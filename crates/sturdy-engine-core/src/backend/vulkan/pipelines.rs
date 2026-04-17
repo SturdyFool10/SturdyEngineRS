@@ -129,6 +129,7 @@ pub struct VulkanPipeline {
     pub layout: vk::PipelineLayout,
     pub bind_point: vk::PipelineBindPoint,
     pub render_pass: vk::RenderPass,
+    pub push_constants_bytes: u32,
 }
 
 impl PipelineRegistry {
@@ -142,8 +143,11 @@ impl PipelineRegistry {
     ) -> Result<()> {
         let module = shaders.module(desc.shader)?;
         let stage = shaders.stage(desc.shader)?;
-        let layout_handle = desc.layout.expect("compute pipeline layout must be resolved before backend call");
+        let layout_handle = desc
+            .layout
+            .expect("compute pipeline layout must be resolved before backend call");
         let layout = descriptors.pipeline_layout(layout_handle)?;
+        let push_constants_bytes = descriptors.push_constants_bytes(layout_handle)?;
         let entry = CString::new(shaders.entry_point(desc.shader)?).map_err(|_| {
             Error::InvalidInput("shader entry point cannot contain interior nul bytes".into())
         })?;
@@ -170,6 +174,7 @@ impl PipelineRegistry {
                 layout,
                 bind_point: vk::PipelineBindPoint::COMPUTE,
                 render_pass: vk::RenderPass::null(),
+                push_constants_bytes,
             },
         );
         Ok(())
@@ -183,11 +188,21 @@ impl PipelineRegistry {
         shaders: &ShaderRegistry,
         descriptors: &DescriptorRegistry,
     ) -> Result<()> {
-        let layout_handle = desc.layout.expect("graphics pipeline layout must be resolved before backend call");
+        let layout_handle = desc
+            .layout
+            .expect("graphics pipeline layout must be resolved before backend call");
         let layout = descriptors.pipeline_layout(layout_handle)?;
+        let push_constants_bytes = descriptors.push_constants_bytes(layout_handle)?;
         let render_pass = create_render_pass(device, desc)?;
-        let result =
-            self.create_graphics_pipeline_inner(device, handle, desc, shaders, layout, render_pass);
+        let result = self.create_graphics_pipeline_inner(
+            device,
+            handle,
+            desc,
+            shaders,
+            layout,
+            render_pass,
+            push_constants_bytes,
+        );
         if result.is_err() {
             unsafe {
                 device.destroy_render_pass(render_pass, None);
@@ -204,6 +219,7 @@ impl PipelineRegistry {
         shaders: &ShaderRegistry,
         layout: vk::PipelineLayout,
         render_pass: vk::RenderPass,
+        push_constants_bytes: u32,
     ) -> Result<()> {
         let vertex_entry =
             CString::new(shaders.entry_point(desc.vertex_shader)?).map_err(|_| {
@@ -322,6 +338,7 @@ impl PipelineRegistry {
                 layout,
                 bind_point: vk::PipelineBindPoint::GRAPHICS,
                 render_pass,
+                push_constants_bytes,
             },
         );
         Ok(())
@@ -336,8 +353,14 @@ impl PipelineRegistry {
         height: u32,
         layers: u32,
     ) -> Result<vk::Framebuffer> {
-        self.framebuffer_cache
-            .get_or_create(device, render_pass, attachments, width, height, layers)
+        self.framebuffer_cache.get_or_create(
+            device,
+            render_pass,
+            attachments,
+            width,
+            height,
+            layers,
+        )
     }
 
     pub fn invalidate_framebuffers_for_view(&mut self, device: &Device, view: vk::ImageView) {

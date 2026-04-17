@@ -18,8 +18,8 @@ use crate::backend::{Backend, BackendKind};
 use crate::{
     BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, CanonicalPipelineLayout, Caps,
     CompiledGraph, ComputePipelineDesc, Error, GraphicsPipelineDesc, ImageDesc, ImageHandle,
-    NativeSurfaceDesc, PipelineHandle, PipelineLayoutHandle, Result, ShaderDesc, ShaderHandle,
-    SurfaceHandle, SurfaceSize,
+    NativeSurfaceDesc, PipelineHandle, PipelineLayoutHandle, Result, SamplerDesc, SamplerHandle,
+    ShaderDesc, ShaderHandle, SurfaceHandle, SurfaceSize,
 };
 
 pub use config::VulkanBackendConfig;
@@ -57,10 +57,8 @@ impl VulkanBackend {
         let commands =
             commands::CommandContext::create(&logical.device, selection.graphics_queue_family)?;
         let cache_data = load_pipeline_cache_file();
-        let pipeline_registry = pipelines::PipelineRegistry::create(
-            &logical.device,
-            cache_data.as_deref(),
-        )?;
+        let pipeline_registry =
+            pipelines::PipelineRegistry::create(&logical.device, cache_data.as_deref())?;
 
         Ok(Self {
             _entry: entry,
@@ -136,6 +134,20 @@ impl Backend for VulkanBackend {
             .lock()
             .expect("vulkan resource registry mutex poisoned")
             .destroy_buffer(&self.device, handle)
+    }
+
+    fn create_sampler(&self, handle: SamplerHandle, desc: SamplerDesc) -> Result<()> {
+        self.resources
+            .lock()
+            .expect("vulkan resource registry mutex poisoned")
+            .create_sampler(&self.device, handle, desc)
+    }
+
+    fn destroy_sampler(&self, handle: SamplerHandle) -> Result<()> {
+        self.resources
+            .lock()
+            .expect("vulkan resource registry mutex poisoned")
+            .destroy_sampler(&self.device, handle)
     }
 
     fn write_buffer(&self, handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {

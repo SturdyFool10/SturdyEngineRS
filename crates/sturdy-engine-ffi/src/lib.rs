@@ -697,6 +697,7 @@ pub extern "C" fn gfx_frame_add_pass(
                 shader,
                 pipeline: None,
                 bind_groups: Vec::new(),
+                push_constants: None,
                 work: PassWork::None,
                 reads,
                 writes,

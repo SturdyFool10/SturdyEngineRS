@@ -8,10 +8,11 @@ use crate::backend::vulkan::{VulkanBackend, VulkanBackendConfig};
 use crate::backend::{Backend, BackendKind, NullBackend, auto_backend_preference_order};
 use crate::handles::HandleAllocator;
 use crate::{
-    BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, CanonicalBinding, CanonicalGroupLayout,
+    BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, BufferStateKey, CanonicalGroupLayout,
     CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error, FrameHandle, GraphicsPipelineDesc,
-    ImageDesc, ImageHandle, PipelineHandle, PipelineLayoutHandle, RenderGraph, Result, ShaderDesc,
-    ShaderHandle, ShaderReflection, ShaderTarget, SurfaceHandle, SurfaceSize,
+    ImageDesc, ImageHandle, ImageStateKey, PipelineHandle, PipelineLayoutHandle, RenderGraph,
+    Result, RgState, SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection,
+    SurfaceHandle, SurfaceSize,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -38,6 +39,9 @@ struct DeviceInner {
     backend: Box<dyn Backend>,
     images: HashMap<ImageHandle, ImageDesc>,
     buffers: HashMap<BufferHandle, BufferDesc>,
+    image_states: HashMap<ImageStateKey, RgState>,
+    buffer_states: HashMap<BufferStateKey, RgState>,
+    samplers: HashMap<SamplerHandle, SamplerDesc>,
     shaders: HashMap<ShaderHandle, ShaderDesc>,
     shader_reflections: HashMap<ShaderHandle, ShaderReflection>,
     pipeline_layouts: HashMap<PipelineLayoutHandle, CanonicalPipelineLayout>,
@@ -47,6 +51,7 @@ struct DeviceInner {
     frames: HashMap<FrameHandle, RenderGraph>,
     image_handles: HandleAllocator,
     buffer_handles: HandleAllocator,
+    sampler_handles: HandleAllocator,
     shader_handles: HandleAllocator,
     pipeline_layout_handles: HandleAllocator,
     pipeline_handles: HandleAllocator,
@@ -64,6 +69,9 @@ impl Device {
                 backend,
                 images: HashMap::new(),
                 buffers: HashMap::new(),
+                image_states: HashMap::new(),
+                buffer_states: HashMap::new(),
+                samplers: HashMap::new(),
                 shaders: HashMap::new(),
                 shader_reflections: HashMap::new(),
                 pipeline_layouts: HashMap::new(),
@@ -73,6 +81,7 @@ impl Device {
                 frames: HashMap::new(),
                 image_handles: HandleAllocator::default(),
                 buffer_handles: HandleAllocator::default(),
+                sampler_handles: HandleAllocator::default(),
                 shader_handles: HandleAllocator::default(),
                 pipeline_layout_handles: HandleAllocator::default(),
                 pipeline_handles: HandleAllocator::default(),
@@ -119,6 +128,7 @@ impl Device {
     pub fn destroy_image(&self, handle: ImageHandle) -> Result<()> {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let _desc = inner.images.remove(&handle).ok_or(Error::InvalidHandle)?;
+        inner.image_states.retain(|key, _| key.image != handle);
         inner.backend.destroy_image(handle)
     }
 
@@ -143,6 +153,7 @@ impl Device {
     pub fn destroy_buffer(&self, handle: BufferHandle) -> Result<()> {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let _desc = inner.buffers.remove(&handle).ok_or(Error::InvalidHandle)?;
+        inner.buffer_states.retain(|key, _| key.buffer != handle);
         inner.backend.destroy_buffer(handle)
     }
 
@@ -180,6 +191,30 @@ impl Device {
         let inner = self.inner.lock().expect("device mutex poisoned");
         inner
             .buffers
+            .get(&handle)
+            .copied()
+            .ok_or(Error::InvalidHandle)
+    }
+
+    pub fn create_sampler(&self, desc: SamplerDesc) -> Result<SamplerHandle> {
+        desc.validate()?;
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        let handle = SamplerHandle(inner.sampler_handles.alloc());
+        inner.backend.create_sampler(handle, desc)?;
+        inner.samplers.insert(handle, desc);
+        Ok(handle)
+    }
+
+    pub fn destroy_sampler(&self, handle: SamplerHandle) -> Result<()> {
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        let _desc = inner.samplers.remove(&handle).ok_or(Error::InvalidHandle)?;
+        inner.backend.destroy_sampler(handle)
+    }
+
+    pub fn sampler_desc(&self, handle: SamplerHandle) -> Result<SamplerDesc> {
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        inner
+            .samplers
             .get(&handle)
             .copied()
             .ok_or(Error::InvalidHandle)
@@ -316,8 +351,7 @@ impl Device {
                 (h, false)
             }
             None => {
-                let layout =
-                    merge_shader_reflections(&inner.shader_reflections, &desc);
+                let layout = merge_shader_reflections(&inner.shader_reflections, &desc);
                 let lh = PipelineLayoutHandle(inner.pipeline_layout_handles.alloc());
                 inner.backend.create_pipeline_layout(lh, &layout)?;
                 inner.pipeline_layouts.insert(lh, layout);
@@ -383,6 +417,7 @@ impl Device {
         let handle = ImageHandle(inner.image_handles.alloc());
         let desc = inner.backend.acquire_surface_image(surface, handle)?;
         inner.images.insert(handle, desc);
+        inner.image_states.retain(|key, _| key.image != handle);
         Ok(handle)
     }
 
@@ -403,7 +438,14 @@ impl Device {
     pub fn begin_frame(&self) -> Result<Frame> {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let handle = FrameHandle(inner.frame_handles.alloc());
-        inner.frames.insert(handle, RenderGraph::new());
+        let mut graph = RenderGraph::new();
+        for (key, state) in &inner.image_states {
+            graph.set_initial_image_subresource_state(key.image, key.subresource, *state);
+        }
+        for (key, state) in &inner.buffer_states {
+            graph.set_initial_buffer_range_state(key.buffer, key.offset, key.size, *state);
+        }
+        inner.frames.insert(handle, graph);
         Ok(Frame {
             device: self.clone(),
             handle,
@@ -445,10 +487,11 @@ fn merge_shader_reflections(
     reflections: &HashMap<ShaderHandle, ShaderReflection>,
     desc: &GraphicsPipelineDesc,
 ) -> CanonicalPipelineLayout {
-    use std::collections::BTreeMap;
     use crate::CanonicalBinding;
+    use std::collections::BTreeMap;
 
     let mut groups: BTreeMap<usize, (String, Vec<(String, CanonicalBinding)>)> = BTreeMap::new();
+    let mut push_constants_bytes = 0;
 
     let shaders: Vec<ShaderHandle> = [Some(desc.vertex_shader), desc.fragment_shader]
         .into_iter()
@@ -459,6 +502,7 @@ fn merge_shader_reflections(
         let Some(reflection) = reflections.get(&shader) else {
             continue;
         };
+        push_constants_bytes = push_constants_bytes.max(reflection.layout.push_constants_bytes);
         for (group_idx, group) in reflection.layout.groups.iter().enumerate() {
             let entry = groups
                 .entry(group_idx)
@@ -481,7 +525,7 @@ fn merge_shader_reflections(
                 bindings: bindings.into_iter().map(|(_, b)| b).collect(),
             })
             .collect(),
-        push_constants_bytes: 0,
+        push_constants_bytes,
     }
 }
 
@@ -562,12 +606,20 @@ impl Frame {
             graph.compile()?
         };
 
-        self.device
-            .inner
-            .lock()
-            .expect("device mutex poisoned")
-            .backend
-            .flush(&compiled)?;
+        {
+            let mut inner = self.device.inner.lock().expect("device mutex poisoned");
+            inner.backend.flush(&compiled)?;
+            for (key, state) in &compiled.final_image_states {
+                if inner.images.contains_key(&key.image) {
+                    inner.image_states.insert(*key, *state);
+                }
+            }
+            for (key, state) in &compiled.final_buffer_states {
+                if inner.buffers.contains_key(&key.buffer) {
+                    inner.buffer_states.insert(*key, *state);
+                }
+            }
+        }
         self.submitted = true;
         Ok(())
     }

@@ -1,6 +1,9 @@
 use std::env;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Instant;
+
+mod push_demo;
 
 #[cfg(not(target_arch = "wasm32"))]
 use sturdy_engine::NativeSurfaceDesc;
@@ -14,6 +17,8 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::{Window, WindowAttributes, WindowId};
+
+use push_demo::PushConstantsDemo;
 
 fn main() -> ExitCode {
     match run() {
@@ -75,7 +80,7 @@ fn show_window(backend: BackendKind) -> Result<(), Error> {
 struct GraphicalApp {
     backend: BackendKind,
     window: Option<Arc<Window>>,
-    app: Option<HelloTriangleApp>,
+    app: Option<TestbedApp>,
 }
 
 impl GraphicalApp {
@@ -114,10 +119,10 @@ impl ApplicationHandler for GraphicalApp {
                 return;
             }
         };
-        self.app = match HelloTriangleApp::new(self.backend, &window) {
+        self.app = match TestbedApp::new(self.backend, &window) {
             Ok(app) => Some(app),
             Err(error) => {
-                eprintln!("failed to create hello triangle app: {error}");
+                eprintln!("failed to create testbed app: {error}");
                 event_loop.exit();
                 return;
             }
@@ -167,14 +172,14 @@ impl ApplicationHandler for GraphicalApp {
     }
 }
 
-struct HelloTriangleApp {
+struct TestbedApp {
     engine: Engine,
     surface: Surface,
-    mesh: RenderMesh,
-    shader: RenderShader,
+    push_demo: PushConstantsDemo,
+    started_at: Instant,
 }
 
-impl HelloTriangleApp {
+impl TestbedApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn new(backend: BackendKind, window: &Window) -> Result<Self, Error> {
         let engine = Engine::with_backend(backend)?;
@@ -197,15 +202,14 @@ impl HelloTriangleApp {
                 height: size.height.max(1),
             },
         })?;
-        let mesh = RenderMesh::new(&engine, triangle_vertices().as_slice())?;
-        let shader = triangle_shader(&engine)?;
+        let push_demo = PushConstantsDemo::new(&engine)?;
 
-        println!("hello triangle swapchain created");
+        println!("push-constant animation swapchain created");
         Ok(Self {
             engine,
             surface,
-            mesh,
-            shader,
+            push_demo,
+            started_at: Instant::now(),
         })
     }
 
@@ -217,9 +221,17 @@ impl HelloTriangleApp {
     }
 
     fn render_frame(&mut self) -> Result<(), Error> {
-        self.engine.render_surface(&self.surface, |renderer| {
-            renderer.draw_mesh(&self.mesh, &mut self.shader)
-        })
+        let surface_image = self.surface.acquire_image()?;
+        let mut frame = self.engine.begin_frame()?;
+        self.push_demo.draw(
+            &mut frame,
+            &surface_image,
+            self.started_at.elapsed().as_secs_f32(),
+        )?;
+        frame.present_image(&surface_image)?;
+        frame.flush()?;
+        frame.wait()?;
+        self.surface.present()
     }
 }
 

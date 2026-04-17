@@ -12,6 +12,10 @@ pub struct BufferHandle(pub u64);
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct SamplerHandle(pub u64);
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct ShaderHandle(pub u64);
 
 #[repr(transparent)]

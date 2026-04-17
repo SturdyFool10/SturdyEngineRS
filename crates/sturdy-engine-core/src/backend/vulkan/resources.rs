@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use ash::{Device, vk};
 
 use crate::{
-    BufferDesc, BufferHandle, BufferUsage, Error, Format, ImageDesc, ImageHandle, ImageUsage,
-    Result,
+    AddressMode, BorderColor, BufferDesc, BufferHandle, BufferUsage, CompareOp, Error, FilterMode,
+    Format, ImageDesc, ImageHandle, ImageUsage, MipmapMode, Result, SamplerDesc, SamplerHandle,
 };
 
 use super::allocator::{Allocation, GpuAllocator};
@@ -13,6 +13,7 @@ pub struct ResourceRegistry {
     allocator: GpuAllocator,
     images: HashMap<ImageHandle, VulkanImage>,
     buffers: HashMap<BufferHandle, VulkanBuffer>,
+    samplers: HashMap<SamplerHandle, vk::Sampler>,
 }
 
 struct VulkanImage {
@@ -34,6 +35,7 @@ impl ResourceRegistry {
             allocator: GpuAllocator::new(memory_properties),
             images: HashMap::new(),
             buffers: HashMap::new(),
+            samplers: HashMap::new(),
         }
     }
 
@@ -65,21 +67,26 @@ impl ResourceRegistry {
                 .map_err(|error| Error::Backend(format!("vkCreateImage failed: {error:?}")))?
         };
         let requirements = unsafe { device.get_image_memory_requirements(image) };
-        let allocation = match self
-            .allocator
-            .alloc(device, requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)
-        {
-            Ok(a) => a,
-            Err(error) => {
-                unsafe { device.destroy_image(image, None) };
-                return Err(error);
-            }
-        };
+        let allocation =
+            match self
+                .allocator
+                .alloc(device, requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            {
+                Ok(a) => a,
+                Err(error) => {
+                    unsafe { device.destroy_image(image, None) };
+                    return Err(error);
+                }
+            };
         unsafe {
-            if let Err(error) = device.bind_image_memory(image, allocation.memory, allocation.offset) {
+            if let Err(error) =
+                device.bind_image_memory(image, allocation.memory, allocation.offset)
+            {
                 self.allocator.dealloc(device, allocation);
                 device.destroy_image(image, None);
-                return Err(Error::Backend(format!("vkBindImageMemory failed: {error:?}")));
+                return Err(Error::Backend(format!(
+                    "vkBindImageMemory failed: {error:?}"
+                )));
             }
         }
         let view_info = vk::ImageViewCreateInfo::default()
@@ -99,14 +106,22 @@ impl ResourceRegistry {
                 Err(error) => {
                     self.allocator.dealloc(device, allocation);
                     device.destroy_image(image, None);
-                    return Err(Error::Backend(format!("vkCreateImageView failed: {error:?}")));
+                    return Err(Error::Backend(format!(
+                        "vkCreateImageView failed: {error:?}"
+                    )));
                 }
             }
         };
 
         self.images.insert(
             handle,
-            VulkanImage { image, view, allocation: Some(allocation), desc, imported: false },
+            VulkanImage {
+                image,
+                view,
+                allocation: Some(allocation),
+                desc,
+                imported: false,
+            },
         );
         Ok(())
     }
@@ -137,7 +152,13 @@ impl ResourceRegistry {
         }
         self.images.insert(
             handle,
-            VulkanImage { image, view, allocation: None, desc, imported: true },
+            VulkanImage {
+                image,
+                view,
+                allocation: None,
+                desc,
+                imported: true,
+            },
         );
         Ok(())
     }
@@ -171,14 +192,19 @@ impl ResourceRegistry {
             }
         };
         unsafe {
-            if let Err(error) = device.bind_buffer_memory(buffer, allocation.memory, allocation.offset) {
+            if let Err(error) =
+                device.bind_buffer_memory(buffer, allocation.memory, allocation.offset)
+            {
                 self.allocator.dealloc(device, allocation);
                 device.destroy_buffer(buffer, None);
-                return Err(Error::Backend(format!("vkBindBufferMemory failed: {error:?}")));
+                return Err(Error::Backend(format!(
+                    "vkBindBufferMemory failed: {error:?}"
+                )));
             }
         }
 
-        self.buffers.insert(handle, VulkanBuffer { buffer, allocation });
+        self.buffers
+            .insert(handle, VulkanBuffer { buffer, allocation });
         Ok(())
     }
 
@@ -189,14 +215,61 @@ impl ResourceRegistry {
         Ok(())
     }
 
+    pub fn create_sampler(
+        &mut self,
+        device: &Device,
+        handle: SamplerHandle,
+        desc: SamplerDesc,
+    ) -> Result<()> {
+        if self.samplers.contains_key(&handle) {
+            return Err(Error::InvalidHandle);
+        }
+        let info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk_filter(desc.mag_filter))
+            .min_filter(vk_filter(desc.min_filter))
+            .mipmap_mode(vk_mipmap_mode(desc.mipmap_mode))
+            .address_mode_u(vk_address_mode(desc.address_u))
+            .address_mode_v(vk_address_mode(desc.address_v))
+            .address_mode_w(vk_address_mode(desc.address_w))
+            .mip_lod_bias(desc.mip_lod_bias)
+            .anisotropy_enable(desc.max_anisotropy.is_some())
+            .max_anisotropy(desc.max_anisotropy.unwrap_or(1.0))
+            .compare_enable(desc.compare.is_some())
+            .compare_op(
+                desc.compare
+                    .map(vk_compare_op)
+                    .unwrap_or(vk::CompareOp::ALWAYS),
+            )
+            .min_lod(desc.min_lod)
+            .max_lod(desc.max_lod)
+            .border_color(vk_border_color(desc.border_color))
+            .unnormalized_coordinates(desc.unnormalized_coordinates);
+        let sampler = unsafe {
+            device
+                .create_sampler(&info, None)
+                .map_err(|error| Error::Backend(format!("vkCreateSampler failed: {error:?}")))?
+        };
+        self.samplers.insert(handle, sampler);
+        Ok(())
+    }
+
+    pub fn destroy_sampler(&mut self, device: &Device, handle: SamplerHandle) -> Result<()> {
+        let sampler = self.samplers.remove(&handle).ok_or(Error::InvalidHandle)?;
+        unsafe {
+            device.destroy_sampler(sampler, None);
+        }
+        Ok(())
+    }
+
     pub fn write_buffer(&self, handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
         let buf = self.buffers.get(&handle).ok_or(Error::InvalidHandle)?;
         if data.is_empty() {
             return Ok(());
         }
-        let base = buf.allocation.mapped_ptr.ok_or_else(|| {
-            Error::Backend("buffer allocation is not host-visible".into())
-        })?;
+        let base = buf
+            .allocation
+            .mapped_ptr
+            .ok_or_else(|| Error::Backend("buffer allocation is not host-visible".into()))?;
         let start = offset as usize;
         let end = start + data.len();
         if end > buf.allocation.size as usize {
@@ -217,9 +290,10 @@ impl ResourceRegistry {
         if out.is_empty() {
             return Ok(());
         }
-        let base = buf.allocation.mapped_ptr.ok_or_else(|| {
-            Error::Backend("buffer allocation is not host-visible".into())
-        })?;
+        let base = buf
+            .allocation
+            .mapped_ptr
+            .ok_or_else(|| Error::Backend("buffer allocation is not host-visible".into()))?;
         let start = offset as usize;
         let end = start + out.len();
         if end > buf.allocation.size as usize {
@@ -251,6 +325,11 @@ impl ResourceRegistry {
             unsafe { device.destroy_buffer(buf.buffer, None) };
             self.allocator.dealloc(device, buf.allocation);
         }
+        for (_, sampler) in self.samplers.drain() {
+            unsafe {
+                device.destroy_sampler(sampler, None);
+            }
+        }
         self.allocator.destroy_all(device);
     }
 
@@ -279,6 +358,13 @@ impl ResourceRegistry {
         self.buffers
             .get(&handle)
             .map(|buffer| buffer.buffer)
+            .ok_or(Error::InvalidHandle)
+    }
+
+    pub fn sampler(&self, handle: SamplerHandle) -> Result<vk::Sampler> {
+        self.samplers
+            .get(&handle)
+            .copied()
             .ok_or(Error::InvalidHandle)
     }
 }
@@ -389,4 +475,51 @@ fn vk_buffer_usage(usage: BufferUsage) -> vk::BufferUsageFlags {
         flags |= vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR;
     }
     flags
+}
+
+fn vk_filter(filter: FilterMode) -> vk::Filter {
+    match filter {
+        FilterMode::Nearest => vk::Filter::NEAREST,
+        FilterMode::Linear => vk::Filter::LINEAR,
+    }
+}
+
+fn vk_mipmap_mode(mode: MipmapMode) -> vk::SamplerMipmapMode {
+    match mode {
+        MipmapMode::Nearest => vk::SamplerMipmapMode::NEAREST,
+        MipmapMode::Linear => vk::SamplerMipmapMode::LINEAR,
+    }
+}
+
+fn vk_address_mode(mode: AddressMode) -> vk::SamplerAddressMode {
+    match mode {
+        AddressMode::Repeat => vk::SamplerAddressMode::REPEAT,
+        AddressMode::MirroredRepeat => vk::SamplerAddressMode::MIRRORED_REPEAT,
+        AddressMode::ClampToEdge => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+        AddressMode::ClampToBorder => vk::SamplerAddressMode::CLAMP_TO_BORDER,
+    }
+}
+
+fn vk_compare_op(compare: CompareOp) -> vk::CompareOp {
+    match compare {
+        CompareOp::Never => vk::CompareOp::NEVER,
+        CompareOp::Less => vk::CompareOp::LESS,
+        CompareOp::Equal => vk::CompareOp::EQUAL,
+        CompareOp::LessOrEqual => vk::CompareOp::LESS_OR_EQUAL,
+        CompareOp::Greater => vk::CompareOp::GREATER,
+        CompareOp::NotEqual => vk::CompareOp::NOT_EQUAL,
+        CompareOp::GreaterOrEqual => vk::CompareOp::GREATER_OR_EQUAL,
+        CompareOp::Always => vk::CompareOp::ALWAYS,
+    }
+}
+
+fn vk_border_color(color: BorderColor) -> vk::BorderColor {
+    match color {
+        BorderColor::FloatTransparentBlack => vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
+        BorderColor::IntTransparentBlack => vk::BorderColor::INT_TRANSPARENT_BLACK,
+        BorderColor::FloatOpaqueBlack => vk::BorderColor::FLOAT_OPAQUE_BLACK,
+        BorderColor::IntOpaqueBlack => vk::BorderColor::INT_OPAQUE_BLACK,
+        BorderColor::FloatOpaqueWhite => vk::BorderColor::FLOAT_OPAQUE_WHITE,
+        BorderColor::IntOpaqueWhite => vk::BorderColor::INT_OPAQUE_WHITE,
+    }
 }

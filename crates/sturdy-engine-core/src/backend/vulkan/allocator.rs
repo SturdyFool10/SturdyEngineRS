@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 // Block sizes for new VkDeviceMemory allocations.
 const DEVICE_LOCAL_BLOCK_SIZE: u64 = 256 * 1024 * 1024; // 256 MiB
-const HOST_VISIBLE_BLOCK_SIZE: u64 = 64 * 1024 * 1024;  // 64 MiB
+const HOST_VISIBLE_BLOCK_SIZE: u64 = 64 * 1024 * 1024; // 64 MiB
 
 pub struct Allocation {
     pub memory: vk::DeviceMemory,
@@ -33,7 +33,13 @@ impl Block {
     fn new(id: u64, memory: vk::DeviceMemory, capacity: u64, mapped_ptr: Option<*mut u8>) -> Self {
         let mut free = BTreeMap::new();
         free.insert(0, capacity);
-        Self { id, memory, capacity, free, mapped_ptr }
+        Self {
+            id,
+            memory,
+            capacity,
+            free,
+            mapped_ptr,
+        }
     }
 
     fn allocate(&mut self, size: u64, alignment: u64) -> Option<u64> {
@@ -85,8 +91,7 @@ impl Block {
     }
 
     fn is_empty(&self) -> bool {
-        self.free.len() == 1
-            && self.free.get(&0).copied() == Some(self.capacity)
+        self.free.len() == 1 && self.free.get(&0).copied() == Some(self.capacity)
     }
 }
 
@@ -99,15 +104,15 @@ struct TypePool {
 
 impl TypePool {
     fn new(memory_type: u32, host_visible: bool) -> Self {
-        Self { memory_type, host_visible, blocks: Vec::new(), next_block_id: 0 }
+        Self {
+            memory_type,
+            host_visible,
+            blocks: Vec::new(),
+            next_block_id: 0,
+        }
     }
 
-    fn alloc(
-        &mut self,
-        device: &Device,
-        size: u64,
-        alignment: u64,
-    ) -> Result<Allocation> {
+    fn alloc(&mut self, device: &Device, size: u64, alignment: u64) -> Result<Allocation> {
         // Try existing blocks first.
         for block in &mut self.blocks {
             if let Some(offset) = block.allocate(size, alignment) {
@@ -155,7 +160,9 @@ impl TypePool {
         let id = self.next_block_id;
         self.next_block_id += 1;
         let mut block = Block::new(id, memory, block_capacity, mapped_ptr);
-        let offset = block.allocate(size, alignment).expect("fresh block must fit");
+        let offset = block
+            .allocate(size, alignment)
+            .expect("fresh block must fit");
         self.blocks.push(block);
         let mapped_ptr = mapped_ptr.map(|base| unsafe { base.add(offset as usize) });
         Ok(Allocation {
@@ -230,9 +237,7 @@ impl GpuAllocator {
         required_flags: vk::MemoryPropertyFlags,
     ) -> Result<Allocation> {
         let memory_type = self.find_memory_type(requirements.memory_type_bits, required_flags)?;
-        let host_visible = self
-            .memory_properties
-            .memory_types[memory_type as usize]
+        let host_visible = self.memory_properties.memory_types[memory_type as usize]
             .property_flags
             .contains(vk::MemoryPropertyFlags::HOST_VISIBLE);
 
@@ -262,11 +267,7 @@ impl GpuAllocator {
         self.pools.clear();
     }
 
-    fn find_memory_type(
-        &self,
-        type_bits: u32,
-        required: vk::MemoryPropertyFlags,
-    ) -> Result<u32> {
+    fn find_memory_type(&self, type_bits: u32, required: vk::MemoryPropertyFlags) -> Result<u32> {
         for index in 0..self.memory_properties.memory_type_count {
             let supported = (type_bits & (1 << index)) != 0;
             let mt = self.memory_properties.memory_types[index as usize];

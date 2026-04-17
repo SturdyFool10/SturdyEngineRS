@@ -1,4 +1,4 @@
-use crate::{BufferHandle, ImageHandle, PipelineLayoutHandle};
+use crate::{BufferHandle, ImageHandle, PipelineLayoutHandle, SamplerHandle};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum BindingKind {
@@ -69,6 +69,7 @@ pub struct CanonicalPipelineLayout {
 pub enum ResourceBinding {
     Image(ImageHandle),
     Buffer(BufferHandle),
+    Sampler(SamplerHandle),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

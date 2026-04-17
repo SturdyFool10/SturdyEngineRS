@@ -16,6 +16,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         out_dir.join("triangle_fragment.spv"),
         ShaderStage::Fragment,
     )?;
+    compile_shader(
+        manifest_dir.join("shaders").join("textured_vertex.slang"),
+        out_dir.join("textured_vertex.spv"),
+        ShaderStage::Vertex,
+    )?;
+    compile_shader(
+        manifest_dir.join("shaders").join("textured_fragment.slang"),
+        out_dir.join("textured_fragment.spv"),
+        ShaderStage::Fragment,
+    )?;
+    compile_shader(
+        manifest_dir.join("shaders").join("push_vertex.slang"),
+        out_dir.join("push_vertex.spv"),
+        ShaderStage::Vertex,
+    )?;
+    compile_shader(
+        manifest_dir.join("shaders").join("push_fragment.slang"),
+        out_dir.join("push_fragment.spv"),
+        ShaderStage::Fragment,
+    )?;
 
     Ok(())
 }

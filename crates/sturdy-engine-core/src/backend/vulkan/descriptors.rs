@@ -20,6 +20,7 @@ struct VulkanPipelineLayout {
     set_layouts: Vec<vk::DescriptorSetLayout>,
     bindings: HashMap<String, VulkanBinding>,
     pool_sizes: Vec<vk::DescriptorPoolSize>,
+    push_constants_bytes: u32,
 }
 
 #[derive(Copy, Clone)]
@@ -119,6 +120,7 @@ impl DescriptorRegistry {
                         descriptor_count,
                     })
                     .collect(),
+                push_constants_bytes: layout.push_constants_bytes,
             },
         );
         Ok(())
@@ -251,6 +253,13 @@ impl DescriptorRegistry {
             .ok_or(Error::InvalidHandle)
     }
 
+    pub fn push_constants_bytes(&self, handle: PipelineLayoutHandle) -> Result<u32> {
+        self.layouts
+            .get(&handle)
+            .map(|layout| layout.push_constants_bytes)
+            .ok_or(Error::InvalidHandle)
+    }
+
     pub fn descriptor_sets(&self, handle: BindGroupHandle) -> Result<&[vk::DescriptorSet]> {
         self.bind_groups
             .get(&handle)
@@ -374,6 +383,22 @@ fn write_descriptor(
             let info = [vk::DescriptorImageInfo::default()
                 .image_view(resources.image_view(image)?)
                 .image_layout(image_descriptor_layout(binding.descriptor_type))];
+            let write = [vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(binding.binding_index)
+                .descriptor_type(binding.descriptor_type)
+                .image_info(&info)];
+            unsafe {
+                device.update_descriptor_sets(&write, &[]);
+            }
+        }
+        ResourceBinding::Sampler(sampler) => {
+            if binding.descriptor_type != vk::DescriptorType::SAMPLER {
+                return Err(Error::InvalidInput(
+                    "sampler resource can only be bound to sampler descriptors".into(),
+                ));
+            }
+            let info = [vk::DescriptorImageInfo::default().sampler(resources.sampler(sampler)?)];
             let write = [vk::WriteDescriptorSet::default()
                 .dst_set(set)
                 .dst_binding(binding.binding_index)

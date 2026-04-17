@@ -6,21 +6,28 @@
 
 use std::collections::HashMap;
 
+#[cfg(test)]
+mod tests;
+mod texture;
+
 pub use glam::{Vec2, Vec3};
 #[cfg(not(target_arch = "wasm32"))]
 pub use sturdy_engine_core::NativeSurfaceDesc;
 pub use sturdy_engine_core::{
-    Access, BackendKind, BindGroupDesc, BindGroupEntry, BindingKind, BufferDesc, BufferUsage,
-    BufferUse, CanonicalBinding, CanonicalGroupLayout, CanonicalPipelineLayout, Caps,
-    ColorTargetDesc, CompiledShaderArtifact, ComputePipelineDesc, CopyImageToBufferDesc, CullMode,
-    DispatchDesc, DrawDesc, Error, Extent3d, Format, FrontFace, GraphicsPipelineDesc, ImageDesc,
-    ImageUsage, ImageUse, IndexBufferBinding, IndexFormat, PassDesc, PassWork, PrimitiveTopology,
-    QueueType, RasterState, ResourceBinding, Result, RgState, ShaderDesc, ShaderSource,
-    ShaderStage, ShaderTarget, SlangCompileDesc, StageMask, SubresourceRange, UpdateRate,
-    VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout, VertexFormat, VertexInputRate,
-    compile_slang, compile_slang_to_file, compile_slang_to_spirv, spirv_words_from_bytes,
+    Access, AddressMode, BackendKind, BindGroupDesc, BindGroupEntry, BindingKind, BorderColor,
+    BufferDesc, BufferUsage, BufferUse, CanonicalBinding, CanonicalGroupLayout,
+    CanonicalPipelineLayout, Caps, ColorTargetDesc, CompareOp, CompiledShaderArtifact,
+    ComputePipelineDesc, CopyBufferToImageDesc, CopyImageToBufferDesc, CullMode, DispatchDesc,
+    DrawDesc, Error, Extent3d, FilterMode, Format, FrontFace, GraphicsPipelineDesc, ImageDesc,
+    ImageUsage, ImageUse, IndexBufferBinding, IndexFormat, MipmapMode, PassDesc, PassWork,
+    PrimitiveTopology, PushConstants, QueueType, RasterState, ResourceBinding, Result, RgState,
+    SamplerDesc, ShaderDesc, ShaderSource, ShaderStage, ShaderTarget, SlangCompileDesc, StageMask,
+    SubresourceRange, UpdateRate, VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout,
+    VertexFormat, VertexInputRate, compile_slang, compile_slang_to_file, compile_slang_to_spirv,
+    spirv_words_from_bytes,
 };
-pub use sturdy_engine_core::{ImageHandle, SurfaceHandle, SurfaceSize};
+pub use sturdy_engine_core::{ImageHandle, SamplerHandle, SurfaceHandle, SurfaceSize};
+pub use texture::{ImageCopyRegion, TextureUploadDesc};
 
 use sturdy_engine_core as core;
 
@@ -81,6 +88,15 @@ impl Engine {
         self.device.read_buffer(buffer.handle, offset, out)
     }
 
+    pub fn create_sampler(&self, desc: SamplerDesc) -> Result<Sampler> {
+        let handle = self.device.create_sampler(desc)?;
+        Ok(Sampler {
+            device: self.device.clone(),
+            handle,
+            desc,
+        })
+    }
+
     pub fn create_shader(&self, desc: ShaderDesc) -> Result<Shader> {
         let handle = self.device.create_shader(desc.clone())?;
         Ok(Shader {
@@ -129,7 +145,9 @@ impl Engine {
 
     pub fn begin_frame(&self) -> Result<Frame> {
         Ok(Frame {
+            engine: self.clone(),
             inner: self.device.begin_frame()?,
+            transient_buffers: Vec::new(),
         })
     }
 
@@ -333,6 +351,7 @@ impl RenderContext<'_> {
             shader: Some(shader_handle),
             pipeline: Some(pipeline_handle),
             bind_groups: Vec::new(),
+            push_constants: None,
             work: PassWork::Draw(DrawDesc {
                 vertex_count: mesh.vertex_count,
                 instance_count: 1,
@@ -377,6 +396,7 @@ impl RenderContext<'_> {
             shader: None,
             pipeline: None,
             bind_groups: Vec::new(),
+            push_constants: None,
             work: PassWork::None,
             reads: vec![ImageUse {
                 image: self.framebuffer.image,
@@ -452,6 +472,28 @@ impl Buffer {
 impl Drop for Buffer {
     fn drop(&mut self) {
         let _ = self.device.destroy_buffer(self.handle);
+    }
+}
+
+pub struct Sampler {
+    device: core::Device,
+    handle: core::SamplerHandle,
+    desc: SamplerDesc,
+}
+
+impl Sampler {
+    pub fn handle(&self) -> core::SamplerHandle {
+        self.handle
+    }
+
+    pub fn desc(&self) -> SamplerDesc {
+        self.desc
+    }
+}
+
+impl Drop for Sampler {
+    fn drop(&mut self) {
+        let _ = self.device.destroy_sampler(self.handle);
     }
 }
 
@@ -608,13 +650,21 @@ pub trait ImageRef {
 }
 
 impl ImageRef for Image {
-    fn image_handle(&self) -> core::ImageHandle { self.handle }
-    fn image_desc(&self) -> ImageDesc { self.desc }
+    fn image_handle(&self) -> core::ImageHandle {
+        self.handle
+    }
+    fn image_desc(&self) -> ImageDesc {
+        self.desc
+    }
 }
 
 impl ImageRef for SurfaceImage {
-    fn image_handle(&self) -> core::ImageHandle { self.handle }
-    fn image_desc(&self) -> ImageDesc { self.desc }
+    fn image_handle(&self) -> core::ImageHandle {
+        self.handle
+    }
+    fn image_desc(&self) -> ImageDesc {
+        self.desc
+    }
 }
 
 pub struct DrawPassBuilder<'f> {
@@ -632,6 +682,7 @@ pub struct DrawPassBuilder<'f> {
     instance_count: u32,
     first_vertex: u32,
     first_instance: u32,
+    push_constants: Option<PushConstants>,
     /// Clear color per image handle (stored as f32 bit-patterns).
     clear_colors: Vec<(core::ImageHandle, [u32; 4])>,
     clear_depth: Option<(core::ImageHandle, u32, u8)>,
@@ -639,7 +690,8 @@ pub struct DrawPassBuilder<'f> {
 
 impl<'f> DrawPassBuilder<'f> {
     pub fn color(mut self, image: &impl ImageRef) -> Self {
-        self.color_writes.push((image.image_handle(), image.image_desc()));
+        self.color_writes
+            .push((image.image_handle(), image.image_desc()));
         self
     }
 
@@ -667,7 +719,8 @@ impl<'f> DrawPassBuilder<'f> {
     }
 
     pub fn sample(mut self, image: &impl ImageRef) -> Self {
-        self.image_reads.push((image.image_handle(), image.image_desc()));
+        self.image_reads
+            .push((image.image_handle(), image.image_desc()));
         self
     }
 
@@ -678,6 +731,24 @@ impl<'f> DrawPassBuilder<'f> {
 
     pub fn bind(mut self, bind_group: &BindGroup) -> Self {
         self.bind_groups.push(bind_group.handle());
+        self
+    }
+
+    pub fn push_constants(mut self, stages: StageMask, bytes: &[u8]) -> Self {
+        self.push_constants = Some(PushConstants {
+            offset: 0,
+            stages,
+            bytes: bytes.to_vec(),
+        });
+        self
+    }
+
+    pub fn push_constants_at(mut self, offset: u32, stages: StageMask, bytes: &[u8]) -> Self {
+        self.push_constants = Some(PushConstants {
+            offset,
+            stages,
+            bytes: bytes.to_vec(),
+        });
         self
     }
 
@@ -718,6 +789,7 @@ impl<'f> DrawPassBuilder<'f> {
             instance_count,
             first_vertex,
             first_instance,
+            push_constants,
             clear_colors,
             clear_depth,
         } = self;
@@ -820,6 +892,7 @@ impl<'f> DrawPassBuilder<'f> {
             shader: None,
             pipeline,
             bind_groups,
+            push_constants,
             work: PassWork::Draw(DrawDesc {
                 vertex_count,
                 instance_count,
@@ -843,6 +916,7 @@ pub struct ComputePassBuilder<'f> {
     name: String,
     pipeline: Option<core::PipelineHandle>,
     bind_groups: Vec<core::BindGroupHandle>,
+    push_constants: Option<PushConstants>,
     image_reads: Vec<(core::ImageHandle, ImageDesc)>,
     image_writes: Vec<(core::ImageHandle, ImageDesc)>,
     buffer_reads: Vec<(core::BufferHandle, BufferDesc)>,
@@ -852,12 +926,14 @@ pub struct ComputePassBuilder<'f> {
 
 impl<'f> ComputePassBuilder<'f> {
     pub fn read_image(mut self, image: &impl ImageRef) -> Self {
-        self.image_reads.push((image.image_handle(), image.image_desc()));
+        self.image_reads
+            .push((image.image_handle(), image.image_desc()));
         self
     }
 
     pub fn write_image(mut self, image: &impl ImageRef) -> Self {
-        self.image_writes.push((image.image_handle(), image.image_desc()));
+        self.image_writes
+            .push((image.image_handle(), image.image_desc()));
         self
     }
 
@@ -881,6 +957,24 @@ impl<'f> ComputePassBuilder<'f> {
         self
     }
 
+    pub fn push_constants(mut self, stages: StageMask, bytes: &[u8]) -> Self {
+        self.push_constants = Some(PushConstants {
+            offset: 0,
+            stages,
+            bytes: bytes.to_vec(),
+        });
+        self
+    }
+
+    pub fn push_constants_at(mut self, offset: u32, stages: StageMask, bytes: &[u8]) -> Self {
+        self.push_constants = Some(PushConstants {
+            offset,
+            stages,
+            bytes: bytes.to_vec(),
+        });
+        self
+    }
+
     pub fn dispatch(mut self, x: u32, y: u32, z: u32) -> Self {
         self.dispatch = Some(DispatchDesc { x, y, z });
         self
@@ -892,6 +986,7 @@ impl<'f> ComputePassBuilder<'f> {
             name,
             pipeline,
             bind_groups,
+            push_constants,
             image_reads,
             image_writes,
             buffer_reads,
@@ -965,6 +1060,7 @@ impl<'f> ComputePassBuilder<'f> {
             shader: None,
             pipeline,
             bind_groups,
+            push_constants,
             work: PassWork::Dispatch(dispatch),
             reads,
             writes,
@@ -977,7 +1073,9 @@ impl<'f> ComputePassBuilder<'f> {
 }
 
 pub struct Frame {
-    inner: core::Frame,
+    pub(crate) engine: Engine,
+    pub(crate) inner: core::Frame,
+    pub(crate) transient_buffers: Vec<Buffer>,
 }
 
 impl Frame {
@@ -1016,6 +1114,7 @@ impl Frame {
             instance_count: 1,
             first_vertex: 0,
             first_instance: 0,
+            push_constants: None,
             clear_colors: Vec::new(),
             clear_depth: None,
         }
@@ -1027,6 +1126,7 @@ impl Frame {
             name: name.into(),
             pipeline: None,
             bind_groups: Vec::new(),
+            push_constants: None,
             image_reads: Vec::new(),
             image_writes: Vec::new(),
             buffer_reads: Vec::new(),
@@ -1044,6 +1144,7 @@ impl Frame {
             shader: None,
             pipeline: None,
             bind_groups: Vec::new(),
+            push_constants: None,
             work: PassWork::None,
             reads: vec![ImageUse {
                 image: image.image_handle(),

@@ -9,7 +9,6 @@ use crate::{
     ShaderTarget, StageMask, UpdateRate,
 };
 
-
 #[cfg(not(target_arch = "wasm32"))]
 mod sys {
     use std::ffi::{c_char, c_int, c_uint};
@@ -132,9 +131,7 @@ mod sys {
         ) -> *mut SlangReflectionEntryPoint;
 
         // Entry point
-        pub fn spReflectionEntryPoint_getName(
-            ep: *mut SlangReflectionEntryPoint,
-        ) -> *const c_char;
+        pub fn spReflectionEntryPoint_getName(ep: *mut SlangReflectionEntryPoint) -> *const c_char;
 
         // Parameter/variable layout
         pub fn spReflectionParameter_GetBindingSpace(
@@ -281,7 +278,10 @@ pub fn reflect_pipeline_layout(desc: &ShaderDesc) -> Result<ShaderReflection> {
             }
         }
 
-        Ok(ShaderReflection { layout, entry_points })
+        Ok(ShaderReflection {
+            layout,
+            entry_points,
+        })
     })
 }
 
@@ -315,7 +315,9 @@ unsafe fn extract_layout(
             if ptr.is_null() {
                 String::new()
             } else {
-                unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+                unsafe { CStr::from_ptr(ptr) }
+                    .to_string_lossy()
+                    .into_owned()
             }
         };
 
@@ -334,9 +336,9 @@ unsafe fn extract_layout(
             let set_offset = unsafe {
                 sys::spReflectionTypeLayout_getBindingRangeDescriptorSetIndex(type_layout, r)
             };
-            let count = unsafe {
-                sys::spReflectionTypeLayout_getBindingRangeBindingCount(type_layout, r)
-            } as u32;
+            let count =
+                unsafe { sys::spReflectionTypeLayout_getBindingRangeBindingCount(type_layout, r) }
+                    as u32;
 
             let kind = match slang_binding_type_to_kind(binding_type) {
                 Some(k) => k,
@@ -487,7 +489,13 @@ pub fn compile_and_reflect(
             entry_point: desc.entry_point.clone(),
             stage: desc.stage,
         };
-        Ok((compiled_desc, ShaderReflection { layout, entry_points }))
+        Ok((
+            compiled_desc,
+            ShaderReflection {
+                layout,
+                entry_points,
+            },
+        ))
     })
 }
 

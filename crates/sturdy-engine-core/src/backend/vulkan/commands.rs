@@ -1,8 +1,8 @@
 use ash::{Device, vk};
 
 use crate::{
-    BufferBarrier, CompiledGraph, Error, ImageBarrier, IndexFormat, PassDesc, PassWork, Result,
-    RgState, SubresourceRange,
+    BufferBarrier, CompiledGraph, Error, Format, ImageBarrier, IndexFormat, PassDesc, PassWork,
+    PushConstants, Result, RgState, StageMask, SubresourceRange,
 };
 
 use super::descriptors::DescriptorRegistry;
@@ -46,9 +46,8 @@ impl CommandContext {
             descriptors,
             pipelines,
         );
-        let submit_result = result.and_then(|()| {
-            self.submit_and_wait(device, queue, command_buffer, fence)
-        });
+        let submit_result =
+            result.and_then(|()| self.submit_and_wait(device, queue, command_buffer, fence));
 
         unsafe {
             device.destroy_fence(fence, None);
@@ -145,7 +144,14 @@ impl CommandContext {
                             );
                         }
                     }
+                    if let Some(push_constants) = &pass.push_constants {
+                        record_push_constants(device, command_buffer, pipeline, push_constants)?;
+                    }
                     bound_pipeline = Some(pipeline);
+                } else if pass.push_constants.is_some() {
+                    return Err(Error::InvalidInput(
+                        "push constants require a bound pipeline".into(),
+                    ));
                 }
 
                 match pass.work {
@@ -240,6 +246,7 @@ impl CommandContext {
                         )?;
                     }
                     PassWork::CopyImageToBuffer(copy) => unsafe {
+                        let image_desc = resources.image_desc(copy.image)?;
                         device.cmd_copy_image_to_buffer(
                             command_buffer,
                             resources.image(copy.image)?,
@@ -250,10 +257,35 @@ impl CommandContext {
                                 .buffer_row_length(0)
                                 .buffer_image_height(0)
                                 .image_subresource(vk::ImageSubresourceLayers {
-                                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                                    mip_level: 0,
-                                    base_array_layer: 0,
-                                    layer_count: 1,
+                                    aspect_mask: image_aspect_mask(image_desc.format),
+                                    mip_level: copy.mip_level,
+                                    base_array_layer: copy.base_layer,
+                                    layer_count: copy.layer_count,
+                                })
+                                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                                .image_extent(vk::Extent3D {
+                                    width: copy.width,
+                                    height: copy.height,
+                                    depth: copy.depth,
+                                })],
+                        );
+                    },
+                    PassWork::CopyBufferToImage(copy) => unsafe {
+                        let image_desc = resources.image_desc(copy.image)?;
+                        device.cmd_copy_buffer_to_image(
+                            command_buffer,
+                            resources.buffer(copy.buffer)?,
+                            resources.image(copy.image)?,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            &[vk::BufferImageCopy::default()
+                                .buffer_offset(copy.buffer_offset)
+                                .buffer_row_length(0)
+                                .buffer_image_height(0)
+                                .image_subresource(vk::ImageSubresourceLayers {
+                                    aspect_mask: image_aspect_mask(image_desc.format),
+                                    mip_level: copy.mip_level,
+                                    base_array_layer: copy.base_layer,
+                                    layer_count: copy.layer_count,
                                 })
                                 .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
                                 .image_extent(vk::Extent3D {
@@ -459,6 +491,67 @@ fn vk_index_type(format: IndexFormat) -> vk::IndexType {
     }
 }
 
+fn record_push_constants(
+    device: &Device,
+    command_buffer: vk::CommandBuffer,
+    pipeline: super::pipelines::VulkanPipeline,
+    push_constants: &PushConstants,
+) -> Result<()> {
+    let end = push_constants
+        .offset
+        .checked_add(push_constants.bytes.len() as u32)
+        .ok_or_else(|| Error::InvalidInput("push constant byte range overflowed".into()))?;
+    if end > pipeline.push_constants_bytes {
+        return Err(Error::InvalidInput(format!(
+            "push constant byte range [{}, {}) exceeds pipeline layout push constant size {}",
+            push_constants.offset, end, pipeline.push_constants_bytes
+        )));
+    }
+    unsafe {
+        device.cmd_push_constants(
+            command_buffer,
+            pipeline.layout,
+            shader_stage_flags(push_constants.stages),
+            push_constants.offset,
+            &push_constants.bytes,
+        );
+    }
+    Ok(())
+}
+
+fn shader_stage_flags(mask: StageMask) -> vk::ShaderStageFlags {
+    if mask == StageMask::ALL {
+        return vk::ShaderStageFlags::ALL;
+    }
+
+    let mut flags = vk::ShaderStageFlags::empty();
+    if mask.0 & StageMask::VERTEX.0 != 0 {
+        flags |= vk::ShaderStageFlags::VERTEX;
+    }
+    if mask.0 & StageMask::FRAGMENT.0 != 0 {
+        flags |= vk::ShaderStageFlags::FRAGMENT;
+    }
+    if mask.0 & StageMask::COMPUTE.0 != 0 {
+        flags |= vk::ShaderStageFlags::COMPUTE;
+    }
+    if mask.0 & StageMask::MESH.0 != 0 {
+        flags |= vk::ShaderStageFlags::MESH_EXT;
+    }
+    if mask.0 & StageMask::TASK.0 != 0 {
+        flags |= vk::ShaderStageFlags::TASK_EXT;
+    }
+    if mask.0 & StageMask::RAY_TRACING.0 != 0 {
+        flags |= vk::ShaderStageFlags::RAYGEN_KHR
+            | vk::ShaderStageFlags::MISS_KHR
+            | vk::ShaderStageFlags::CLOSEST_HIT_KHR;
+    }
+    if flags.is_empty() {
+        vk::ShaderStageFlags::ALL
+    } else {
+        flags
+    }
+}
+
 fn image_layout(state: RgState) -> vk::ImageLayout {
     match state {
         RgState::Undefined => vk::ImageLayout::UNDEFINED,
@@ -488,6 +581,14 @@ fn subresource_range(state: RgState, subresource: SubresourceRange) -> vk::Image
 fn aspect_mask(state: RgState) -> vk::ImageAspectFlags {
     match state {
         RgState::DepthRead | RgState::DepthWrite => vk::ImageAspectFlags::DEPTH,
+        _ => vk::ImageAspectFlags::COLOR,
+    }
+}
+
+fn image_aspect_mask(format: Format) -> vk::ImageAspectFlags {
+    match format {
+        Format::Depth32Float => vk::ImageAspectFlags::DEPTH,
+        Format::Depth24Stencil8 => vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
         _ => vk::ImageAspectFlags::COLOR,
     }
 }

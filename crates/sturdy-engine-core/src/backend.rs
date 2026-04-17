@@ -3,8 +3,8 @@ use crate::NativeSurfaceDesc;
 use crate::{
     BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, CanonicalPipelineLayout, Caps,
     CompiledGraph, ComputePipelineDesc, GraphicsPipelineDesc, ImageDesc, ImageHandle,
-    PipelineHandle, PipelineLayoutHandle, Result, ShaderDesc, ShaderHandle, ShaderTarget,
-    SurfaceHandle, SurfaceSize,
+    PipelineHandle, PipelineLayoutHandle, Result, SamplerDesc, SamplerHandle, ShaderDesc,
+    ShaderHandle, ShaderTarget, SurfaceHandle, SurfaceSize,
 };
 
 #[cfg(target_os = "windows")]
@@ -104,6 +104,12 @@ pub trait Backend: Send + Sync {
         Ok(())
     }
     fn destroy_buffer(&self, _handle: BufferHandle) -> Result<()> {
+        Ok(())
+    }
+    fn create_sampler(&self, _handle: SamplerHandle, _desc: SamplerDesc) -> Result<()> {
+        Ok(())
+    }
+    fn destroy_sampler(&self, _handle: SamplerHandle) -> Result<()> {
         Ok(())
     }
     fn write_buffer(&self, _handle: BufferHandle, _offset: u64, _data: &[u8]) -> Result<()> {
