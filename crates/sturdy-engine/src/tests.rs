@@ -1,64 +1,84 @@
 use crate::*;
 
+fn sampled_image_sampler_layout() -> CanonicalPipelineLayout {
+    CanonicalPipelineLayout {
+        groups: vec![CanonicalGroupLayout {
+            name: "material".into(),
+            bindings: vec![
+                CanonicalBinding {
+                    path: "base_color".into(),
+                    kind: BindingKind::SampledImage,
+                    count: 1,
+                    stage_mask: StageMask::FRAGMENT,
+                    update_rate: UpdateRate::Material,
+                },
+                CanonicalBinding {
+                    path: "base_sampler".into(),
+                    kind: BindingKind::Sampler,
+                    count: 1,
+                    stage_mask: StageMask::FRAGMENT,
+                    update_rate: UpdateRate::Material,
+                },
+            ],
+        }],
+        push_constants_bytes: 0,
+    }
+}
+
+fn create_sampled_image_sampler_bind_group(engine: &Engine) -> Result<BindGroup> {
+    let image = engine.create_image(ImageDesc {
+        extent: Extent3d {
+            width: 2,
+            height: 2,
+            depth: 1,
+        },
+        mip_levels: 1,
+        layers: 1,
+        samples: 1,
+        format: Format::Rgba8Unorm,
+        usage: ImageUsage::SAMPLED,
+    })?;
+    let sampler = engine.create_sampler(SamplerDesc::default())?;
+    let layout = engine.create_pipeline_layout(sampled_image_sampler_layout())?;
+
+    engine.create_bind_group(BindGroupDesc {
+        layout: layout.handle(),
+        entries: vec![
+            BindGroupEntry {
+                path: "base_color".into(),
+                resource: ResourceBinding::Image(image.handle()),
+            },
+            BindGroupEntry {
+                path: "base_sampler".into(),
+                resource: ResourceBinding::Sampler(sampler.handle()),
+            },
+        ],
+    })
+}
+
 #[test]
 fn creates_sampled_image_and_sampler_bind_group() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
-    let image = engine
-        .create_image(ImageDesc {
-            extent: Extent3d {
-                width: 2,
-                height: 2,
-                depth: 1,
-            },
-            mip_levels: 1,
-            layers: 1,
-            samples: 1,
-            format: Format::Rgba8Unorm,
-            usage: ImageUsage::SAMPLED,
-        })
-        .unwrap();
-    let sampler = engine.create_sampler(SamplerDesc::default()).unwrap();
-    let layout = engine
-        .create_pipeline_layout(CanonicalPipelineLayout {
-            groups: vec![CanonicalGroupLayout {
-                name: "material".into(),
-                bindings: vec![
-                    CanonicalBinding {
-                        path: "base_color".into(),
-                        kind: BindingKind::SampledImage,
-                        count: 1,
-                        stage_mask: StageMask::FRAGMENT,
-                        update_rate: UpdateRate::Material,
-                    },
-                    CanonicalBinding {
-                        path: "base_sampler".into(),
-                        kind: BindingKind::Sampler,
-                        count: 1,
-                        stage_mask: StageMask::FRAGMENT,
-                        update_rate: UpdateRate::Material,
-                    },
-                ],
-            }],
-            push_constants_bytes: 0,
-        })
-        .unwrap();
+    let bind_group = create_sampled_image_sampler_bind_group(&engine).unwrap();
 
-    let bind_group = engine
-        .create_bind_group(BindGroupDesc {
-            layout: layout.handle(),
-            entries: vec![
-                BindGroupEntry {
-                    path: "base_color".into(),
-                    resource: ResourceBinding::Image(image.handle()),
-                },
-                BindGroupEntry {
-                    path: "base_sampler".into(),
-                    resource: ResourceBinding::Sampler(sampler.handle()),
-                },
-            ],
-        })
-        .unwrap();
+    assert_eq!(bind_group.desc().entries.len(), 2);
+}
 
+#[test]
+fn vulkan_writes_sampled_image_and_sampler_descriptors_when_available() {
+    let engine = match Engine::with_backend(BackendKind::Vulkan) {
+        Ok(engine) => engine,
+        Err(Error::Unsupported(_)) => return,
+        Err(Error::Backend(message))
+            if message.contains("failed to load Vulkan loader")
+                || message.contains("no Vulkan physical device") =>
+        {
+            return;
+        }
+        Err(error) => panic!("unexpected Vulkan backend creation error: {error}"),
+    };
+
+    let bind_group = create_sampled_image_sampler_bind_group(&engine).unwrap();
     assert_eq!(bind_group.desc().entries.len(), 2);
 }
 
