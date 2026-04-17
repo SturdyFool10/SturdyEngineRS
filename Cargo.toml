@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "crates/sturdy-engine-core",
+    "crates/sturdy-engine-ffi",
+    "crates/sturdy-engine",
+    "crates/sturdy-engine-testbed",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://example.invalid/sturdy-engine"
+rust-version = "1.85"

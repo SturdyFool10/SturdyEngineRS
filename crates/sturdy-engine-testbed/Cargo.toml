@@ -1,0 +1,18 @@
+[package]
+name = "sturdy-engine-testbed"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sturdy-engine-testbed"
+path = "src/main.rs"
+
+[dependencies]
+sturdy-engine = { path = "../sturdy-engine" }
+winit = "0.30"
+
+[build-dependencies]
+sturdy-engine-core = { path = "../sturdy-engine-core" }

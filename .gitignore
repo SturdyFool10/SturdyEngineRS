@@ -1,0 +1,33 @@
+# Rust build artifacts
+/target/
+
+# Claude AI session data and memory
+.claude/
+
+# cbindgen-generated C header
+include/sturdy_engine.h
+
+# Compiled shaders (generated at build time via build.rs)
+**/*.spv
+**/*.dxil
+**/*.metallib
+
+# Pipeline cache (written at runtime)
+pipeline_cache.bin
+**/pipeline_cache.bin
+
+# IDE and editor
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
