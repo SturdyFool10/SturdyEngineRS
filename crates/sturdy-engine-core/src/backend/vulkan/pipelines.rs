@@ -130,6 +130,7 @@ pub struct VulkanPipeline {
     pub bind_point: vk::PipelineBindPoint,
     pub render_pass: vk::RenderPass,
     pub push_constants_bytes: u32,
+    pub push_constant_stages: vk::ShaderStageFlags,
 }
 
 impl PipelineRegistry {
@@ -148,6 +149,7 @@ impl PipelineRegistry {
             .expect("compute pipeline layout must be resolved before backend call");
         let layout = descriptors.pipeline_layout(layout_handle)?;
         let push_constants_bytes = descriptors.push_constants_bytes(layout_handle)?;
+        let push_constant_stages = descriptors.push_constant_stages(layout_handle)?;
         let entry = CString::new(shaders.entry_point(desc.shader)?).map_err(|_| {
             Error::InvalidInput("shader entry point cannot contain interior nul bytes".into())
         })?;
@@ -175,6 +177,7 @@ impl PipelineRegistry {
                 bind_point: vk::PipelineBindPoint::COMPUTE,
                 render_pass: vk::RenderPass::null(),
                 push_constants_bytes,
+                push_constant_stages,
             },
         );
         Ok(())
@@ -193,6 +196,7 @@ impl PipelineRegistry {
             .expect("graphics pipeline layout must be resolved before backend call");
         let layout = descriptors.pipeline_layout(layout_handle)?;
         let push_constants_bytes = descriptors.push_constants_bytes(layout_handle)?;
+        let push_constant_stages = descriptors.push_constant_stages(layout_handle)?;
         let render_pass = create_render_pass(device, desc)?;
         let result = self.create_graphics_pipeline_inner(
             device,
@@ -202,6 +206,7 @@ impl PipelineRegistry {
             layout,
             render_pass,
             push_constants_bytes,
+            push_constant_stages,
         );
         if result.is_err() {
             unsafe {
@@ -220,6 +225,7 @@ impl PipelineRegistry {
         layout: vk::PipelineLayout,
         render_pass: vk::RenderPass,
         push_constants_bytes: u32,
+        push_constant_stages: vk::ShaderStageFlags,
     ) -> Result<()> {
         let vertex_entry =
             CString::new(shaders.entry_point(desc.vertex_shader)?).map_err(|_| {
@@ -339,6 +345,7 @@ impl PipelineRegistry {
                 bind_point: vk::PipelineBindPoint::GRAPHICS,
                 render_pass,
                 push_constants_bytes,
+                push_constant_stages,
             },
         );
         Ok(())

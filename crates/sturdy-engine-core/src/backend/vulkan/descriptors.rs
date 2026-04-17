@@ -21,6 +21,7 @@ struct VulkanPipelineLayout {
     bindings: HashMap<String, VulkanBinding>,
     pool_sizes: Vec<vk::DescriptorPoolSize>,
     push_constants_bytes: u32,
+    push_constant_stages: vk::ShaderStageFlags,
 }
 
 #[derive(Copy, Clone)]
@@ -82,15 +83,18 @@ impl DescriptorRegistry {
             set_layouts.push(set_layout);
         }
 
+        let push_constant_stages = if layout.push_constants_bytes == 0 {
+            vk::ShaderStageFlags::empty()
+        } else {
+            vk::ShaderStageFlags::ALL
+        };
         let push_ranges = if layout.push_constants_bytes == 0 {
             Vec::new()
         } else {
-            vec![
-                vk::PushConstantRange::default()
-                    .stage_flags(vk::ShaderStageFlags::ALL)
-                    .offset(0)
-                    .size(layout.push_constants_bytes),
-            ]
+            vec![vk::PushConstantRange::default()
+                .stage_flags(push_constant_stages)
+                .offset(0)
+                .size(layout.push_constants_bytes)]
         };
         let info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&set_layouts)
@@ -121,6 +125,7 @@ impl DescriptorRegistry {
                     })
                     .collect(),
                 push_constants_bytes: layout.push_constants_bytes,
+                push_constant_stages,
             },
         );
         Ok(())
@@ -257,6 +262,16 @@ impl DescriptorRegistry {
         self.layouts
             .get(&handle)
             .map(|layout| layout.push_constants_bytes)
+            .ok_or(Error::InvalidHandle)
+    }
+
+    pub fn push_constant_stages(
+        &self,
+        handle: PipelineLayoutHandle,
+    ) -> Result<vk::ShaderStageFlags> {
+        self.layouts
+            .get(&handle)
+            .map(|layout| layout.push_constant_stages)
             .ok_or(Error::InvalidHandle)
     }
 

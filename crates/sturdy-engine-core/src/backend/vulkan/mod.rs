@@ -275,26 +275,40 @@ impl Backend for VulkanBackend {
     }
 
     fn resize_surface(&self, handle: SurfaceHandle, size: SurfaceSize) -> Result<()> {
+        unsafe {
+            self.device
+                .device_wait_idle()
+                .map_err(|error| Error::Backend(format!("vkDeviceWaitIdle failed: {error:?}")))?;
+        }
+        self.pipelines
+            .lock()
+            .expect("vulkan pipeline registry mutex poisoned")
+            .clear_all_framebuffers(&self.device);
         self.surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
             .resize_surface(&self.device, self.physical_device, handle, size)?;
-        self.pipelines
-            .lock()
-            .expect("vulkan pipeline registry mutex poisoned")
-            .clear_all_framebuffers(&self.device);
         Ok(())
     }
 
     fn destroy_surface(&self, handle: SurfaceHandle) -> Result<()> {
-        self.surfaces
+        unsafe {
+            self.device
+                .device_wait_idle()
+                .map_err(|error| Error::Backend(format!("vkDeviceWaitIdle failed: {error:?}")))?;
+        }
+        *self
+            .active_surface
             .lock()
-            .expect("vulkan surface registry mutex poisoned")
-            .destroy_surface(&self.device, handle)?;
+            .expect("vulkan active surface mutex poisoned") = None;
         self.pipelines
             .lock()
             .expect("vulkan pipeline registry mutex poisoned")
             .clear_all_framebuffers(&self.device);
+        self.surfaces
+            .lock()
+            .expect("vulkan surface registry mutex poisoned")
+            .destroy_surface(&self.device, handle)?;
         Ok(())
     }
 

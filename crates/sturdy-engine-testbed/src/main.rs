@@ -79,16 +79,16 @@ fn show_window(backend: BackendKind) -> Result<(), Error> {
 
 struct GraphicalApp {
     backend: BackendKind,
-    window: Option<Arc<Window>>,
     app: Option<TestbedApp>,
+    window: Option<Arc<Window>>,
 }
 
 impl GraphicalApp {
     fn new(backend: BackendKind) -> Self {
         Self {
             backend,
-            window: None,
             app: None,
+            window: None,
         }
     }
 
@@ -99,6 +99,13 @@ impl GraphicalApp {
         app.render_frame()?;
         event_loop.set_control_flow(ControlFlow::Wait);
         Ok(())
+    }
+}
+
+impl Drop for GraphicalApp {
+    fn drop(&mut self) {
+        self.app.take();
+        self.window.take();
     }
 }
 

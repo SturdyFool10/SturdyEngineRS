@@ -2,7 +2,7 @@ use ash::{Device, vk};
 
 use crate::{
     BufferBarrier, CompiledGraph, Error, Format, ImageBarrier, IndexFormat, PassDesc, PassWork,
-    PushConstants, Result, RgState, StageMask, SubresourceRange, SubmissionHandle,
+    PushConstants, Result, RgState, SubresourceRange, SubmissionHandle,
 };
 
 use super::descriptors::DescriptorRegistry;
@@ -604,45 +604,12 @@ fn record_push_constants(
         device.cmd_push_constants(
             command_buffer,
             pipeline.layout,
-            shader_stage_flags(push_constants.stages),
+            pipeline.push_constant_stages,
             push_constants.offset,
             &push_constants.bytes,
         );
     }
     Ok(())
-}
-
-fn shader_stage_flags(mask: StageMask) -> vk::ShaderStageFlags {
-    if mask == StageMask::ALL {
-        return vk::ShaderStageFlags::ALL;
-    }
-
-    let mut flags = vk::ShaderStageFlags::empty();
-    if mask.0 & StageMask::VERTEX.0 != 0 {
-        flags |= vk::ShaderStageFlags::VERTEX;
-    }
-    if mask.0 & StageMask::FRAGMENT.0 != 0 {
-        flags |= vk::ShaderStageFlags::FRAGMENT;
-    }
-    if mask.0 & StageMask::COMPUTE.0 != 0 {
-        flags |= vk::ShaderStageFlags::COMPUTE;
-    }
-    if mask.0 & StageMask::MESH.0 != 0 {
-        flags |= vk::ShaderStageFlags::MESH_EXT;
-    }
-    if mask.0 & StageMask::TASK.0 != 0 {
-        flags |= vk::ShaderStageFlags::TASK_EXT;
-    }
-    if mask.0 & StageMask::RAY_TRACING.0 != 0 {
-        flags |= vk::ShaderStageFlags::RAYGEN_KHR
-            | vk::ShaderStageFlags::MISS_KHR
-            | vk::ShaderStageFlags::CLOSEST_HIT_KHR;
-    }
-    if flags.is_empty() {
-        vk::ShaderStageFlags::ALL
-    } else {
-        flags
-    }
 }
 
 fn image_layout(state: RgState) -> vk::ImageLayout {

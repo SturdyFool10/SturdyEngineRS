@@ -2,7 +2,7 @@
 
 ## Near-Term Graphics Work
 
-- [ ] Add indexed draw coverage in the testbed.
+- [x] Add indexed draw coverage in the testbed.
 - [x] Replace temporary per-draw Vulkan framebuffer creation with a framebuffer/render-pass cache.
 - [x] Add a windowing and surface system.
   - [x] Create platform windows and backend surfaces through a runtime-selected window layer.

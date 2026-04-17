@@ -21,8 +21,6 @@ struct VulkanSurface {
     size: SurfaceSize,
     /// Signaled by vkAcquireNextImageKHR when the swapchain image is ready.
     image_available: vk::Semaphore,
-    /// Signaled by queue submit when rendering is complete; waited by present.
-    render_finished: vk::Semaphore,
 }
 
 #[allow(dead_code)]
@@ -33,6 +31,11 @@ struct VulkanSwapchain {
     extent: vk::Extent2D,
     images: Vec<vk::Image>,
     image_views: Vec<vk::ImageView>,
+    /// One presentation wait semaphore per swapchain image.
+    ///
+    /// A semaphore waited by presentation cannot be reused until the image it
+    /// was associated with is acquired again.
+    render_finished: Vec<vk::Semaphore>,
 }
 
 pub struct AcquiredSurfaceImage {
@@ -71,18 +74,6 @@ impl SurfaceRegistry {
                 .create_semaphore(&sem_info, None)
                 .map_err(|e| Error::Backend(format!("vkCreateSemaphore failed: {e:?}")))?
         };
-        let render_finished = unsafe {
-            match device.create_semaphore(&sem_info, None) {
-                Ok(s) => s,
-                Err(e) => {
-                    device.destroy_semaphore(image_available, None);
-                    return Err(Error::Backend(format!(
-                        "vkCreateSemaphore failed: {e:?}"
-                    )));
-                }
-            }
-        };
-
         let swapchain = match (|| {
             let present_supported = unsafe {
                 surface_loader
@@ -112,7 +103,6 @@ impl SurfaceRegistry {
             Ok(swapchain) => swapchain,
             Err(error) => {
                 unsafe {
-                    device.destroy_semaphore(render_finished, None);
                     device.destroy_semaphore(image_available, None);
                     surface_loader.destroy_surface(surface, None);
                 }
@@ -129,7 +119,6 @@ impl SurfaceRegistry {
                 acquired_image_index: None,
                 size: desc.size,
                 image_available,
-                render_finished,
             },
         );
         Ok(())
@@ -208,10 +197,22 @@ impl SurfaceRegistry {
         })
     }
 
-    /// Returns `(image_available, render_finished)` semaphores for `handle`.
-    pub fn frame_semaphores(&self, handle: SurfaceHandle) -> Result<(vk::Semaphore, vk::Semaphore)> {
+    /// Returns `(image_available, render_finished)` semaphores for the acquired image.
+    pub fn frame_semaphores(
+        &self,
+        handle: SurfaceHandle,
+    ) -> Result<(vk::Semaphore, vk::Semaphore)> {
         let surface = self.surfaces.get(&handle).ok_or(Error::InvalidHandle)?;
-        Ok((surface.image_available, surface.render_finished))
+        let image_index = surface.acquired_image_index.ok_or_else(|| {
+            Error::InvalidInput("surface frame semaphores require an acquired image".into())
+        })?;
+        let render_finished = surface
+            .swapchain
+            .render_finished
+            .get(image_index as usize)
+            .copied()
+            .ok_or(Error::InvalidHandle)?;
+        Ok((surface.image_available, render_finished))
     }
 
     /// Present the acquired swapchain image.  Waits on `render_finished` so
@@ -221,7 +222,7 @@ impl SurfaceRegistry {
         let image_index = surface.acquired_image_index.ok_or_else(|| {
             Error::InvalidInput("surface present requires an acquired image".into())
         })?;
-        let wait_semaphores = [surface.render_finished];
+        let wait_semaphores = [surface.swapchain.render_finished[image_index as usize]];
         let swapchains = [surface.swapchain.swapchain];
         let image_indices = [image_index];
         let present_info = vk::PresentInfoKHR::default()
@@ -254,7 +255,6 @@ impl SurfaceRegistry {
 fn destroy_surface(device: &Device, surface: &mut VulkanSurface) {
     destroy_swapchain(device, &surface.swapchain_loader, &mut surface.swapchain);
     unsafe {
-        device.destroy_semaphore(surface.render_finished, None);
         device.destroy_semaphore(surface.image_available, None);
         surface
             .surface_loader
@@ -328,6 +328,7 @@ fn create_swapchain(
             .map_err(|error| Error::Backend(format!("vkGetSwapchainImagesKHR failed: {error:?}")))?
     };
     let mut image_views = Vec::with_capacity(images.len());
+    let mut render_finished = Vec::with_capacity(images.len());
     for image in images.iter().copied() {
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
@@ -357,6 +358,27 @@ fn create_swapchain(
         };
         image_views.push(image_view);
     }
+    let sem_info = vk::SemaphoreCreateInfo::default();
+    for _ in 0..images.len() {
+        let semaphore = unsafe {
+            match device.create_semaphore(&sem_info, None) {
+                Ok(semaphore) => semaphore,
+                Err(error) => {
+                    for semaphore in render_finished.drain(..) {
+                        device.destroy_semaphore(semaphore, None);
+                    }
+                    for image_view in image_views.drain(..) {
+                        device.destroy_image_view(image_view, None);
+                    }
+                    swapchain_loader.destroy_swapchain(swapchain, None);
+                    return Err(Error::Backend(format!(
+                        "vkCreateSemaphore failed: {error:?}"
+                    )));
+                }
+            }
+        };
+        render_finished.push(semaphore);
+    }
 
     Ok(VulkanSwapchain {
         swapchain,
@@ -365,6 +387,7 @@ fn create_swapchain(
         extent,
         images,
         image_views,
+        render_finished,
     })
 }
 
@@ -441,6 +464,9 @@ fn destroy_swapchain(
     swapchain: &mut VulkanSwapchain,
 ) {
     unsafe {
+        for semaphore in swapchain.render_finished.drain(..) {
+            device.destroy_semaphore(semaphore, None);
+        }
         for image_view in swapchain.image_views.drain(..) {
             device.destroy_image_view(image_view, None);
         }
