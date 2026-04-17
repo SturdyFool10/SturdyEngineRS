@@ -230,10 +230,31 @@ pub struct RecordBatch {
     pub pass_indices: Vec<u32>,
 }
 
+/// Lifetime and aliasing slot assignment for one transient resource.
+///
+/// Two resources with non-overlapping `[first_pass, last_pass]` ranges share
+/// the same `alias_slot`, meaning they can occupy the same physical memory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceLifetime {
+    pub first_pass: u32,
+    pub last_pass: u32,
+    /// Index into the pool of aliasable memory slots.  Resources in the same
+    /// slot have non-overlapping lifetimes and can share physical memory.
+    pub alias_slot: u32,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AliasPlan {
     pub transient_image_count: usize,
     pub transient_buffer_count: usize,
+    /// Per-transient-image lifetime and alias-slot assignment.
+    pub image_lifetimes: Vec<(ImageHandle, ResourceLifetime)>,
+    /// Per-transient-buffer lifetime and alias-slot assignment.
+    pub buffer_lifetimes: Vec<(BufferHandle, ResourceLifetime)>,
+    /// How many distinct memory slots images need (= minimum VkDeviceMemory allocations for images).
+    pub image_slot_count: usize,
+    /// How many distinct memory slots buffers need.
+    pub buffer_slot_count: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -577,10 +598,7 @@ impl RenderGraph {
             .map(|index| self.passes[*index as usize].clone())
             .collect::<Vec<_>>();
         let batches = build_batches(&passes);
-        let alias_plan = AliasPlan {
-            transient_image_count: images.iter().filter(|image| !image.imported).count(),
-            transient_buffer_count: buffers.iter().filter(|buffer| !buffer.imported).count(),
-        };
+        let alias_plan = build_alias_plan(&images, &buffers);
         let final_image_states = state_by_image
             .into_iter()
             .filter(|(key, _)| self.image_set.contains(&key.image))
@@ -706,6 +724,73 @@ fn build_batches(passes: &[PassDesc]) -> Vec<RecordBatch> {
         }
     }
     batches
+}
+
+/// Greedy interval-graph-coloring alias plan.
+///
+/// Resources are sorted by first_pass and assigned to the first alias slot
+/// whose last occupant ended before this resource starts.  This minimises the
+/// number of distinct memory slots needed.
+fn build_alias_plan(images: &[VirtualImage], buffers: &[VirtualBuffer]) -> AliasPlan {
+    let (image_lifetimes, image_slot_count) = pack_lifetimes(
+        images
+            .iter()
+            .filter(|img| !img.imported)
+            .map(|img| (img.handle, img.first_use, img.last_use)),
+    );
+    let (buffer_lifetimes, buffer_slot_count) = pack_lifetimes(
+        buffers
+            .iter()
+            .filter(|buf| !buf.imported)
+            .map(|buf| (buf.handle, buf.first_use, buf.last_use)),
+    );
+    AliasPlan {
+        transient_image_count: image_lifetimes.len(),
+        transient_buffer_count: buffer_lifetimes.len(),
+        image_lifetimes,
+        buffer_lifetimes,
+        image_slot_count,
+        buffer_slot_count,
+    }
+}
+
+/// Assign alias slots to resources using greedy interval coloring.
+///
+/// Returns (lifetimes_with_slots, slot_count).
+fn pack_lifetimes<H: Copy>(
+    resources: impl Iterator<Item = (H, u32, u32)>,
+) -> (Vec<(H, ResourceLifetime)>, usize) {
+    let mut items: Vec<(H, u32, u32)> = resources.collect();
+    // Sort by first_pass so we can greedily assign slots.
+    items.sort_unstable_by_key(|(_, first, _)| *first);
+
+    // `slot_last_use[s]` = the last_pass of the most-recently-assigned
+    // resource in slot s.  A slot is free for a new resource whose first_pass
+    // > slot_last_use[s].
+    let mut slot_last_use: Vec<u32> = Vec::new();
+    let mut result = Vec::with_capacity(items.len());
+
+    for (handle, first, last) in items {
+        let slot = slot_last_use
+            .iter()
+            .position(|&end| end < first)
+            .unwrap_or_else(|| {
+                slot_last_use.push(0);
+                slot_last_use.len() - 1
+            });
+        slot_last_use[slot] = last;
+        result.push((
+            handle,
+            ResourceLifetime {
+                first_pass: first,
+                last_pass: last,
+                alias_slot: slot as u32,
+            },
+        ));
+    }
+
+    let slot_count = slot_last_use.len();
+    (result, slot_count)
 }
 
 fn validate_copy_extent(
@@ -1139,5 +1224,44 @@ mod tests {
         let compiled = graph.compile().unwrap();
         assert!(compiled.barriers_per_pass[0].is_empty());
         assert_eq!(compiled.final_image_states.len(), 2);
+    }
+
+    #[test]
+    fn alias_plan_packs_non_overlapping_lifetimes_into_same_slot() {
+        // [0,1] and [2,3] don't overlap → share slot 0
+        // [0,3] overlaps both → slot 1
+        let resources = vec![
+            (ImageHandle(0), 0u32, 1u32),
+            (ImageHandle(1), 2u32, 3u32),
+            (ImageHandle(2), 0u32, 3u32),
+        ];
+        let (lifetimes, slot_count) =
+            pack_lifetimes(resources.into_iter());
+        assert_eq!(slot_count, 2);
+        let slot_for = |h: ImageHandle| {
+            lifetimes.iter().find(|(hh, _)| *hh == h).unwrap().1.alias_slot
+        };
+        assert_eq!(slot_for(ImageHandle(0)), slot_for(ImageHandle(1)));
+        assert_ne!(slot_for(ImageHandle(0)), slot_for(ImageHandle(2)));
+    }
+
+    #[test]
+    fn alias_plan_all_overlapping_gets_unique_slots() {
+        // [0,3], [1,4], [2,5] all overlap each other → 3 unique slots
+        let resources = vec![
+            (ImageHandle(0), 0u32, 3u32),
+            (ImageHandle(1), 1u32, 4u32),
+            (ImageHandle(2), 2u32, 5u32),
+        ];
+        let (_, slot_count) = pack_lifetimes(resources.into_iter());
+        assert_eq!(slot_count, 3);
+    }
+
+    #[test]
+    fn alias_plan_empty_produces_zero_slots() {
+        let (lifetimes, slot_count) =
+            pack_lifetimes(std::iter::empty::<(ImageHandle, u32, u32)>());
+        assert_eq!(slot_count, 0);
+        assert!(lifetimes.is_empty());
     }
 }

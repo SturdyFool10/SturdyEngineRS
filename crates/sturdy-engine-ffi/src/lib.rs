@@ -718,7 +718,7 @@ pub extern "C" fn gfx_frame_flush(frame: gfx_frame_t) -> gfx_result_t {
             .frames
             .get_mut(&frame.h)
             .ok_or(sturdy_engine_core::Error::InvalidHandle)?;
-        frame.flush()
+        frame.flush().map(|_| ())
     })
 }
 

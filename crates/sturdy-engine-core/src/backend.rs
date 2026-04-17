@@ -4,7 +4,7 @@ use crate::{
     BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, CanonicalPipelineLayout, Caps,
     CompiledGraph, ComputePipelineDesc, GraphicsPipelineDesc, ImageDesc, ImageHandle,
     PipelineHandle, PipelineLayoutHandle, Result, SamplerDesc, SamplerHandle, ShaderDesc,
-    ShaderHandle, ShaderTarget, SurfaceHandle, SurfaceSize,
+    ShaderHandle, ShaderTarget, SubmissionHandle, SurfaceHandle, SurfaceSize,
 };
 
 #[cfg(target_os = "windows")]
@@ -182,7 +182,10 @@ pub trait Backend: Send + Sync {
     fn destroy_surface(&self, _handle: SurfaceHandle) -> Result<()> {
         Ok(())
     }
-    fn flush(&self, _graph: &CompiledGraph) -> Result<()>;
+    fn flush(&self, _graph: &CompiledGraph) -> Result<SubmissionHandle>;
+    fn wait_submission(&self, _token: SubmissionHandle) -> Result<()> {
+        Ok(())
+    }
     fn present(&self) -> Result<()>;
     fn wait_idle(&self) -> Result<()>;
 }
@@ -215,8 +218,8 @@ impl Backend for NullBackend {
         self.caps
     }
 
-    fn flush(&self, _graph: &CompiledGraph) -> Result<()> {
-        Ok(())
+    fn flush(&self, _graph: &CompiledGraph) -> Result<SubmissionHandle> {
+        Ok(SubmissionHandle(0))
     }
 
     fn present(&self) -> Result<()> {

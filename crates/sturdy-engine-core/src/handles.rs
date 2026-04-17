@@ -42,6 +42,12 @@ pub struct BindGroupHandle(pub u64);
 #[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct SurfaceHandle(pub u64);
 
+/// Opaque token returned by `flush`.  Callers can pass it to
+/// `Device::wait_for_submission` to block until the GPU finishes that frame.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SubmissionHandle(pub u64);
+
 #[derive(Debug, Default)]
 pub(crate) struct HandleAllocator {
     next: u64,

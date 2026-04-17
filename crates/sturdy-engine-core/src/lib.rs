@@ -31,7 +31,8 @@ pub use device::{Device, DeviceDesc, Frame};
 pub use error::{Error, Result};
 pub use handles::{
     BindGroupHandle, BufferHandle, DeviceHandle, FrameHandle, ImageHandle, PassHandle,
-    PipelineHandle, PipelineLayoutHandle, SamplerHandle, ShaderHandle, SurfaceHandle,
+    PipelineHandle, PipelineLayoutHandle, SamplerHandle, ShaderHandle, SubmissionHandle,
+    SurfaceHandle,
 };
 pub use image::{Extent3d, Format, ImageDesc, ImageUsage};
 pub use pipeline::{
@@ -41,10 +42,11 @@ pub use pipeline::{
 };
 pub use push_constants::PushConstants;
 pub use render_graph::{
-    Access, Barrier, BufferBarrier, BufferStateKey, BufferUse, CompiledGraph,
+    Access, AliasPlan, Barrier, BufferBarrier, BufferStateKey, BufferUse, CompiledGraph,
     CopyBufferToImageDesc, CopyImageToBufferDesc, DispatchDesc, DrawDesc, ImageBarrier,
     ImageStateKey, ImageUse, IndexBufferBinding, IndexFormat, PassDesc, PassWork, QueueType,
-    RecordBatch, RenderGraph, ResourceUse, RgState, SubresourceRange, VertexBufferBinding,
+    RecordBatch, RenderGraph, ResourceLifetime, ResourceUse, RgState, SubresourceRange,
+    VertexBufferBinding,
 };
 pub use sampler::{AddressMode, BorderColor, CompareOp, FilterMode, MipmapMode, SamplerDesc};
 pub use shader::{

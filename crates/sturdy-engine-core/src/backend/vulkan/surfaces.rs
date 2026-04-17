@@ -19,6 +19,10 @@ struct VulkanSurface {
     swapchain: VulkanSwapchain,
     acquired_image_index: Option<u32>,
     size: SurfaceSize,
+    /// Signaled by vkAcquireNextImageKHR when the swapchain image is ready.
+    image_available: vk::Semaphore,
+    /// Signaled by queue submit when rendering is complete; waited by present.
+    render_finished: vk::Semaphore,
 }
 
 #[allow(dead_code)]
@@ -61,6 +65,24 @@ impl SurfaceRegistry {
         let surface_loader = khr::surface::Instance::new(entry, instance);
         let swapchain_loader = khr::swapchain::Device::new(instance, device);
 
+        let sem_info = vk::SemaphoreCreateInfo::default();
+        let image_available = unsafe {
+            device
+                .create_semaphore(&sem_info, None)
+                .map_err(|e| Error::Backend(format!("vkCreateSemaphore failed: {e:?}")))?
+        };
+        let render_finished = unsafe {
+            match device.create_semaphore(&sem_info, None) {
+                Ok(s) => s,
+                Err(e) => {
+                    device.destroy_semaphore(image_available, None);
+                    return Err(Error::Backend(format!(
+                        "vkCreateSemaphore failed: {e:?}"
+                    )));
+                }
+            }
+        };
+
         let swapchain = match (|| {
             let present_supported = unsafe {
                 surface_loader
@@ -90,6 +112,8 @@ impl SurfaceRegistry {
             Ok(swapchain) => swapchain,
             Err(error) => {
                 unsafe {
+                    device.destroy_semaphore(render_finished, None);
+                    device.destroy_semaphore(image_available, None);
                     surface_loader.destroy_surface(surface, None);
                 }
                 return Err(error);
@@ -104,6 +128,8 @@ impl SurfaceRegistry {
                 swapchain,
                 acquired_image_index: None,
                 size: desc.size,
+                image_available,
+                render_finished,
             },
         );
         Ok(())
@@ -140,7 +166,6 @@ impl SurfaceRegistry {
 
     pub fn acquire_image(
         &mut self,
-        device: &Device,
         handle: SurfaceHandle,
     ) -> Result<AcquiredSurfaceImage> {
         let surface = self.surfaces.get_mut(&handle).ok_or(Error::InvalidHandle)?;
@@ -150,42 +175,24 @@ impl SurfaceRegistry {
             ));
         }
 
-        let fence_info = vk::FenceCreateInfo::default();
-        let fence = unsafe {
-            device
-                .create_fence(&fence_info, None)
-                .map_err(|error| Error::Backend(format!("vkCreateFence failed: {error:?}")))?
+        // Signal image_available semaphore; the GPU will wait on it in submit.
+        let (image_index, _suboptimal) = unsafe {
+            surface
+                .swapchain_loader
+                .acquire_next_image(
+                    surface.swapchain.swapchain,
+                    u64::MAX,
+                    surface.image_available,
+                    vk::Fence::null(),
+                )
+                .map_err(|e| Error::Backend(format!("vkAcquireNextImageKHR failed: {e:?}")))?
         };
-        let acquire_result = unsafe {
-            surface.swapchain_loader.acquire_next_image(
-                surface.swapchain.swapchain,
-                u64::MAX,
-                vk::Semaphore::null(),
-                fence,
-            )
-        };
-        let (image_index, _suboptimal) = match acquire_result {
-            Ok(result) => result,
-            Err(error) => unsafe {
-                device.destroy_fence(fence, None);
-                return Err(Error::Backend(format!(
-                    "vkAcquireNextImageKHR failed: {error:?}"
-                )));
-            },
-        };
-        unsafe {
-            if let Err(error) = device.wait_for_fences(&[fence], true, u64::MAX) {
-                device.destroy_fence(fence, None);
-                return Err(Error::Backend(format!("vkWaitForFences failed: {error:?}")));
-            }
-            device.destroy_fence(fence, None);
-        }
 
         surface.acquired_image_index = Some(image_index);
-        let image_index = image_index as usize;
+        let idx = image_index as usize;
         Ok(AcquiredSurfaceImage {
-            image: surface.swapchain.images[image_index],
-            image_view: surface.swapchain.image_views[image_index],
+            image: surface.swapchain.images[idx],
+            image_view: surface.swapchain.image_views[idx],
             desc: ImageDesc {
                 extent: Extent3d {
                     width: surface.swapchain.extent.width,
@@ -201,14 +208,24 @@ impl SurfaceRegistry {
         })
     }
 
+    /// Returns `(image_available, render_finished)` semaphores for `handle`.
+    pub fn frame_semaphores(&self, handle: SurfaceHandle) -> Result<(vk::Semaphore, vk::Semaphore)> {
+        let surface = self.surfaces.get(&handle).ok_or(Error::InvalidHandle)?;
+        Ok((surface.image_available, surface.render_finished))
+    }
+
+    /// Present the acquired swapchain image.  Waits on `render_finished` so
+    /// the GPU has finished writing before the image is displayed.
     pub fn present(&mut self, queue: vk::Queue, handle: SurfaceHandle) -> Result<()> {
         let surface = self.surfaces.get_mut(&handle).ok_or(Error::InvalidHandle)?;
         let image_index = surface.acquired_image_index.ok_or_else(|| {
             Error::InvalidInput("surface present requires an acquired image".into())
         })?;
+        let wait_semaphores = [surface.render_finished];
         let swapchains = [surface.swapchain.swapchain];
         let image_indices = [image_index];
         let present_info = vk::PresentInfoKHR::default()
+            .wait_semaphores(&wait_semaphores)
             .swapchains(&swapchains)
             .image_indices(&image_indices);
         unsafe {
@@ -237,6 +254,8 @@ impl SurfaceRegistry {
 fn destroy_surface(device: &Device, surface: &mut VulkanSurface) {
     destroy_swapchain(device, &surface.swapchain_loader, &mut surface.swapchain);
     unsafe {
+        device.destroy_semaphore(surface.render_finished, None);
+        device.destroy_semaphore(surface.image_available, None);
         surface
             .surface_loader
             .destroy_surface(surface.surface, None);

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -8,11 +8,12 @@ use crate::backend::vulkan::{VulkanBackend, VulkanBackendConfig};
 use crate::backend::{Backend, BackendKind, NullBackend, auto_backend_preference_order};
 use crate::handles::HandleAllocator;
 use crate::{
-    BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, BufferStateKey, CanonicalGroupLayout,
-    CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error, FrameHandle, GraphicsPipelineDesc,
-    ImageDesc, ImageHandle, ImageStateKey, PipelineHandle, PipelineLayoutHandle, RenderGraph,
-    Result, RgState, SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection,
-    SurfaceHandle, SurfaceSize,
+    BindGroupDesc, BindGroupHandle, BindingKind, BufferDesc, BufferHandle, BufferStateKey,
+    CanonicalGroupLayout, CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error, FrameHandle,
+    GraphicsPipelineDesc, ImageDesc, ImageHandle, ImageStateKey, PipelineHandle,
+    PipelineLayoutHandle, RenderGraph, ResourceBinding, Result, RgState, SamplerDesc,
+    SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection, SubmissionHandle, SurfaceHandle,
+    SurfaceSize,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -35,6 +36,18 @@ pub struct Device {
     inner: Arc<Mutex<DeviceInner>>,
 }
 
+/// GPU resource to destroy after the in-flight frame's fence is signaled.
+enum DeferredDestroy {
+    Image(ImageHandle),
+    Buffer(BufferHandle),
+    Sampler(SamplerHandle),
+    Shader(ShaderHandle),
+    /// Pipeline first — layout must outlive the pipeline per Vulkan spec.
+    Pipeline(PipelineHandle),
+    PipelineLayout(PipelineLayoutHandle),
+    BindGroup(BindGroupHandle),
+}
+
 struct DeviceInner {
     backend: Box<dyn Backend>,
     images: HashMap<ImageHandle, ImageDesc>,
@@ -49,6 +62,14 @@ struct DeviceInner {
     bind_groups: HashMap<BindGroupHandle, BindGroupDesc>,
     surfaces: HashMap<SurfaceHandle, SurfaceSize>,
     frames: HashMap<FrameHandle, RenderGraph>,
+    /// Resources queued for deferred destruction.  Drained at the start of
+    /// every `Frame::flush` after the previous frame's fence is waited —
+    /// guaranteeing the GPU is no longer accessing them.
+    deferred_destroys: Vec<DeferredDestroy>,
+    /// Transient images queued for destruction after the in-flight frame's
+    /// fence is signaled.  Populated by `Frame::flush` and drained at the
+    /// next `Frame::flush` after the fence is waited.
+    pending_transient_destroys: Vec<ImageHandle>,
     image_handles: HandleAllocator,
     buffer_handles: HandleAllocator,
     sampler_handles: HandleAllocator,
@@ -79,6 +100,8 @@ impl Device {
                 bind_groups: HashMap::new(),
                 surfaces: HashMap::new(),
                 frames: HashMap::new(),
+                deferred_destroys: Vec::new(),
+                pending_transient_destroys: Vec::new(),
                 image_handles: HandleAllocator::default(),
                 buffer_handles: HandleAllocator::default(),
                 sampler_handles: HandleAllocator::default(),
@@ -125,11 +148,20 @@ impl Device {
         Ok(handle)
     }
 
+    /// Create an image whose lifetime is tied to one frame.  The caller must
+    /// add the returned handle to the frame's transient list via
+    /// `Frame::add_transient_image`; the device will destroy it automatically
+    /// after the GPU finishes the frame that uses it.
+    pub fn create_transient_image(&self, desc: ImageDesc) -> Result<ImageHandle> {
+        self.create_image(desc)
+    }
+
     pub fn destroy_image(&self, handle: ImageHandle) -> Result<()> {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let _desc = inner.images.remove(&handle).ok_or(Error::InvalidHandle)?;
         inner.image_states.retain(|key, _| key.image != handle);
-        inner.backend.destroy_image(handle)
+        inner.deferred_destroys.push(DeferredDestroy::Image(handle));
+        Ok(())
     }
 
     pub fn image_desc(&self, handle: ImageHandle) -> Result<ImageDesc> {
@@ -154,7 +186,8 @@ impl Device {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let _desc = inner.buffers.remove(&handle).ok_or(Error::InvalidHandle)?;
         inner.buffer_states.retain(|key, _| key.buffer != handle);
-        inner.backend.destroy_buffer(handle)
+        inner.deferred_destroys.push(DeferredDestroy::Buffer(handle));
+        Ok(())
     }
 
     pub fn write_buffer(&self, handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
@@ -208,7 +241,8 @@ impl Device {
     pub fn destroy_sampler(&self, handle: SamplerHandle) -> Result<()> {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let _desc = inner.samplers.remove(&handle).ok_or(Error::InvalidHandle)?;
-        inner.backend.destroy_sampler(handle)
+        inner.deferred_destroys.push(DeferredDestroy::Sampler(handle));
+        Ok(())
     }
 
     pub fn sampler_desc(&self, handle: SamplerHandle) -> Result<SamplerDesc> {
@@ -248,7 +282,8 @@ impl Device {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let _desc = inner.shaders.remove(&handle).ok_or(Error::InvalidHandle)?;
         inner.shader_reflections.remove(&handle);
-        inner.backend.destroy_shader(handle)
+        inner.deferred_destroys.push(DeferredDestroy::Shader(handle));
+        Ok(())
     }
 
     pub fn create_pipeline_layout(
@@ -268,11 +303,15 @@ impl Device {
             .pipeline_layouts
             .remove(&handle)
             .ok_or(Error::InvalidHandle)?;
-        inner.backend.destroy_pipeline_layout(handle)
+        inner
+            .deferred_destroys
+            .push(DeferredDestroy::PipelineLayout(handle));
+        Ok(())
     }
 
     pub fn create_bind_group(&self, desc: BindGroupDesc) -> Result<BindGroupHandle> {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
+        inner.validate_bind_group_desc(&desc)?;
         let handle = BindGroupHandle(inner.bind_group_handles.alloc());
         inner.backend.create_bind_group(handle, &desc)?;
         inner.bind_groups.insert(handle, desc);
@@ -285,7 +324,10 @@ impl Device {
             .bind_groups
             .remove(&handle)
             .ok_or(Error::InvalidHandle)?;
-        inner.backend.destroy_bind_group(handle)
+        inner
+            .deferred_destroys
+            .push(DeferredDestroy::BindGroup(handle));
+        Ok(())
     }
 
     pub fn create_compute_pipeline(&self, desc: ComputePipelineDesc) -> Result<PipelineHandle> {
@@ -380,10 +422,13 @@ impl Device {
             .pipelines
             .remove(&handle)
             .ok_or(Error::InvalidHandle)?;
-        inner.backend.destroy_pipeline(handle)?;
+        // Pipeline must be destroyed before its layout per Vulkan spec — push in order.
+        inner.deferred_destroys.push(DeferredDestroy::Pipeline(handle));
         if let Some(lh) = desc.owned_layout() {
             inner.pipeline_layouts.remove(&lh);
-            inner.backend.destroy_pipeline_layout(lh)?;
+            inner
+                .deferred_destroys
+                .push(DeferredDestroy::PipelineLayout(lh));
         }
         Ok(())
     }
@@ -450,7 +495,17 @@ impl Device {
             device: self.clone(),
             handle,
             submitted: false,
+            last_submission: None,
+            transient_images: Vec::new(),
         })
+    }
+
+    pub fn wait_for_submission(&self, token: SubmissionHandle) -> Result<()> {
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .wait_submission(token)
     }
 
     pub fn wait_idle(&self) -> Result<()> {
@@ -459,6 +514,85 @@ impl Device {
             .expect("device mutex poisoned")
             .backend
             .wait_idle()
+    }
+}
+
+impl DeviceInner {
+    fn validate_bind_group_desc(&self, desc: &BindGroupDesc) -> Result<()> {
+        let layout = self
+            .pipeline_layouts
+            .get(&desc.layout)
+            .ok_or(Error::InvalidHandle)?;
+        let mut seen_paths = HashSet::new();
+
+        for entry in &desc.entries {
+            if !seen_paths.insert(entry.path.as_str()) {
+                return Err(Error::InvalidInput(format!(
+                    "bind group entry path '{}' was specified more than once",
+                    entry.path
+                )));
+            }
+
+            let binding = layout
+                .groups
+                .iter()
+                .flat_map(|group| group.bindings.iter())
+                .find(|binding| binding.path == entry.path)
+                .ok_or_else(|| {
+                    Error::InvalidInput(format!(
+                        "bind group entry path '{}' was not found in pipeline layout",
+                        entry.path
+                    ))
+                })?;
+
+            validate_binding_resource_kind(&entry.path, binding.kind, entry.resource)?;
+            self.validate_binding_resource_handle(entry.resource)?;
+        }
+
+        Ok(())
+    }
+
+    fn validate_binding_resource_handle(&self, resource: ResourceBinding) -> Result<()> {
+        match resource {
+            ResourceBinding::Image(handle) if self.images.contains_key(&handle) => Ok(()),
+            ResourceBinding::Buffer(handle) if self.buffers.contains_key(&handle) => Ok(()),
+            ResourceBinding::Sampler(handle) if self.samplers.contains_key(&handle) => Ok(()),
+            _ => Err(Error::InvalidHandle),
+        }
+    }
+}
+
+fn validate_binding_resource_kind(
+    path: &str,
+    expected: BindingKind,
+    resource: ResourceBinding,
+) -> Result<()> {
+    let valid = matches!(
+        (expected, resource),
+        (
+            BindingKind::SampledImage | BindingKind::StorageImage,
+            ResourceBinding::Image(_)
+        ) | (
+            BindingKind::UniformBuffer | BindingKind::StorageBuffer,
+            ResourceBinding::Buffer(_)
+        ) | (BindingKind::Sampler, ResourceBinding::Sampler(_))
+    );
+
+    if valid {
+        return Ok(());
+    }
+
+    Err(Error::InvalidInput(format!(
+        "bind group entry path '{path}' expected {expected:?}, got {}",
+        resource_binding_label(resource)
+    )))
+}
+
+fn resource_binding_label(resource: ResourceBinding) -> &'static str {
+    match resource {
+        ResourceBinding::Image(_) => "image",
+        ResourceBinding::Buffer(_) => "buffer",
+        ResourceBinding::Sampler(_) => "sampler",
     }
 }
 
@@ -583,11 +717,22 @@ pub struct Frame {
     device: Device,
     handle: FrameHandle,
     submitted: bool,
+    last_submission: Option<SubmissionHandle>,
+    /// Transient images owned by this frame; scheduled for destruction after
+    /// the GPU signals the frame fence.
+    transient_images: Vec<ImageHandle>,
 }
 
 impl Frame {
     pub fn handle(&self) -> FrameHandle {
         self.handle
+    }
+
+    /// Register a transient image with this frame.  The device will destroy it
+    /// automatically after the GPU finishes this frame's work (at the start of
+    /// the next flush, when the previous frame's fence is signaled).
+    pub fn add_transient_image(&mut self, handle: ImageHandle) {
+        self.transient_images.push(handle);
     }
 
     pub fn graph_mut<R>(&mut self, f: impl FnOnce(&mut RenderGraph) -> Result<R>) -> Result<R> {
@@ -599,16 +744,19 @@ impl Frame {
         f(graph)
     }
 
-    pub fn flush(&mut self) -> Result<()> {
+    pub fn flush(&mut self) -> Result<SubmissionHandle> {
         let compiled = {
             let inner = self.device.inner.lock().expect("device mutex poisoned");
             let graph = inner.frames.get(&self.handle).ok_or(Error::InvalidHandle)?;
             graph.compile()?
         };
 
-        {
+        let token = {
             let mut inner = self.device.inner.lock().expect("device mutex poisoned");
-            inner.backend.flush(&compiled)?;
+            // `backend.flush` → `submit_graph` waits the previous frame's fence
+            // before submitting.  Everything after this point is safe to destroy.
+            let token = inner.backend.flush(&compiled)?;
+
             for (key, state) in &compiled.final_image_states {
                 if inner.images.contains_key(&key.image) {
                     inner.image_states.insert(*key, *state);
@@ -619,9 +767,42 @@ impl Frame {
                     inner.buffer_states.insert(*key, *state);
                 }
             }
-        }
+
+            // Drain deferred destroys (user-destroyed resources) and transient
+            // images from the previous frame — both are safe now that the
+            // previous frame's fence has been waited inside `backend.flush`.
+            let deferred = std::mem::take(&mut inner.deferred_destroys);
+            for item in deferred {
+                let _ = match item {
+                    DeferredDestroy::Image(h) => inner.backend.destroy_image(h),
+                    DeferredDestroy::Buffer(h) => inner.backend.destroy_buffer(h),
+                    DeferredDestroy::Sampler(h) => inner.backend.destroy_sampler(h),
+                    DeferredDestroy::Shader(h) => inner.backend.destroy_shader(h),
+                    DeferredDestroy::Pipeline(h) => inner.backend.destroy_pipeline(h),
+                    DeferredDestroy::PipelineLayout(h) => {
+                        inner.backend.destroy_pipeline_layout(h)
+                    }
+                    DeferredDestroy::BindGroup(h) => inner.backend.destroy_bind_group(h),
+                };
+            }
+
+            let pending = std::mem::take(&mut inner.pending_transient_destroys);
+            for handle in pending {
+                inner.images.remove(&handle);
+                inner.image_states.retain(|key, _| key.image != handle);
+                let _ = inner.backend.destroy_image(handle);
+            }
+
+            // Schedule this frame's transient images for destruction next flush.
+            inner
+                .pending_transient_destroys
+                .extend(self.transient_images.drain(..));
+
+            token
+        };
         self.submitted = true;
-        Ok(())
+        self.last_submission = Some(token);
+        Ok(token)
     }
 
     pub fn present(&mut self) -> Result<()> {
@@ -636,8 +817,13 @@ impl Frame {
             .present()
     }
 
+    /// Block until the GPU finishes the work submitted by `flush`.
+    /// If `flush` has not been called yet this is a no-op.
     pub fn wait(&self) -> Result<()> {
-        self.device.wait_idle()
+        match self.last_submission {
+            Some(token) => self.device.wait_for_submission(token),
+            None => Ok(()),
+        }
     }
 }
 
@@ -645,6 +831,13 @@ impl Drop for Frame {
     fn drop(&mut self) {
         if let Ok(mut inner) = self.device.inner.lock() {
             inner.frames.remove(&self.handle);
+            // Transient images that were never flushed are safe to destroy
+            // immediately (they were never submitted to the GPU).
+            for handle in self.transient_images.drain(..) {
+                inner.images.remove(&handle);
+                inner.image_states.retain(|key, _| key.image != handle);
+                let _ = inner.backend.destroy_image(handle);
+            }
         }
     }
 }

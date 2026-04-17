@@ -6,11 +6,15 @@
 
 use std::collections::HashMap;
 
+mod bind_group;
+mod pipeline_layout;
 #[cfg(test)]
 mod tests;
 mod texture;
 
+pub use bind_group::BindGroupBuilder;
 pub use glam::{Vec2, Vec3};
+pub use pipeline_layout::PipelineLayoutBuilder;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sturdy_engine_core::NativeSurfaceDesc;
 pub use sturdy_engine_core::{
@@ -26,7 +30,7 @@ pub use sturdy_engine_core::{
     VertexFormat, VertexInputRate, compile_slang, compile_slang_to_file, compile_slang_to_spirv,
     spirv_words_from_bytes,
 };
-pub use sturdy_engine_core::{ImageHandle, SamplerHandle, SurfaceHandle, SurfaceSize};
+pub use sturdy_engine_core::{ImageHandle, SamplerHandle, SubmissionHandle, SurfaceHandle, SurfaceSize};
 pub use texture::{ImageCopyRegion, TextureUploadDesc};
 
 use sturdy_engine_core as core;
@@ -1165,7 +1169,7 @@ impl Frame {
         })
     }
 
-    pub fn flush(&mut self) -> Result<()> {
+    pub fn flush(&mut self) -> Result<SubmissionHandle> {
         self.inner.flush()
     }
 

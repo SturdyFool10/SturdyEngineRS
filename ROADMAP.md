@@ -29,8 +29,10 @@ API requirement: consuming the engine must stay simple and graphics API agnostic
 - [x] Add `ResourceBinding::Sampler`.
 - [x] Write Vulkan sampler descriptors from bind group entries.
 - [ ] Decide whether combined image sampler should be represented as a distinct `BindingKind` or composed from separate image/sampler bindings.
-- [ ] Add descriptor validation that verifies resource binding kind matches reflected binding kind before backend descriptor writes.
+- [x] Add descriptor validation that verifies resource binding kind matches reflected binding kind before backend descriptor writes.
 - [x] Add tests for sampled image + sampler binding paths.
+- [x] Add an API-agnostic bind group builder for image, buffer, and sampler entries.
+- [x] Add an API-agnostic pipeline layout builder for common reflected binding declarations.
 
 ### Texture Upload And Copy Work
 
@@ -62,21 +64,21 @@ API requirement: consuming the engine must stay simple and graphics API agnostic
 - [x] Submit Vulkan graph work through a backend `flush` path.
 - [x] Persist whole-resource final graph states across frames for imported images and buffers.
 - [x] Replace whole-resource persistent states with subresource/range-aware state tracking.
-- [ ] Stop treating Vulkan flush as submit-and-wait.
-- [ ] Add `SubmissionHandle` or equivalent frame/timeline token.
-- [ ] Add explicit wait APIs for submission wait, frame wait, readback wait, and device idle.
-- [ ] Make presentation wait only on the synchronization needed for the acquired swapchain image.
-- [ ] Add deferred destruction tied to submission completion.
-- [ ] Add tests that prove graph submission does not CPU-wait unless requested.
+- [x] Stop treating Vulkan flush as submit-and-wait.
+- [x] Add `SubmissionHandle` or equivalent frame/timeline token.
+- [x] Add explicit wait APIs for submission wait, frame wait, readback wait, and device idle.
+- [x] Make presentation wait only on the synchronization needed for the acquired swapchain image.
+- [x] Add deferred destruction tied to submission completion.
+- [x] Add tests that prove graph submission does not CPU-wait unless requested.
 - [ ] Keep convenience APIs such as `render_image` and `render_surface` allowed to wait where their contract requires it.
 
 ### Multithreaded Command Recording
 
-- [ ] Replace the single Vulkan `CommandContext` command pool model with per-thread/per-frame command pools.
-- [ ] Make `RecordBatch` drive actual independent command buffer recording.
-- [ ] Keep queue submission centralized and externally synchronized per Vulkan queue.
-- [ ] Decide primary-command-buffer-per-batch vs secondary-command-buffer-per-pass strategy.
-- [ ] Make descriptor, resource, and pipeline registries safely readable during parallel recording.
+- [x] Replace the single Vulkan `CommandContext` command pool model with per-thread/per-frame command pools.
+- [x] Make `RecordBatch` drive actual independent command buffer recording.
+- [x] Keep queue submission centralized and externally synchronized per Vulkan queue.
+- [x] Decide primary-command-buffer-per-batch vs secondary-command-buffer-per-pass strategy.
+- [x] Make descriptor, resource, and pipeline registries safely readable during parallel recording.
 - [ ] Add frame-local upload arenas and command allocator recycling.
 - [ ] Add multi-queue ownership and synchronization support for graphics, compute, and transfer queues.
 - [ ] Add tests with independent graph batches that can record in parallel.

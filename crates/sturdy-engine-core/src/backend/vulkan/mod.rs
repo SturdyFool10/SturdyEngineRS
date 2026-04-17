@@ -11,7 +11,7 @@ mod shaders;
 mod surfaces;
 
 use ash::{Device as AshDevice, Entry, Instance, vk};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::{fs, path::PathBuf};
 
 use crate::backend::{Backend, BackendKind};
@@ -19,7 +19,7 @@ use crate::{
     BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, CanonicalPipelineLayout, Caps,
     CompiledGraph, ComputePipelineDesc, Error, GraphicsPipelineDesc, ImageDesc, ImageHandle,
     NativeSurfaceDesc, PipelineHandle, PipelineLayoutHandle, Result, SamplerDesc, SamplerHandle,
-    ShaderDesc, ShaderHandle, SurfaceHandle, SurfaceSize,
+    ShaderDesc, ShaderHandle, SubmissionHandle, SurfaceHandle, SurfaceSize,
 };
 
 pub use config::VulkanBackendConfig;
@@ -37,11 +37,13 @@ pub struct VulkanBackend {
     graphics_queue: vk::Queue,
     caps: Caps,
     commands: Mutex<commands::CommandContext>,
-    descriptors: Mutex<descriptors::DescriptorRegistry>,
+    descriptors: RwLock<descriptors::DescriptorRegistry>,
     pipelines: Mutex<pipelines::PipelineRegistry>,
-    resources: Mutex<resources::ResourceRegistry>,
+    resources: RwLock<resources::ResourceRegistry>,
     shaders: Mutex<shaders::ShaderRegistry>,
     surfaces: Mutex<surfaces::SurfaceRegistry>,
+    /// Surface whose image was most recently acquired; cleared after present.
+    active_surface: Mutex<Option<SurfaceHandle>>,
 }
 
 impl VulkanBackend {
@@ -69,11 +71,12 @@ impl VulkanBackend {
             graphics_queue: logical.graphics_queue,
             caps,
             commands: Mutex::new(commands),
-            descriptors: Mutex::new(descriptors::DescriptorRegistry::default()),
+            descriptors: RwLock::new(descriptors::DescriptorRegistry::default()),
             pipelines: Mutex::new(pipeline_registry),
-            resources: Mutex::new(resource_registry),
+            resources: RwLock::new(resource_registry),
             shaders: Mutex::new(shaders::ShaderRegistry::default()),
             surfaces: Mutex::new(surfaces::SurfaceRegistry::default()),
+            active_surface: Mutex::new(None),
         })
     }
 
@@ -101,66 +104,63 @@ impl Backend for VulkanBackend {
 
     fn create_image(&self, handle: ImageHandle, desc: ImageDesc) -> Result<()> {
         self.resources
-            .lock()
-            .expect("vulkan resource registry mutex poisoned")
+            .write()
+            .expect("vulkan resource registry rwlock poisoned")
             .create_image(&self.device, handle, desc)
     }
 
     fn destroy_image(&self, handle: ImageHandle) -> Result<()> {
-        let view = self
+        let mut resources = self
             .resources
-            .lock()
-            .expect("vulkan resource registry mutex poisoned")
-            .image_view(handle)?;
+            .write()
+            .expect("vulkan resource registry rwlock poisoned");
+        let view = resources.image_view(handle)?;
         self.pipelines
             .lock()
             .expect("vulkan pipeline registry mutex poisoned")
             .invalidate_framebuffers_for_view(&self.device, view);
-        self.resources
-            .lock()
-            .expect("vulkan resource registry mutex poisoned")
-            .destroy_image(&self.device, handle)
+        resources.destroy_image(&self.device, handle)
     }
 
     fn create_buffer(&self, handle: BufferHandle, desc: BufferDesc) -> Result<()> {
         self.resources
-            .lock()
-            .expect("vulkan resource registry mutex poisoned")
+            .write()
+            .expect("vulkan resource registry rwlock poisoned")
             .create_buffer(&self.device, handle, desc)
     }
 
     fn destroy_buffer(&self, handle: BufferHandle) -> Result<()> {
         self.resources
-            .lock()
-            .expect("vulkan resource registry mutex poisoned")
+            .write()
+            .expect("vulkan resource registry rwlock poisoned")
             .destroy_buffer(&self.device, handle)
     }
 
     fn create_sampler(&self, handle: SamplerHandle, desc: SamplerDesc) -> Result<()> {
         self.resources
-            .lock()
-            .expect("vulkan resource registry mutex poisoned")
+            .write()
+            .expect("vulkan resource registry rwlock poisoned")
             .create_sampler(&self.device, handle, desc)
     }
 
     fn destroy_sampler(&self, handle: SamplerHandle) -> Result<()> {
         self.resources
-            .lock()
-            .expect("vulkan resource registry mutex poisoned")
+            .write()
+            .expect("vulkan resource registry rwlock poisoned")
             .destroy_sampler(&self.device, handle)
     }
 
     fn write_buffer(&self, handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
         self.resources
-            .lock()
-            .expect("vulkan resource registry mutex poisoned")
+            .write()
+            .expect("vulkan resource registry rwlock poisoned")
             .write_buffer(handle, offset, data)
     }
 
     fn read_buffer(&self, handle: BufferHandle, offset: u64, out: &mut [u8]) -> Result<()> {
         self.resources
-            .lock()
-            .expect("vulkan resource registry mutex poisoned")
+            .read()
+            .expect("vulkan resource registry rwlock poisoned")
             .read_buffer(handle, offset, out)
     }
 
@@ -184,33 +184,33 @@ impl Backend for VulkanBackend {
         layout: &CanonicalPipelineLayout,
     ) -> Result<()> {
         self.descriptors
-            .lock()
-            .expect("vulkan descriptor registry mutex poisoned")
+            .write()
+            .expect("vulkan descriptor registry rwlock poisoned")
             .create_pipeline_layout(&self.device, handle, layout)
     }
 
     fn destroy_pipeline_layout(&self, handle: PipelineLayoutHandle) -> Result<()> {
         self.descriptors
-            .lock()
-            .expect("vulkan descriptor registry mutex poisoned")
+            .write()
+            .expect("vulkan descriptor registry rwlock poisoned")
             .destroy_pipeline_layout(&self.device, handle)
     }
 
     fn create_bind_group(&self, handle: BindGroupHandle, desc: &BindGroupDesc) -> Result<()> {
         let resources = self
             .resources
-            .lock()
-            .expect("vulkan resource registry mutex poisoned");
+            .read()
+            .expect("vulkan resource registry rwlock poisoned");
         self.descriptors
-            .lock()
-            .expect("vulkan descriptor registry mutex poisoned")
+            .write()
+            .expect("vulkan descriptor registry rwlock poisoned")
             .create_bind_group(&self.device, handle, desc, &resources)
     }
 
     fn destroy_bind_group(&self, handle: BindGroupHandle) -> Result<()> {
         self.descriptors
-            .lock()
-            .expect("vulkan descriptor registry mutex poisoned")
+            .write()
+            .expect("vulkan descriptor registry rwlock poisoned")
             .destroy_bind_group(&self.device, handle)
     }
 
@@ -225,8 +225,8 @@ impl Backend for VulkanBackend {
             .expect("vulkan shader registry mutex poisoned");
         let descriptors = self
             .descriptors
-            .lock()
-            .expect("vulkan descriptor registry mutex poisoned");
+            .read()
+            .expect("vulkan descriptor registry rwlock poisoned");
         self.pipelines
             .lock()
             .expect("vulkan pipeline registry mutex poisoned")
@@ -244,8 +244,8 @@ impl Backend for VulkanBackend {
             .expect("vulkan shader registry mutex poisoned");
         let descriptors = self
             .descriptors
-            .lock()
-            .expect("vulkan descriptor registry mutex poisoned");
+            .read()
+            .expect("vulkan descriptor registry rwlock poisoned");
         self.pipelines
             .lock()
             .expect("vulkan pipeline registry mutex poisoned")
@@ -307,30 +307,58 @@ impl Backend for VulkanBackend {
             .surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
-            .acquire_image(&self.device, surface)?;
+            .acquire_image(surface)?;
         self.resources
-            .lock()
-            .expect("vulkan resource registry mutex poisoned")
+            .write()
+            .expect("vulkan resource registry rwlock poisoned")
             .import_image(image, acquired.image, acquired.image_view, acquired.desc)?;
+        *self
+            .active_surface
+            .lock()
+            .expect("vulkan active surface mutex poisoned") = Some(surface);
         Ok(acquired.desc)
     }
 
     fn present_surface(&self, surface: SurfaceHandle) -> Result<()> {
-        self.surfaces
+        let result = self
+            .surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
-            .present(self.graphics_queue, surface)
+            .present(self.graphics_queue, surface);
+        *self
+            .active_surface
+            .lock()
+            .expect("vulkan active surface mutex poisoned") = None;
+        result
     }
 
-    fn flush(&self, graph: &CompiledGraph) -> Result<()> {
+    fn flush(&self, graph: &CompiledGraph) -> Result<SubmissionHandle> {
+        // Resolve per-surface semaphores if a swapchain image was acquired.
+        let (wait_sem, signal_sem) = {
+            let active = *self
+                .active_surface
+                .lock()
+                .expect("vulkan active surface mutex poisoned");
+            if let Some(sh) = active {
+                let sems = self
+                    .surfaces
+                    .lock()
+                    .expect("vulkan surface registry mutex poisoned")
+                    .frame_semaphores(sh)?;
+                (Some(sems.0), Some(sems.1))
+            } else {
+                (None, None)
+            }
+        };
+
         let resources = self
             .resources
-            .lock()
-            .expect("vulkan resource registry mutex poisoned");
+            .read()
+            .expect("vulkan resource registry rwlock poisoned");
         let descriptors = self
             .descriptors
-            .lock()
-            .expect("vulkan descriptor registry mutex poisoned");
+            .read()
+            .expect("vulkan descriptor registry rwlock poisoned");
         let mut pipelines = self
             .pipelines
             .lock()
@@ -339,14 +367,23 @@ impl Backend for VulkanBackend {
             .commands
             .lock()
             .expect("vulkan command context mutex poisoned");
-        commands.record_submit_and_wait(
+        commands.submit_graph(
             &self.device,
             self.graphics_queue,
             graph,
             &resources,
             &descriptors,
             &mut pipelines,
+            wait_sem,
+            signal_sem,
         )
+    }
+
+    fn wait_submission(&self, token: SubmissionHandle) -> Result<()> {
+        self.commands
+            .lock()
+            .expect("vulkan command context mutex poisoned")
+            .wait_for_submission(&self.device, token)
     }
 
     fn present(&self) -> Result<()> {
@@ -379,13 +416,13 @@ impl Drop for VulkanBackend {
             if let Ok(mut pipelines) = self.pipelines.lock() {
                 pipelines.destroy_all(&self.device);
             }
-            if let Ok(mut descriptors) = self.descriptors.lock() {
+            if let Ok(mut descriptors) = self.descriptors.write() {
                 descriptors.destroy_all(&self.device);
             }
             if let Ok(mut shaders) = self.shaders.lock() {
                 shaders.destroy_all(&self.device);
             }
-            if let Ok(mut resources) = self.resources.lock() {
+            if let Ok(mut resources) = self.resources.write() {
                 resources.destroy_all(&self.device);
             }
             if let Ok(mut surfaces) = self.surfaces.lock() {
