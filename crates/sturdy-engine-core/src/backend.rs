@@ -4,7 +4,7 @@ use crate::{
     BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, CanonicalPipelineLayout, Caps,
     CompiledGraph, ComputePipelineDesc, GraphicsPipelineDesc, ImageDesc, ImageHandle,
     PipelineHandle, PipelineLayoutHandle, Result, SamplerDesc, SamplerHandle, ShaderDesc,
-    ShaderHandle, ShaderTarget, SubmissionHandle, SurfaceHandle, SurfaceSize,
+    ShaderHandle, ShaderTarget, SubmissionHandle, SurfaceHandle, SurfaceInfo, SurfaceSize,
 };
 
 #[cfg(target_os = "windows")]
@@ -159,11 +159,23 @@ pub trait Backend: Send + Sync {
         Ok(())
     }
     #[cfg(not(target_arch = "wasm32"))]
-    fn create_surface(&self, _handle: SurfaceHandle, _desc: NativeSurfaceDesc) -> Result<()> {
-        Ok(())
+    fn create_surface(
+        &self,
+        _handle: SurfaceHandle,
+        desc: NativeSurfaceDesc,
+    ) -> Result<SurfaceInfo> {
+        Ok(SurfaceInfo {
+            size: desc.size,
+            format: crate::Format::Unknown,
+            color_space: crate::SurfaceColorSpace::Unknown,
+        })
     }
-    fn resize_surface(&self, _handle: SurfaceHandle, _size: SurfaceSize) -> Result<()> {
-        Ok(())
+    fn resize_surface(&self, _handle: SurfaceHandle, size: SurfaceSize) -> Result<SurfaceInfo> {
+        Ok(SurfaceInfo {
+            size,
+            format: crate::Format::Unknown,
+            color_space: crate::SurfaceColorSpace::Unknown,
+        })
     }
     fn acquire_surface_image(
         &self,

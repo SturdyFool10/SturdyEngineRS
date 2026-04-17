@@ -158,7 +158,11 @@ fn upload_texture_2d_rejects_wrong_byte_count() {
 
 fn small_image_desc() -> ImageDesc {
     ImageDesc {
-        extent: Extent3d { width: 1, height: 1, depth: 1 },
+        extent: Extent3d {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
         mip_levels: 1,
         layers: 1,
         samples: 1,

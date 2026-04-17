@@ -2,18 +2,18 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::NativeSurfaceDesc;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::backend::vulkan::{VulkanBackend, VulkanBackendConfig};
-use crate::backend::{Backend, BackendKind, NullBackend, auto_backend_preference_order};
+use crate::backend::{auto_backend_preference_order, Backend, BackendKind, NullBackend};
 use crate::handles::HandleAllocator;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::NativeSurfaceDesc;
 use crate::{
     BindGroupDesc, BindGroupHandle, BindingKind, BufferDesc, BufferHandle, BufferStateKey,
     CanonicalGroupLayout, CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error, FrameHandle,
     GraphicsPipelineDesc, ImageDesc, ImageHandle, ImageStateKey, PipelineHandle,
     PipelineLayoutHandle, RenderGraph, ResourceBinding, Result, RgState, SamplerDesc,
-    SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection, SubmissionHandle, SurfaceHandle,
-    SurfaceSize,
+    SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection, SubmissionHandle, SurfaceEvent,
+    SurfaceHandle, SurfaceInfo, SurfaceSize,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -60,7 +60,7 @@ struct DeviceInner {
     pipeline_layouts: HashMap<PipelineLayoutHandle, CanonicalPipelineLayout>,
     pipelines: HashMap<PipelineHandle, PipelineDesc>,
     bind_groups: HashMap<BindGroupHandle, BindGroupDesc>,
-    surfaces: HashMap<SurfaceHandle, SurfaceSize>,
+    surfaces: HashMap<SurfaceHandle, SurfaceState>,
     frames: HashMap<FrameHandle, RenderGraph>,
     /// Resources queued for deferred destruction.  Drained at the start of
     /// every `Frame::flush` after the previous frame's fence is waited —
@@ -79,6 +79,11 @@ struct DeviceInner {
     bind_group_handles: HandleAllocator,
     surface_handles: HandleAllocator,
     frame_handles: HandleAllocator,
+}
+
+struct SurfaceState {
+    info: SurfaceInfo,
+    events: Vec<SurfaceEvent>,
 }
 
 impl Device {
@@ -186,7 +191,9 @@ impl Device {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let _desc = inner.buffers.remove(&handle).ok_or(Error::InvalidHandle)?;
         inner.buffer_states.retain(|key, _| key.buffer != handle);
-        inner.deferred_destroys.push(DeferredDestroy::Buffer(handle));
+        inner
+            .deferred_destroys
+            .push(DeferredDestroy::Buffer(handle));
         Ok(())
     }
 
@@ -241,7 +248,9 @@ impl Device {
     pub fn destroy_sampler(&self, handle: SamplerHandle) -> Result<()> {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let _desc = inner.samplers.remove(&handle).ok_or(Error::InvalidHandle)?;
-        inner.deferred_destroys.push(DeferredDestroy::Sampler(handle));
+        inner
+            .deferred_destroys
+            .push(DeferredDestroy::Sampler(handle));
         Ok(())
     }
 
@@ -282,7 +291,9 @@ impl Device {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let _desc = inner.shaders.remove(&handle).ok_or(Error::InvalidHandle)?;
         inner.shader_reflections.remove(&handle);
-        inner.deferred_destroys.push(DeferredDestroy::Shader(handle));
+        inner
+            .deferred_destroys
+            .push(DeferredDestroy::Shader(handle));
         Ok(())
     }
 
@@ -423,7 +434,9 @@ impl Device {
             .remove(&handle)
             .ok_or(Error::InvalidHandle)?;
         // Pipeline must be destroyed before its layout per Vulkan spec — push in order.
-        inner.deferred_destroys.push(DeferredDestroy::Pipeline(handle));
+        inner
+            .deferred_destroys
+            .push(DeferredDestroy::Pipeline(handle));
         if let Some(lh) = desc.owned_layout() {
             inner.pipeline_layouts.remove(&lh);
             inner
@@ -438,20 +451,51 @@ impl Device {
         desc.validate()?;
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let handle = SurfaceHandle(inner.surface_handles.alloc());
-        inner.backend.create_surface(handle, desc)?;
-        inner.surfaces.insert(handle, desc.size);
+        let info = inner.backend.create_surface(handle, desc)?;
+        inner.surfaces.insert(
+            handle,
+            SurfaceState {
+                info,
+                events: Vec::new(),
+            },
+        );
         Ok(handle)
     }
 
     pub fn resize_surface(&self, handle: SurfaceHandle, size: SurfaceSize) -> Result<()> {
         size.validate()?;
         let mut inner = self.inner.lock().expect("device mutex poisoned");
-        if !inner.surfaces.contains_key(&handle) {
-            return Err(Error::InvalidHandle);
-        }
-        inner.backend.resize_surface(handle, size)?;
-        inner.surfaces.insert(handle, size);
+        let old = inner
+            .surfaces
+            .get(&handle)
+            .map(|surface| surface.info)
+            .ok_or(Error::InvalidHandle)?;
+        let new = inner.backend.resize_surface(handle, size)?;
+        let surface = inner
+            .surfaces
+            .get_mut(&handle)
+            .ok_or(Error::InvalidHandle)?;
+        queue_surface_events(&mut surface.events, old, new);
+        surface.info = new;
         Ok(())
+    }
+
+    pub fn surface_info(&self, handle: SurfaceHandle) -> Result<SurfaceInfo> {
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        inner
+            .surfaces
+            .get(&handle)
+            .map(|surface| surface.info)
+            .ok_or(Error::InvalidHandle)
+    }
+
+    pub fn drain_surface_events(&self, handle: SurfaceHandle) -> Result<Vec<SurfaceEvent>> {
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        let surface = inner
+            .surfaces
+            .get_mut(&handle)
+            .ok_or(Error::InvalidHandle)?;
+        Ok(std::mem::take(&mut surface.events))
     }
 
     pub fn acquire_surface_image(&self, surface: SurfaceHandle) -> Result<ImageHandle> {
@@ -476,7 +520,7 @@ impl Device {
 
     pub fn destroy_surface(&self, handle: SurfaceHandle) -> Result<()> {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
-        let _size = inner.surfaces.remove(&handle).ok_or(Error::InvalidHandle)?;
+        let _surface = inner.surfaces.remove(&handle).ok_or(Error::InvalidHandle)?;
         inner.backend.destroy_surface(handle)
     }
 
@@ -712,6 +756,28 @@ fn create_available_backend(kind: BackendKind, name: &'static str) -> Result<Box
     Ok(Box::new(NullBackend::for_kind(kind)))
 }
 
+fn queue_surface_events(events: &mut Vec<SurfaceEvent>, old: SurfaceInfo, new: SurfaceInfo) {
+    if old.size != new.size {
+        events.push(SurfaceEvent::Resized {
+            old: old.size,
+            new: new.size,
+        });
+    }
+    if old.format != new.format {
+        events.push(SurfaceEvent::FormatChanged {
+            old: old.format,
+            new: new.format,
+        });
+    }
+    if old.color_space != new.color_space {
+        events.push(SurfaceEvent::ColorSpaceChanged {
+            old: old.color_space,
+            new: new.color_space,
+        });
+    }
+    events.push(SurfaceEvent::Recreated { old, new });
+}
+
 #[derive(Clone)]
 pub struct Frame {
     device: Device,
@@ -779,9 +845,7 @@ impl Frame {
                     DeferredDestroy::Sampler(h) => inner.backend.destroy_sampler(h),
                     DeferredDestroy::Shader(h) => inner.backend.destroy_shader(h),
                     DeferredDestroy::Pipeline(h) => inner.backend.destroy_pipeline(h),
-                    DeferredDestroy::PipelineLayout(h) => {
-                        inner.backend.destroy_pipeline_layout(h)
-                    }
+                    DeferredDestroy::PipelineLayout(h) => inner.backend.destroy_pipeline_layout(h),
                     DeferredDestroy::BindGroup(h) => inner.backend.destroy_bind_group(h),
                 };
             }
@@ -839,5 +903,76 @@ impl Drop for Frame {
                 let _ = inner.backend.destroy_image(handle);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SurfaceColorSpace;
+
+    #[test]
+    fn surface_events_capture_resize_format_color_space_and_recreation() {
+        let old = SurfaceInfo {
+            size: SurfaceSize {
+                width: 640,
+                height: 360,
+            },
+            format: crate::Format::Bgra8Unorm,
+            color_space: SurfaceColorSpace::SrgbNonlinear,
+        };
+        let new = SurfaceInfo {
+            size: SurfaceSize {
+                width: 1280,
+                height: 720,
+            },
+            format: crate::Format::Rgba16Float,
+            color_space: SurfaceColorSpace::Hdr10St2084,
+        };
+        let mut events = Vec::new();
+
+        queue_surface_events(&mut events, old, new);
+
+        assert_eq!(
+            events,
+            vec![
+                SurfaceEvent::Resized {
+                    old: old.size,
+                    new: new.size,
+                },
+                SurfaceEvent::FormatChanged {
+                    old: old.format,
+                    new: new.format,
+                },
+                SurfaceEvent::ColorSpaceChanged {
+                    old: old.color_space,
+                    new: new.color_space,
+                },
+                SurfaceEvent::Recreated { old, new },
+            ]
+        );
+    }
+
+    #[test]
+    fn surface_events_always_capture_recreation() {
+        let info = SurfaceInfo {
+            size: SurfaceSize {
+                width: 640,
+                height: 360,
+            },
+            format: crate::Format::Bgra8Unorm,
+            color_space: SurfaceColorSpace::SrgbNonlinear,
+        };
+        let mut events = Vec::new();
+
+        queue_surface_events(&mut events, info, info);
+
+        assert_eq!(
+            events,
+            vec![SurfaceEvent::Recreated {
+                old: info,
+                new: info
+            }]
+        );
     }
 }

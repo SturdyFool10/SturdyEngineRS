@@ -59,4 +59,4 @@ pub use slang::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use surface::NativeSurfaceDesc;
-pub use surface::SurfaceSize;
+pub use surface::{SurfaceColorSpace, SurfaceEvent, SurfaceInfo, SurfaceSize};

@@ -10,7 +10,7 @@ mod resources;
 mod shaders;
 mod surfaces;
 
-use ash::{Device as AshDevice, Entry, Instance, vk};
+use ash::{vk, Device as AshDevice, Entry, Instance};
 use std::sync::{Mutex, RwLock};
 use std::{fs, path::PathBuf};
 
@@ -19,11 +19,11 @@ use crate::{
     BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, CanonicalPipelineLayout, Caps,
     CompiledGraph, ComputePipelineDesc, Error, GraphicsPipelineDesc, ImageDesc, ImageHandle,
     NativeSurfaceDesc, PipelineHandle, PipelineLayoutHandle, Result, SamplerDesc, SamplerHandle,
-    ShaderDesc, ShaderHandle, SubmissionHandle, SurfaceHandle, SurfaceSize,
+    ShaderDesc, ShaderHandle, SubmissionHandle, SurfaceHandle, SurfaceInfo, SurfaceSize,
 };
 
 pub use config::VulkanBackendConfig;
-use device::{DeviceSelection, create_logical_device};
+use device::{create_logical_device, DeviceSelection};
 use instance::{create_instance, load_entry};
 
 pub const KIND: BackendKind = BackendKind::Vulkan;
@@ -259,7 +259,11 @@ impl Backend for VulkanBackend {
             .destroy_pipeline(&self.device, handle)
     }
 
-    fn create_surface(&self, handle: SurfaceHandle, desc: NativeSurfaceDesc) -> Result<()> {
+    fn create_surface(
+        &self,
+        handle: SurfaceHandle,
+        desc: NativeSurfaceDesc,
+    ) -> Result<SurfaceInfo> {
         self.surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
@@ -274,7 +278,7 @@ impl Backend for VulkanBackend {
             )
     }
 
-    fn resize_surface(&self, handle: SurfaceHandle, size: SurfaceSize) -> Result<()> {
+    fn resize_surface(&self, handle: SurfaceHandle, size: SurfaceSize) -> Result<SurfaceInfo> {
         unsafe {
             self.device
                 .device_wait_idle()
@@ -287,8 +291,7 @@ impl Backend for VulkanBackend {
         self.surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
-            .resize_surface(&self.device, self.physical_device, handle, size)?;
-        Ok(())
+            .resize_surface(&self.device, self.physical_device, handle, size)
     }
 
     fn destroy_surface(&self, handle: SurfaceHandle) -> Result<()> {

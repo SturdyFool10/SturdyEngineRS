@@ -18,19 +18,21 @@ pub use pipeline_layout::PipelineLayoutBuilder;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sturdy_engine_core::NativeSurfaceDesc;
 pub use sturdy_engine_core::{
-    Access, AddressMode, BackendKind, BindGroupDesc, BindGroupEntry, BindingKind, BorderColor,
-    BufferDesc, BufferUsage, BufferUse, CanonicalBinding, CanonicalGroupLayout,
-    CanonicalPipelineLayout, Caps, ColorTargetDesc, CompareOp, CompiledShaderArtifact,
-    ComputePipelineDesc, CopyBufferToImageDesc, CopyImageToBufferDesc, CullMode, DispatchDesc,
-    DrawDesc, Error, Extent3d, FilterMode, Format, FrontFace, GraphicsPipelineDesc, ImageDesc,
-    ImageUsage, ImageUse, IndexBufferBinding, IndexFormat, MipmapMode, PassDesc, PassWork,
-    PrimitiveTopology, PushConstants, QueueType, RasterState, ResourceBinding, Result, RgState,
-    SamplerDesc, ShaderDesc, ShaderSource, ShaderStage, ShaderTarget, SlangCompileDesc, StageMask,
-    SubresourceRange, UpdateRate, VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout,
-    VertexFormat, VertexInputRate, compile_slang, compile_slang_to_file, compile_slang_to_spirv,
-    spirv_words_from_bytes,
+    compile_slang, compile_slang_to_file, compile_slang_to_spirv, spirv_words_from_bytes, Access,
+    AddressMode, BackendKind, BindGroupDesc, BindGroupEntry, BindingKind, BorderColor, BufferDesc,
+    BufferUsage, BufferUse, CanonicalBinding, CanonicalGroupLayout, CanonicalPipelineLayout, Caps,
+    ColorTargetDesc, CompareOp, CompiledShaderArtifact, ComputePipelineDesc, CopyBufferToImageDesc,
+    CopyImageToBufferDesc, CullMode, DispatchDesc, DrawDesc, Error, Extent3d, FilterMode, Format,
+    FrontFace, GraphicsPipelineDesc, ImageDesc, ImageUsage, ImageUse, IndexBufferBinding,
+    IndexFormat, MipmapMode, PassDesc, PassWork, PrimitiveTopology, PushConstants, QueueType,
+    RasterState, ResourceBinding, Result, RgState, SamplerDesc, ShaderDesc, ShaderSource,
+    ShaderStage, ShaderTarget, SlangCompileDesc, StageMask, SubresourceRange, SurfaceColorSpace,
+    SurfaceEvent, SurfaceInfo, UpdateRate, VertexAttributeDesc, VertexBufferBinding,
+    VertexBufferLayout, VertexFormat, VertexInputRate,
 };
-pub use sturdy_engine_core::{ImageHandle, SamplerHandle, SubmissionHandle, SurfaceHandle, SurfaceSize};
+pub use sturdy_engine_core::{
+    ImageHandle, SamplerHandle, SubmissionHandle, SurfaceHandle, SurfaceSize,
+};
 pub use texture::{ImageCopyRegion, TextureUploadDesc};
 
 use sturdy_engine_core as core;
@@ -207,10 +209,11 @@ impl Engine {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn create_surface(&self, desc: NativeSurfaceDesc) -> Result<Surface> {
         let handle = self.device.create_surface(desc)?;
+        let info = self.device.surface_info(handle)?;
         Ok(Surface {
             device: self.device.clone(),
             handle,
-            size: desc.size,
+            info,
         })
     }
 }
@@ -587,7 +590,7 @@ impl Drop for Pipeline {
 pub struct Surface {
     device: core::Device,
     handle: core::SurfaceHandle,
-    size: SurfaceSize,
+    info: SurfaceInfo,
 }
 
 impl Surface {
@@ -596,13 +599,23 @@ impl Surface {
     }
 
     pub fn size(&self) -> SurfaceSize {
-        self.size
+        self.info.size
+    }
+
+    pub fn info(&self) -> SurfaceInfo {
+        self.info
     }
 
     pub fn resize(&mut self, size: SurfaceSize) -> Result<()> {
         self.device.resize_surface(self.handle, size)?;
-        self.size = size;
+        self.info = self.device.surface_info(self.handle)?;
         Ok(())
+    }
+
+    pub fn drain_events(&mut self) -> Result<Vec<SurfaceEvent>> {
+        let events = self.device.drain_surface_events(self.handle)?;
+        self.info = self.device.surface_info(self.handle)?;
+        Ok(events)
     }
 
     pub fn acquire_image(&self) -> Result<SurfaceImage> {

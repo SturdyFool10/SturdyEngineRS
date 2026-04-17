@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use ash::{Device, Entry, Instance, khr, vk};
+use ash::{khr, vk, Device, Entry, Instance};
 
 use crate::{
-    Error, Extent3d, Format, ImageDesc, ImageUsage, NativeSurfaceDesc, Result, SurfaceHandle,
-    SurfaceSize,
+    Error, Extent3d, Format, ImageDesc, ImageUsage, NativeSurfaceDesc, Result, SurfaceColorSpace,
+    SurfaceHandle, SurfaceInfo, SurfaceSize,
 };
 
 #[derive(Default)]
@@ -54,7 +54,7 @@ impl SurfaceRegistry {
         queue_family: u32,
         handle: SurfaceHandle,
         desc: NativeSurfaceDesc,
-    ) -> Result<()> {
+    ) -> Result<SurfaceInfo> {
         let surface = unsafe {
             ash_window::create_surface(
                 entry,
@@ -109,6 +109,7 @@ impl SurfaceRegistry {
                 return Err(error);
             }
         };
+        let info = swapchain.info()?;
         self.surfaces.insert(
             handle,
             VulkanSurface {
@@ -121,7 +122,7 @@ impl SurfaceRegistry {
                 image_available,
             },
         );
-        Ok(())
+        Ok(info)
     }
 
     pub fn resize_surface(
@@ -130,7 +131,7 @@ impl SurfaceRegistry {
         physical_device: vk::PhysicalDevice,
         handle: SurfaceHandle,
         size: SurfaceSize,
-    ) -> Result<()> {
+    ) -> Result<SurfaceInfo> {
         let surface = self.surfaces.get_mut(&handle).ok_or(Error::InvalidHandle)?;
         if surface.acquired_image_index.is_some() {
             return Err(Error::InvalidInput(
@@ -150,13 +151,10 @@ impl SurfaceRegistry {
         destroy_swapchain(device, &surface.swapchain_loader, &mut surface.swapchain);
         surface.swapchain = new_swapchain;
         surface.size = size;
-        Ok(())
+        surface.swapchain.info()
     }
 
-    pub fn acquire_image(
-        &mut self,
-        handle: SurfaceHandle,
-    ) -> Result<AcquiredSurfaceImage> {
+    pub fn acquire_image(&mut self, handle: SurfaceHandle) -> Result<AcquiredSurfaceImage> {
         let surface = self.surfaces.get_mut(&handle).ok_or(Error::InvalidHandle)?;
         if surface.acquired_image_index.is_some() {
             return Err(Error::InvalidInput(
@@ -249,6 +247,19 @@ impl SurfaceRegistry {
         for (_, mut surface) in self.surfaces.drain() {
             destroy_surface(device, &mut surface);
         }
+    }
+}
+
+impl VulkanSwapchain {
+    fn info(&self) -> Result<SurfaceInfo> {
+        Ok(SurfaceInfo {
+            size: SurfaceSize {
+                width: self.extent.width,
+                height: self.extent.height,
+            },
+            format: vk_format_to_engine(self.format)?,
+            color_space: vk_color_space_to_engine(self.color_space),
+        })
     }
 }
 
@@ -483,5 +494,16 @@ fn vk_format_to_engine(format: vk::Format) -> Result<Format> {
         _ => Err(Error::Unsupported(
             "Vulkan surface format is not supported by the engine",
         )),
+    }
+}
+
+fn vk_color_space_to_engine(color_space: vk::ColorSpaceKHR) -> SurfaceColorSpace {
+    match color_space {
+        vk::ColorSpaceKHR::SRGB_NONLINEAR => SurfaceColorSpace::SrgbNonlinear,
+        vk::ColorSpaceKHR::DISPLAY_P3_NONLINEAR_EXT => SurfaceColorSpace::DisplayP3Nonlinear,
+        vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT => SurfaceColorSpace::ExtendedSrgbLinear,
+        vk::ColorSpaceKHR::HDR10_ST2084_EXT => SurfaceColorSpace::Hdr10St2084,
+        vk::ColorSpaceKHR::HDR10_HLG_EXT => SurfaceColorSpace::Hdr10Hlg,
+        _ => SurfaceColorSpace::Unknown,
     }
 }

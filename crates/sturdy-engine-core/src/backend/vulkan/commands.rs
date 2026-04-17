@@ -1,8 +1,8 @@
-use ash::{Device, vk};
+use ash::{vk, Device};
 
 use crate::{
     BufferBarrier, CompiledGraph, Error, Format, ImageBarrier, IndexFormat, PassDesc, PassWork,
-    PushConstants, Result, RgState, SubresourceRange, SubmissionHandle,
+    PushConstants, Result, RgState, SubmissionHandle, SubresourceRange,
 };
 
 use super::descriptors::DescriptorRegistry;
@@ -41,7 +41,10 @@ impl BatchPool {
                 }
             }
         };
-        Ok(Self { pool, command_buffer })
+        Ok(Self {
+            pool,
+            command_buffer,
+        })
     }
 
     fn destroy(&self, device: &Device) {
@@ -245,11 +248,7 @@ impl CommandContext {
         if let Some(pipeline) = pass.pipeline {
             let pipeline = pipelines.pipeline(pipeline)?;
             unsafe {
-                device.cmd_bind_pipeline(
-                    command_buffer,
-                    pipeline.bind_point,
-                    pipeline.pipeline,
-                );
+                device.cmd_bind_pipeline(command_buffer, pipeline.bind_point, pipeline.pipeline);
             }
             let mut sets = Vec::new();
             for bind_group in &pass.bind_groups {
@@ -285,7 +284,8 @@ impl CommandContext {
                 })?;
                 if pipeline.bind_point != vk::PipelineBindPoint::COMPUTE {
                     return Err(Error::InvalidInput(
-                        "dispatch pass pipeline must bind to the compute pipeline bind point".into(),
+                        "dispatch pass pipeline must bind to the compute pipeline bind point"
+                            .into(),
                     ));
                 }
                 unsafe {

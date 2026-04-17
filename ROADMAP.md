@@ -7,7 +7,7 @@
 - [x] Add a windowing and surface system.
   - [x] Create platform windows and backend surfaces through a runtime-selected window layer.
   - [x] Keep swapchain/surface ownership separate from the device so surfaces can be resized or fully reconstructed during execution.
-  - [ ] Model resize, format changes, color-space changes, and surface recreation as explicit events.
+  - [x] Model resize, format changes, color-space changes, and surface recreation as explicit events.
   - [ ] Preserve the ability to reconstruct the surface/swapchain later for HDR mode changes without tearing down the whole engine/device.
 
 ## Reflection-Driven Renderer Todo

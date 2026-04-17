@@ -1,34 +1,14 @@
-#[cfg(not(target_arch = "wasm32"))]
-use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
-
-use crate::{Error, Result};
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct SurfaceSize {
-    pub width: u32,
-    pub height: u32,
-}
-
-impl SurfaceSize {
-    pub fn validate(self) -> Result<()> {
-        if self.width == 0 || self.height == 0 {
-            return Err(Error::InvalidInput("surface size must be non-zero".into()));
-        }
-        Ok(())
-    }
-}
+mod surface_color_space;
+mod surface_event;
+mod surface_info;
+mod surface_size;
 
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Copy, Clone, Debug)]
-pub struct NativeSurfaceDesc {
-    pub display_handle: RawDisplayHandle,
-    pub window_handle: RawWindowHandle,
-    pub size: SurfaceSize,
-}
+mod native_surface_desc;
 
 #[cfg(not(target_arch = "wasm32"))]
-impl NativeSurfaceDesc {
-    pub fn validate(&self) -> Result<()> {
-        self.size.validate()
-    }
-}
+pub use native_surface_desc::NativeSurfaceDesc;
+pub use surface_color_space::SurfaceColorSpace;
+pub use surface_event::SurfaceEvent;
+pub use surface_info::SurfaceInfo;
+pub use surface_size::SurfaceSize;

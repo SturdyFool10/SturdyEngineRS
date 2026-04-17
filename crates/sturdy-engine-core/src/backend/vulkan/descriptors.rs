@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ash::{Device, vk};
+use ash::{vk, Device};
 
 use crate::{
     BindGroupDesc, BindGroupHandle, BindingKind, CanonicalBinding, CanonicalPipelineLayout, Error,
