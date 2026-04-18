@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::os::raw::c_char;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -394,6 +394,7 @@ pub extern "C" fn gfx_create_image(
             .get(&dev.h)
             .ok_or(sturdy_engine_core::Error::InvalidHandle)?;
         let image = device.create_image(ImageDesc {
+            dimension: sturdy_engine_core::ImageDimension::D2,
             extent: Extent3d {
                 width: desc.width,
                 height: desc.height,
@@ -404,6 +405,9 @@ pub extern "C" fn gfx_create_image(
             samples: desc.samples,
             format: ffi_format(desc.format),
             usage: ImageUsage(desc.usage_flags),
+            transient: false,
+            clear_value: None,
+            debug_name: None,
         })?;
         let ffi_image = registry.alloc();
         registry.images.insert(

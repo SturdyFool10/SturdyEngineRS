@@ -103,6 +103,7 @@ mod tests {
 
     fn image_desc() -> ImageDesc {
         ImageDesc {
+            dimension: crate::ImageDimension::D2,
             extent: Extent3d {
                 width: 1,
                 height: 1,
@@ -113,6 +114,9 @@ mod tests {
             samples: 1,
             format: Format::Rgba8Unorm,
             usage: ImageUsage::SAMPLED,
+            transient: false,
+            clear_value: None,
+            debug_name: None,
         }
     }
 }

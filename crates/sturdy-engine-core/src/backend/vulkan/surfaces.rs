@@ -235,6 +235,7 @@ impl SurfaceRegistry {
             image: surface.swapchain.images[idx],
             image_view: surface.swapchain.image_views[idx],
             desc: ImageDesc {
+                dimension: crate::ImageDimension::D2,
                 extent: Extent3d {
                     width: surface.swapchain.extent.width,
                     height: surface.swapchain.extent.height,
@@ -245,6 +246,9 @@ impl SurfaceRegistry {
                 samples: 1,
                 format: vk_format_to_engine(surface.swapchain.format)?,
                 usage: ImageUsage::RENDER_TARGET | ImageUsage::PRESENT | ImageUsage::COPY_DST,
+                transient: false,
+                clear_value: None,
+                debug_name: Some("surface image"),
             },
         })
     }

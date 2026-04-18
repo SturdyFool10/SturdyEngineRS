@@ -19,6 +19,7 @@ fn sampled_image_sampler_layout() -> CanonicalPipelineLayout {
 
 fn create_sampled_image_sampler_bind_group(engine: &Engine) -> Result<BindGroup> {
     let image = engine.create_image(ImageDesc {
+        dimension: ImageDimension::D2,
         extent: Extent3d {
             width: 2,
             height: 2,
@@ -29,6 +30,9 @@ fn create_sampled_image_sampler_bind_group(engine: &Engine) -> Result<BindGroup>
         samples: 1,
         format: Format::Rgba8Unorm,
         usage: ImageUsage::SAMPLED,
+        transient: false,
+        clear_value: None,
+        debug_name: None,
     })?;
     let sampler = engine.create_sampler(SamplerDesc::default())?;
     let layout = engine
@@ -77,6 +81,16 @@ fn engine_exposes_backend_raw_capabilities() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
 
     assert_eq!(engine.raw_capabilities(), BackendRawCapabilities::None);
+}
+
+#[test]
+fn null_backend_reports_conservative_format_capabilities() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+
+    assert_eq!(
+        engine.format_capabilities(Format::Rgba8Unorm),
+        FormatCapabilities::default()
+    );
 }
 
 #[test]
@@ -267,6 +281,7 @@ fn texture_uploads_share_frame_upload_arena() {
 
 fn small_image_desc() -> ImageDesc {
     ImageDesc {
+        dimension: ImageDimension::D2,
         extent: Extent3d {
             width: 1,
             height: 1,
@@ -277,6 +292,9 @@ fn small_image_desc() -> ImageDesc {
         samples: 1,
         format: Format::Rgba8Unorm,
         usage: ImageUsage::SAMPLED,
+        transient: false,
+        clear_value: None,
+        debug_name: None,
     }
 }
 

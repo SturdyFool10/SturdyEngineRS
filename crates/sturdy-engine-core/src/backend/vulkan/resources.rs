@@ -532,20 +532,20 @@ impl ResourceRegistry {
 }
 
 fn image_type(desc: ImageDesc) -> vk::ImageType {
-    if desc.extent.depth > 1 {
-        vk::ImageType::TYPE_3D
-    } else {
-        vk::ImageType::TYPE_2D
+    match desc.dimension {
+        crate::ImageDimension::D1 => vk::ImageType::TYPE_1D,
+        crate::ImageDimension::D2 => vk::ImageType::TYPE_2D,
+        crate::ImageDimension::D3 => vk::ImageType::TYPE_3D,
     }
 }
 
 fn vk_image_view_type(desc: ImageDesc) -> vk::ImageViewType {
-    if desc.extent.depth > 1 {
-        vk::ImageViewType::TYPE_3D
-    } else if desc.layers > 1 {
-        vk::ImageViewType::TYPE_2D_ARRAY
-    } else {
-        vk::ImageViewType::TYPE_2D
+    match desc.dimension {
+        crate::ImageDimension::D1 if desc.layers > 1 => vk::ImageViewType::TYPE_1D_ARRAY,
+        crate::ImageDimension::D1 => vk::ImageViewType::TYPE_1D,
+        crate::ImageDimension::D2 if desc.layers > 1 => vk::ImageViewType::TYPE_2D_ARRAY,
+        crate::ImageDimension::D2 => vk::ImageViewType::TYPE_2D,
+        crate::ImageDimension::D3 => vk::ImageViewType::TYPE_3D,
     }
 }
 

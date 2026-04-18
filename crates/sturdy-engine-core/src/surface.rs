@@ -1,6 +1,7 @@
 mod surface_capabilities;
 mod surface_color_space;
 mod surface_event;
+mod surface_hdr_caps;
 mod surface_hdr_preference;
 mod surface_info;
 mod surface_present_mode;
@@ -15,6 +16,7 @@ pub use native_surface_desc::NativeSurfaceDesc;
 pub use surface_capabilities::{SurfaceCapabilities, SurfaceFormatInfo};
 pub use surface_color_space::SurfaceColorSpace;
 pub use surface_event::SurfaceEvent;
+pub use surface_hdr_caps::SurfaceHdrCaps;
 pub use surface_hdr_preference::SurfaceHdrPreference;
 pub use surface_info::SurfaceInfo;
 pub use surface_present_mode::SurfacePresentMode;

@@ -52,7 +52,9 @@ pub use handles::{
     PipelineHandle, PipelineLayoutHandle, SamplerHandle, ShaderHandle, SubmissionHandle,
     SurfaceHandle,
 };
-pub use image::{Extent3d, Format, ImageDesc, ImageUsage};
+pub use image::{
+    Extent3d, Format, FormatCapabilities, ImageClearValue, ImageDesc, ImageDimension, ImageUsage,
+};
 pub use limits::Limits;
 pub use native_handles::{
     native_handle_capabilities_for_backend, NativeHandleCapabilities, NativeHandleCapability,
@@ -87,6 +89,6 @@ pub use slang::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use surface::NativeSurfaceDesc;
 pub use surface::{
-    SurfaceCapabilities, SurfaceColorSpace, SurfaceEvent, SurfaceFormatInfo, SurfaceHdrPreference,
-    SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc, SurfaceSize,
+    SurfaceCapabilities, SurfaceColorSpace, SurfaceEvent, SurfaceFormatInfo, SurfaceHdrCaps,
+    SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc, SurfaceSize,
 };

@@ -26,15 +26,16 @@ pub use sturdy_engine_core::{
     CanonicalGroupLayout, CanonicalPipelineLayout, Caps, ColorTargetDesc, CompareOp,
     CompiledShaderArtifact, ComputePipelineDesc, CopyBufferToImageDesc, CopyImageToBufferDesc,
     CullMode, D3d12RawCapabilities, DispatchDesc, DrawDesc, Error, Extent3d, ExternalBufferDesc,
-    ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode, Format, FrontFace,
-    GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc, ImageDesc, ImageUsage, ImageUse,
-    IndexBufferBinding, IndexFormat, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
-    NativeHandleCapability, NativeHandleKind, NativeHandleOwnership, PassDesc, PassWork,
-    PrimitiveTopology, PushConstants, QueueType, RasterState, ResourceBinding, Result, RgState,
-    SamplerDesc, ShaderDesc, ShaderSource, ShaderStage, ShaderTarget, SlangCompileDesc, StageMask,
-    SubresourceRange, SurfaceColorSpace, SurfaceEvent, SurfaceHdrPreference, SurfaceInfo,
-    SurfacePresentMode, SurfaceRecreateDesc, UpdateRate, VertexAttributeDesc, VertexBufferBinding,
-    VertexBufferLayout, VertexFormat, VertexInputRate, VulkanExternalBuffer, VulkanExternalImage,
+    ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode, Format,
+    FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc, ImageDesc,
+    ImageDimension, ImageUsage, ImageUse, IndexBufferBinding, IndexFormat, MetalRawCapabilities,
+    MipmapMode, NativeHandleCapabilities, NativeHandleCapability, NativeHandleKind,
+    NativeHandleOwnership, PassDesc, PassWork, PrimitiveTopology, PushConstants, QueueType,
+    RasterState, ResourceBinding, Result, RgState, SamplerDesc, ShaderDesc, ShaderSource,
+    ShaderStage, ShaderTarget, SlangCompileDesc, StageMask, SubresourceRange, SurfaceColorSpace,
+    SurfaceEvent, SurfaceHdrCaps, SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode,
+    SurfaceRecreateDesc, UpdateRate, VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout,
+    VertexFormat, VertexInputRate, VulkanExternalBuffer, VulkanExternalImage,
     VulkanRawCapabilities,
 };
 pub use sturdy_engine_core::{
@@ -72,6 +73,10 @@ impl Engine {
 
     pub fn caps(&self) -> Caps {
         self.device.caps()
+    }
+
+    pub fn format_capabilities(&self, format: Format) -> FormatCapabilities {
+        self.device.format_capabilities(format)
     }
 
     pub fn native_handle_capabilities(&self) -> NativeHandleCapabilities {
@@ -708,6 +713,10 @@ impl Surface {
         let events = self.device.drain_surface_events(self.handle)?;
         self.info = self.device.surface_info(self.handle)?;
         Ok(events)
+    }
+
+    pub fn hdr_caps(&self) -> Result<SurfaceHdrCaps> {
+        self.device.surface_hdr_caps(self.handle)
     }
 
     pub fn acquire_image(&self) -> Result<SurfaceImage> {

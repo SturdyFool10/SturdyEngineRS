@@ -24,10 +24,10 @@ use crate::backend::{Backend, BackendKind};
 use crate::{
     AdapterInfo, BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, CanonicalPipelineLayout,
     Caps, CompiledGraph, ComputePipelineDesc, Error, ExternalBufferDesc, ExternalBufferHandle,
-    ExternalImageDesc, ExternalImageHandle, GraphicsPipelineDesc, ImageDesc, ImageHandle,
-    NativeSurfaceDesc, PipelineHandle, PipelineLayoutHandle, Result, SamplerDesc, SamplerHandle,
-    ShaderDesc, ShaderHandle, SubmissionHandle, SurfaceCapabilities, SurfaceHandle, SurfaceInfo,
-    SurfaceRecreateDesc, SurfaceSize,
+    ExternalImageDesc, ExternalImageHandle, Format, FormatCapabilities, GraphicsPipelineDesc,
+    ImageDesc, ImageHandle, NativeSurfaceDesc, PipelineHandle, PipelineLayoutHandle, Result,
+    SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, SubmissionHandle, SurfaceCapabilities,
+    SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
 };
 
 pub use config::VulkanBackendConfig;
@@ -123,6 +123,10 @@ impl Backend for VulkanBackend {
 
     fn caps(&self) -> Caps {
         self.caps.clone()
+    }
+
+    fn format_capabilities(&self, format: Format) -> FormatCapabilities {
+        caps::query_format_capabilities(&self.instance, self.physical_device, format)
     }
 
     fn create_image(&self, handle: ImageHandle, desc: ImageDesc) -> Result<()> {

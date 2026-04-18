@@ -9,9 +9,11 @@ use crate::{
     SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, ShaderTarget, SubmissionHandle,
     SurfaceCapabilities, SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
 };
+use crate::{Format, FormatCapabilities};
 
 #[cfg(target_os = "windows")]
 pub mod d3d12;
+pub mod factory;
 #[cfg(any(
     target_os = "macos",
     target_os = "ios",
@@ -92,6 +94,9 @@ pub trait Backend: Send + Sync {
         None
     }
     fn caps(&self) -> Caps;
+    fn format_capabilities(&self, _format: Format) -> FormatCapabilities {
+        FormatCapabilities::default()
+    }
     fn native_handle_capabilities(&self) -> NativeHandleCapabilities {
         native_handle_capabilities_for_backend(self.kind())
     }

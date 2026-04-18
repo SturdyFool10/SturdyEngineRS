@@ -2,7 +2,7 @@ use std::ffi::CStr;
 
 use ash::{vk, Instance};
 
-use crate::{BackendFeatures, Caps, Limits};
+use crate::{BackendFeatures, Caps, Format, FormatCapabilities, Limits};
 
 pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> Caps {
     let properties = unsafe { instance.get_physical_device_properties(physical_device) };
@@ -35,32 +35,61 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         properties.api_version >= vk::API_VERSION_1_2 || has(b"VK_KHR_timeline_semaphore\0");
     let hdr_output = has(b"VK_EXT_hdr_metadata\0") || has(b"VK_AMD_display_native_hdr\0");
     let variable_rate_shading = has(b"VK_KHR_fragment_shading_rate\0");
+    let core_features = unsafe { instance.get_physical_device_features(physical_device) };
+    let feature_chain = available_feature_chain(instance, physical_device);
+    let bindless = descriptor_indexing
+        && feature_chain.descriptor_indexing.runtime_descriptor_array == vk::TRUE
+        && feature_chain
+            .descriptor_indexing
+            .descriptor_binding_partially_bound
+            == vk::TRUE;
+    let shader_fp16 = feature_chain.shader_float16_int8.shader_float16 == vk::TRUE;
+    let shader_fp64 = core_features.shader_float64 == vk::TRUE;
+    let image_fp16_render = format_supports_color_attachment(
+        instance,
+        physical_device,
+        vk::Format::R16G16B16A16_SFLOAT,
+    );
+    let image_fp32_render = format_supports_color_attachment(
+        instance,
+        physical_device,
+        vk::Format::R32G32B32A32_SFLOAT,
+    );
 
     let features = BackendFeatures {
         ray_tracing,
         mesh_shading,
+        bindless,
         descriptor_indexing,
         timeline_semaphores,
         dynamic_rendering,
         synchronization2,
         hdr_output,
+        shader_fp16,
+        shader_fp64,
+        image_fp16_render,
+        image_fp32_render,
         variable_rate_shading,
     };
 
     let limits = Limits {
         max_image_dimension_2d: lim.max_image_dimension2_d,
         max_image_dimension_3d: lim.max_image_dimension3_d,
+        max_texture_2d_size: lim.max_image_dimension2_d,
+        max_texture_array_layers: lim.max_image_array_layers,
         max_mip_levels,
         max_push_constants_size: lim.max_push_constants_size,
         max_bound_descriptor_sets: lim.max_bound_descriptor_sets,
         max_color_attachments: lim.max_color_attachments,
+        max_compute_workgroup_size: lim.max_compute_work_group_size,
+        max_compute_invocations: lim.max_compute_work_group_invocations,
         max_frames_in_flight: 2,
     };
 
     Caps {
         supports_raytracing: ray_tracing,
         supports_mesh_shading: mesh_shading,
-        supports_bindless: descriptor_indexing,
+        supports_bindless: bindless,
         max_mip_levels,
         max_frames_in_flight: 2,
         features,
@@ -79,6 +108,53 @@ pub fn available_device_extension_names(
         .map(|ext| unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) })
         .map(|name| name.to_string_lossy().into_owned())
         .collect()
+}
+
+fn format_supports_color_attachment(
+    instance: &Instance,
+    physical_device: vk::PhysicalDevice,
+    format: vk::Format,
+) -> bool {
+    let props = unsafe { instance.get_physical_device_format_properties(physical_device, format) };
+    props
+        .optimal_tiling_features
+        .contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT)
+}
+
+pub fn query_format_capabilities(
+    instance: &Instance,
+    physical_device: vk::PhysicalDevice,
+    format: Format,
+) -> FormatCapabilities {
+    let Ok(vk_format) = vk_format(format) else {
+        return FormatCapabilities::default();
+    };
+    let props =
+        unsafe { instance.get_physical_device_format_properties(physical_device, vk_format) };
+    let optimal = props.optimal_tiling_features;
+
+    FormatCapabilities {
+        sampled: optimal.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE),
+        storage: optimal.contains(vk::FormatFeatureFlags::STORAGE_IMAGE),
+        color_attachment: optimal.contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT),
+        depth_stencil_attachment: optimal
+            .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT),
+        copy_src: optimal.contains(vk::FormatFeatureFlags::TRANSFER_SRC),
+        copy_dst: optimal.contains(vk::FormatFeatureFlags::TRANSFER_DST),
+        linear_filter: optimal.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR),
+    }
+}
+
+fn vk_format(format: Format) -> Result<vk::Format, ()> {
+    match format {
+        Format::Unknown => Err(()),
+        Format::Rgba8Unorm => Ok(vk::Format::R8G8B8A8_UNORM),
+        Format::Bgra8Unorm => Ok(vk::Format::B8G8R8A8_UNORM),
+        Format::Rgba16Float => Ok(vk::Format::R16G16B16A16_SFLOAT),
+        Format::Rgba32Float => Ok(vk::Format::R32G32B32A32_SFLOAT),
+        Format::Depth32Float => Ok(vk::Format::D32_SFLOAT),
+        Format::Depth24Stencil8 => Ok(vk::Format::D24_UNORM_S8_UINT),
+    }
 }
 
 pub fn available_core_feature_names(
@@ -212,6 +288,7 @@ pub struct AvailableFeatureChain<'a> {
     pub timeline: vk::PhysicalDeviceTimelineSemaphoreFeatures<'a>,
     pub dynamic_rendering: vk::PhysicalDeviceDynamicRenderingFeatures<'a>,
     pub synchronization2: vk::PhysicalDeviceSynchronization2Features<'a>,
+    pub shader_float16_int8: vk::PhysicalDeviceShaderFloat16Int8Features<'a>,
     pub mesh_shader: vk::PhysicalDeviceMeshShaderFeaturesEXT<'a>,
     pub acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'a>,
     pub ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR<'a>,
@@ -227,6 +304,7 @@ pub fn available_feature_chain(
         timeline: vk::PhysicalDeviceTimelineSemaphoreFeatures::default(),
         dynamic_rendering: vk::PhysicalDeviceDynamicRenderingFeatures::default(),
         synchronization2: vk::PhysicalDeviceSynchronization2Features::default(),
+        shader_float16_int8: vk::PhysicalDeviceShaderFloat16Int8Features::default(),
         mesh_shader: vk::PhysicalDeviceMeshShaderFeaturesEXT::default(),
         acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default(),
         ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default(),
@@ -237,6 +315,7 @@ pub fn available_feature_chain(
         .push_next(&mut chain.timeline)
         .push_next(&mut chain.dynamic_rendering)
         .push_next(&mut chain.synchronization2)
+        .push_next(&mut chain.shader_float16_int8)
         .push_next(&mut chain.mesh_shader)
         .push_next(&mut chain.acceleration_structure)
         .push_next(&mut chain.ray_tracing)

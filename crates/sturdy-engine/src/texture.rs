@@ -193,6 +193,7 @@ impl Frame {
         }
 
         let image = self.engine.create_image(ImageDesc {
+            dimension: crate::ImageDimension::D2,
             extent: Extent3d {
                 width: desc.width,
                 height: desc.height,
@@ -203,6 +204,9 @@ impl Frame {
             samples: 1,
             format: desc.format,
             usage: desc.usage | ImageUsage::COPY_DST,
+            transient: false,
+            clear_value: None,
+            debug_name: Some("uploaded texture"),
         })?;
         let allocation = self.upload_arena.upload(&self.engine, data)?;
         let (staging_handle, staging_desc) = {

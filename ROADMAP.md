@@ -17,12 +17,12 @@
 
 ## 1. Remove backend leakage from core
 
-- [ ] Move backend creation out of `device.rs`
-- [ ] Create `backend/factory.rs`
-  - [ ] `create_backend(desc: &DeviceDesc)`
-  - [ ] `enumerate_adapters(kind: BackendKind)`
+- [x] Move backend creation out of `device.rs`
+- [x] Create `backend/factory.rs`
+  - [x] `create_backend(desc: &DeviceDesc)`
+  - [x] `enumerate_adapters(kind: BackendKind)`
 - [ ] Remove all direct Vulkan imports from:
-  - [ ] `device.rs`
+  - [x] `device.rs`
   - [ ] any non-`backend/vulkan/*` modules
 - [ ] Ensure only `backend/vulkan/*` references:
   - Vulkan types
@@ -49,36 +49,36 @@
 
 ## 3. Expand `Caps`
 
-- [ ] mesh_shading
-- [ ] ray_tracing
-- [ ] bindless
-- [ ] hdr_output
-- [ ] shader_fp16
-- [ ] shader_fp64
-- [ ] image_fp16_render
-- [ ] image_fp32_render
-- [ ] dynamic_rendering
-- [ ] timeline_semaphores
+- [x] mesh_shading
+- [x] ray_tracing
+- [x] bindless
+- [x] hdr_output
+- [x] shader_fp16
+- [x] shader_fp64
+- [x] image_fp16_render
+- [x] image_fp32_render
+- [x] dynamic_rendering
+- [x] timeline_semaphores
 
 ## 4. Expand `Limits`
 
-- [ ] max_texture_2d_size
-- [ ] max_texture_array_layers
-- [ ] max_color_attachments
-- [ ] max_compute_workgroup_size
-- [ ] max_compute_invocations
-- [ ] max_push_constants_size
+- [x] max_texture_2d_size
+- [x] max_texture_array_layers
+- [x] max_color_attachments
+- [x] max_compute_workgroup_size
+- [x] max_compute_invocations
+- [x] max_push_constants_size
 
 ## 5. Add format capabilities
 
-- [ ] FormatCapabilities struct
-- [ ] device.format_capabilities(format)
+- [x] FormatCapabilities struct
+- [x] device.format_capabilities(format)
 
 ## 6. Add surface/HDR queries
 
-- [ ] SurfaceHdrCaps
-- [ ] HDR10 support
-- [ ] scRGB support
+- [x] SurfaceHdrCaps
+- [x] HDR10 support
+- [x] scRGB support
 
 ---
 
@@ -86,13 +86,13 @@
 
 ## 7. Expand ImageDesc
 
-- [ ] dimension
-- [ ] mip_levels
-- [ ] layers
-- [ ] samples
-- [ ] transient
-- [ ] clear_value
-- [ ] debug_name
+- [x] dimension
+- [x] mip_levels
+- [x] layers
+- [x] samples
+- [x] transient
+- [x] clear_value
+- [x] debug_name
 
 ## 8. Introduce ImageBuilder
 

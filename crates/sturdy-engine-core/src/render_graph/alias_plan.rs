@@ -312,6 +312,21 @@ mod tests {
     use super::*;
     use crate::{BufferDesc, Extent3d, ImageUsage};
 
+    fn desc_defaults() -> ImageDesc {
+        ImageDesc {
+            dimension: crate::ImageDimension::D2,
+            extent: Extent3d::default(),
+            mip_levels: 1,
+            layers: 1,
+            samples: 1,
+            format: Format::Rgba8Unorm,
+            usage: ImageUsage::SAMPLED,
+            transient: false,
+            clear_value: None,
+            debug_name: None,
+        }
+    }
+
     fn color_image(handle: ImageHandle, w: u32, h: u32) -> VirtualImage {
         VirtualImage {
             handle,
@@ -326,6 +341,7 @@ mod tests {
                 samples: 1,
                 format: Format::Rgba8Unorm,
                 usage: ImageUsage::RENDER_TARGET | ImageUsage::SAMPLED,
+                ..desc_defaults()
             },
             imported: false,
             first_use: 0,
@@ -347,6 +363,7 @@ mod tests {
                 samples: 1,
                 format: Format::Depth32Float,
                 usage: ImageUsage::DEPTH_STENCIL,
+                ..desc_defaults()
             },
             imported: false,
             first_use: 0,
@@ -368,6 +385,7 @@ mod tests {
                 samples: 1,
                 format: Format::Rgba16Float,
                 usage: ImageUsage::RENDER_TARGET | ImageUsage::SAMPLED,
+                ..desc_defaults()
             },
             imported: false,
             first_use: 0,
@@ -453,6 +471,7 @@ mod tests {
                 samples: 1,
                 format: Format::Rgba8Unorm,
                 usage: ImageUsage::SAMPLED,
+                ..desc_defaults()
             },
             imported: false,
             first_use: 0,
@@ -538,6 +557,7 @@ mod tests {
                 samples: 1,
                 format: Format::Rgba8Unorm,
                 usage,
+                ..desc_defaults()
             },
             imported: false,
             first_use: 1,
@@ -558,6 +578,7 @@ mod tests {
                 samples: 1,
                 format: Format::Rgba8Unorm,
                 usage,
+                ..desc_defaults()
             },
             imported: false,
             first_use: 1,
@@ -581,6 +602,7 @@ mod tests {
                 samples: 1,
                 format: Format::Rgba8Unorm,
                 usage,
+                ..desc_defaults()
             },
             imported: false,
             first_use: 3,
@@ -626,6 +648,7 @@ mod tests {
                 samples: 1,
                 format: Format::Rgba8Unorm,
                 usage: ImageUsage::RENDER_TARGET,
+                ..desc_defaults()
             },
             imported: false,
             first_use: first,

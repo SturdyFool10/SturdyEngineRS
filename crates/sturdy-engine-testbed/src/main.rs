@@ -10,9 +10,9 @@ mod textured;
 use sturdy_engine::NativeSurfaceDesc;
 use sturdy_engine::{
     spirv_words_from_bytes, AdapterSelection, BackendKind, BufferDesc, BufferUsage, DeviceDesc,
-    Engine, Error, Extent3d, Format, ImageCopyRegion, ImageDesc, ImageUsage, RenderMesh,
-    RenderShader, RenderVertex, Surface, SurfaceHdrPreference, SurfacePresentMode, SurfaceSize,
-    TextureUploadDesc, Vec2, Vec3,
+    Engine, Error, Extent3d, Format, ImageCopyRegion, ImageDesc, ImageDimension, ImageUsage,
+    RenderMesh, RenderShader, RenderVertex, Surface, SurfaceHdrPreference, SurfacePresentMode,
+    SurfaceSize, TextureUploadDesc, Vec2, Vec3,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -47,6 +47,7 @@ fn run_headless_smoke(args: &Args) -> Result<(), Error> {
     let engine = Engine::with_desc(args.device_desc())?;
     print_backend_info(&engine);
     let target = engine.create_image(ImageDesc {
+        dimension: ImageDimension::D2,
         extent: Extent3d {
             width: 640,
             height: 360,
@@ -57,6 +58,9 @@ fn run_headless_smoke(args: &Args) -> Result<(), Error> {
         samples: 1,
         format: Format::Rgba8Unorm,
         usage: ImageUsage::RENDER_TARGET | ImageUsage::COPY_SRC,
+        transient: false,
+        clear_value: None,
+        debug_name: Some("headless target"),
     })?;
     let mesh = RenderMesh::new(&engine, triangle_vertices().as_slice())?;
     let mut shader = triangle_shader(&engine)?;

@@ -890,7 +890,22 @@ fn mip_extent(base: u32, mip_level: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BufferUsage, Extent3d, Format, ImageUsage};
+    use crate::{BufferUsage, Extent3d, Format, ImageDimension, ImageUsage};
+
+    fn image_desc_defaults() -> ImageDesc {
+        ImageDesc {
+            dimension: ImageDimension::D2,
+            extent: Extent3d::default(),
+            mip_levels: 1,
+            layers: 1,
+            samples: 1,
+            format: Format::Rgba8Unorm,
+            usage: ImageUsage::SAMPLED,
+            transient: false,
+            clear_value: None,
+            debug_name: None,
+        }
+    }
 
     fn image_desc() -> ImageDesc {
         ImageDesc {
@@ -904,6 +919,7 @@ mod tests {
             samples: 1,
             format: Format::Rgba8Unorm,
             usage: ImageUsage::SAMPLED | ImageUsage::COPY_DST | ImageUsage::COPY_SRC,
+            ..image_desc_defaults()
         }
     }
 
@@ -929,6 +945,9 @@ mod tests {
                 | ImageUsage::STORAGE
                 | ImageUsage::RENDER_TARGET
                 | ImageUsage::COPY_DST,
+            transient: true,
+            debug_name: Some("transient test image"),
+            ..image_desc_defaults()
         }
     }
 

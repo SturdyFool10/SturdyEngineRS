@@ -1,9 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::backend::vulkan::{VulkanBackend, VulkanBackendConfig};
-use crate::backend::{auto_backend_preference_order, Backend, BackendKind, NullBackend};
+use crate::backend::factory::create_backend;
+use crate::backend::{factory, Backend, BackendKind};
 use crate::handles::HandleAllocator;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::NativeSurfaceDesc;
@@ -11,12 +10,12 @@ use crate::{
     AdapterInfo, AdapterSelection, BackendRawCapabilities, BindGroupDesc, BindGroupHandle,
     BindingKind, BufferDesc, BufferHandle, BufferStateKey, CanonicalGroupLayout,
     CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error, ExternalBufferDesc,
-    ExternalImageDesc, FrameHandle, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc,
-    ImageDesc, ImageHandle, ImageStateKey, NativeHandleCapabilities, PipelineHandle,
-    PipelineLayoutHandle, RenderGraph, ResourceBinding, Result, RgState, SamplerDesc,
-    SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection, StageMask, SubmissionHandle,
-    SurfaceCapabilities, SurfaceEvent, SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc,
-    SurfaceSize,
+    ExternalImageDesc, Format, FormatCapabilities, FrameHandle, GpuCaptureDesc, GpuCaptureTool,
+    GraphicsPipelineDesc, ImageDesc, ImageHandle, ImageStateKey, NativeHandleCapabilities,
+    PipelineHandle, PipelineLayoutHandle, RenderGraph, ResourceBinding, Result, RgState,
+    SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection, StageMask,
+    SubmissionHandle, SurfaceCapabilities, SurfaceEvent, SurfaceHandle, SurfaceHdrCaps,
+    SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
 };
 
 #[derive(Clone, Debug)]
@@ -80,33 +79,8 @@ impl DeviceDesc {
     }
 }
 
-/// Enumerate all physical adapters for the given backend without creating a device.
-///
-/// Returns an empty list for backends that are not available on this target.
 pub fn enumerate_adapters(backend: BackendKind) -> Result<Vec<AdapterInfo>> {
-    match backend {
-        BackendKind::Vulkan => enumerate_vulkan_adapters(),
-        BackendKind::Auto => {
-            for kind in auto_backend_preference_order() {
-                let adapters = enumerate_adapters(kind)?;
-                if !adapters.is_empty() {
-                    return Ok(adapters);
-                }
-            }
-            Ok(Vec::new())
-        }
-        _ => Ok(Vec::new()),
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn enumerate_vulkan_adapters() -> Result<Vec<AdapterInfo>> {
-    VulkanBackend::enumerate_adapters(&VulkanBackendConfig::default())
-}
-
-#[cfg(target_arch = "wasm32")]
-fn enumerate_vulkan_adapters() -> Result<Vec<AdapterInfo>> {
-    Ok(Vec::new())
+    factory::enumerate_adapters(backend)
 }
 
 #[derive(Clone)]
@@ -222,6 +196,14 @@ impl Device {
             .caps()
     }
 
+    pub fn format_capabilities(&self, format: Format) -> FormatCapabilities {
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .format_capabilities(format)
+    }
+
     pub fn native_handle_capabilities(&self) -> NativeHandleCapabilities {
         self.inner
             .lock()
@@ -243,6 +225,9 @@ impl Device {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let handle = ImageHandle(inner.image_handles.alloc());
         inner.backend.create_image(handle, desc)?;
+        if let Some(name) = desc.debug_name {
+            inner.backend.set_image_debug_name(handle, name);
+        }
         inner.images.insert(handle, desc);
         Ok(handle)
     }
@@ -274,10 +259,17 @@ impl Device {
     /// to the frame's transient list via `Frame::add_transient_image` so the
     /// device destroys it automatically after the GPU finishes the frame.
     pub fn create_transient_image(&self, desc: ImageDesc) -> Result<ImageHandle> {
+        let desc = ImageDesc {
+            transient: true,
+            ..desc
+        };
         desc.validate()?;
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let handle = ImageHandle(inner.image_handles.alloc());
         inner.backend.create_transient_image(handle, desc)?;
+        if let Some(name) = desc.debug_name {
+            inner.backend.set_image_debug_name(handle, name);
+        }
         inner.images.insert(handle, desc);
         Ok(handle)
     }
@@ -741,6 +733,11 @@ impl Device {
         inner.backend.query_surface_capabilities(handle)
     }
 
+    pub fn surface_hdr_caps(&self, handle: SurfaceHandle) -> Result<SurfaceHdrCaps> {
+        self.query_surface_capabilities(handle)
+            .map(|capabilities| SurfaceHdrCaps::from_surface_capabilities(&capabilities))
+    }
+
     pub fn begin_frame(&self) -> Result<Frame> {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let handle = FrameHandle(inner.frame_handles.alloc());
@@ -927,66 +924,6 @@ fn merge_shader_reflections(
         push_constants_bytes,
         push_constants_stage_mask,
     }
-}
-
-fn create_backend(desc: &DeviceDesc) -> Result<Box<dyn Backend>> {
-    match desc.backend {
-        BackendKind::Auto => {
-            let preferred = auto_backend_preference_order();
-            let mut last_error = None;
-            for kind in preferred {
-                let sub = DeviceDesc {
-                    backend: kind,
-                    ..desc.clone()
-                };
-                match create_backend(&sub) {
-                    Ok(backend) => return Ok(backend),
-                    Err(error) => last_error = Some(error),
-                }
-            }
-            Err(last_error.unwrap_or(Error::Unsupported("no backend is available on this target")))
-        }
-        BackendKind::Null => Ok(Box::new(NullBackend::new())),
-        BackendKind::Vulkan => create_vulkan_backend(desc),
-        BackendKind::D3d12 => create_available_backend(BackendKind::D3d12, "D3D12"),
-        BackendKind::Metal => create_available_backend(BackendKind::Metal, "Metal"),
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn create_vulkan_backend(desc: &DeviceDesc) -> Result<Box<dyn Backend>> {
-    if !BackendKind::Vulkan.is_available_on_target() {
-        return Err(Error::Unsupported("Vulkan is not available on this target"));
-    }
-    Ok(Box::new(VulkanBackend::create(VulkanBackendConfig::new(
-        desc.validation,
-        desc.adapter.clone(),
-        desc.required_features.clone(),
-        desc.optional_features.clone(),
-        desc.disabled_features.clone(),
-        desc.required_extensions.clone(),
-        desc.optional_extensions.clone(),
-        desc.disabled_extensions.clone(),
-    ))?))
-}
-
-#[cfg(target_arch = "wasm32")]
-fn create_vulkan_backend(_desc: &DeviceDesc) -> Result<Box<dyn Backend>> {
-    Err(Error::Unsupported("Vulkan is not available on this target"))
-}
-
-fn create_available_backend(kind: BackendKind, name: &'static str) -> Result<Box<dyn Backend>> {
-    if !kind.is_available_on_target() {
-        return Err(Error::Unsupported(match kind {
-            BackendKind::Vulkan => "Vulkan is not available on this target",
-            BackendKind::D3d12 => "D3D12 is not available on this target",
-            BackendKind::Metal => "Metal is not available on this target",
-            BackendKind::Auto | BackendKind::Null => "backend is not available on this target",
-        }));
-    }
-
-    let _name = name;
-    Ok(Box::new(NullBackend::for_kind(kind)))
 }
 
 fn queue_surface_events(events: &mut Vec<SurfaceEvent>, old: SurfaceInfo, new: SurfaceInfo) {
