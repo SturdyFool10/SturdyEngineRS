@@ -25,7 +25,7 @@ pub struct FormatCapabilities {
 }
 
 /// Defines the intended usage of an image. This is a bitmask.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct ImageUsage(pub u32);
 
 impl ImageUsage {
@@ -60,7 +60,7 @@ impl std::ops::BitOrAssign for ImageUsage {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Extent3d {
     pub width: u32,
     pub height: u32,
@@ -78,7 +78,7 @@ impl Default for Extent3d {
 }
 
 #[repr(u8)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub enum ImageDimension {
     D1,
     #[default]
@@ -86,7 +86,7 @@ pub enum ImageDimension {
     D3,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ImageClearValue {
     ColorFloatBits([u32; 4]),
     DepthStencil { depth_bits: u32, stencil: u32 },
@@ -142,7 +142,7 @@ impl ImageRole {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ImageDesc {
     pub dimension: ImageDimension,
     pub extent: Extent3d,

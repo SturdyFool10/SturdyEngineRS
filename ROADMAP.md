@@ -3,7 +3,7 @@
 ## 🎯 Goals
 
 - Full backend-agnostic core (no Vulkan leakage outside backend/)
-- Image-centric high-level API
+- Image-centric engine API
 - Render graph driven execution
 - Text system integrated as image operations
 - HDR + FP16/FP32 support
@@ -39,7 +39,7 @@
 - [x] Backend layer contains:
   - [x] actual API implementations
 - [x] Engine layer (`sturdy-engine`) contains:
-  - [x] ergonomic API
+  - [x] Rust wrapper API
   - [x] chaining
   - [x] runtime management
 
@@ -192,3 +192,274 @@
 - Deferred execution
 - Backend isolation
 - Rebuild on GPU switch
+
+---
+
+# Phase 11+ — Reflection-First Graph Systems
+
+The current testbed points at the next technical direction: reflected Slang
+shaders should drive pass inputs, pipeline layouts, graph resource declarations,
+and validation data. The engine should infer layout, binding, barrier, mip
+transition, and draw metadata when that information is available from shader
+reflection and declared resource intent.
+
+Chained frontend calls should record graph operations, not force immediate
+execution order. Graph compilation determines the actual ordering, barriers,
+resource states, and parallel batches from reflection data and declared resource
+uses.
+
+The previous phases remain active where unchecked. These objectives build on
+top of that foundation instead of replacing it.
+
+## Goals
+
+- Make reflected Slang shaders the primary way to describe pass inputs,
+  constants, resource bindings, and pipeline layouts.
+- Support multi-pass render graphs composed from reflected shader passes.
+- Keep the frontend render API destination-oriented: create or fetch graph
+  images, then execute reflected shaders onto those images.
+- Treat chained image/shader operations as graph declarations that can be
+  reordered when dependencies allow it.
+- Add a proceduralism layer so textures can come from shader-authored or
+  CPU-authored generators, not only image files or image sequences.
+- Expose mips as a graph resource concept for graphical effects such as
+  bloom, hierarchical blur, downsample chains, luminance pyramids, and stylized
+  texture lookups.
+- Expose GPU instancing as a normal draw concept for repeated geometry,
+  particle-like effects, sprite fields, impostors, and per-instance material
+  variation.
+- Keep the engine backend-agnostic while allowing Vulkan, D3D12, and Metal
+  backends to map these concepts to their native resource and command models.
+
+## Current Testbed Baseline
+
+- The testbed already demonstrates the right shape: Slang source files,
+  reflection-derived pipeline layout, push constants, a fullscreen pass, and a
+  frame graph submission path.
+- The current implementation still requires manual shader grouping, graphics
+  pipeline creation, vertex buffer binding, push-constant upload, and draw
+  command recording.
+- The next layer should define reusable engine primitives such as reflected
+  fullscreen pass, procedural image, mip chain, and instanced draw.
+
+## Target Frontend Shape
+
+The frontend API should look roughly like:
+
+```rust
+let scene = engine.load_shader("scene.slang")?;
+let bloom_downsample = engine.load_shader("bloom_downsample.slang")?;
+let bloom_upsample = engine.load_shader("bloom_upsample.slang")?;
+let composite = engine.load_shader("composite.slang")?;
+
+fn render(frame: &mut RenderFrame) -> Result<()> {
+    let hdr = frame.image("hdr_scene", ImageDesc::hdr_color());
+    let bloom = frame.image("bloom_chain", ImageDesc::hdr_mips());
+    let output = frame.swapchain_image();
+
+    hdr.execute_shader(&scene)?;
+    bloom.execute_shader(&bloom_downsample)?;
+    bloom.execute_shader(&bloom_upsample)?;
+    output.execute_shader(&composite)?;
+
+    Ok(())
+}
+```
+
+- `frame.image(name, desc)` returns a logical graph image. The API presents it
+  as image creation, but the engine caches the real backing images per
+  swapchain image and only creates new GPU resources when the requested
+  descriptor/name/cache key is not already resident.
+- `image.execute_shader(shader)` records a graph pass where `image` is the
+  destination resource.
+- Reflected shader metadata declares the source images, samplers, buffers,
+  constants, and storage resources required by the pass.
+- Reflected image names are resolved against the current frame's named graph
+  images and persistent cached images.
+- Chained calls record logical operations. The call order is a declaration
+  order, not necessarily the final execution order.
+- The graph compiler uses reflected resource dependencies, destination images,
+  explicit reads/writes, subresource ranges, and queue capabilities to decide
+  what must happen before what.
+- Independent operations may execute in parallel or in separate queue batches
+  when their resource usage does not conflict.
+- `render()` records graph intent. At the end of the render function, the engine
+  executes the accumulated graph by default.
+- Calling `flush()` executes the graph immediately, clears the pending graph
+  command list, and allows later calls in the same frame to record a new graph
+  segment.
+
+## Phase 11 — Reflected Pass API
+
+- [x] Add an engine-level `ShaderProgram` or `EffectPass` wrapper that groups
+  shader stages, entry points, reflected layout, and pipeline cache keys.
+- [x] Add graph pass builders that map reflected shader parameters to graph
+  resources.
+- [x] Add `GraphImage::execute_shader(shader)` as the primary
+  destination-oriented frontend pass API.
+- [x] Add shader-side naming conventions for reflected image dependencies.
+- [x] Resolve reflected image dependency names against frame image names before
+  graph compilation.
+- [ ] Validate pass resources against shader reflection before graph submission.
+- [x] Report missing resources with source-level names from Slang reflection.
+- [ ] Support reflected push-constant structs with typed Rust upload helpers.
+- [x] Cache graphics and compute pipelines from reflected pass descriptors.
+- [x] Add testbed examples for:
+  - [x] fullscreen reflected fragment pass
+  - [x] reflected compute pass (ComputeProgram + GraphImage::execute_compute)
+  - [x] reflected image input/output pass (two-pass scene → composite)
+  - [x] reflected uniform/push-constant animation pass
+
+## Phase 12 — Render Graph Composition
+
+- [x] Add named graph resources so passes can connect by semantic names such as
+  `scene_color`, `bright_extract`, `bloom_mips`, and `final_color`.
+- [x] Add per-swapchain-image caches for named graph images and intermediate
+  resources.
+- [x] Key cached graph images by logical name, image descriptor, swapchain image
+  index, and relevant usage flags.
+- [x] Reuse cached graph images across frames unless the swapchain, descriptor,
+  usage, or logical name changes.
+- [ ] Retire or recreate cached graph images on swapchain resize and incompatible
+  descriptor changes.
+- [ ] Add graph templates for common pass shapes:
+  - [ ] fullscreen color pass
+  - [ ] compute image pass
+  - [ ] downsample pass
+  - [ ] upsample/composite pass
+  - [ ] copy/resolve/pass-through pass
+- [ ] Add graph introspection data for passes, resources, subresources,
+  barriers, aliases, and final states.
+- [ ] Add graph validation for unused outputs, read-before-write,
+  write-after-write hazards, and accidental full-resource barriers when a
+  mip/layer range would be enough.
+- [ ] Add examples showing a multi-pass graph assembled from reflected shaders.
+
+## Phase 12.5 — Graph Execution Semantics
+
+- [ ] Treat frame render callbacks as graph recording scopes.
+- [ ] Treat chained image/shader calls as unordered graph operation declarations
+  unless explicit dependencies or resource hazards require ordering.
+- [ ] Add a graph scheduler that derives execution order from reflected
+  resources, declared image destinations, explicit reads/writes, and
+  subresource ranges.
+- [ ] Preserve source declaration order only as a deterministic tie-breaker for
+  otherwise independent operations.
+- [ ] Derive dependency edges for:
+  - [ ] read-after-write
+  - [ ] write-after-read
+  - [ ] write-after-write
+  - [ ] selected mip/layer hazards
+  - [ ] buffer range hazards
+  - [ ] explicit user ordering constraints
+- [ ] Detect graph operations that can run in parallel because their image
+  subresources, buffer ranges, queues, and pipeline resources do not conflict.
+- [ ] Compile parallel-ready passes into record batches grouped by queue and
+  dependency level.
+- [ ] Define how graphics, compute, and transfer queues synchronize when graph
+  passes cross queue families.
+- [ ] Execute the pending render graph automatically when the render callback
+  returns successfully.
+- [ ] Add `flush()` as an explicit graph execution boundary inside a frame.
+- [ ] After `flush()`, preserve persistent frame resources and clear only the
+  pending graph passes for the next graph segment.
+- [ ] Define error behavior for automatic end-of-render execution and explicit
+  `flush()` execution.
+- [ ] Ensure presentation is appended after the final graph segment unless the
+  caller explicitly presents earlier.
+
+## Phase 13 — Procedural Texture Layer
+
+- [ ] Introduce a `ProceduralImage` / `GeneratedTexture` concept that owns a
+  generation recipe, target image description, update policy, and cache state.
+- [ ] Support CPU-authored procedural textures for small/generated assets:
+  noise, gradients, ramps, masks, lookup tables, and debug patterns.
+- [ ] Support GPU-authored procedural textures through reflected compute or
+  fullscreen shader passes.
+- [ ] Support animated procedural textures driven by frame time, frame index,
+  user parameters, or external data.
+- [ ] Allow procedural textures to regenerate:
+  - [ ] once at creation
+  - [ ] when parameters change
+  - [ ] every frame
+  - [ ] on explicit request
+- [ ] Make generated textures compatible with uploaded texture usage sites:
+  sampled images, storage images, render targets, and graph intermediates where
+  the format/usage allows it.
+- [ ] Add serialization-friendly recipe descriptors so procedural assets can be
+  authored without embedding runtime-only closures in asset data.
+- [ ] Add testbed examples for:
+  - [ ] static procedural checker/noise texture
+  - [ ] animated procedural texture
+  - [ ] procedural mask feeding a reflected shader pass
+  - [ ] GPU-generated texture feeding a later graph pass
+
+## Phase 14 — Mip Resources and Mip-Based Effects
+
+- [ ] Add image builders for full mip chains and selected mip counts.
+- [ ] Add subresource-aware graph helpers for addressing individual mips and
+  mip ranges.
+- [ ] Add automatic mip generation for sampled textures where format and usage
+  support it.
+- [ ] Add explicit mip graph operations:
+  - [ ] write mip
+  - [ ] read mip
+  - [ ] downsample mip N to N+1
+  - [ ] upsample/composite mip N+1 into N
+  - [ ] transition selected mip ranges
+- [ ] Add sampler controls for lod bias, min/max lod, and mip filter choices in
+  the engine API.
+- [ ] Implement bloom as the reference mip-based effect:
+  - [ ] bright extract
+  - [ ] downsample chain
+  - [ ] upsample chain
+  - [ ] final composite
+- [ ] Add testbed examples that render or sample individual mip levels.
+
+## Phase 15 — GPU Instancing as a First-Class Concept
+
+- [ ] Add instance buffer builders with clear per-instance layout
+  declarations.
+- [ ] Add reflected validation for instance-rate vertex inputs when available.
+- [ ] Add graph draw helpers for instanced meshes, fullscreen instance fields,
+  sprite batches, and indirect-ready instance buffers.
+- [ ] Add per-instance data upload paths that work with the existing upload
+  arena and deferred frame model.
+- [ ] Add optional storage-buffer-driven instancing for large or variable-size
+  instance data.
+- [ ] Add examples for:
+  - [ ] many instanced quads
+  - [ ] instanced meshes with per-instance color/material parameters
+  - [ ] animated GPU-updated instance data
+  - [ ] effect-oriented instancing, such as layered glow sprites or particles
+
+## Phase 16 — Effect Asset Model
+
+- [ ] Define a small effect asset format that can reference:
+  - [ ] Slang shader files and entry points
+  - [ ] reflected pass parameters
+  - [ ] graph resource declarations
+  - [ ] procedural texture recipes
+  - [ ] mip policies
+  - [ ] instancing inputs
+- [ ] Add stable debug names for all generated resources and passes.
+- [ ] Keep the Rust API and asset format backed by the same engine primitives.
+
+## Phase 17 — Backend and Capability Work
+
+- [ ] Ensure image usage flags, format capabilities, and sampler capabilities
+  are checked before enabling procedural, mip, and storage-image paths.
+- [ ] Add backend support for selected mip/layer image views where needed.
+- [ ] Add backend support for copy/blit/compute mip generation paths.
+- [ ] Add backend support for reflected bind group updates that can handle
+  generated images, sampled images, samplers, storage images, uniform buffers,
+  storage buffers, and push constants.
+- [ ] Keep Vulkan as the reference backend while preserving D3D12 and Metal
+  layout constraints in the public model.
+
+## Reference Milestone
+
+- [ ] Build a new testbed scene that demonstrates the technical target:
+  a reflected shader graph renders a scene into HDR color, generates a
+  procedural animated texture, uses mips for bloom, draws instanced elements,
+  composites the result, and presents it.

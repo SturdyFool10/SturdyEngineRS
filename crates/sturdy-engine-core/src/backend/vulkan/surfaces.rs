@@ -45,6 +45,8 @@ pub struct AcquiredSurfaceImage {
     pub image: vk::Image,
     pub image_view: vk::ImageView,
     pub desc: ImageDesc,
+    /// Stable index into the swapchain image array (0..swapchain_image_count).
+    pub image_index: u32,
 }
 
 impl SurfaceRegistry {
@@ -234,6 +236,7 @@ impl SurfaceRegistry {
         Ok(AcquiredSurfaceImage {
             image: surface.swapchain.images[idx],
             image_view: surface.swapchain.image_views[idx],
+            image_index,
             desc: ImageDesc {
                 dimension: crate::ImageDimension::D2,
                 extent: Extent3d {

@@ -442,7 +442,7 @@ impl Backend for VulkanBackend {
         &self,
         surface: SurfaceHandle,
         image: ImageHandle,
-    ) -> Result<ImageDesc> {
+    ) -> Result<(ImageDesc, u64)> {
         let acquired = self
             .surfaces
             .lock()
@@ -456,7 +456,7 @@ impl Backend for VulkanBackend {
             .active_surface
             .lock()
             .expect("vulkan active surface mutex poisoned") = Some(surface);
-        Ok(acquired.desc)
+        Ok((acquired.desc, acquired.image_index as u64))
     }
 
     fn present_surface(&self, surface: SurfaceHandle) -> Result<()> {

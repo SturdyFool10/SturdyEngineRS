@@ -4,29 +4,52 @@
 //! with RAII resource types and builder-style descriptors while keeping the
 //! lower-level `sturdy-engine-core` crate available for engine internals.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 mod bind_group;
+mod bloom_pass;
+mod compute_program;
 mod device_manager;
+mod frontend_graph;
 mod graph_frame;
 mod hdr_pipeline;
+mod mesh;
+mod mesh_program;
 mod pipeline_layout;
+mod quad_batch;
+mod sampler_catalog;
 #[cfg(test)]
 mod tests;
 mod text_draw;
 mod texture;
 mod upload_arena;
 
+pub use bloom_pass::{
+    BloomConfig, BloomPass, BrightPassConstants, CompositeConstants, DownsampleConstants,
+    ToneBloomConstants,
+};
+pub use compute_program::ComputeProgram;
 pub use device_manager::{AdapterEntry, DeviceManager};
 pub use graph_frame::{FullscreenPassBuilder, GraphFrame, ImageNode};
 pub use hdr_pipeline::{HdrMode, HdrPipelineDesc, HdrPreference, ToneMappingOp};
+pub use mesh::{Mesh, Vertex2d, Vertex3d};
+pub use mesh_program::{MeshProgram, MeshProgramDesc, MeshVertexKind};
+pub use quad_batch::QuadBatch;
+pub use sampler_catalog::SamplerPreset;
 pub use text_draw::{TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput, TextRenderer};
 
 pub use bind_group::BindGroupBuilder;
+pub use frontend_graph::{
+    GraphImage, GraphImageCacheKey, RenderFrame, ShaderProgram, ShaderProgramDesc,
+};
 pub use glam::{Vec2, Vec3};
 pub use pipeline_layout::PipelineLayoutBuilder;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sturdy_engine_core::NativeSurfaceDesc;
+pub use sturdy_engine_core::ShaderReflection;
 pub use sturdy_engine_core::{
     Access, AdapterInfo, AdapterKind, AdapterSelection, AddressMode, BackendKind,
     BackendRawCapabilities, BindGroupDesc, BindGroupEntry, BindingKind, BorderColor, BufferDesc,
@@ -57,6 +80,8 @@ use upload_arena::UploadArena;
 #[derive(Clone)]
 pub struct Engine {
     device: core::Device,
+    graph_image_cache: Arc<Mutex<HashMap<GraphImageCacheKey, Image>>>,
+    sampler_catalog: Arc<sampler_catalog::SamplerCatalog>,
 }
 
 impl Engine {
@@ -65,18 +90,36 @@ impl Engine {
     }
 
     pub fn with_backend(backend: BackendKind) -> Result<Self> {
-        Self::with_desc(core::DeviceDesc {
+        let mut desc = core::DeviceDesc {
             backend,
             validation: cfg!(debug_assertions),
             adapter: core::AdapterSelection::Auto,
             ..core::DeviceDesc::default()
-        })
+        };
+        desc.optional_features
+            .push("sampler_anisotropy".to_string());
+        Self::with_desc(desc)
     }
 
     pub fn with_desc(desc: core::DeviceDesc) -> Result<Self> {
-        Ok(Self {
-            device: core::Device::create(desc)?,
-        })
+        let device = core::Device::create(desc)?;
+        let mut engine = Self {
+            device,
+            graph_image_cache: Arc::new(Mutex::new(HashMap::new())),
+            sampler_catalog: Arc::new(sampler_catalog::SamplerCatalog::empty()),
+        };
+        let catalog = sampler_catalog::SamplerCatalog::build(&engine)?;
+        engine.sampler_catalog = Arc::new(catalog);
+        Ok(engine)
+    }
+
+    /// Return the handle for a sampler preset. Used internally to resolve shader bindings.
+    pub fn sampler_handle(&self, preset: SamplerPreset) -> core::SamplerHandle {
+        self.sampler_catalog.handle(preset)
+    }
+
+    pub(crate) fn default_sampler(&self) -> core::SamplerHandle {
+        self.sampler_catalog.handle(SamplerPreset::Linear)
     }
 
     pub fn caps(&self) -> Caps {
@@ -177,6 +220,54 @@ impl Engine {
         })
     }
 
+    pub fn load_shader(&self, path: impl Into<std::path::PathBuf>) -> Result<ShaderProgram> {
+        ShaderProgram::load_fragment(self, path)
+    }
+
+    pub fn create_shader_program(&self, desc: ShaderProgramDesc) -> Result<ShaderProgram> {
+        ShaderProgram::new(self, desc)
+    }
+
+    pub fn begin_render_frame(&self) -> Result<RenderFrame> {
+        RenderFrame::new(self.clone(), 0)
+    }
+
+    /// Begin a render frame whose per-frame graph image cache is keyed by the
+    /// given swapchain image. Use this instead of `begin_render_frame` when
+    /// rendering to a swapchain so that intermediate images (e.g. `scene_color`)
+    /// get separate GPU allocations for each swapchain slot, preventing races
+    /// between frames in flight.
+    pub fn begin_render_frame_for(&self, surface_image: &SurfaceImage) -> Result<RenderFrame> {
+        RenderFrame::new(self.clone(), surface_image.slot)
+    }
+
+    pub(crate) fn cached_graph_image(
+        &self,
+        key: GraphImageCacheKey,
+        desc: ImageDesc,
+    ) -> Result<(core::ImageHandle, ImageDesc)> {
+        let mut cache = self
+            .graph_image_cache
+            .lock()
+            .expect("graph image cache mutex poisoned");
+        if let Some(image) = cache.get(&key) {
+            return Ok((image.handle(), image.desc()));
+        }
+
+        let image = self.create_image(desc)?;
+        if let Some(name) = key.debug_name() {
+            let _ = image.set_debug_name(&name);
+        }
+        let handle = image.handle();
+        let desc = image.desc();
+        cache.insert(key, image);
+        Ok((handle, desc))
+    }
+
+    pub fn shader_reflection(&self, shader: &Shader) -> Result<ShaderReflection> {
+        self.device.shader_reflection(shader.handle())
+    }
+
     pub fn create_bind_group(&self, desc: BindGroupDesc) -> Result<BindGroup> {
         let handle = self.device.create_bind_group(desc.clone())?;
         Ok(BindGroup {
@@ -228,61 +319,6 @@ impl Engine {
         Ok(GraphFrame::new(self.clone(), frame))
     }
 
-    /// Render an image through the convenience path.
-    ///
-    /// This helper intentionally flushes and waits before returning. Use
-    /// `begin_frame`, `Frame::flush`, and `Frame::wait` directly when the
-    /// caller needs fully deferred, non-blocking submission.
-    pub fn render_image(
-        &self,
-        image: &Image,
-        render: impl FnOnce(&mut RenderContext<'_>) -> Result<()>,
-    ) -> Result<()> {
-        let mut frame = self.begin_frame()?;
-        frame.import_image(image)?;
-        {
-            let mut context = RenderContext {
-                frame: &mut frame,
-                framebuffer: Framebuffer {
-                    image: image.handle(),
-                    format: image.desc().format,
-                },
-            };
-            render(&mut context)?;
-        }
-        frame.flush()?;
-        frame.wait()
-    }
-
-    /// Render one surface frame through the convenience path.
-    ///
-    /// This helper intentionally flushes and waits before presenting. Use
-    /// `begin_frame`, `Frame::flush`, and `Frame::present` directly when the
-    /// caller needs fully deferred, non-blocking submission.
-    pub fn render_surface(
-        &self,
-        surface: &Surface,
-        render: impl FnOnce(&mut RenderContext<'_>) -> Result<()>,
-    ) -> Result<()> {
-        let surface_image = surface.acquire_image()?;
-        let mut frame = self.begin_frame()?;
-        frame.import_surface_image(&surface_image)?;
-        {
-            let mut context = RenderContext {
-                frame: &mut frame,
-                framebuffer: Framebuffer {
-                    image: surface_image.handle(),
-                    format: surface_image.desc().format,
-                },
-            };
-            render(&mut context)?;
-            context.present_framebuffer()?;
-        }
-        frame.flush()?;
-        frame.wait()?;
-        surface.present()
-    }
-
     pub fn wait_idle(&self) -> Result<()> {
         self.device.wait_idle()
     }
@@ -309,218 +345,6 @@ impl Engine {
             info,
         })
     }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct RenderVertex {
-    pub position: Vec2,
-    pub color: Vec3,
-}
-
-impl RenderVertex {
-    pub const fn new(position: Vec2, color: Vec3) -> Self {
-        Self { position, color }
-    }
-}
-
-pub struct RenderMesh {
-    vertex_buffer: Buffer,
-    vertex_count: u32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct PackedRenderVertex {
-    position: [f32; 2],
-    color: [f32; 3],
-}
-
-impl RenderMesh {
-    pub fn new(engine: &Engine, vertices: &[RenderVertex]) -> Result<Self> {
-        if vertices.is_empty() {
-            return Err(Error::InvalidInput(
-                "render mesh requires at least one vertex".into(),
-            ));
-        }
-        let packed = vertices
-            .iter()
-            .map(|vertex| PackedRenderVertex {
-                position: vertex.position.to_array(),
-                color: vertex.color.to_array(),
-            })
-            .collect::<Vec<_>>();
-        let vertex_buffer = engine.create_buffer(BufferDesc {
-            size: std::mem::size_of_val(packed.as_slice()) as u64,
-            usage: BufferUsage::VERTEX,
-        })?;
-        vertex_buffer.write(0, bytes_of_slice(packed.as_slice()))?;
-        Ok(Self {
-            vertex_buffer,
-            vertex_count: vertices.len() as u32,
-        })
-    }
-}
-
-pub struct RenderShader {
-    engine: Engine,
-    vertex_shader: Shader,
-    fragment_shader: Shader,
-    pipelines: HashMap<Format, Pipeline>,
-}
-
-impl RenderShader {
-    pub fn new(engine: &Engine, vertex_spirv: Vec<u32>, fragment_spirv: Vec<u32>) -> Result<Self> {
-        let vertex_shader = engine.create_shader(ShaderDesc {
-            source: ShaderSource::Spirv(vertex_spirv),
-            entry_point: "main".to_owned(),
-            stage: ShaderStage::Vertex,
-        })?;
-        let fragment_shader = engine.create_shader(ShaderDesc {
-            source: ShaderSource::Spirv(fragment_spirv),
-            entry_point: "main".to_owned(),
-            stage: ShaderStage::Fragment,
-        })?;
-        Ok(Self {
-            engine: engine.clone(),
-            vertex_shader,
-            fragment_shader,
-            pipelines: HashMap::new(),
-        })
-    }
-
-    fn pipeline(&mut self, format: Format) -> Result<&Pipeline> {
-        if !self.pipelines.contains_key(&format) {
-            let pipeline = self.engine.create_graphics_pipeline(GraphicsPipelineDesc {
-                vertex_shader: self.vertex_shader.handle(),
-                fragment_shader: Some(self.fragment_shader.handle()),
-                layout: None,
-                vertex_buffers: vec![VertexBufferLayout {
-                    binding: 0,
-                    stride: std::mem::size_of::<PackedRenderVertex>() as u32,
-                    input_rate: VertexInputRate::Vertex,
-                }],
-                vertex_attributes: vec![
-                    VertexAttributeDesc {
-                        location: 0,
-                        binding: 0,
-                        format: VertexFormat::Float32x2,
-                        offset: std::mem::offset_of!(PackedRenderVertex, position) as u32,
-                    },
-                    VertexAttributeDesc {
-                        location: 1,
-                        binding: 0,
-                        format: VertexFormat::Float32x3,
-                        offset: std::mem::offset_of!(PackedRenderVertex, color) as u32,
-                    },
-                ],
-                color_targets: vec![ColorTargetDesc { format }],
-                depth_format: None,
-                topology: PrimitiveTopology::TriangleList,
-                raster: RasterState {
-                    cull_mode: CullMode::None,
-                    front_face: FrontFace::CounterClockwise,
-                },
-            })?;
-            self.pipelines.insert(format, pipeline);
-        }
-        self.pipelines
-            .get(&format)
-            .ok_or_else(|| Error::Unknown("render shader pipeline cache miss".into()))
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-pub struct Framebuffer {
-    image: ImageHandle,
-    format: Format,
-}
-
-pub struct RenderContext<'a> {
-    frame: &'a mut Frame,
-    framebuffer: Framebuffer,
-}
-
-impl RenderContext<'_> {
-    pub fn draw_mesh(&mut self, mesh: &RenderMesh, shader: &mut RenderShader) -> Result<()> {
-        let shader_handle = shader.vertex_shader.handle();
-        let pipeline_handle = shader.pipeline(self.framebuffer.format)?.handle();
-        self.frame.import_buffer(&mesh.vertex_buffer)?;
-        self.frame.add_pass(PassDesc {
-            name: "draw-mesh".to_owned(),
-            queue: QueueType::Graphics,
-            shader: Some(shader_handle),
-            pipeline: Some(pipeline_handle),
-            bind_groups: Vec::new(),
-            push_constants: None,
-            work: PassWork::Draw(DrawDesc {
-                vertex_count: mesh.vertex_count,
-                instance_count: 1,
-                first_vertex: 0,
-                first_instance: 0,
-                vertex_buffer: Some(VertexBufferBinding {
-                    buffer: mesh.vertex_buffer.handle(),
-                    binding: 0,
-                    offset: 0,
-                }),
-                index_buffer: None,
-            }),
-            reads: Vec::new(),
-            writes: vec![ImageUse {
-                image: self.framebuffer.image,
-                access: Access::Write,
-                state: RgState::RenderTarget,
-                subresource: SubresourceRange {
-                    base_mip: 0,
-                    mip_count: 1,
-                    base_layer: 0,
-                    layer_count: 1,
-                },
-            }],
-            buffer_reads: vec![BufferUse {
-                buffer: mesh.vertex_buffer.handle(),
-                access: Access::Read,
-                state: RgState::VertexRead,
-                offset: 0,
-                size: mesh.vertex_buffer.desc().size,
-            }],
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
-        })
-    }
-
-    fn present_framebuffer(&mut self) -> Result<()> {
-        self.frame.add_pass(PassDesc {
-            name: "present-framebuffer".to_owned(),
-            queue: QueueType::Graphics,
-            shader: None,
-            pipeline: None,
-            bind_groups: Vec::new(),
-            push_constants: None,
-            work: PassWork::None,
-            reads: vec![ImageUse {
-                image: self.framebuffer.image,
-                access: Access::Read,
-                state: RgState::Present,
-                subresource: SubresourceRange {
-                    base_mip: 0,
-                    mip_count: 1,
-                    base_layer: 0,
-                    layer_count: 1,
-                },
-            }],
-            writes: Vec::new(),
-            buffer_reads: Vec::new(),
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
-        })
-    }
-}
-
-fn bytes_of_slice<T>(values: &[T]) -> &[u8] {
-    let len = std::mem::size_of_val(values);
-    unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), len) }
 }
 
 pub struct Image {
@@ -734,12 +558,13 @@ impl Surface {
     }
 
     pub fn acquire_image(&self) -> Result<SurfaceImage> {
-        let handle = self.device.acquire_surface_image(self.handle)?;
+        let (handle, slot) = self.device.acquire_surface_image(self.handle)?;
         let desc = self.device.image_desc(handle)?;
         Ok(SurfaceImage {
             device: self.device.clone(),
             handle,
             desc,
+            slot,
         })
     }
 
@@ -758,6 +583,8 @@ pub struct SurfaceImage {
     device: core::Device,
     handle: core::ImageHandle,
     desc: ImageDesc,
+    /// Stable swapchain image index (0..swapchain_image_count).
+    slot: u64,
 }
 
 impl SurfaceImage {

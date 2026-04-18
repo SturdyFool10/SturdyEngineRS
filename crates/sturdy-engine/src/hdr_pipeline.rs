@@ -47,6 +47,10 @@ pub enum ToneMappingOp {
     Aces,
     /// Simple Reinhard tone mapping.
     Reinhard,
+    /// Hermite spline tone mapping — smooth, perceptually-friendly curve with
+    /// no harsh clipping at highlights.  Commonly used in real-time HDR pipelines
+    /// where ACES is too aggressive.
+    Hermite,
     /// Pass-through: no tone mapping applied (for HDR displays).
     Linear,
 }

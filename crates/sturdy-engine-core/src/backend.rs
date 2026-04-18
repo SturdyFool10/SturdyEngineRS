@@ -231,7 +231,7 @@ pub trait Backend: Send + Sync {
         &self,
         _surface: SurfaceHandle,
         _image: ImageHandle,
-    ) -> Result<ImageDesc> {
+    ) -> Result<(ImageDesc, u64)> {
         Err(crate::Error::Unsupported(
             "backend does not support surface image acquisition",
         ))

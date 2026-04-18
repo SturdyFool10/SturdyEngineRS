@@ -698,16 +698,20 @@ impl Device {
         Ok(std::mem::take(&mut surface.events))
     }
 
-    pub fn acquire_surface_image(&self, surface: SurfaceHandle) -> Result<ImageHandle> {
+    /// Acquire the next swapchain image.
+    ///
+    /// Returns `(handle, slot)` where `slot` is the stable swapchain image
+    /// index (0..swapchain_image_count) — suitable as a per-frame cache key.
+    pub fn acquire_surface_image(&self, surface: SurfaceHandle) -> Result<(ImageHandle, u64)> {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         if !inner.surfaces.contains_key(&surface) {
             return Err(Error::InvalidHandle);
         }
         let handle = ImageHandle(inner.image_handles.alloc());
-        let desc = inner.backend.acquire_surface_image(surface, handle)?;
+        let (desc, slot) = inner.backend.acquire_surface_image(surface, handle)?;
         inner.images.insert(handle, desc);
         inner.image_states.retain(|key, _| key.image != handle);
-        Ok(handle)
+        Ok((handle, slot))
     }
 
     pub fn present_surface(&self, surface: SurfaceHandle) -> Result<()> {

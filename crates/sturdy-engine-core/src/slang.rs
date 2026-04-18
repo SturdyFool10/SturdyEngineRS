@@ -296,10 +296,11 @@ fn reflect_pipeline_layout_inner(
         if is_file {
             sys::spAddTranslationUnitSourceFile(request, tu, path_or_source_cstr.as_ptr());
         } else {
+            let inline_path = std::ffi::CStr::from_bytes_with_nul(b"<inline>\0").unwrap();
             sys::spAddTranslationUnitSourceString(
                 request,
                 tu,
-                std::ptr::null(),
+                inline_path.as_ptr(),
                 path_or_source_cstr.as_ptr(),
             );
         }
@@ -631,10 +632,11 @@ pub fn compile_and_reflect(
         if is_file {
             sys::spAddTranslationUnitSourceFile(request, tu, path_or_source_cstr.as_ptr());
         } else {
+            let inline_path = std::ffi::CStr::from_bytes_with_nul(b"<inline>\0").unwrap();
             sys::spAddTranslationUnitSourceString(
                 request,
                 tu,
-                std::ptr::null(),
+                inline_path.as_ptr(),
                 path_or_source_cstr.as_ptr(),
             );
         }

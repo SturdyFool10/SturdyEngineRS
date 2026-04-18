@@ -11,5 +11,6 @@ name = "sturdy_engine"
 path = "src/lib.rs"
 
 [dependencies]
+bytemuck = "1.20"
 glam = "0.30"
 sturdy-engine-core = { path = "../sturdy-engine-core" }
