@@ -4,7 +4,11 @@
 //! opaque handles, images, shaders, frame graphs, and submission semantics. It
 //! intentionally has no C ABI concerns and no high-level ergonomic wrappers.
 
+pub mod adapter_info;
+pub mod adapter_kind;
+pub mod adapter_selection;
 pub mod backend;
+pub mod backend_features;
 pub mod binding;
 pub mod buffer;
 pub mod caps;
@@ -12,22 +16,29 @@ pub mod device;
 pub mod error;
 pub mod handles;
 pub mod image;
+pub mod limits;
+pub mod native_handles;
 pub mod pipeline;
 pub mod push_constants;
+pub mod raw_capabilities;
 pub mod render_graph;
 pub mod sampler;
 pub mod shader;
 pub mod slang;
 pub mod surface;
 
-pub use backend::{Backend, BackendKind, auto_backend_preference_order, available_backend_kinds};
+pub use adapter_info::AdapterInfo;
+pub use adapter_kind::AdapterKind;
+pub use adapter_selection::AdapterSelection;
+pub use backend::{auto_backend_preference_order, available_backend_kinds, Backend, BackendKind};
+pub use backend_features::BackendFeatures;
 pub use binding::{
     BindGroupDesc, BindGroupEntry, BindingKind, CanonicalBinding, CanonicalGroupLayout,
-    CanonicalPipelineLayout, ResourceBinding, StageMask, UpdateRate,
+    CanonicalPipelineLayout, ResourceBinding, StageMask, UpdateRate, BINDLESS_COUNT,
 };
 pub use buffer::{BufferDesc, BufferUsage};
 pub use caps::Caps;
-pub use device::{Device, DeviceDesc, Frame};
+pub use device::{enumerate_adapters, Device, DeviceDesc, Frame};
 pub use error::{Error, Result};
 pub use handles::{
     BindGroupHandle, BufferHandle, DeviceHandle, FrameHandle, ImageHandle, PassHandle,
@@ -35,12 +46,20 @@ pub use handles::{
     SurfaceHandle,
 };
 pub use image::{Extent3d, Format, ImageDesc, ImageUsage};
+pub use limits::Limits;
+pub use native_handles::{
+    native_handle_capabilities_for_backend, NativeHandleCapabilities, NativeHandleCapability,
+    NativeHandleKind, NativeHandleOwnership,
+};
 pub use pipeline::{
     ColorTargetDesc, ComputePipelineDesc, CullMode, FrontFace, GraphicsPipelineDesc,
     PrimitiveTopology, RasterState, VertexAttributeDesc, VertexBufferLayout, VertexFormat,
     VertexInputRate,
 };
 pub use push_constants::PushConstants;
+pub use raw_capabilities::{
+    BackendRawCapabilities, D3d12RawCapabilities, MetalRawCapabilities, VulkanRawCapabilities,
+};
 pub use render_graph::{
     Access, AliasPlan, Barrier, BufferBarrier, BufferStateKey, BufferUse, CompiledGraph,
     CopyBufferToImageDesc, CopyImageToBufferDesc, DispatchDesc, DrawDesc, ImageBarrier,
@@ -54,9 +73,13 @@ pub use shader::{
     ShaderTarget,
 };
 pub use slang::{
-    SlangCompileDesc, compile_and_reflect, compile_slang, compile_slang_to_file,
-    compile_slang_to_spirv, reflect_pipeline_layout, spirv_words_from_bytes,
+    compile_and_reflect, compile_slang, compile_slang_to_file, compile_slang_to_spirv,
+    reflect_pipeline_layout, reflect_pipeline_layout_with_caps, spirv_words_from_bytes,
+    SlangCompileDesc,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use surface::NativeSurfaceDesc;
-pub use surface::{SurfaceColorSpace, SurfaceEvent, SurfaceInfo, SurfaceSize};
+pub use surface::{
+    SurfaceCapabilities, SurfaceColorSpace, SurfaceEvent, SurfaceFormatInfo, SurfaceHdrPreference,
+    SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc, SurfaceSize,
+};

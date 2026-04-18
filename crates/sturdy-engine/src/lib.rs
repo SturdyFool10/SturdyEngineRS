@@ -11,6 +11,7 @@ mod pipeline_layout;
 #[cfg(test)]
 mod tests;
 mod texture;
+mod upload_arena;
 
 pub use bind_group::BindGroupBuilder;
 pub use glam::{Vec2, Vec3};
@@ -18,24 +19,29 @@ pub use pipeline_layout::PipelineLayoutBuilder;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sturdy_engine_core::NativeSurfaceDesc;
 pub use sturdy_engine_core::{
-    compile_slang, compile_slang_to_file, compile_slang_to_spirv, spirv_words_from_bytes, Access,
-    AddressMode, BackendKind, BindGroupDesc, BindGroupEntry, BindingKind, BorderColor, BufferDesc,
-    BufferUsage, BufferUse, CanonicalBinding, CanonicalGroupLayout, CanonicalPipelineLayout, Caps,
-    ColorTargetDesc, CompareOp, CompiledShaderArtifact, ComputePipelineDesc, CopyBufferToImageDesc,
-    CopyImageToBufferDesc, CullMode, DispatchDesc, DrawDesc, Error, Extent3d, FilterMode, Format,
+    compile_slang, compile_slang_to_file, compile_slang_to_spirv,
+    native_handle_capabilities_for_backend, spirv_words_from_bytes, Access, AdapterKind,
+    AdapterSelection, AddressMode, BackendKind, BackendRawCapabilities, BindGroupDesc,
+    BindGroupEntry, BindingKind, BorderColor, BufferDesc, BufferUsage, BufferUse, CanonicalBinding,
+    CanonicalGroupLayout, CanonicalPipelineLayout, Caps, ColorTargetDesc, CompareOp,
+    CompiledShaderArtifact, ComputePipelineDesc, CopyBufferToImageDesc, CopyImageToBufferDesc,
+    CullMode, D3d12RawCapabilities, DispatchDesc, DrawDesc, Error, Extent3d, FilterMode, Format,
     FrontFace, GraphicsPipelineDesc, ImageDesc, ImageUsage, ImageUse, IndexBufferBinding,
-    IndexFormat, MipmapMode, PassDesc, PassWork, PrimitiveTopology, PushConstants, QueueType,
-    RasterState, ResourceBinding, Result, RgState, SamplerDesc, ShaderDesc, ShaderSource,
-    ShaderStage, ShaderTarget, SlangCompileDesc, StageMask, SubresourceRange, SurfaceColorSpace,
-    SurfaceEvent, SurfaceInfo, UpdateRate, VertexAttributeDesc, VertexBufferBinding,
-    VertexBufferLayout, VertexFormat, VertexInputRate,
+    IndexFormat, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
+    NativeHandleCapability, NativeHandleKind, NativeHandleOwnership, PassDesc, PassWork,
+    PrimitiveTopology, PushConstants, QueueType, RasterState, ResourceBinding, Result, RgState,
+    SamplerDesc, ShaderDesc, ShaderSource, ShaderStage, ShaderTarget, SlangCompileDesc, StageMask,
+    SubresourceRange, SurfaceColorSpace, SurfaceEvent, SurfaceHdrPreference, SurfaceInfo,
+    SurfacePresentMode, SurfaceRecreateDesc, UpdateRate, VertexAttributeDesc, VertexBufferBinding,
+    VertexBufferLayout, VertexFormat, VertexInputRate, VulkanRawCapabilities,
 };
 pub use sturdy_engine_core::{
-    ImageHandle, SamplerHandle, SubmissionHandle, SurfaceHandle, SurfaceSize,
+    DeviceDesc, ImageHandle, SamplerHandle, SubmissionHandle, SurfaceHandle, SurfaceSize,
 };
 pub use texture::{ImageCopyRegion, TextureUploadDesc};
 
 use sturdy_engine_core as core;
+use upload_arena::UploadArena;
 
 #[derive(Clone)]
 pub struct Engine {
@@ -48,16 +54,30 @@ impl Engine {
     }
 
     pub fn with_backend(backend: BackendKind) -> Result<Self> {
+        Self::with_desc(core::DeviceDesc {
+            backend,
+            validation: cfg!(debug_assertions),
+            adapter: core::AdapterSelection::Auto,
+            ..core::DeviceDesc::default()
+        })
+    }
+
+    pub fn with_desc(desc: core::DeviceDesc) -> Result<Self> {
         Ok(Self {
-            device: core::Device::create(core::DeviceDesc {
-                backend,
-                validation: cfg!(debug_assertions),
-            })?,
+            device: core::Device::create(desc)?,
         })
     }
 
     pub fn caps(&self) -> Caps {
         self.device.caps()
+    }
+
+    pub fn native_handle_capabilities(&self) -> NativeHandleCapabilities {
+        self.device.native_handle_capabilities()
+    }
+
+    pub fn raw_capabilities(&self) -> BackendRawCapabilities {
+        self.device.raw_capabilities()
     }
 
     pub fn backend_kind(&self) -> BackendKind {
@@ -153,10 +173,15 @@ impl Engine {
         Ok(Frame {
             engine: self.clone(),
             inner: self.device.begin_frame()?,
-            transient_buffers: Vec::new(),
+            upload_arena: UploadArena::default(),
         })
     }
 
+    /// Render an image through the convenience path.
+    ///
+    /// This helper intentionally flushes and waits before returning. Use
+    /// `begin_frame`, `Frame::flush`, and `Frame::wait` directly when the
+    /// caller needs fully deferred, non-blocking submission.
     pub fn render_image(
         &self,
         image: &Image,
@@ -178,6 +203,11 @@ impl Engine {
         frame.wait()
     }
 
+    /// Render one surface frame through the convenience path.
+    ///
+    /// This helper intentionally flushes and waits before presenting. Use
+    /// `begin_frame`, `Frame::flush`, and `Frame::present` directly when the
+    /// caller needs fully deferred, non-blocking submission.
     pub fn render_surface(
         &self,
         surface: &Surface,
@@ -608,6 +638,12 @@ impl Surface {
 
     pub fn resize(&mut self, size: SurfaceSize) -> Result<()> {
         self.device.resize_surface(self.handle, size)?;
+        self.info = self.device.surface_info(self.handle)?;
+        Ok(())
+    }
+
+    pub fn recreate(&mut self, desc: SurfaceRecreateDesc) -> Result<()> {
+        self.device.recreate_surface(self.handle, desc)?;
         self.info = self.device.surface_info(self.handle)?;
         Ok(())
     }
@@ -1092,7 +1128,7 @@ impl<'f> ComputePassBuilder<'f> {
 pub struct Frame {
     pub(crate) engine: Engine,
     pub(crate) inner: core::Frame,
-    pub(crate) transient_buffers: Vec<Buffer>,
+    pub(crate) upload_arena: UploadArena,
 }
 
 impl Frame {

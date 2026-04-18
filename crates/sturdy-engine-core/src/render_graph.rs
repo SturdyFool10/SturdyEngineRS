@@ -5,7 +5,15 @@ use crate::{
     PushConstants, Result, ShaderHandle,
 };
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[path = "render_graph/alias_plan.rs"]
+mod alias_plan;
+
+use alias_plan::build_alias_plan;
+pub use alias_plan::{
+    AliasCompatibilityClass, AliasPlacement, AliasPlan, AliasResourceKind, ResourceLifetime,
+};
+
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub enum QueueType {
     Graphics,
     Compute,
@@ -191,6 +199,8 @@ pub struct Barrier {
     pub subresource: SubresourceRange,
     pub before: RgState,
     pub after: RgState,
+    pub before_queue: QueueType,
+    pub after_queue: QueueType,
     pub queue: QueueType,
 }
 
@@ -201,9 +211,17 @@ pub struct BufferBarrier {
     pub buffer: BufferHandle,
     pub before: RgState,
     pub after: RgState,
+    pub before_queue: QueueType,
+    pub after_queue: QueueType,
     pub queue: QueueType,
     pub offset: u64,
     pub size: u64,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct ResourceState {
+    state: RgState,
+    queue: QueueType,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -228,33 +246,6 @@ pub struct VirtualBuffer {
 pub struct RecordBatch {
     pub queue: QueueType,
     pub pass_indices: Vec<u32>,
-}
-
-/// Lifetime and aliasing slot assignment for one transient resource.
-///
-/// Two resources with non-overlapping `[first_pass, last_pass]` ranges share
-/// the same `alias_slot`, meaning they can occupy the same physical memory.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResourceLifetime {
-    pub first_pass: u32,
-    pub last_pass: u32,
-    /// Index into the pool of aliasable memory slots.  Resources in the same
-    /// slot have non-overlapping lifetimes and can share physical memory.
-    pub alias_slot: u32,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct AliasPlan {
-    pub transient_image_count: usize,
-    pub transient_buffer_count: usize,
-    /// Per-transient-image lifetime and alias-slot assignment.
-    pub image_lifetimes: Vec<(ImageHandle, ResourceLifetime)>,
-    /// Per-transient-buffer lifetime and alias-slot assignment.
-    pub buffer_lifetimes: Vec<(BufferHandle, ResourceLifetime)>,
-    /// How many distinct memory slots images need (= minimum VkDeviceMemory allocations for images).
-    pub image_slot_count: usize,
-    /// How many distinct memory slots buffers need.
-    pub buffer_slot_count: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -524,8 +515,32 @@ impl RenderGraph {
             }
         }
 
-        let mut state_by_image = self.initial_image_states.clone();
-        let mut state_by_buffer = self.initial_buffer_states.clone();
+        let mut state_by_image = self
+            .initial_image_states
+            .iter()
+            .map(|(key, state)| {
+                (
+                    *key,
+                    ResourceState {
+                        state: *state,
+                        queue: QueueType::Graphics,
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut state_by_buffer = self
+            .initial_buffer_states
+            .iter()
+            .map(|(key, state)| {
+                (
+                    *key,
+                    ResourceState {
+                        state: *state,
+                        queue: QueueType::Graphics,
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
         let mut barriers_per_pass = Vec::with_capacity(order.len());
         let mut buffer_barriers_per_pass = Vec::with_capacity(order.len());
 
@@ -546,18 +561,29 @@ impl RenderGraph {
                             subresource: SubresourceRange::WHOLE,
                         })
                         .copied()
-                        .unwrap_or(RgState::Undefined)
+                        .unwrap_or(ResourceState {
+                            state: RgState::Undefined,
+                            queue: pass.queue,
+                        })
                 });
-                if before != usage.state {
+                if before.state != usage.state || before.queue != pass.queue {
                     pass_barriers.push(ImageBarrier {
                         image: usage.image,
                         subresource: usage.subresource,
-                        before,
+                        before: before.state,
                         after: usage.state,
+                        before_queue: before.queue,
+                        after_queue: pass.queue,
                         queue: pass.queue,
                     });
                 }
-                state_by_image.insert(key, usage.state);
+                state_by_image.insert(
+                    key,
+                    ResourceState {
+                        state: usage.state,
+                        queue: pass.queue,
+                    },
+                );
             }
 
             for usage in pass.buffer_reads.iter().chain(pass.buffer_writes.iter()) {
@@ -574,19 +600,30 @@ impl RenderGraph {
                             size: u64::MAX,
                         })
                         .copied()
-                        .unwrap_or(RgState::Undefined)
+                        .unwrap_or(ResourceState {
+                            state: RgState::Undefined,
+                            queue: pass.queue,
+                        })
                 });
-                if before != usage.state {
+                if before.state != usage.state || before.queue != pass.queue {
                     pass_buffer_barriers.push(BufferBarrier {
                         buffer: usage.buffer,
-                        before,
+                        before: before.state,
                         after: usage.state,
+                        before_queue: before.queue,
+                        after_queue: pass.queue,
                         queue: pass.queue,
                         offset: usage.offset,
                         size: usage.size,
                     });
                 }
-                state_by_buffer.insert(key, usage.state);
+                state_by_buffer.insert(
+                    key,
+                    ResourceState {
+                        state: usage.state,
+                        queue: pass.queue,
+                    },
+                );
             }
 
             barriers_per_pass.push(pass_barriers);
@@ -602,10 +639,12 @@ impl RenderGraph {
         let final_image_states = state_by_image
             .into_iter()
             .filter(|(key, _)| self.image_set.contains(&key.image))
+            .map(|(key, state)| (key, state.state))
             .collect();
         let final_buffer_states = state_by_buffer
             .into_iter()
             .filter(|(key, _)| self.buffer_set.contains(&key.buffer))
+            .map(|(key, state)| (key, state.state))
             .collect();
 
         Ok(CompiledGraph {
@@ -724,73 +763,6 @@ fn build_batches(passes: &[PassDesc]) -> Vec<RecordBatch> {
         }
     }
     batches
-}
-
-/// Greedy interval-graph-coloring alias plan.
-///
-/// Resources are sorted by first_pass and assigned to the first alias slot
-/// whose last occupant ended before this resource starts.  This minimises the
-/// number of distinct memory slots needed.
-fn build_alias_plan(images: &[VirtualImage], buffers: &[VirtualBuffer]) -> AliasPlan {
-    let (image_lifetimes, image_slot_count) = pack_lifetimes(
-        images
-            .iter()
-            .filter(|img| !img.imported)
-            .map(|img| (img.handle, img.first_use, img.last_use)),
-    );
-    let (buffer_lifetimes, buffer_slot_count) = pack_lifetimes(
-        buffers
-            .iter()
-            .filter(|buf| !buf.imported)
-            .map(|buf| (buf.handle, buf.first_use, buf.last_use)),
-    );
-    AliasPlan {
-        transient_image_count: image_lifetimes.len(),
-        transient_buffer_count: buffer_lifetimes.len(),
-        image_lifetimes,
-        buffer_lifetimes,
-        image_slot_count,
-        buffer_slot_count,
-    }
-}
-
-/// Assign alias slots to resources using greedy interval coloring.
-///
-/// Returns (lifetimes_with_slots, slot_count).
-fn pack_lifetimes<H: Copy>(
-    resources: impl Iterator<Item = (H, u32, u32)>,
-) -> (Vec<(H, ResourceLifetime)>, usize) {
-    let mut items: Vec<(H, u32, u32)> = resources.collect();
-    // Sort by first_pass so we can greedily assign slots.
-    items.sort_unstable_by_key(|(_, first, _)| *first);
-
-    // `slot_last_use[s]` = the last_pass of the most-recently-assigned
-    // resource in slot s.  A slot is free for a new resource whose first_pass
-    // > slot_last_use[s].
-    let mut slot_last_use: Vec<u32> = Vec::new();
-    let mut result = Vec::with_capacity(items.len());
-
-    for (handle, first, last) in items {
-        let slot = slot_last_use
-            .iter()
-            .position(|&end| end < first)
-            .unwrap_or_else(|| {
-                slot_last_use.push(0);
-                slot_last_use.len() - 1
-            });
-        slot_last_use[slot] = last;
-        result.push((
-            handle,
-            ResourceLifetime {
-                first_pass: first,
-                last_pass: last,
-                alias_slot: slot as u32,
-            },
-        ));
-    }
-
-    let slot_count = slot_last_use.len();
-    (result, slot_count)
 }
 
 fn validate_copy_extent(
@@ -940,6 +912,46 @@ mod tests {
             size,
             usage: BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
         }
+    }
+
+    fn transient_image_desc() -> ImageDesc {
+        ImageDesc {
+            extent: Extent3d {
+                width: 64,
+                height: 64,
+                depth: 1,
+            },
+            mip_levels: 1,
+            layers: 1,
+            samples: 1,
+            format: Format::Rgba16Float,
+            usage: ImageUsage::SAMPLED
+                | ImageUsage::STORAGE
+                | ImageUsage::RENDER_TARGET
+                | ImageUsage::COPY_DST,
+        }
+    }
+
+    fn register_transient_image(graph: &mut RenderGraph, handle: ImageHandle, desc: ImageDesc) {
+        graph.image_set.insert(handle);
+        graph.images.push(VirtualImage {
+            handle,
+            desc,
+            imported: false,
+            first_use: u32::MAX,
+            last_use: 0,
+        });
+    }
+
+    fn register_transient_buffer(graph: &mut RenderGraph, handle: BufferHandle, desc: BufferDesc) {
+        graph.buffer_set.insert(handle);
+        graph.buffers.push(VirtualBuffer {
+            handle,
+            desc,
+            imported: false,
+            first_use: u32::MAX,
+            last_use: 0,
+        });
     }
 
     #[test]
@@ -1227,41 +1239,476 @@ mod tests {
     }
 
     #[test]
-    fn alias_plan_packs_non_overlapping_lifetimes_into_same_slot() {
-        // [0,1] and [2,3] don't overlap → share slot 0
-        // [0,3] overlaps both → slot 1
-        let resources = vec![
-            (ImageHandle(0), 0u32, 1u32),
-            (ImageHandle(1), 2u32, 3u32),
-            (ImageHandle(2), 0u32, 3u32),
-        ];
-        let (lifetimes, slot_count) =
-            pack_lifetimes(resources.into_iter());
-        assert_eq!(slot_count, 2);
-        let slot_for = |h: ImageHandle| {
-            lifetimes.iter().find(|(hh, _)| *hh == h).unwrap().1.alias_slot
+    fn queue_changes_emit_ownership_barriers() {
+        let image = ImageHandle(1);
+        let buffer = BufferHandle(2);
+        let mut graph = RenderGraph::new();
+        graph.import_image(image, image_desc()).unwrap();
+        graph.import_buffer(buffer, buffer_desc(64)).unwrap();
+
+        graph
+            .add_pass(PassDesc {
+                name: "upload".into(),
+                queue: QueueType::Transfer,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                work: PassWork::None,
+                reads: Vec::new(),
+                writes: vec![ImageUse {
+                    image,
+                    access: Access::Write,
+                    state: RgState::CopyDst,
+                    subresource: SubresourceRange::WHOLE,
+                }],
+                buffer_reads: Vec::new(),
+                buffer_writes: vec![BufferUse {
+                    buffer,
+                    access: Access::Write,
+                    state: RgState::CopyDst,
+                    offset: 0,
+                    size: 64,
+                }],
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            })
+            .unwrap();
+        graph
+            .add_pass(PassDesc {
+                name: "sample".into(),
+                queue: QueueType::Graphics,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                work: PassWork::None,
+                reads: vec![ImageUse {
+                    image,
+                    access: Access::Read,
+                    state: RgState::ShaderRead,
+                    subresource: SubresourceRange::WHOLE,
+                }],
+                writes: Vec::new(),
+                buffer_reads: vec![BufferUse {
+                    buffer,
+                    access: Access::Read,
+                    state: RgState::ShaderRead,
+                    offset: 0,
+                    size: 64,
+                }],
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            })
+            .unwrap();
+
+        let compiled = graph.compile().unwrap();
+        let image_barrier = compiled.barriers_per_pass[1][0];
+        assert_eq!(image_barrier.before_queue, QueueType::Transfer);
+        assert_eq!(image_barrier.after_queue, QueueType::Graphics);
+        assert_eq!(image_barrier.before, RgState::CopyDst);
+        assert_eq!(image_barrier.after, RgState::ShaderRead);
+
+        let buffer_barrier = compiled.buffer_barriers_per_pass[1][0];
+        assert_eq!(buffer_barrier.before_queue, QueueType::Transfer);
+        assert_eq!(buffer_barrier.after_queue, QueueType::Graphics);
+        assert_eq!(buffer_barrier.before, RgState::CopyDst);
+        assert_eq!(buffer_barrier.after, RgState::ShaderRead);
+    }
+
+    #[test]
+    fn independent_queue_batches_compile_without_cross_batch_barriers() {
+        let compute_buffer = BufferHandle(1);
+        let transfer_image = ImageHandle(2);
+        let transfer_buffer = BufferHandle(3);
+        let graphics_image = ImageHandle(4);
+        let mut graph = RenderGraph::new();
+        graph
+            .import_buffer(compute_buffer, buffer_desc(64))
+            .unwrap();
+        graph.import_image(transfer_image, image_desc()).unwrap();
+        graph
+            .import_buffer(transfer_buffer, buffer_desc(64))
+            .unwrap();
+        graph.import_image(graphics_image, image_desc()).unwrap();
+
+        graph
+            .add_pass(PassDesc {
+                name: "compute-independent".into(),
+                queue: QueueType::Compute,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                work: PassWork::None,
+                reads: Vec::new(),
+                writes: Vec::new(),
+                buffer_reads: Vec::new(),
+                buffer_writes: vec![BufferUse {
+                    buffer: compute_buffer,
+                    access: Access::Write,
+                    state: RgState::ShaderWrite,
+                    offset: 0,
+                    size: 64,
+                }],
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            })
+            .unwrap();
+        graph
+            .add_pass(PassDesc {
+                name: "transfer-independent".into(),
+                queue: QueueType::Transfer,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                work: PassWork::None,
+                reads: Vec::new(),
+                writes: vec![ImageUse {
+                    image: transfer_image,
+                    access: Access::Write,
+                    state: RgState::CopyDst,
+                    subresource: SubresourceRange::WHOLE,
+                }],
+                buffer_reads: vec![BufferUse {
+                    buffer: transfer_buffer,
+                    access: Access::Read,
+                    state: RgState::CopySrc,
+                    offset: 0,
+                    size: 64,
+                }],
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            })
+            .unwrap();
+        graph
+            .add_pass(PassDesc {
+                name: "graphics-independent".into(),
+                queue: QueueType::Graphics,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                work: PassWork::None,
+                reads: Vec::new(),
+                writes: vec![ImageUse {
+                    image: graphics_image,
+                    access: Access::Write,
+                    state: RgState::RenderTarget,
+                    subresource: SubresourceRange::WHOLE,
+                }],
+                buffer_reads: Vec::new(),
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            })
+            .unwrap();
+
+        let compiled = graph.compile().unwrap();
+        assert_eq!(
+            compiled.batches,
+            vec![
+                RecordBatch {
+                    queue: QueueType::Graphics,
+                    pass_indices: vec![0],
+                },
+                RecordBatch {
+                    queue: QueueType::Transfer,
+                    pass_indices: vec![1],
+                },
+                RecordBatch {
+                    queue: QueueType::Compute,
+                    pass_indices: vec![2],
+                },
+            ]
+        );
+        for (pass, barriers) in compiled.passes.iter().zip(&compiled.barriers_per_pass) {
+            for barrier in barriers {
+                assert_eq!(barrier.before_queue, pass.queue);
+                assert_eq!(barrier.after_queue, pass.queue);
+            }
+        }
+        for (pass, barriers) in compiled
+            .passes
+            .iter()
+            .zip(&compiled.buffer_barriers_per_pass)
+        {
+            for barrier in barriers {
+                assert_eq!(barrier.before_queue, pass.queue);
+                assert_eq!(barrier.after_queue, pass.queue);
+            }
+        }
+    }
+
+    #[test]
+    fn showcase_upload_push_constants_multi_queue_and_aliasing_plan() {
+        let staging = BufferHandle(1);
+        let uploaded = ImageHandle(10);
+        let gbuffer = ImageHandle(11);
+        let lighting = ImageHandle(12);
+        let postprocess = ImageHandle(13);
+        let scratch_a = BufferHandle(20);
+        let scratch_b = BufferHandle(21);
+
+        let image_desc = transient_image_desc();
+        let scratch_desc = BufferDesc {
+            size: 4096,
+            usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
         };
-        assert_eq!(slot_for(ImageHandle(0)), slot_for(ImageHandle(1)));
-        assert_ne!(slot_for(ImageHandle(0)), slot_for(ImageHandle(2)));
-    }
+        let subresource = SubresourceRange {
+            base_mip: 0,
+            mip_count: 1,
+            base_layer: 0,
+            layer_count: 1,
+        };
+        let mut graph = RenderGraph::new();
+        graph
+            .import_buffer(staging, buffer_desc(64 * 64 * 8))
+            .unwrap();
+        for image in [uploaded, gbuffer, lighting, postprocess] {
+            register_transient_image(&mut graph, image, image_desc);
+        }
+        for buffer in [scratch_a, scratch_b] {
+            register_transient_buffer(&mut graph, buffer, scratch_desc);
+        }
 
-    #[test]
-    fn alias_plan_all_overlapping_gets_unique_slots() {
-        // [0,3], [1,4], [2,5] all overlap each other → 3 unique slots
-        let resources = vec![
-            (ImageHandle(0), 0u32, 3u32),
-            (ImageHandle(1), 1u32, 4u32),
-            (ImageHandle(2), 2u32, 5u32),
-        ];
-        let (_, slot_count) = pack_lifetimes(resources.into_iter());
-        assert_eq!(slot_count, 3);
-    }
+        graph
+            .add_pass(PassDesc {
+                name: "upload-material-texture".into(),
+                queue: QueueType::Transfer,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                work: PassWork::CopyBufferToImage(CopyBufferToImageDesc {
+                    buffer: staging,
+                    image: uploaded,
+                    buffer_offset: 0,
+                    mip_level: 0,
+                    base_layer: 0,
+                    layer_count: 1,
+                    width: 64,
+                    height: 64,
+                    depth: 1,
+                }),
+                reads: Vec::new(),
+                writes: vec![ImageUse {
+                    image: uploaded,
+                    access: Access::Write,
+                    state: RgState::CopyDst,
+                    subresource,
+                }],
+                buffer_reads: vec![BufferUse {
+                    buffer: staging,
+                    access: Access::Read,
+                    state: RgState::CopySrc,
+                    offset: 0,
+                    size: 64 * 64 * 8,
+                }],
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            })
+            .unwrap();
 
-    #[test]
-    fn alias_plan_empty_produces_zero_slots() {
-        let (lifetimes, slot_count) =
-            pack_lifetimes(std::iter::empty::<(ImageHandle, u32, u32)>());
-        assert_eq!(slot_count, 0);
-        assert!(lifetimes.is_empty());
+        graph
+            .add_pass(PassDesc {
+                name: "gbuffer-draw-with-push-constants".into(),
+                queue: QueueType::Graphics,
+                shader: None,
+                pipeline: Some(PipelineHandle(1)),
+                bind_groups: Vec::new(),
+                push_constants: Some(PushConstants {
+                    offset: 0,
+                    stages: crate::StageMask::VERTEX | crate::StageMask::FRAGMENT,
+                    bytes: vec![0x11; 16],
+                }),
+                work: PassWork::Draw(DrawDesc {
+                    vertex_count: 3,
+                    instance_count: 2,
+                    first_vertex: 0,
+                    first_instance: 0,
+                    vertex_buffer: None,
+                    index_buffer: None,
+                }),
+                reads: vec![ImageUse {
+                    image: uploaded,
+                    access: Access::Read,
+                    state: RgState::ShaderRead,
+                    subresource,
+                }],
+                writes: vec![ImageUse {
+                    image: gbuffer,
+                    access: Access::Write,
+                    state: RgState::RenderTarget,
+                    subresource,
+                }],
+                buffer_reads: Vec::new(),
+                buffer_writes: vec![BufferUse {
+                    buffer: scratch_a,
+                    access: Access::Write,
+                    state: RgState::ShaderWrite,
+                    offset: 0,
+                    size: scratch_desc.size,
+                }],
+                clear_colors: vec![(gbuffer, [0, 0, 0, f32::to_bits(1.0)])],
+                clear_depth: None,
+            })
+            .unwrap();
+
+        graph
+            .add_pass(PassDesc {
+                name: "compute-lighting".into(),
+                queue: QueueType::Compute,
+                shader: None,
+                pipeline: Some(PipelineHandle(2)),
+                bind_groups: Vec::new(),
+                push_constants: Some(PushConstants {
+                    offset: 16,
+                    stages: crate::StageMask::COMPUTE,
+                    bytes: vec![0x22; 16],
+                }),
+                work: PassWork::Dispatch(DispatchDesc { x: 8, y: 8, z: 1 }),
+                reads: vec![ImageUse {
+                    image: gbuffer,
+                    access: Access::Read,
+                    state: RgState::ShaderRead,
+                    subresource,
+                }],
+                writes: vec![ImageUse {
+                    image: lighting,
+                    access: Access::Write,
+                    state: RgState::ShaderWrite,
+                    subresource,
+                }],
+                buffer_reads: vec![BufferUse {
+                    buffer: scratch_a,
+                    access: Access::Read,
+                    state: RgState::ShaderRead,
+                    offset: 0,
+                    size: scratch_desc.size,
+                }],
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            })
+            .unwrap();
+
+        graph
+            .add_pass(PassDesc {
+                name: "postprocess-and-presentable-output".into(),
+                queue: QueueType::Graphics,
+                shader: None,
+                pipeline: Some(PipelineHandle(3)),
+                bind_groups: Vec::new(),
+                push_constants: Some(PushConstants {
+                    offset: 0,
+                    stages: crate::StageMask::FRAGMENT,
+                    bytes: vec![0x33; 16],
+                }),
+                work: PassWork::Draw(DrawDesc {
+                    vertex_count: 3,
+                    instance_count: 1,
+                    first_vertex: 0,
+                    first_instance: 0,
+                    vertex_buffer: None,
+                    index_buffer: None,
+                }),
+                reads: vec![ImageUse {
+                    image: lighting,
+                    access: Access::Read,
+                    state: RgState::ShaderRead,
+                    subresource,
+                }],
+                writes: vec![ImageUse {
+                    image: postprocess,
+                    access: Access::Write,
+                    state: RgState::RenderTarget,
+                    subresource,
+                }],
+                buffer_reads: Vec::new(),
+                buffer_writes: vec![BufferUse {
+                    buffer: scratch_b,
+                    access: Access::Write,
+                    state: RgState::ShaderWrite,
+                    offset: 0,
+                    size: scratch_desc.size,
+                }],
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            })
+            .unwrap();
+
+        let compiled = graph.compile().unwrap();
+
+        assert_eq!(compiled.passes.len(), 4);
+        assert_eq!(
+            compiled.batches,
+            vec![
+                RecordBatch {
+                    queue: QueueType::Transfer,
+                    pass_indices: vec![0],
+                },
+                RecordBatch {
+                    queue: QueueType::Graphics,
+                    pass_indices: vec![1],
+                },
+                RecordBatch {
+                    queue: QueueType::Compute,
+                    pass_indices: vec![2],
+                },
+                RecordBatch {
+                    queue: QueueType::Graphics,
+                    pass_indices: vec![3],
+                },
+            ]
+        );
+
+        assert_eq!(
+            compiled.passes[1].push_constants.as_ref().unwrap().stages,
+            crate::StageMask::VERTEX | crate::StageMask::FRAGMENT
+        );
+        assert_eq!(
+            compiled.passes[2].push_constants.as_ref().unwrap().offset,
+            16
+        );
+
+        let upload_to_draw = compiled.barriers_per_pass[1]
+            .iter()
+            .find(|barrier| barrier.image == uploaded)
+            .expect("uploaded image transitions from transfer upload to graphics sampling");
+        assert_eq!(upload_to_draw.before_queue, QueueType::Transfer);
+        assert_eq!(upload_to_draw.after_queue, QueueType::Graphics);
+        assert_eq!(upload_to_draw.before, RgState::CopyDst);
+        assert_eq!(upload_to_draw.after, RgState::ShaderRead);
+
+        let draw_to_compute = compiled.barriers_per_pass[2]
+            .iter()
+            .find(|barrier| barrier.image == gbuffer)
+            .expect("gbuffer transitions from graphics render target to compute input");
+        assert_eq!(draw_to_compute.before_queue, QueueType::Graphics);
+        assert_eq!(draw_to_compute.after_queue, QueueType::Compute);
+        assert_eq!(draw_to_compute.before, RgState::RenderTarget);
+        assert_eq!(draw_to_compute.after, RgState::ShaderRead);
+
+        let compute_to_post = compiled.barriers_per_pass[3]
+            .iter()
+            .find(|barrier| barrier.image == lighting)
+            .expect("lighting image transitions from compute output to graphics sampling");
+        assert_eq!(compute_to_post.before_queue, QueueType::Compute);
+        assert_eq!(compute_to_post.after_queue, QueueType::Graphics);
+        assert_eq!(compute_to_post.before, RgState::ShaderWrite);
+        assert_eq!(compute_to_post.after, RgState::ShaderRead);
+
+        assert_eq!(compiled.alias_plan.transient_image_count, 4);
+        assert_eq!(compiled.alias_plan.transient_buffer_count, 2);
+        assert!(compiled.alias_plan.image_slot_count < 4);
+        assert_eq!(compiled.alias_plan.buffer_slot_count, 1);
+        assert!(compiled.alias_plan.image_savings_bytes > 0);
+        assert_eq!(compiled.alias_plan.buffer_savings_bytes, scratch_desc.size);
+        assert!(compiled.alias_plan.total_savings_bytes() > scratch_desc.size);
     }
 }

@@ -8,18 +8,27 @@ use crate::handles::HandleAllocator;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::NativeSurfaceDesc;
 use crate::{
-    BindGroupDesc, BindGroupHandle, BindingKind, BufferDesc, BufferHandle, BufferStateKey,
-    CanonicalGroupLayout, CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error, FrameHandle,
-    GraphicsPipelineDesc, ImageDesc, ImageHandle, ImageStateKey, PipelineHandle,
+    AdapterInfo, AdapterSelection, BackendRawCapabilities, BindGroupDesc, BindGroupHandle,
+    BindingKind, BufferDesc, BufferHandle, BufferStateKey, CanonicalGroupLayout,
+    CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error, FrameHandle, GraphicsPipelineDesc,
+    ImageDesc, ImageHandle, ImageStateKey, NativeHandleCapabilities, PipelineHandle,
     PipelineLayoutHandle, RenderGraph, ResourceBinding, Result, RgState, SamplerDesc,
-    SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection, SubmissionHandle, SurfaceEvent,
-    SurfaceHandle, SurfaceInfo, SurfaceSize,
+    SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection, StageMask, SubmissionHandle,
+    SurfaceCapabilities, SurfaceEvent, SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc,
+    SurfaceSize,
 };
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DeviceDesc {
     pub backend: BackendKind,
     pub validation: bool,
+    pub adapter: AdapterSelection,
+    pub required_features: Vec<String>,
+    pub optional_features: Vec<String>,
+    pub disabled_features: Vec<String>,
+    pub required_extensions: Vec<String>,
+    pub optional_extensions: Vec<String>,
+    pub disabled_extensions: Vec<String>,
 }
 
 impl Default for DeviceDesc {
@@ -27,8 +36,76 @@ impl Default for DeviceDesc {
         Self {
             backend: BackendKind::Auto,
             validation: cfg!(debug_assertions),
+            adapter: AdapterSelection::Auto,
+            required_features: Vec::new(),
+            optional_features: Vec::new(),
+            disabled_features: Vec::new(),
+            required_extensions: Vec::new(),
+            optional_extensions: Vec::new(),
+            disabled_extensions: Vec::new(),
         }
     }
+}
+
+impl DeviceDesc {
+    pub fn require_backend_feature(mut self, name: impl Into<String>) -> Self {
+        self.required_features.push(name.into());
+        self
+    }
+
+    pub fn prefer_backend_feature(mut self, name: impl Into<String>) -> Self {
+        self.optional_features.push(name.into());
+        self
+    }
+
+    pub fn disable_backend_feature(mut self, name: impl Into<String>) -> Self {
+        self.disabled_features.push(name.into());
+        self
+    }
+
+    pub fn require_backend_extension(mut self, name: impl Into<String>) -> Self {
+        self.required_extensions.push(name.into());
+        self
+    }
+
+    pub fn prefer_backend_extension(mut self, name: impl Into<String>) -> Self {
+        self.optional_extensions.push(name.into());
+        self
+    }
+
+    pub fn disable_backend_extension(mut self, name: impl Into<String>) -> Self {
+        self.disabled_extensions.push(name.into());
+        self
+    }
+}
+
+/// Enumerate all physical adapters for the given backend without creating a device.
+///
+/// Returns an empty list for backends that are not available on this target.
+pub fn enumerate_adapters(backend: BackendKind) -> Result<Vec<AdapterInfo>> {
+    match backend {
+        BackendKind::Vulkan => enumerate_vulkan_adapters(),
+        BackendKind::Auto => {
+            for kind in auto_backend_preference_order() {
+                let adapters = enumerate_adapters(kind)?;
+                if !adapters.is_empty() {
+                    return Ok(adapters);
+                }
+            }
+            Ok(Vec::new())
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn enumerate_vulkan_adapters() -> Result<Vec<AdapterInfo>> {
+    VulkanBackend::enumerate_adapters(&VulkanBackendConfig::default())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn enumerate_vulkan_adapters() -> Result<Vec<AdapterInfo>> {
+    Ok(Vec::new())
 }
 
 #[derive(Clone)]
@@ -88,7 +165,7 @@ struct SurfaceState {
 
 impl Device {
     pub fn create(desc: DeviceDesc) -> Result<Self> {
-        let backend = create_backend(desc.backend)?;
+        let backend = create_backend(&desc)?;
 
         Ok(Self {
             inner: Arc::new(Mutex::new(DeviceInner {
@@ -144,6 +221,22 @@ impl Device {
             .caps()
     }
 
+    pub fn native_handle_capabilities(&self) -> NativeHandleCapabilities {
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .native_handle_capabilities()
+    }
+
+    pub fn raw_capabilities(&self) -> BackendRawCapabilities {
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .raw_capabilities()
+    }
+
     pub fn create_image(&self, desc: ImageDesc) -> Result<ImageHandle> {
         desc.validate()?;
         let mut inner = self.inner.lock().expect("device mutex poisoned");
@@ -153,12 +246,20 @@ impl Device {
         Ok(handle)
     }
 
-    /// Create an image whose lifetime is tied to one frame.  The caller must
-    /// add the returned handle to the frame's transient list via
-    /// `Frame::add_transient_image`; the device will destroy it automatically
-    /// after the GPU finishes the frame that uses it.
+    /// Create an image whose lifetime is tied to one frame.
+    ///
+    /// On backends that support aliasing (Vulkan) the image is created without
+    /// immediately allocating memory; memory is bound during `Frame::flush` based
+    /// on the render graph's alias plan.  The caller must add the returned handle
+    /// to the frame's transient list via `Frame::add_transient_image` so the
+    /// device destroys it automatically after the GPU finishes the frame.
     pub fn create_transient_image(&self, desc: ImageDesc) -> Result<ImageHandle> {
-        self.create_image(desc)
+        desc.validate()?;
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        let handle = ImageHandle(inner.image_handles.alloc());
+        inner.backend.create_transient_image(handle, desc)?;
+        inner.images.insert(handle, desc);
+        Ok(handle)
     }
 
     pub fn destroy_image(&self, handle: ImageHandle) -> Result<()> {
@@ -427,6 +528,21 @@ impl Device {
         Ok(handle)
     }
 
+    pub fn set_image_debug_name(&self, handle: ImageHandle, name: &str) {
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        inner.backend.set_image_debug_name(handle, name);
+    }
+
+    pub fn set_buffer_debug_name(&self, handle: BufferHandle, name: &str) {
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        inner.backend.set_buffer_debug_name(handle, name);
+    }
+
+    pub fn set_pipeline_debug_name(&self, handle: PipelineHandle, name: &str) {
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        inner.backend.set_pipeline_debug_name(handle, name);
+    }
+
     pub fn destroy_pipeline(&self, handle: PipelineHandle) -> Result<()> {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let desc = inner
@@ -480,6 +596,24 @@ impl Device {
         Ok(())
     }
 
+    pub fn recreate_surface(&self, handle: SurfaceHandle, desc: SurfaceRecreateDesc) -> Result<()> {
+        desc.validate()?;
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        let old = inner
+            .surfaces
+            .get(&handle)
+            .map(|surface| surface.info)
+            .ok_or(Error::InvalidHandle)?;
+        let new = inner.backend.recreate_surface(handle, desc, old)?;
+        let surface = inner
+            .surfaces
+            .get_mut(&handle)
+            .ok_or(Error::InvalidHandle)?;
+        queue_surface_events(&mut surface.events, old, new);
+        surface.info = new;
+        Ok(())
+    }
+
     pub fn surface_info(&self, handle: SurfaceHandle) -> Result<SurfaceInfo> {
         let inner = self.inner.lock().expect("device mutex poisoned");
         inner
@@ -522,6 +656,14 @@ impl Device {
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let _surface = inner.surfaces.remove(&handle).ok_or(Error::InvalidHandle)?;
         inner.backend.destroy_surface(handle)
+    }
+
+    pub fn query_surface_capabilities(&self, handle: SurfaceHandle) -> Result<SurfaceCapabilities> {
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.surfaces.contains_key(&handle) {
+            return Err(Error::InvalidHandle);
+        }
+        inner.backend.query_surface_capabilities(handle)
     }
 
     pub fn begin_frame(&self) -> Result<Frame> {
@@ -670,6 +812,7 @@ fn merge_shader_reflections(
 
     let mut groups: BTreeMap<usize, (String, Vec<(String, CanonicalBinding)>)> = BTreeMap::new();
     let mut push_constants_bytes = 0;
+    let mut push_constants_stage_mask = StageMask::default();
 
     let shaders: Vec<ShaderHandle> = [Some(desc.vertex_shader), desc.fragment_shader]
         .into_iter()
@@ -681,6 +824,9 @@ fn merge_shader_reflections(
             continue;
         };
         push_constants_bytes = push_constants_bytes.max(reflection.layout.push_constants_bytes);
+        if reflection.layout.push_constants_bytes != 0 {
+            push_constants_stage_mask |= reflection.layout.push_constants_stage_mask;
+        }
         for (group_idx, group) in reflection.layout.groups.iter().enumerate() {
             let entry = groups
                 .entry(group_idx)
@@ -704,16 +850,21 @@ fn merge_shader_reflections(
             })
             .collect(),
         push_constants_bytes,
+        push_constants_stage_mask,
     }
 }
 
-fn create_backend(kind: BackendKind) -> Result<Box<dyn Backend>> {
-    match kind {
+fn create_backend(desc: &DeviceDesc) -> Result<Box<dyn Backend>> {
+    match desc.backend {
         BackendKind::Auto => {
             let preferred = auto_backend_preference_order();
             let mut last_error = None;
-            for backend in preferred {
-                match create_backend(backend) {
+            for kind in preferred {
+                let sub = DeviceDesc {
+                    backend: kind,
+                    ..desc.clone()
+                };
+                match create_backend(&sub) {
                     Ok(backend) => return Ok(backend),
                     Err(error) => last_error = Some(error),
                 }
@@ -721,24 +872,31 @@ fn create_backend(kind: BackendKind) -> Result<Box<dyn Backend>> {
             Err(last_error.unwrap_or(Error::Unsupported("no backend is available on this target")))
         }
         BackendKind::Null => Ok(Box::new(NullBackend::new())),
-        BackendKind::Vulkan => create_vulkan_backend(),
+        BackendKind::Vulkan => create_vulkan_backend(desc),
         BackendKind::D3d12 => create_available_backend(BackendKind::D3d12, "D3D12"),
         BackendKind::Metal => create_available_backend(BackendKind::Metal, "Metal"),
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn create_vulkan_backend() -> Result<Box<dyn Backend>> {
+fn create_vulkan_backend(desc: &DeviceDesc) -> Result<Box<dyn Backend>> {
     if !BackendKind::Vulkan.is_available_on_target() {
         return Err(Error::Unsupported("Vulkan is not available on this target"));
     }
-    Ok(Box::new(VulkanBackend::create(VulkanBackendConfig {
-        validation: cfg!(debug_assertions),
-    })?))
+    Ok(Box::new(VulkanBackend::create(VulkanBackendConfig::new(
+        desc.validation,
+        desc.adapter.clone(),
+        desc.required_features.clone(),
+        desc.optional_features.clone(),
+        desc.disabled_features.clone(),
+        desc.required_extensions.clone(),
+        desc.optional_extensions.clone(),
+        desc.disabled_extensions.clone(),
+    ))?))
 }
 
 #[cfg(target_arch = "wasm32")]
-fn create_vulkan_backend() -> Result<Box<dyn Backend>> {
+fn create_vulkan_backend(_desc: &DeviceDesc) -> Result<Box<dyn Backend>> {
     Err(Error::Unsupported("Vulkan is not available on this target"))
 }
 

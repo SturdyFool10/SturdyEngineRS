@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use ash::{khr, vk, Device, Entry, Instance};
 
 use crate::{
-    Error, Extent3d, Format, ImageDesc, ImageUsage, NativeSurfaceDesc, Result, SurfaceColorSpace,
-    SurfaceHandle, SurfaceInfo, SurfaceSize,
+    Error, Extent3d, Format, ImageDesc, ImageUsage, NativeSurfaceDesc, Result, SurfaceCapabilities,
+    SurfaceColorSpace, SurfaceFormatInfo, SurfaceHandle, SurfaceHdrPreference, SurfaceInfo,
+    SurfacePresentMode, SurfaceRecreateDesc, SurfaceSize,
 };
 
 #[derive(Default)]
@@ -19,6 +20,8 @@ struct VulkanSurface {
     swapchain: VulkanSwapchain,
     acquired_image_index: Option<u32>,
     size: SurfaceSize,
+    hdr: SurfaceHdrPreference,
+    preferred_present_mode: Option<SurfacePresentMode>,
     /// Signaled by vkAcquireNextImageKHR when the swapchain image is ready.
     image_available: vk::Semaphore,
 }
@@ -97,6 +100,8 @@ impl SurfaceRegistry {
                 physical_device,
                 surface,
                 desc.size,
+                desc.hdr.preferred_formats(),
+                desc.preferred_present_mode.as_ref(),
                 vk::SwapchainKHR::null(),
             )
         })() {
@@ -119,6 +124,8 @@ impl SurfaceRegistry {
                 swapchain,
                 acquired_image_index: None,
                 size: desc.size,
+                hdr: desc.hdr,
+                preferred_present_mode: desc.preferred_present_mode,
                 image_available,
             },
         );
@@ -139,6 +146,8 @@ impl SurfaceRegistry {
             ));
         }
         let old_swapchain = surface.swapchain.swapchain;
+        let preferred_formats = surface.hdr.preferred_formats();
+        let preferred_present_mode = surface.preferred_present_mode.as_ref();
         let new_swapchain = create_swapchain(
             device,
             &surface.surface_loader,
@@ -146,6 +155,51 @@ impl SurfaceRegistry {
             physical_device,
             surface.surface,
             size,
+            preferred_formats,
+            preferred_present_mode,
+            old_swapchain,
+        )?;
+        destroy_swapchain(device, &surface.swapchain_loader, &mut surface.swapchain);
+        surface.swapchain = new_swapchain;
+        surface.size = size;
+        surface.swapchain.info()
+    }
+
+    pub fn recreate_surface(
+        &mut self,
+        device: &Device,
+        physical_device: vk::PhysicalDevice,
+        handle: SurfaceHandle,
+        desc: SurfaceRecreateDesc,
+    ) -> Result<SurfaceInfo> {
+        let surface = self.surfaces.get_mut(&handle).ok_or(Error::InvalidHandle)?;
+        if surface.acquired_image_index.is_some() {
+            return Err(Error::InvalidInput(
+                "cannot recreate a Vulkan surface while an image is acquired".into(),
+            ));
+        }
+        let size = desc.size.unwrap_or(surface.size);
+
+        // Apply any HDR/present-mode overrides from the recreate desc.
+        if let Some(hdr) = desc.hdr {
+            surface.hdr = hdr;
+        }
+        if desc.preferred_present_mode.is_some() {
+            surface.preferred_present_mode = desc.preferred_present_mode;
+        }
+
+        let old_swapchain = surface.swapchain.swapchain;
+        let preferred_formats = surface.hdr.preferred_formats();
+        let preferred_present_mode = surface.preferred_present_mode.as_ref();
+        let new_swapchain = create_swapchain(
+            device,
+            &surface.surface_loader,
+            &surface.swapchain_loader,
+            physical_device,
+            surface.surface,
+            size,
+            preferred_formats,
+            preferred_present_mode,
             old_swapchain,
         )?;
         destroy_swapchain(device, &surface.swapchain_loader, &mut surface.swapchain);
@@ -237,6 +291,69 @@ impl SurfaceRegistry {
         Ok(())
     }
 
+    pub fn query_surface_capabilities(
+        &self,
+        physical_device: vk::PhysicalDevice,
+        handle: SurfaceHandle,
+    ) -> Result<SurfaceCapabilities> {
+        let surface = self.surfaces.get(&handle).ok_or(Error::InvalidHandle)?;
+        let loader = &surface.surface_loader;
+
+        let caps = unsafe {
+            loader
+                .get_physical_device_surface_capabilities(physical_device, surface.surface)
+                .map_err(|e| {
+                    Error::Backend(format!(
+                        "vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed: {e:?}"
+                    ))
+                })?
+        };
+        let vk_formats = unsafe {
+            loader
+                .get_physical_device_surface_formats(physical_device, surface.surface)
+                .map_err(|e| {
+                    Error::Backend(format!(
+                        "vkGetPhysicalDeviceSurfaceFormatsKHR failed: {e:?}"
+                    ))
+                })?
+        };
+        let vk_modes = unsafe {
+            loader
+                .get_physical_device_surface_present_modes(physical_device, surface.surface)
+                .map_err(|e| {
+                    Error::Backend(format!(
+                        "vkGetPhysicalDeviceSurfacePresentModesKHR failed: {e:?}"
+                    ))
+                })?
+        };
+
+        let formats = vk_formats
+            .into_iter()
+            .filter_map(|f| {
+                vk_format_to_engine(f.format)
+                    .ok()
+                    .map(|format| SurfaceFormatInfo {
+                        format,
+                        color_space: vk_color_space_to_engine(f.color_space),
+                    })
+            })
+            .collect();
+
+        let present_modes = vk_modes
+            .into_iter()
+            .map(vk_present_mode_to_engine)
+            .collect();
+
+        Ok(SurfaceCapabilities {
+            formats,
+            present_modes,
+            min_image_count: caps.min_image_count,
+            max_image_count: caps.max_image_count,
+            current_width: caps.current_extent.width,
+            current_height: caps.current_extent.height,
+        })
+    }
+
     pub fn destroy_surface(&mut self, device: &Device, handle: SurfaceHandle) -> Result<()> {
         let mut surface = self.surfaces.remove(&handle).ok_or(Error::InvalidHandle)?;
         destroy_surface(device, &mut surface);
@@ -280,6 +397,8 @@ fn create_swapchain(
     physical_device: vk::PhysicalDevice,
     surface: vk::SurfaceKHR,
     size: SurfaceSize,
+    preferred_formats: &[(Format, SurfaceColorSpace)],
+    preferred_present_mode: Option<&SurfacePresentMode>,
     old_swapchain: vk::SwapchainKHR,
 ) -> Result<VulkanSwapchain> {
     let capabilities = unsafe {
@@ -310,8 +429,8 @@ fn create_swapchain(
             })?
     };
 
-    let format = choose_surface_format(&formats)?;
-    let present_mode = choose_present_mode(&present_modes);
+    let format = choose_surface_format(&formats, preferred_formats)?;
+    let present_mode = choose_present_mode(&present_modes, preferred_present_mode);
     let extent = choose_extent(&capabilities, size);
     let image_count = choose_image_count(&capabilities);
     let create_info = vk::SwapchainCreateInfoKHR::default()
@@ -402,45 +521,62 @@ fn create_swapchain(
     })
 }
 
-fn choose_surface_format(formats: &[vk::SurfaceFormatKHR]) -> Result<vk::SurfaceFormatKHR> {
-    if formats.is_empty() {
+fn choose_surface_format(
+    available: &[vk::SurfaceFormatKHR],
+    preferred: &[(Format, SurfaceColorSpace)],
+) -> Result<vk::SurfaceFormatKHR> {
+    if available.is_empty() {
         return Err(Error::Unsupported(
             "Vulkan surface did not report any supported formats",
         ));
     }
-    formats
+    // Try each preferred (format, color_space) pair in priority order.
+    for (fmt, cs) in preferred {
+        if let (Some(vk_fmt), Some(vk_cs)) =
+            (engine_format_to_vk(*fmt), engine_color_space_to_vk(*cs))
+        {
+            if let Some(hit) = available
+                .iter()
+                .copied()
+                .find(|f| f.format == vk_fmt && f.color_space == vk_cs)
+            {
+                return Ok(hit);
+            }
+        }
+    }
+    // Fall back to any known-good format in the available list.
+    available
         .iter()
         .copied()
-        .find(|format| {
+        .find(|f| {
             matches!(
-                format.format,
+                f.format,
                 vk::Format::B8G8R8A8_UNORM
                     | vk::Format::R8G8B8A8_UNORM
                     | vk::Format::R16G16B16A16_SFLOAT
                     | vk::Format::R32G32B32A32_SFLOAT
-            ) && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-        })
-        .or_else(|| {
-            formats.iter().copied().find(|format| {
-                matches!(
-                    format.format,
-                    vk::Format::B8G8R8A8_UNORM
-                        | vk::Format::R8G8B8A8_UNORM
-                        | vk::Format::R16G16B16A16_SFLOAT
-                        | vk::Format::R32G32B32A32_SFLOAT
-                )
-            })
+            )
         })
         .ok_or(Error::Unsupported(
             "Vulkan surface did not report a format supported by the engine",
         ))
 }
 
-fn choose_present_mode(present_modes: &[vk::PresentModeKHR]) -> vk::PresentModeKHR {
-    present_modes
+fn choose_present_mode(
+    available: &[vk::PresentModeKHR],
+    preferred: Option<&SurfacePresentMode>,
+) -> vk::PresentModeKHR {
+    if let Some(pref) = preferred {
+        let vk_pref = engine_present_mode_to_vk(pref);
+        if available.iter().any(|m| *m == vk_pref) {
+            return vk_pref;
+        }
+    }
+    // Default preference: Mailbox → FIFO.
+    available
         .iter()
         .copied()
-        .find(|mode| *mode == vk::PresentModeKHR::MAILBOX)
+        .find(|m| *m == vk::PresentModeKHR::MAILBOX)
         .unwrap_or(vk::PresentModeKHR::FIFO)
 }
 
@@ -485,6 +621,36 @@ fn destroy_swapchain(
     }
 }
 
+fn engine_format_to_vk(format: Format) -> Option<vk::Format> {
+    match format {
+        Format::Bgra8Unorm => Some(vk::Format::B8G8R8A8_UNORM),
+        Format::Rgba8Unorm => Some(vk::Format::R8G8B8A8_UNORM),
+        Format::Rgba16Float => Some(vk::Format::R16G16B16A16_SFLOAT),
+        Format::Rgba32Float => Some(vk::Format::R32G32B32A32_SFLOAT),
+        _ => None,
+    }
+}
+
+fn engine_color_space_to_vk(cs: SurfaceColorSpace) -> Option<vk::ColorSpaceKHR> {
+    match cs {
+        SurfaceColorSpace::SrgbNonlinear => Some(vk::ColorSpaceKHR::SRGB_NONLINEAR),
+        SurfaceColorSpace::DisplayP3Nonlinear => Some(vk::ColorSpaceKHR::DISPLAY_P3_NONLINEAR_EXT),
+        SurfaceColorSpace::ExtendedSrgbLinear => Some(vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT),
+        SurfaceColorSpace::Hdr10St2084 => Some(vk::ColorSpaceKHR::HDR10_ST2084_EXT),
+        SurfaceColorSpace::Hdr10Hlg => Some(vk::ColorSpaceKHR::HDR10_HLG_EXT),
+        SurfaceColorSpace::Unknown => None,
+    }
+}
+
+fn engine_present_mode_to_vk(mode: &SurfacePresentMode) -> vk::PresentModeKHR {
+    match mode {
+        SurfacePresentMode::Fifo => vk::PresentModeKHR::FIFO,
+        SurfacePresentMode::Mailbox => vk::PresentModeKHR::MAILBOX,
+        SurfacePresentMode::Immediate => vk::PresentModeKHR::IMMEDIATE,
+        SurfacePresentMode::RelaxedFifo => vk::PresentModeKHR::FIFO_RELAXED,
+    }
+}
+
 fn vk_format_to_engine(format: vk::Format) -> Result<Format> {
     match format {
         vk::Format::B8G8R8A8_UNORM => Ok(Format::Bgra8Unorm),
@@ -494,6 +660,16 @@ fn vk_format_to_engine(format: vk::Format) -> Result<Format> {
         _ => Err(Error::Unsupported(
             "Vulkan surface format is not supported by the engine",
         )),
+    }
+}
+
+fn vk_present_mode_to_engine(mode: vk::PresentModeKHR) -> SurfacePresentMode {
+    match mode {
+        vk::PresentModeKHR::FIFO => SurfacePresentMode::Fifo,
+        vk::PresentModeKHR::MAILBOX => SurfacePresentMode::Mailbox,
+        vk::PresentModeKHR::IMMEDIATE => SurfacePresentMode::Immediate,
+        vk::PresentModeKHR::FIFO_RELAXED => SurfacePresentMode::RelaxedFifo,
+        _ => SurfacePresentMode::Fifo,
     }
 }
 

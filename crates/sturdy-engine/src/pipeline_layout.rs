@@ -18,6 +18,11 @@ impl PipelineLayoutBuilder {
         self
     }
 
+    pub fn push_constants_stage_mask(mut self, stage_mask: StageMask) -> Self {
+        self.layout.push_constants_stage_mask = stage_mask;
+        self
+    }
+
     pub fn sampled_image(
         self,
         group: impl Into<String>,
@@ -101,20 +106,30 @@ impl PipelineLayoutBuilder {
         update_rate: UpdateRate,
     ) -> Self {
         let group = group.into();
+        // Compute the next free binding slot before taking a mutable borrow.
+        let next_slot = self
+            .layout
+            .groups
+            .iter()
+            .find(|g| g.name == group)
+            .map(|g| {
+                g.bindings
+                    .iter()
+                    .map(|b| b.binding + b.count.max(1))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
         let binding = CanonicalBinding {
             path: path.into(),
             kind,
             count: 1,
             stage_mask,
             update_rate,
+            binding: next_slot,
         };
 
-        if let Some(existing_group) = self
-            .layout
-            .groups
-            .iter_mut()
-            .find(|existing_group| existing_group.name == group)
-        {
+        if let Some(existing_group) = self.layout.groups.iter_mut().find(|g| g.name == group) {
             existing_group.bindings.push(binding);
         } else {
             self.layout.groups.push(CanonicalGroupLayout {

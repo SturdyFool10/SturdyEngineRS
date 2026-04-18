@@ -2,10 +2,17 @@ use crate::{BufferHandle, ImageHandle, PipelineLayoutHandle, SamplerHandle};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum BindingKind {
+    /// A texture/image view without an embedded sampler.
+    ///
+    /// Sturdy's canonical layout intentionally models sampled images and
+    /// samplers as separate bindings. Backends that support combined image
+    /// samplers can compose them internally later, but the engine-facing
+    /// reflection and bind-group model stays split for cross-API portability.
     SampledImage,
     StorageImage,
     UniformBuffer,
     StorageBuffer,
+    /// A standalone sampler binding paired with `SampledImage` shader usage.
     Sampler,
     AccelerationStructure,
 }
@@ -44,6 +51,9 @@ pub enum UpdateRate {
     Draw,
 }
 
+/// Sentinel value for `CanonicalBinding::count` indicating an unbounded (bindless) descriptor array.
+pub const BINDLESS_COUNT: u32 = u32::MAX;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CanonicalBinding {
     pub path: String,
@@ -51,6 +61,9 @@ pub struct CanonicalBinding {
     pub count: u32,
     pub stage_mask: StageMask,
     pub update_rate: UpdateRate,
+    /// Vulkan binding slot (the `binding` in `layout(set=X, binding=Y)`).
+    /// Set from Slang reflection data when available; 0-indexed otherwise.
+    pub binding: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,6 +76,7 @@ pub struct CanonicalGroupLayout {
 pub struct CanonicalPipelineLayout {
     pub groups: Vec<CanonicalGroupLayout>,
     pub push_constants_bytes: u32,
+    pub push_constants_stage_mask: StageMask,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

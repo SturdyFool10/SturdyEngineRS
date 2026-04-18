@@ -1,70 +1,31 @@
 use ash::{vk, Device};
 
+#[path = "commands/batch_pool.rs"]
+mod batch_pool;
+
 use crate::{
     BufferBarrier, CompiledGraph, Error, Format, ImageBarrier, IndexFormat, PassDesc, PassWork,
     PushConstants, Result, RgState, SubmissionHandle, SubresourceRange,
 };
 
+use super::debug::DebugUtils;
 use super::descriptors::DescriptorRegistry;
 use super::pipelines::PipelineRegistry;
+use super::queues::{queue_family_index, QueueFamilyMap, VulkanQueues};
 use super::resources::ResourceRegistry;
-
-/// One command pool + command buffer per batch slot.
-/// Pools are reset at the start of each frame; command buffers are reused.
-struct BatchPool {
-    pool: vk::CommandPool,
-    command_buffer: vk::CommandBuffer,
-}
-
-impl BatchPool {
-    fn create(device: &Device, queue_family: u32) -> Result<Self> {
-        let pool_info = vk::CommandPoolCreateInfo::default()
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-            .queue_family_index(queue_family);
-        let pool = unsafe {
-            device
-                .create_command_pool(&pool_info, None)
-                .map_err(|e| Error::Backend(format!("vkCreateCommandPool failed: {e:?}")))?
-        };
-        let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
-        let command_buffer = unsafe {
-            match device.allocate_command_buffers(&alloc_info) {
-                Ok(bufs) => bufs[0],
-                Err(e) => {
-                    device.destroy_command_pool(pool, None);
-                    return Err(Error::Backend(format!(
-                        "vkAllocateCommandBuffers failed: {e:?}"
-                    )));
-                }
-            }
-        };
-        Ok(Self {
-            pool,
-            command_buffer,
-        })
-    }
-
-    fn destroy(&self, device: &Device) {
-        unsafe {
-            device.destroy_command_pool(self.pool, None);
-        }
-    }
-}
+use batch_pool::BatchPool;
 
 pub struct CommandContext {
-    queue_family: u32,
     /// One pool per batch slot; grows to match the largest batch count seen.
     batch_pools: Vec<BatchPool>,
+    pending_semaphores: Vec<vk::Semaphore>,
     frame_fence: vk::Fence,
     frame_submitted: bool,
     submission_count: u64,
 }
 
 impl CommandContext {
-    pub fn create(device: &Device, queue_family: u32) -> Result<Self> {
+    pub fn create(device: &Device, queue_families: QueueFamilyMap) -> Result<Self> {
         let fence_info = vk::FenceCreateInfo::default();
         let frame_fence = unsafe {
             device
@@ -73,11 +34,11 @@ impl CommandContext {
         };
 
         // Pre-allocate one batch pool so there is always at least one cmd buf.
-        let initial_pool = BatchPool::create(device, queue_family)?;
+        let initial_pool = BatchPool::create(device, queue_families.graphics)?;
 
         Ok(Self {
-            queue_family,
             batch_pools: vec![initial_pool],
+            pending_semaphores: Vec::new(),
             frame_fence,
             frame_submitted: false,
             submission_count: 0,
@@ -89,11 +50,13 @@ impl CommandContext {
     pub fn submit_graph(
         &mut self,
         device: &Device,
-        queue: vk::Queue,
+        queues: VulkanQueues,
+        queue_families: QueueFamilyMap,
         graph: &CompiledGraph,
         resources: &ResourceRegistry,
         descriptors: &DescriptorRegistry,
         pipelines: &mut PipelineRegistry,
+        debug: &DebugUtils,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
     ) -> Result<SubmissionHandle> {
@@ -107,6 +70,11 @@ impl CommandContext {
                     .reset_fences(&[self.frame_fence])
                     .map_err(|e| Error::Backend(format!("vkResetFences failed: {e:?}")))?;
             }
+            for semaphore in self.pending_semaphores.drain(..) {
+                unsafe {
+                    device.destroy_semaphore(semaphore, None);
+                }
+            }
             self.frame_submitted = false;
         }
 
@@ -114,7 +82,12 @@ impl CommandContext {
 
         // Grow batch pool vec to cover the number of batches in this frame.
         while self.batch_pools.len() < num_batches {
-            let bp = BatchPool::create(device, self.queue_family)?;
+            let batch_queue = graph
+                .batches
+                .get(self.batch_pools.len())
+                .map(|batch| batch.queue)
+                .unwrap_or(crate::QueueType::Graphics);
+            let bp = BatchPool::create(device, queue_families.family(batch_queue))?;
             self.batch_pools.push(bp);
         }
 
@@ -155,39 +128,74 @@ impl CommandContext {
                         image_barriers,
                         buffer_barriers,
                         resources,
+                        queue_families,
                     )?;
                     if let Some(pass) = graph.passes.get(pass_idx) {
+                        if !pass.name.is_empty() {
+                            debug.begin_region(cmd, &pass.name, [0.5, 0.5, 1.0, 1.0]);
+                        }
                         self.record_pass(device, cmd, pass, resources, descriptors, pipelines)?;
+                        if !pass.name.is_empty() {
+                            debug.end_region(cmd);
+                        }
                     }
                 }
                 self.end_cmd(device, cmd)?;
             }
         }
 
-        // Collect command buffers in batch order.
-        let cmd_bufs: Vec<vk::CommandBuffer> = self.batch_pools[..num_batches]
-            .iter()
-            .map(|bp| bp.command_buffer)
-            .collect();
-
-        let wait_sems: Vec<vk::Semaphore> = wait_semaphore.into_iter().collect();
-        let signal_sems: Vec<vk::Semaphore> = signal_semaphore.into_iter().collect();
-        let wait_stages: Vec<vk::PipelineStageFlags> = wait_sems
-            .iter()
-            .map(|_| vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .collect();
-
-        let submit_info = vk::SubmitInfo::default()
-            .command_buffers(&cmd_bufs)
-            .wait_semaphores(&wait_sems)
-            .wait_dst_stage_mask(&wait_stages)
-            .signal_semaphores(&signal_sems);
-
-        unsafe {
-            device
-                .queue_submit(queue, &[submit_info], self.frame_fence)
-                .map_err(|e| Error::Backend(format!("vkQueueSubmit failed: {e:?}")))?;
+        let batch_count = graph.batches.len().max(1);
+        let mut chain_semaphores = Vec::new();
+        for _ in 1..batch_count {
+            let info = vk::SemaphoreCreateInfo::default();
+            let semaphore = unsafe {
+                device
+                    .create_semaphore(&info, None)
+                    .map_err(|e| Error::Backend(format!("vkCreateSemaphore failed: {e:?}")))?
+            };
+            chain_semaphores.push(semaphore);
         }
+
+        for batch_index in 0..batch_count {
+            let batch_queue = graph
+                .batches
+                .get(batch_index)
+                .map(|batch| batch.queue)
+                .unwrap_or(crate::QueueType::Graphics);
+            let mut wait_sems = Vec::new();
+            if batch_index == 0 {
+                wait_sems.extend(wait_semaphore);
+            } else {
+                wait_sems.push(chain_semaphores[batch_index - 1]);
+            }
+            let mut signal_sems = Vec::new();
+            if batch_index + 1 < batch_count {
+                signal_sems.push(chain_semaphores[batch_index]);
+            } else {
+                signal_sems.extend(signal_semaphore);
+            }
+            let wait_stages = wait_sems
+                .iter()
+                .map(|_| vk::PipelineStageFlags::ALL_COMMANDS)
+                .collect::<Vec<_>>();
+            let cmd_bufs = [self.batch_pools[batch_index].command_buffer];
+            let submit_info = vk::SubmitInfo::default()
+                .command_buffers(&cmd_bufs)
+                .wait_semaphores(&wait_sems)
+                .wait_dst_stage_mask(&wait_stages)
+                .signal_semaphores(&signal_sems);
+            let fence = if batch_index + 1 == batch_count {
+                self.frame_fence
+            } else {
+                vk::Fence::null()
+            };
+            unsafe {
+                device
+                    .queue_submit(queues.queue(batch_queue), &[submit_info], fence)
+                    .map_err(|e| Error::Backend(format!("vkQueueSubmit failed: {e:?}")))?;
+            }
+        }
+        self.pending_semaphores.extend(chain_semaphores);
         self.submission_count += 1;
         self.frame_submitted = true;
         Ok(SubmissionHandle(self.submission_count))
@@ -209,6 +217,9 @@ impl CommandContext {
         unsafe {
             // device_wait_idle is called first in VulkanBackend::Drop.
             device.destroy_fence(self.frame_fence, None);
+            for semaphore in &self.pending_semaphores {
+                device.destroy_semaphore(*semaphore, None);
+            }
             for bp in &self.batch_pools {
                 bp.destroy(device);
             }
@@ -507,6 +518,7 @@ impl CommandContext {
         image_barriers: &[ImageBarrier],
         buffer_barriers: &[BufferBarrier],
         resources: &ResourceRegistry,
+        queue_families: QueueFamilyMap,
     ) -> Result<()> {
         if image_barriers.is_empty() && buffer_barriers.is_empty() {
             return Ok(());
@@ -515,13 +527,19 @@ impl CommandContext {
         let vk_image_barriers = image_barriers
             .iter()
             .map(|barrier| {
+                let (src_queue_family, dst_queue_family) = queue_family_index(
+                    queue_families,
+                    barrier.before_queue,
+                    barrier.after_queue,
+                    barrier.queue,
+                );
                 Ok(vk::ImageMemoryBarrier::default()
                     .src_access_mask(access_mask(barrier.before))
                     .dst_access_mask(access_mask(barrier.after))
                     .old_layout(image_layout(barrier.before))
                     .new_layout(image_layout(barrier.after))
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .src_queue_family_index(src_queue_family)
+                    .dst_queue_family_index(dst_queue_family)
                     .image(resources.image(barrier.image)?)
                     .subresource_range(subresource_range(barrier.after, barrier.subresource)))
             })
@@ -529,11 +547,17 @@ impl CommandContext {
         let vk_buffer_barriers = buffer_barriers
             .iter()
             .map(|barrier| {
+                let (src_queue_family, dst_queue_family) = queue_family_index(
+                    queue_families,
+                    barrier.before_queue,
+                    barrier.after_queue,
+                    barrier.queue,
+                );
                 Ok(vk::BufferMemoryBarrier::default()
                     .src_access_mask(access_mask(barrier.before))
                     .dst_access_mask(access_mask(barrier.after))
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .src_queue_family_index(src_queue_family)
+                    .dst_queue_family_index(dst_queue_family)
                     .buffer(resources.buffer(barrier.buffer)?)
                     .offset(barrier.offset)
                     .size(if barrier.size == 0 {

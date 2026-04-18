@@ -1,10 +1,12 @@
+use crate::native_handle_capabilities_for_backend;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::NativeSurfaceDesc;
 use crate::{
-    BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, CanonicalPipelineLayout, Caps,
-    CompiledGraph, ComputePipelineDesc, GraphicsPipelineDesc, ImageDesc, ImageHandle,
-    PipelineHandle, PipelineLayoutHandle, Result, SamplerDesc, SamplerHandle, ShaderDesc,
-    ShaderHandle, ShaderTarget, SubmissionHandle, SurfaceHandle, SurfaceInfo, SurfaceSize,
+    BackendRawCapabilities, BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle,
+    CanonicalPipelineLayout, Caps, CompiledGraph, ComputePipelineDesc, GraphicsPipelineDesc,
+    ImageDesc, ImageHandle, NativeHandleCapabilities, PipelineHandle, PipelineLayoutHandle, Result,
+    SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, ShaderTarget, SubmissionHandle,
+    SurfaceCapabilities, SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
 };
 
 #[cfg(target_os = "windows")]
@@ -89,6 +91,12 @@ pub trait Backend: Send + Sync {
         None
     }
     fn caps(&self) -> Caps;
+    fn native_handle_capabilities(&self) -> NativeHandleCapabilities {
+        native_handle_capabilities_for_backend(self.kind())
+    }
+    fn raw_capabilities(&self) -> BackendRawCapabilities {
+        BackendRawCapabilities::for_backend(self.kind(), &self.caps())
+    }
     /// The shader IR format this backend requires. The device uses this to select
     /// the Slang compilation target when compiling from source.
     fn preferred_shader_ir(&self) -> ShaderTarget {
@@ -96,6 +104,13 @@ pub trait Backend: Send + Sync {
     }
     fn create_image(&self, _handle: ImageHandle, _desc: ImageDesc) -> Result<()> {
         Ok(())
+    }
+    /// Create a transient image that may be aliased with other transient images.
+    ///
+    /// Backends that support aliasing (Vulkan) defer memory binding to flush time.
+    /// Backends that do not support aliasing fall back to `create_image`.
+    fn create_transient_image(&self, handle: ImageHandle, desc: ImageDesc) -> Result<()> {
+        self.create_image(handle, desc)
     }
     fn destroy_image(&self, _handle: ImageHandle) -> Result<()> {
         Ok(())
@@ -177,6 +192,17 @@ pub trait Backend: Send + Sync {
             color_space: crate::SurfaceColorSpace::Unknown,
         })
     }
+    fn recreate_surface(
+        &self,
+        _handle: SurfaceHandle,
+        desc: SurfaceRecreateDesc,
+        current: SurfaceInfo,
+    ) -> Result<SurfaceInfo> {
+        Ok(SurfaceInfo {
+            size: desc.size.unwrap_or(current.size),
+            ..current
+        })
+    }
     fn acquire_surface_image(
         &self,
         _surface: SurfaceHandle,
@@ -194,6 +220,15 @@ pub trait Backend: Send + Sync {
     fn destroy_surface(&self, _handle: SurfaceHandle) -> Result<()> {
         Ok(())
     }
+    fn query_surface_capabilities(&self, _handle: SurfaceHandle) -> Result<SurfaceCapabilities> {
+        Ok(SurfaceCapabilities::default())
+    }
+    /// Assign a debug name to an image resource. No-op when debug utils are unavailable.
+    fn set_image_debug_name(&self, _handle: ImageHandle, _name: &str) {}
+    /// Assign a debug name to a buffer resource. No-op when debug utils are unavailable.
+    fn set_buffer_debug_name(&self, _handle: BufferHandle, _name: &str) {}
+    /// Assign a debug name to a pipeline. No-op when debug utils are unavailable.
+    fn set_pipeline_debug_name(&self, _handle: PipelineHandle, _name: &str) {}
     fn flush(&self, _graph: &CompiledGraph) -> Result<SubmissionHandle>;
     fn wait_submission(&self, _token: SubmissionHandle) -> Result<()> {
         Ok(())
@@ -227,7 +262,7 @@ impl Backend for NullBackend {
     }
 
     fn caps(&self) -> Caps {
-        self.caps
+        self.caps.clone()
     }
 
     fn flush(&self, _graph: &CompiledGraph) -> Result<SubmissionHandle> {

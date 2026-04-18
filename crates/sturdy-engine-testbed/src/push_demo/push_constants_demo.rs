@@ -9,7 +9,7 @@ use sturdy_engine::{
 
 use super::bytes::{bytes_of_slice, bytes_of_value};
 use super::geometry::{push_indices, push_vertices};
-use super::push_data::{animated_push_data, PUSH_CONSTANT_BYTES};
+use super::push_data::{animated_push_data, PushData, PUSH_CONSTANT_BYTES};
 use super::push_vertex::PushVertex;
 use super::shader_assets::included_spirv;
 
@@ -43,6 +43,7 @@ impl PushConstantsDemo {
         let pipeline_layout = engine.create_pipeline_layout(CanonicalPipelineLayout {
             groups: Vec::new(),
             push_constants_bytes: PUSH_CONSTANT_BYTES,
+            push_constants_stage_mask: StageMask::VERTEX | StageMask::FRAGMENT,
         })?;
         let vertex_shader = engine.create_shader(ShaderDesc {
             source: ShaderSource::Spirv(included_spirv("push_vertex.spv")?),
@@ -73,13 +74,94 @@ impl PushConstantsDemo {
         target: &SurfaceImage,
         time_seconds: f32,
     ) -> Result<(), Error> {
+        self.draw_with_clear(frame, target, time_seconds, true)
+    }
+
+    pub fn draw_with_clear(
+        &mut self,
+        frame: &mut Frame,
+        target: &SurfaceImage,
+        time_seconds: f32,
+        clear: bool,
+    ) -> Result<(), Error> {
         let pipeline = self.pipeline(target.desc().format)?;
         let push = animated_push_data(time_seconds);
-        frame
+        let mut pass = frame
             .draw_pass("draw-indexed-push-constant-quad")
-            .color(target)
-            .clear_color([0.02, 0.025, 0.03, 1.0])
-            .pipeline(pipeline)
+            .color(target);
+        if clear {
+            pass = pass.clear_color([0.02, 0.025, 0.03, 1.0]);
+        }
+        pass.pipeline(pipeline)
+            .push_constants(
+                StageMask::VERTEX | StageMask::FRAGMENT,
+                bytes_of_value(&push),
+            )
+            .vertex_buffer(&self.vertex_buffer, 0, 0)
+            .index_buffer(&self.index_buffer, IndexFormat::Uint16, 0)
+            .draw(self.index_count)
+            .submit()
+    }
+
+    pub fn draw_gallery(
+        &mut self,
+        frame: &mut Frame,
+        target: &SurfaceImage,
+        time_seconds: f32,
+    ) -> Result<(), Error> {
+        let colors = [
+            [1.0, 0.20, 0.12, 1.0],
+            [0.15, 0.85, 0.35, 1.0],
+            [0.20, 0.45, 1.15, 1.0],
+            [1.1, 0.85, 0.22, 1.0],
+            [0.95, 0.35, 1.1, 1.0],
+            [0.25, 1.0, 0.95, 1.0],
+        ];
+
+        for (i, tint) in colors.into_iter().enumerate() {
+            let phase = time_seconds * (0.7 + i as f32 * 0.08) + i as f32 * 1.047;
+            let radius = 0.48 + 0.08 * (time_seconds * 0.9 + i as f32).sin();
+            let offset = [phase.cos() * radius, phase.sin() * radius * 0.58];
+            let scale = 0.18 + 0.035 * (time_seconds * 2.0 + i as f32 * 0.7).sin();
+            self.draw_custom(
+                frame,
+                target,
+                PushData::new(offset, [scale, scale], tint),
+                false,
+                i,
+            )?;
+        }
+
+        let center_scale = 0.34 + 0.035 * (time_seconds * 1.6).sin();
+        self.draw_custom(
+            frame,
+            target,
+            PushData::new(
+                [0.0, 0.0],
+                [center_scale, center_scale],
+                [1.15, 1.05, 0.75, 1.0],
+            ),
+            false,
+            colors.len(),
+        )
+    }
+
+    fn draw_custom(
+        &mut self,
+        frame: &mut Frame,
+        target: &SurfaceImage,
+        push: PushData,
+        clear: bool,
+        index: usize,
+    ) -> Result<(), Error> {
+        let pipeline = self.pipeline(target.desc().format)?;
+        let mut pass = frame
+            .draw_pass(format!("push-constant-orbit-{index}"))
+            .color(target);
+        if clear {
+            pass = pass.clear_color([0.02, 0.025, 0.03, 1.0]);
+        }
+        pass.pipeline(pipeline)
             .push_constants(
                 StageMask::VERTEX | StageMask::FRAGMENT,
                 bytes_of_value(&push),

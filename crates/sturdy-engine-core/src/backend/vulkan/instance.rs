@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString};
 
-use ash::{Entry, Instance, vk};
+use ash::{vk, Entry, Instance};
 
 use crate::{Error, Result};
 
@@ -73,6 +73,19 @@ fn requested_layers(entry: &Entry, validation: bool) -> Result<Vec<CString>> {
     Ok(available.then_some(wanted).into_iter().collect())
 }
 
+pub fn has_debug_utils_extension(entry: &Entry) -> bool {
+    unsafe {
+        entry
+            .enumerate_instance_extension_properties(None)
+            .unwrap_or_default()
+            .iter()
+            .any(|ext| {
+                let name = unsafe { std::ffi::CStr::from_ptr(ext.extension_name.as_ptr()) };
+                name.to_bytes() == b"VK_EXT_debug_utils"
+            })
+    }
+}
+
 fn required_instance_extensions(entry: &Entry) -> Result<Vec<CString>> {
     let available = unsafe {
         entry
@@ -112,6 +125,8 @@ fn required_instance_extensions(entry: &Entry) -> Result<Vec<CString>> {
             "VK_KHR_portability_enumeration",
         );
     }
+
+    push_extension(&mut extensions, &has_extension, "VK_EXT_debug_utils");
 
     Ok(extensions)
 }

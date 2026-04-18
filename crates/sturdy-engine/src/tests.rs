@@ -63,6 +63,23 @@ fn creates_sampled_image_and_sampler_bind_group() {
 }
 
 #[test]
+fn engine_exposes_native_handle_capabilities() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let capabilities = engine.native_handle_capabilities();
+
+    assert_eq!(capabilities.backend, BackendKind::Null);
+    assert!(capabilities.handles.is_empty());
+    assert!(!capabilities.supports_export(NativeHandleKind::VulkanDevice));
+}
+
+#[test]
+fn engine_exposes_backend_raw_capabilities() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+
+    assert_eq!(engine.raw_capabilities(), BackendRawCapabilities::None);
+}
+
+#[test]
 fn bind_group_rejects_resource_kind_mismatch() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     let sampler = engine.create_sampler(SamplerDesc::default()).unwrap();
@@ -80,6 +97,20 @@ fn bind_group_rejects_resource_kind_mismatch() {
     };
 
     assert!(matches!(err, Error::InvalidInput(_)));
+}
+
+#[test]
+fn sampled_images_and_samplers_are_separate_bindings() {
+    let layout = sampled_image_sampler_layout();
+    let material = layout
+        .groups
+        .iter()
+        .find(|group| group.name == "material")
+        .expect("material group exists");
+
+    assert_eq!(material.bindings.len(), 2);
+    assert_eq!(material.bindings[0].kind, BindingKind::SampledImage);
+    assert_eq!(material.bindings[1].kind, BindingKind::Sampler);
 }
 
 #[test]
@@ -156,6 +187,22 @@ fn upload_texture_2d_rejects_wrong_byte_count() {
     assert!(matches!(err, Error::InvalidInput(_)));
 }
 
+#[test]
+fn texture_uploads_share_frame_upload_arena() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let mut frame = engine.begin_frame().unwrap();
+    let pixels = [255u8; 16];
+
+    frame
+        .upload_texture_2d("first", TextureUploadDesc::sampled_rgba8(2, 2), &pixels)
+        .unwrap();
+    frame
+        .upload_texture_2d("second", TextureUploadDesc::sampled_rgba8(2, 2), &pixels)
+        .unwrap();
+
+    assert_eq!(frame.upload_arena.block_count(), 1);
+}
+
 fn small_image_desc() -> ImageDesc {
     ImageDesc {
         extent: Extent3d {
@@ -188,6 +235,20 @@ fn consecutive_flushes_succeed() {
         let mut frame = engine.begin_frame().unwrap();
         frame.flush().unwrap();
     }
+}
+
+#[test]
+fn render_image_convenience_flushes_and_waits() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let image = engine.create_image(small_image_desc()).unwrap();
+
+    engine
+        .render_image(&image, |_context| {
+            // The convenience contract is that this returns only after the
+            // internally-created frame has flushed and waited.
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]

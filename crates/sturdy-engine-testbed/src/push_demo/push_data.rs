@@ -8,6 +8,16 @@ pub struct PushData {
 
 pub const PUSH_CONSTANT_BYTES: u32 = std::mem::size_of::<PushData>() as u32;
 
+impl PushData {
+    pub fn new(offset: [f32; 2], scale: [f32; 2], tint: [f32; 4]) -> Self {
+        Self {
+            offset,
+            scale,
+            tint,
+        }
+    }
+}
+
 pub fn animated_push_data(time_seconds: f32) -> PushData {
     let x = time_seconds.sin() * 0.35;
     let y = (time_seconds * 0.7).cos() * 0.18;

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use ash::{Device, vk};
+use ash::{vk, Device};
 
 use crate::{Error, Result};
 
@@ -267,7 +267,11 @@ impl GpuAllocator {
         self.pools.clear();
     }
 
-    fn find_memory_type(&self, type_bits: u32, required: vk::MemoryPropertyFlags) -> Result<u32> {
+    pub fn find_memory_type(
+        &self,
+        type_bits: u32,
+        required: vk::MemoryPropertyFlags,
+    ) -> Result<u32> {
         for index in 0..self.memory_properties.memory_type_count {
             let supported = (type_bits & (1 << index)) != 0;
             let mt = self.memory_properties.memory_types[index as usize];

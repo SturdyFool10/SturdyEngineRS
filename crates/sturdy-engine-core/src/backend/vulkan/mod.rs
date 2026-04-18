@@ -1,14 +1,20 @@
+mod adapter;
+mod alias_heaps;
 mod allocator;
 mod caps;
 mod commands;
 mod config;
+mod debug;
 mod descriptors;
 mod device;
 mod instance;
 mod pipelines;
+mod queues;
 mod resources;
 mod shaders;
 mod surfaces;
+
+use std::collections::HashMap;
 
 use ash::{vk, Device as AshDevice, Entry, Instance};
 use std::sync::{Mutex, RwLock};
@@ -16,15 +22,17 @@ use std::{fs, path::PathBuf};
 
 use crate::backend::{Backend, BackendKind};
 use crate::{
-    BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, CanonicalPipelineLayout, Caps,
-    CompiledGraph, ComputePipelineDesc, Error, GraphicsPipelineDesc, ImageDesc, ImageHandle,
+    AdapterInfo, BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, CanonicalPipelineLayout,
+    Caps, CompiledGraph, ComputePipelineDesc, Error, GraphicsPipelineDesc, ImageDesc, ImageHandle,
     NativeSurfaceDesc, PipelineHandle, PipelineLayoutHandle, Result, SamplerDesc, SamplerHandle,
-    ShaderDesc, ShaderHandle, SubmissionHandle, SurfaceHandle, SurfaceInfo, SurfaceSize,
+    ShaderDesc, ShaderHandle, SubmissionHandle, SurfaceCapabilities, SurfaceHandle, SurfaceInfo,
+    SurfaceRecreateDesc, SurfaceSize,
 };
 
 pub use config::VulkanBackendConfig;
 use device::{create_logical_device, DeviceSelection};
 use instance::{create_instance, load_entry};
+use queues::{QueueFamilyMap, VulkanQueues};
 
 pub const KIND: BackendKind = BackendKind::Vulkan;
 
@@ -33,49 +41,63 @@ pub struct VulkanBackend {
     instance: Instance,
     physical_device: vk::PhysicalDevice,
     device: AshDevice,
-    graphics_queue_family: u32,
-    graphics_queue: vk::Queue,
+    queue_families: QueueFamilyMap,
+    queues: VulkanQueues,
     caps: Caps,
+    debug: debug::DebugUtils,
     commands: Mutex<commands::CommandContext>,
     descriptors: RwLock<descriptors::DescriptorRegistry>,
     pipelines: Mutex<pipelines::PipelineRegistry>,
     resources: RwLock<resources::ResourceRegistry>,
     shaders: Mutex<shaders::ShaderRegistry>,
     surfaces: Mutex<surfaces::SurfaceRegistry>,
+    /// Persistent alias heaps: one `VkDeviceMemory` per alias slot, reused each frame.
+    alias_heaps: Mutex<alias_heaps::AliasHeapRegistry>,
     /// Surface whose image was most recently acquired; cleared after present.
     active_surface: Mutex<Option<SurfaceHandle>>,
 }
 
 impl VulkanBackend {
+    /// Enumerate all Vulkan physical adapters without creating a logical device.
+    pub fn enumerate_adapters(config: &VulkanBackendConfig) -> Result<Vec<AdapterInfo>> {
+        let entry = load_entry()?;
+        let instance = create_instance(&entry, config)?;
+        let adapters = adapter::enumerate(&instance);
+        unsafe { instance.destroy_instance(None) };
+        Ok(adapters)
+    }
+
     pub fn create(config: VulkanBackendConfig) -> Result<Self> {
         let entry = load_entry()?;
         let instance = create_instance(&entry, &config)?;
-        let selection = DeviceSelection::pick(&instance)?;
-        let logical = create_logical_device(&instance, &selection)?;
+        let selection = DeviceSelection::pick(&instance, &config.adapter_selection)?;
+        let logical = create_logical_device(&instance, &selection, &config)?;
         let caps = caps::query_caps(&instance, selection.physical_device);
         let memory_properties =
             unsafe { instance.get_physical_device_memory_properties(selection.physical_device) };
         let resource_registry = resources::ResourceRegistry::new(memory_properties);
-        let commands =
-            commands::CommandContext::create(&logical.device, selection.graphics_queue_family)?;
+        let commands = commands::CommandContext::create(&logical.device, logical.queue_families)?;
         let cache_data = load_pipeline_cache_file();
         let pipeline_registry =
             pipelines::PipelineRegistry::create(&logical.device, cache_data.as_deref())?;
 
+        let debug_utils = debug::DebugUtils::new(&instance, &logical.device);
         Ok(Self {
             _entry: entry,
             instance,
             physical_device: selection.physical_device,
             device: logical.device,
-            graphics_queue_family: selection.graphics_queue_family,
-            graphics_queue: logical.graphics_queue,
+            queue_families: logical.queue_families,
+            queues: logical.queues,
             caps,
+            debug: debug_utils,
             commands: Mutex::new(commands),
             descriptors: RwLock::new(descriptors::DescriptorRegistry::default()),
             pipelines: Mutex::new(pipeline_registry),
             resources: RwLock::new(resource_registry),
             shaders: Mutex::new(shaders::ShaderRegistry::default()),
             surfaces: Mutex::new(surfaces::SurfaceRegistry::default()),
+            alias_heaps: Mutex::new(alias_heaps::AliasHeapRegistry::default()),
             active_surface: Mutex::new(None),
         })
     }
@@ -85,7 +107,7 @@ impl VulkanBackend {
     }
 
     pub fn graphics_queue_family(&self) -> u32 {
-        self.graphics_queue_family
+        self.queue_families.graphics
     }
 }
 
@@ -99,7 +121,7 @@ impl Backend for VulkanBackend {
     }
 
     fn caps(&self) -> Caps {
-        self.caps
+        self.caps.clone()
     }
 
     fn create_image(&self, handle: ImageHandle, desc: ImageDesc) -> Result<()> {
@@ -107,6 +129,13 @@ impl Backend for VulkanBackend {
             .write()
             .expect("vulkan resource registry rwlock poisoned")
             .create_image(&self.device, handle, desc)
+    }
+
+    fn create_transient_image(&self, handle: ImageHandle, desc: ImageDesc) -> Result<()> {
+        self.resources
+            .write()
+            .expect("vulkan resource registry rwlock poisoned")
+            .create_image_unbound(&self.device, handle, desc)
     }
 
     fn destroy_image(&self, handle: ImageHandle) -> Result<()> {
@@ -272,7 +301,7 @@ impl Backend for VulkanBackend {
                 &self.instance,
                 &self.device,
                 self.physical_device,
-                self.graphics_queue_family,
+                self.queue_families.graphics,
                 handle,
                 desc,
             )
@@ -294,6 +323,27 @@ impl Backend for VulkanBackend {
             .resize_surface(&self.device, self.physical_device, handle, size)
     }
 
+    fn recreate_surface(
+        &self,
+        handle: SurfaceHandle,
+        desc: SurfaceRecreateDesc,
+        _current: SurfaceInfo,
+    ) -> Result<SurfaceInfo> {
+        unsafe {
+            self.device
+                .device_wait_idle()
+                .map_err(|error| Error::Backend(format!("vkDeviceWaitIdle failed: {error:?}")))?;
+        }
+        self.pipelines
+            .lock()
+            .expect("vulkan pipeline registry mutex poisoned")
+            .clear_all_framebuffers(&self.device);
+        self.surfaces
+            .lock()
+            .expect("vulkan surface registry mutex poisoned")
+            .recreate_surface(&self.device, self.physical_device, handle, desc)
+    }
+
     fn destroy_surface(&self, handle: SurfaceHandle) -> Result<()> {
         unsafe {
             self.device
@@ -313,6 +363,46 @@ impl Backend for VulkanBackend {
             .expect("vulkan surface registry mutex poisoned")
             .destroy_surface(&self.device, handle)?;
         Ok(())
+    }
+
+    fn query_surface_capabilities(&self, handle: SurfaceHandle) -> Result<SurfaceCapabilities> {
+        self.surfaces
+            .lock()
+            .expect("vulkan surface registry mutex poisoned")
+            .query_surface_capabilities(self.physical_device, handle)
+    }
+
+    fn set_image_debug_name(&self, handle: ImageHandle, name: &str) {
+        if let Ok(image) = self
+            .resources
+            .read()
+            .expect("vulkan resource registry rwlock poisoned")
+            .image(handle)
+        {
+            self.debug.set_name(&self.device, image, name);
+        }
+    }
+
+    fn set_buffer_debug_name(&self, handle: BufferHandle, name: &str) {
+        if let Ok(buffer) = self
+            .resources
+            .read()
+            .expect("vulkan resource registry rwlock poisoned")
+            .buffer(handle)
+        {
+            self.debug.set_name(&self.device, buffer, name);
+        }
+    }
+
+    fn set_pipeline_debug_name(&self, handle: PipelineHandle, name: &str) {
+        if let Ok(pipeline) = self
+            .pipelines
+            .lock()
+            .expect("vulkan pipeline registry mutex poisoned")
+            .pipeline(handle)
+        {
+            self.debug.set_name(&self.device, pipeline.pipeline, name);
+        }
     }
 
     fn acquire_surface_image(
@@ -341,7 +431,7 @@ impl Backend for VulkanBackend {
             .surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
-            .present(self.graphics_queue, surface);
+            .present(self.queues.graphics, surface);
         *self
             .active_surface
             .lock()
@@ -368,6 +458,22 @@ impl Backend for VulkanBackend {
             }
         };
 
+        // Bind transient images to alias heap memories before recording begins.
+        bind_transient_images_to_alias_heaps(
+            &self.device,
+            &self.instance,
+            self.physical_device,
+            &mut self
+                .resources
+                .write()
+                .expect("vulkan resource registry rwlock poisoned"),
+            &mut self
+                .alias_heaps
+                .lock()
+                .expect("vulkan alias heap registry mutex poisoned"),
+            graph,
+        )?;
+
         let resources = self
             .resources
             .read()
@@ -386,11 +492,13 @@ impl Backend for VulkanBackend {
             .expect("vulkan command context mutex poisoned");
         commands.submit_graph(
             &self.device,
-            self.graphics_queue,
+            self.queues,
+            self.queue_families,
             graph,
             &resources,
             &descriptors,
             &mut pipelines,
+            &self.debug,
             wait_sem,
             signal_sem,
         )
@@ -416,6 +524,98 @@ impl Backend for VulkanBackend {
                 .map_err(|error| Error::Backend(format!("vkDeviceWaitIdle failed: {error:?}")))
         }
     }
+}
+
+/// For each alias slot that has transient (unbound) images, allocate a shared
+/// `VkDeviceMemory` and bind every image in the slot to it at offset 0.
+///
+/// Images that already have their own allocation (created via `create_image`)
+/// are skipped — only unbound transient images produced by `create_transient_image`
+/// are affected.
+fn bind_transient_images_to_alias_heaps(
+    device: &AshDevice,
+    instance: &Instance,
+    physical_device: vk::PhysicalDevice,
+    resources: &mut resources::ResourceRegistry,
+    heaps: &mut alias_heaps::AliasHeapRegistry,
+    graph: &CompiledGraph,
+) -> Result<()> {
+    if graph.alias_plan.image_lifetimes.is_empty() {
+        return Ok(());
+    }
+
+    // Group image handles by alias slot.
+    let mut slot_images: HashMap<u32, Vec<ImageHandle>> = HashMap::new();
+    for (handle, lifetime) in &graph.alias_plan.image_lifetimes {
+        slot_images
+            .entry(lifetime.alias_slot)
+            .or_default()
+            .push(*handle);
+    }
+
+    let memory_properties =
+        unsafe { instance.get_physical_device_memory_properties(physical_device) };
+
+    for (slot_id, handles) in &slot_images {
+        // Find the intersection of memory type bits and max size + alignment.
+        let mut combined_type_bits: u32 = !0u32;
+        let mut max_size: u64 = 0;
+        let mut max_alignment: u64 = 1;
+
+        for &handle in handles {
+            let reqs = match resources.image_memory_requirements(device, handle) {
+                Ok(r) => r,
+                Err(_) => continue, // already-bound image; skip
+            };
+            combined_type_bits &= reqs.memory_type_bits;
+            max_size = max_size.max(reqs.size);
+            max_alignment = max_alignment.max(reqs.alignment);
+        }
+
+        if combined_type_bits == 0 || max_size == 0 {
+            continue; // no compatible memory type or no unbound images in this slot
+        }
+
+        // Find a DEVICE_LOCAL memory type compatible with all images in this slot.
+        let memory_type = resources
+            .allocator()
+            .find_memory_type(combined_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            .or_else(|_| {
+                // Fall back to any compatible type if device-local isn't available.
+                find_any_memory_type(&memory_properties, combined_type_bits)
+            })?;
+
+        // Align size to the required alignment.
+        let aligned_size = align_up(max_size, max_alignment);
+
+        // Allocate (or reuse / grow) the heap for this slot.
+        let memory = heaps.slot_memory(device, *slot_id, aligned_size, memory_type)?;
+
+        // Bind all unbound images in this slot.
+        for &handle in handles {
+            resources.bind_image_to_memory_if_unbound(device, handle, memory, 0)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn find_any_memory_type(props: &vk::PhysicalDeviceMemoryProperties, type_bits: u32) -> Result<u32> {
+    for index in 0..props.memory_type_count {
+        if (type_bits & (1 << index)) != 0 {
+            return Ok(index);
+        }
+    }
+    Err(Error::Unsupported(
+        "no compatible Vulkan memory type found for alias heap",
+    ))
+}
+
+fn align_up(value: u64, alignment: u64) -> u64 {
+    if alignment == 0 {
+        return value;
+    }
+    (value + alignment - 1) & !(alignment - 1)
 }
 
 impl Drop for VulkanBackend {
@@ -444,6 +644,9 @@ impl Drop for VulkanBackend {
             }
             if let Ok(mut surfaces) = self.surfaces.lock() {
                 surfaces.destroy_all(&self.device);
+            }
+            if let Ok(mut heaps) = self.alias_heaps.lock() {
+                heaps.destroy_all(&self.device);
             }
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);

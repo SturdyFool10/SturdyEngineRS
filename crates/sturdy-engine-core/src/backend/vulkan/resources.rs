@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ash::{Device, vk};
+use ash::{vk, Device};
 
 use crate::{
     AddressMode, BorderColor, BufferDesc, BufferHandle, BufferUsage, CompareOp, Error, FilterMode,
@@ -124,6 +124,112 @@ impl ResourceRegistry {
             },
         );
         Ok(())
+    }
+
+    /// Create a `VkImage` and view but do NOT allocate or bind memory.
+    ///
+    /// The image must later be bound via `bind_image_to_memory_if_unbound` before
+    /// the GPU accesses it.  Sets `VK_IMAGE_CREATE_ALIAS_BIT` so that multiple
+    /// unbound images can share the same `VkDeviceMemory` simultaneously.
+    pub fn create_image_unbound(
+        &mut self,
+        device: &Device,
+        handle: ImageHandle,
+        desc: ImageDesc,
+    ) -> Result<()> {
+        let info = vk::ImageCreateInfo::default()
+            .flags(vk::ImageCreateFlags::ALIAS)
+            .image_type(image_type(desc))
+            .format(vk_format(desc.format)?)
+            .extent(vk::Extent3D {
+                width: desc.extent.width,
+                height: desc.extent.height,
+                depth: desc.extent.depth,
+            })
+            .mip_levels(desc.mip_levels as u32)
+            .array_layers(desc.layers as u32)
+            .samples(vk_samples(desc.samples)?)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk_image_usage(desc.usage))
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+
+        let image = unsafe {
+            device
+                .create_image(&info, None)
+                .map_err(|e| Error::Backend(format!("vkCreateImage (unbound) failed: {e:?}")))?
+        };
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk_image_view_type(desc))
+            .format(vk_format(desc.format)?)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk_aspect_mask(desc.format),
+                base_mip_level: 0,
+                level_count: desc.mip_levels as u32,
+                base_array_layer: 0,
+                layer_count: desc.layers as u32,
+            });
+        let view = unsafe {
+            match device.create_image_view(&view_info, None) {
+                Ok(v) => v,
+                Err(e) => {
+                    device.destroy_image(image, None);
+                    return Err(Error::Backend(format!(
+                        "vkCreateImageView (unbound) failed: {e:?}"
+                    )));
+                }
+            }
+        };
+        self.images.insert(
+            handle,
+            VulkanImage {
+                image,
+                view,
+                allocation: None,
+                desc,
+                imported: false,
+            },
+        );
+        Ok(())
+    }
+
+    /// Query the memory requirements for an existing (possibly unbound) image.
+    pub fn image_memory_requirements(
+        &self,
+        device: &Device,
+        handle: ImageHandle,
+    ) -> Result<vk::MemoryRequirements> {
+        let vk_image = self.images.get(&handle).ok_or(Error::InvalidHandle)?;
+        Ok(unsafe { device.get_image_memory_requirements(vk_image.image) })
+    }
+
+    /// Bind `handle` to `memory` at `offset`, but only if the image is currently unbound.
+    ///
+    /// Skips images that already have their own allocation (non-transient or
+    /// already bound in a previous call).
+    pub fn bind_image_to_memory_if_unbound(
+        &self,
+        device: &Device,
+        handle: ImageHandle,
+        memory: vk::DeviceMemory,
+        offset: u64,
+    ) -> Result<()> {
+        let vk_image = self.images.get(&handle).ok_or(Error::InvalidHandle)?;
+        if vk_image.allocation.is_some() {
+            return Ok(()); // already has its own allocation
+        }
+        unsafe {
+            device
+                .bind_image_memory(vk_image.image, memory, offset)
+                .map_err(|e| Error::Backend(format!("vkBindImageMemory failed: {e:?}")))?;
+        }
+        Ok(())
+    }
+
+    /// Expose the allocator so the flush path can query memory types.
+    pub fn allocator(&self) -> &super::allocator::GpuAllocator {
+        &self.allocator
     }
 
     pub fn destroy_image(&mut self, device: &Device, handle: ImageHandle) -> Result<()> {

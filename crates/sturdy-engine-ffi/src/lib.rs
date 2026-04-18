@@ -319,6 +319,8 @@ pub extern "C" fn gfx_create_device(out: *mut gfx_device_t) -> gfx_result_t {
         let device = Device::create(DeviceDesc {
             backend: BackendKind::Auto,
             validation: cfg!(debug_assertions),
+            adapter: sturdy_engine_core::AdapterSelection::Auto,
+            ..DeviceDesc::default()
         })?;
         let handle = registry()
             .lock()

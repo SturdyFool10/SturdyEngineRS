@@ -1,17 +1,17 @@
 use std::collections::HashMap;
 
 use sturdy_engine::{
-    BindGroup, BindGroupDesc, BindGroupEntry, BindingKind, Buffer, BufferDesc, BufferUsage,
-    CanonicalBinding, CanonicalGroupLayout, CanonicalPipelineLayout, ColorTargetDesc, CullMode,
-    Engine, Error, FilterMode, Format, Frame, FrontFace, GraphicsPipelineDesc, Image, ImageUsage,
-    MipmapMode, Pipeline, PipelineLayout, PrimitiveTopology, RasterState, ResourceBinding, Sampler,
-    SamplerDesc, Shader, ShaderDesc, ShaderSource, ShaderStage, StageMask, SurfaceImage,
-    TextureUploadDesc, UpdateRate, VertexAttributeDesc, VertexBufferLayout, VertexFormat,
-    VertexInputRate, spirv_words_from_bytes,
+    spirv_words_from_bytes, BindGroup, BindGroupDesc, BindGroupEntry, BindingKind, Buffer,
+    BufferDesc, BufferUsage, CanonicalBinding, CanonicalGroupLayout, CanonicalPipelineLayout,
+    ColorTargetDesc, CullMode, Engine, Error, FilterMode, Format, Frame, FrontFace,
+    GraphicsPipelineDesc, Image, ImageUsage, MipmapMode, Pipeline, PipelineLayout,
+    PrimitiveTopology, RasterState, ResourceBinding, Sampler, SamplerDesc, Shader, ShaderDesc,
+    ShaderSource, ShaderStage, StageMask, SurfaceImage, TextureUploadDesc, UpdateRate,
+    VertexAttributeDesc, VertexBufferLayout, VertexFormat, VertexInputRate,
 };
 
-const TEXTURE_WIDTH: u32 = 4;
-const TEXTURE_HEIGHT: u32 = 4;
+const TEXTURE_WIDTH: u32 = 64;
+const TEXTURE_HEIGHT: u32 = 64;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -79,15 +79,17 @@ impl TexturedQuadDemo {
         &mut self,
         frame: &mut Frame,
         target: &SurfaceImage,
+        time_seconds: f32,
+        clear: bool,
     ) -> Result<TexturedFrameResources, Error> {
-        let texture = upload_checker_texture(frame)?;
+        let texture = upload_checker_texture(frame, time_seconds)?;
         let bind_group = self.bind_texture(&texture)?;
         let pipeline = self.pipeline(target.desc().format)?;
-        frame
-            .draw_pass("draw-textured-quad")
-            .color(target)
-            .clear_color([0.02, 0.025, 0.03, 1.0])
-            .sample(&texture)
+        let mut pass = frame.draw_pass("draw-textured-quad").color(target);
+        if clear {
+            pass = pass.clear_color([0.015, 0.018, 0.022, 1.0]);
+        }
+        pass.sample(&texture)
             .pipeline(pipeline)
             .bind(&bind_group)
             .vertex_buffer(&self.vertex_buffer, 0, 0)
@@ -156,16 +158,16 @@ impl TexturedQuadDemo {
     }
 }
 
-fn upload_checker_texture(frame: &mut Frame) -> Result<Image, Error> {
+fn upload_checker_texture(frame: &mut Frame, time_seconds: f32) -> Result<Image, Error> {
     frame.upload_texture_2d(
-        "checker-texture",
+        "animated-procedural-texture",
         TextureUploadDesc {
             width: TEXTURE_WIDTH,
             height: TEXTURE_HEIGHT,
             format: Format::Rgba8Unorm,
             usage: ImageUsage::SAMPLED,
         },
-        checker_pixels().as_slice(),
+        procedural_pixels(time_seconds).as_slice(),
     )
 }
 
@@ -180,6 +182,7 @@ fn texture_pipeline_layout() -> CanonicalPipelineLayout {
                     count: 1,
                     stage_mask: StageMask::FRAGMENT,
                     update_rate: UpdateRate::Material,
+                    binding: 0,
                 },
                 CanonicalBinding {
                     path: "base_sampler".to_owned(),
@@ -187,51 +190,59 @@ fn texture_pipeline_layout() -> CanonicalPipelineLayout {
                     count: 1,
                     stage_mask: StageMask::FRAGMENT,
                     update_rate: UpdateRate::Material,
+                    binding: 1,
                 },
             ],
         }],
         push_constants_bytes: 0,
+        push_constants_stage_mask: StageMask::default(),
     }
 }
 
 fn textured_vertices() -> Vec<TexturedVertex> {
     vec![
         TexturedVertex {
-            position: [-0.75, -0.75],
+            position: [-0.95, -0.95],
             uv: [0.0, 1.0],
         },
         TexturedVertex {
-            position: [0.75, -0.75],
+            position: [0.95, -0.95],
             uv: [1.0, 1.0],
         },
         TexturedVertex {
-            position: [0.75, 0.75],
+            position: [0.95, 0.95],
             uv: [1.0, 0.0],
         },
         TexturedVertex {
-            position: [-0.75, -0.75],
+            position: [-0.95, -0.95],
             uv: [0.0, 1.0],
         },
         TexturedVertex {
-            position: [0.75, 0.75],
+            position: [0.95, 0.95],
             uv: [1.0, 0.0],
         },
         TexturedVertex {
-            position: [-0.75, 0.75],
+            position: [-0.95, 0.95],
             uv: [0.0, 0.0],
         },
     ]
 }
 
-fn checker_pixels() -> Vec<u8> {
+fn procedural_pixels(time_seconds: f32) -> Vec<u8> {
     let mut pixels = Vec::with_capacity((TEXTURE_WIDTH * TEXTURE_HEIGHT * 4) as usize);
     for y in 0..TEXTURE_HEIGHT {
         for x in 0..TEXTURE_WIDTH {
-            let rgba = if (x + y) % 2 == 0 {
-                [245, 245, 235, 255]
-            } else {
-                [30, 150, 220, 255]
-            };
+            let fx = x as f32 / (TEXTURE_WIDTH - 1) as f32;
+            let fy = y as f32 / (TEXTURE_HEIGHT - 1) as f32;
+            let wave_a = ((fx * 18.0 + time_seconds * 2.1).sin() * 0.5 + 0.5) * 255.0;
+            let wave_b = (((fx + fy) * 13.0 - time_seconds * 1.4).cos() * 0.5 + 0.5) * 255.0;
+            let grid = if (x / 8 + y / 8) % 2 == 0 { 36.0 } else { 0.0 };
+            let rgba = [
+                (35.0 + wave_a * 0.62 + grid).min(255.0) as u8,
+                (45.0 + wave_b * 0.58) as u8,
+                (170.0 + (255.0 - wave_a) * 0.28) as u8,
+                255,
+            ];
             pixels.extend_from_slice(&rgba);
         }
     }

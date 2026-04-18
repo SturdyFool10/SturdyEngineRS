@@ -52,9 +52,8 @@ impl DescriptorRegistry {
             let bindings = group
                 .bindings
                 .iter()
-                .enumerate()
-                .map(|(index, binding)| {
-                    let binding_index = index as u32;
+                .map(|binding| {
+                    let binding_index = binding.binding;
                     let descriptor_type = descriptor_type(binding.kind);
                     binding_map.insert(
                         binding.path.clone(),
@@ -86,7 +85,7 @@ impl DescriptorRegistry {
         let push_constant_stages = if layout.push_constants_bytes == 0 {
             vk::ShaderStageFlags::empty()
         } else {
-            vk::ShaderStageFlags::ALL
+            shader_stage_flags(layout.push_constants_stage_mask)
         };
         let push_ranges = if layout.push_constants_bytes == 0 {
             Vec::new()
