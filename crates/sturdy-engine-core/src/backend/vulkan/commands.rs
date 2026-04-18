@@ -1,4 +1,4 @@
-use ash::{vk, Device};
+use ash::{Device, vk};
 
 #[path = "commands/batch_pool.rs"]
 mod batch_pool;
@@ -11,7 +11,7 @@ use crate::{
 use super::debug::DebugUtils;
 use super::descriptors::DescriptorRegistry;
 use super::pipelines::PipelineRegistry;
-use super::queues::{queue_family_index, QueueFamilyMap, VulkanQueues};
+use super::queues::{QueueFamilyMap, VulkanQueues, queue_family_index};
 use super::resources::ResourceRegistry;
 use batch_pool::BatchPool;
 

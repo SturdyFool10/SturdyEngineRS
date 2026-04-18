@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ash::{khr, vk, Device, Entry, Instance};
+use ash::{Device, Entry, Instance, khr, vk};
 
 use crate::{
     Error, Extent3d, Format, ImageDesc, ImageUsage, NativeSurfaceDesc, Result, SurfaceCapabilities,

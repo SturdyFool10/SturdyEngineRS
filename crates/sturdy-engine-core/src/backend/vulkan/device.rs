@@ -1,7 +1,7 @@
 use std::collections::HashSet;
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_void};
 
-use ash::{vk, Device as AshDevice, Instance};
+use ash::{Device as AshDevice, Instance, vk};
 
 use crate::{AdapterSelection, Error, Result};
 

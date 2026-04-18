@@ -1,6 +1,6 @@
 use std::ffi::{CStr, CString};
 
-use ash::{vk, Entry, Instance};
+use ash::{Entry, Instance, vk};
 
 use crate::{Error, Result};
 
@@ -73,6 +73,7 @@ fn requested_layers(entry: &Entry, validation: bool) -> Result<Vec<CString>> {
     Ok(available.then_some(wanted).into_iter().collect())
 }
 
+#[allow(dead_code)]
 pub fn has_debug_utils_extension(entry: &Entry) -> bool {
     unsafe {
         entry
@@ -80,7 +81,7 @@ pub fn has_debug_utils_extension(entry: &Entry) -> bool {
             .unwrap_or_default()
             .iter()
             .any(|ext| {
-                let name = unsafe { std::ffi::CStr::from_ptr(ext.extension_name.as_ptr()) };
+                let name = CStr::from_ptr(ext.extension_name.as_ptr());
                 name.to_bytes() == b"VK_EXT_debug_utils"
             })
     }

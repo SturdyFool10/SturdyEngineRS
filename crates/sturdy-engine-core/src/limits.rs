@@ -42,10 +42,12 @@ mod tests {
         assert!(limits.max_texture_2d_size > 0);
         assert!(limits.max_texture_array_layers > 0);
         assert!(limits.max_color_attachments > 0);
-        assert!(limits
-            .max_compute_workgroup_size
-            .iter()
-            .all(|size| *size > 0));
+        assert!(
+            limits
+                .max_compute_workgroup_size
+                .iter()
+                .all(|size| *size > 0)
+        );
         assert!(limits.max_compute_invocations > 0);
         assert!(limits.max_push_constants_size > 0);
     }

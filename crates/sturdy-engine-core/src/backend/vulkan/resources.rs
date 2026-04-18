@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ash::{vk, Device};
+use ash::{Device, vk};
 use vk::Handle;
 
 use crate::{

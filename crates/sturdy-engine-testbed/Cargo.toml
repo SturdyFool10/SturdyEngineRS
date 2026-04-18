@@ -11,6 +11,7 @@ name = "sturdy-engine-testbed"
 path = "src/main.rs"
 
 [dependencies]
+raw-window-handle = "0.6"
 sturdy-engine = { path = "../sturdy-engine" }
 winit = "0.30"
 

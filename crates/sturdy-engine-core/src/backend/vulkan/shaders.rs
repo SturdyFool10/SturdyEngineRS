@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ash::{vk, Device};
+use ash::{Device, vk};
 
 use crate::{Error, Result, ShaderDesc, ShaderHandle, ShaderSource, ShaderStage};
 

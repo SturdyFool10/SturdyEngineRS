@@ -7,11 +7,20 @@
 use std::collections::HashMap;
 
 mod bind_group;
+mod device_manager;
+mod graph_frame;
+mod hdr_pipeline;
 mod pipeline_layout;
 #[cfg(test)]
 mod tests;
+mod text_draw;
 mod texture;
 mod upload_arena;
+
+pub use device_manager::{AdapterEntry, DeviceManager};
+pub use graph_frame::{FullscreenPassBuilder, GraphFrame, ImageNode};
+pub use hdr_pipeline::{HdrMode, HdrPipelineDesc, HdrPreference, ToneMappingOp};
+pub use text_draw::{TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput, TextRenderer};
 
 pub use bind_group::BindGroupBuilder;
 pub use glam::{Vec2, Vec3};
@@ -19,24 +28,23 @@ pub use pipeline_layout::PipelineLayoutBuilder;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sturdy_engine_core::NativeSurfaceDesc;
 pub use sturdy_engine_core::{
-    compile_slang, compile_slang_to_file, compile_slang_to_spirv,
-    native_handle_capabilities_for_backend, spirv_words_from_bytes, Access, AdapterKind,
-    AdapterSelection, AddressMode, BackendKind, BackendRawCapabilities, BindGroupDesc,
-    BindGroupEntry, BindingKind, BorderColor, BufferDesc, BufferUsage, BufferUse, CanonicalBinding,
-    CanonicalGroupLayout, CanonicalPipelineLayout, Caps, ColorTargetDesc, CompareOp,
-    CompiledShaderArtifact, ComputePipelineDesc, CopyBufferToImageDesc, CopyImageToBufferDesc,
-    CullMode, D3d12RawCapabilities, DispatchDesc, DrawDesc, Error, Extent3d, ExternalBufferDesc,
-    ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode, Format,
-    FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc, ImageDesc,
-    ImageDimension, ImageUsage, ImageUse, IndexBufferBinding, IndexFormat, MetalRawCapabilities,
-    MipmapMode, NativeHandleCapabilities, NativeHandleCapability, NativeHandleKind,
-    NativeHandleOwnership, PassDesc, PassWork, PrimitiveTopology, PushConstants, QueueType,
-    RasterState, ResourceBinding, Result, RgState, SamplerDesc, ShaderDesc, ShaderSource,
-    ShaderStage, ShaderTarget, SlangCompileDesc, StageMask, SubresourceRange, SurfaceColorSpace,
-    SurfaceEvent, SurfaceHdrCaps, SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode,
-    SurfaceRecreateDesc, UpdateRate, VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout,
-    VertexFormat, VertexInputRate, VulkanExternalBuffer, VulkanExternalImage,
-    VulkanRawCapabilities,
+    Access, AdapterInfo, AdapterKind, AdapterSelection, AddressMode, BackendKind,
+    BackendRawCapabilities, BindGroupDesc, BindGroupEntry, BindingKind, BorderColor, BufferDesc,
+    BufferUsage, BufferUse, CanonicalBinding, CanonicalGroupLayout, CanonicalPipelineLayout, Caps,
+    ColorTargetDesc, CompareOp, CompiledShaderArtifact, ComputePipelineDesc, CopyBufferToImageDesc,
+    CopyImageToBufferDesc, CullMode, D3d12RawCapabilities, DispatchDesc, DrawDesc, Error, Extent3d,
+    ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode,
+    Format, FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc,
+    ImageBuilder, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse, IndexBufferBinding,
+    IndexFormat, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
+    NativeHandleCapability, NativeHandleKind, NativeHandleOwnership, PassDesc, PassWork,
+    PrimitiveTopology, PushConstants, QueueType, RasterState, ResourceBinding, Result, RgState,
+    SamplerDesc, ShaderDesc, ShaderSource, ShaderStage, ShaderTarget, SlangCompileDesc, StageMask,
+    SubresourceRange, SurfaceColorSpace, SurfaceEvent, SurfaceHdrCaps, SurfaceHdrPreference,
+    SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc, UpdateRate, VertexAttributeDesc,
+    VertexBufferBinding, VertexBufferLayout, VertexFormat, VertexInputRate, VulkanExternalBuffer,
+    VulkanExternalImage, VulkanRawCapabilities, compile_slang, compile_slang_to_file,
+    compile_slang_to_spirv, native_handle_capabilities_for_backend, spirv_words_from_bytes,
 };
 pub use sturdy_engine_core::{
     DeviceDesc, ImageHandle, SamplerHandle, SubmissionHandle, SurfaceHandle, SurfaceSize,
@@ -212,6 +220,12 @@ impl Engine {
             inner: self.device.begin_frame()?,
             upload_arena: UploadArena::default(),
         })
+    }
+
+    /// Begin a new image-centric graph frame.
+    pub fn begin_graph_frame(&self) -> Result<GraphFrame> {
+        let frame = self.begin_frame()?;
+        Ok(GraphFrame::new(self.clone(), frame))
     }
 
     /// Render an image through the convenience path.

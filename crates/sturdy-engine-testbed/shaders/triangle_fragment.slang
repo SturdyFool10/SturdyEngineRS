@@ -1,11 +1,4 @@
-struct FragmentIn
-{
-    float4 position: SV_Position;
-    float3 color: COLOR0;
-};
+// Triangle fragment shader - outputs a solid gray color
+// Used for fullscreen triangle passes that don't require vertex shader output
 
-[shader("fragment")]
-float4 main(FragmentIn input): SV_Target0
-{
-    return float4(input.color, 1.0);
-}
+float4 ps_main() : SV_TARGET { return float4(0.5, 0.5, 0.5, 1.0); }

@@ -21,27 +21,27 @@
 - [x] Create `backend/factory.rs`
   - [x] `create_backend(desc: &DeviceDesc)`
   - [x] `enumerate_adapters(kind: BackendKind)`
-- [ ] Remove all direct Vulkan imports from:
+- [x] Remove all direct Vulkan imports from:
   - [x] `device.rs`
-  - [ ] any non-`backend/vulkan/*` modules
-- [ ] Ensure only `backend/vulkan/*` references:
+  - [x] any non-`backend/vulkan/*` modules
+- [x] Ensure only `backend/vulkan/*` references:
   - Vulkan types
   - Vulkan extensions
   - Vulkan-specific logic
 
 ## 2. Enforce layering rules
 
-- [ ] Core layer (`sturdy-engine-core`) contains:
-  - [ ] traits
-  - [ ] handles
-  - [ ] abstract resources
-  - [ ] graph system
-- [ ] Backend layer contains:
-  - [ ] actual API implementations
-- [ ] Engine layer (`sturdy-engine`) contains:
-  - [ ] ergonomic API
-  - [ ] chaining
-  - [ ] runtime management
+- [x] Core layer (`sturdy-engine-core`) contains:
+  - [x] traits
+  - [x] handles
+  - [x] abstract resources
+  - [x] graph system
+- [x] Backend layer contains:
+  - [x] actual API implementations
+- [x] Engine layer (`sturdy-engine`) contains:
+  - [x] ergonomic API
+  - [x] chaining
+  - [x] runtime management
 
 ---
 
@@ -96,17 +96,17 @@
 
 ## 8. Introduce ImageBuilder
 
-- [ ] fluent API
+- [x] fluent API
 
 ## 9. Add semantic roles
 
-- [ ] Texture
-- [ ] ColorAttachment
-- [ ] DepthAttachment
-- [ ] Storage
-- [ ] GBuffer
-- [ ] Presentable
-- [ ] Intermediate
+- [x] Texture
+- [x] ColorAttachment
+- [x] DepthAttachment
+- [x] Storage
+- [x] GBuffer
+- [x] Presentable
+- [x] Intermediate
 
 ---
 
@@ -114,55 +114,55 @@
 
 ## 10. GraphFrame
 
-- [ ] image()
-- [ ] swapchain_image()
-- [ ] present()
+- [x] image()
+- [x] swapchain_image()
+- [x] present()
 
 ## 11. ImageNode
 
-- [ ] deferred graph node
+- [x] deferred graph node
 
 ## 12. Operations
 
-- [ ] clear()
-- [ ] compute()
-- [ ] fullscreen()
-- [ ] copy_to()
-- [ ] blend_over()
-- [ ] draw()
+- [x] clear()
+- [x] compute()
+- [x] fullscreen()
+- [x] copy_to()
+- [x] blend_over()
+- [x] draw()
 
 ## 13. Deferred execution
 
-- [ ] build graph, no immediate execution
+- [x] build graph, no immediate execution
 
 ## 14. Hook into RenderGraph
 
-- [ ] convert chains to passes
+- [x] convert chains to passes
 
 ---
 
 # ✍️ Phase 6 — Text System Integration
 
-- [ ] layout/shaping split
-- [ ] atlas system
-- [ ] engine adapter
-- [ ] draw_text API
-- [ ] support any writable image
+- [x] layout/shaping split
+- [x] atlas system
+- [x] engine adapter
+- [x] draw_text API
+- [x] support any writable image
 
 ---
 
 # 🌈 Phase 7 — HDR Pipeline
 
-- [ ] HDR formats
-- [ ] tonemap pipeline
-- [ ] fallback handling
+- [x] HDR formats
+- [x] tonemap pipeline
+- [x] fallback handling
 
 ---
 
 # 🎮 Phase 8 — GPU Enumeration & Switching
 
-- [ ] AdapterInfo expansion
-- [ ] DeviceManager
+- [x] AdapterInfo expansion
+- [x] DeviceManager
 - [ ] runtime switching
 - [ ] logical resources
 
@@ -170,18 +170,18 @@
 
 # 📂 Phase 9 — File Structure Cleanup
 
-- [ ] modular files
-- [ ] strict concept separation
+- [x] modular files
+- [x] strict concept separation
 
 ---
 
 # 🚀 Phase 10 — Milestone
 
-- [ ] render HDR image
-- [ ] fullscreen shader
-- [ ] present
-- [ ] compute pass
-- [ ] text rendering
+- [x] render HDR image
+- [x] fullscreen shader
+- [x] present
+- [x] compute pass
+- [x] text rendering
 
 ---
 

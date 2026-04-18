@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 
-use ash::{vk, Device};
+use ash::{Device, vk};
 
 use crate::{
     ComputePipelineDesc, CullMode, Error, FrontFace, GraphicsPipelineDesc, PipelineHandle,
@@ -10,7 +10,7 @@ use crate::{
 
 use super::descriptors::DescriptorRegistry;
 use super::resources::vk_format;
-use super::shaders::{shader_stage_flags, ShaderRegistry};
+use super::shaders::{ShaderRegistry, shader_stage_flags};
 
 #[derive(Hash, PartialEq, Eq)]
 struct FramebufferKey {

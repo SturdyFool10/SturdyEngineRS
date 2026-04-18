@@ -1,6 +1,6 @@
-use crate::native_handle_capabilities_for_backend;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::NativeSurfaceDesc;
+use crate::native_handle_capabilities_for_backend;
 use crate::{
     BackendRawCapabilities, BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle,
     CanonicalPipelineLayout, Caps, CompiledGraph, ComputePipelineDesc, ExternalBufferDesc,

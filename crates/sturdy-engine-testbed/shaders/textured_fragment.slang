@@ -1,14 +1,15 @@
-Texture2D<float4> base_color : register(t0, space0);
-SamplerState base_sampler : register(s1, space0);
+// Textured fragment shader for rendering with UV coordinates and texture
+// sampling
 
-struct FragmentIn
-{
-    float4 position: SV_Position;
-    float2 uv: TEXCOORD0;
+struct VSOutput {
+  float4 position : SV_POSITION;
+  float2 uv : TEXCOORD0;
 };
 
-[shader("fragment")]
-float4 main(FragmentIn input): SV_Target0
-{
-    return base_color.Sample(base_sampler, input.uv);
+// Texture and sampler for the diffuse map
+Texture2D diffuseMap : register(t0);
+SamplerState diffuseSampler : register(s0);
+
+float4 ps_main(VSOutput input) : SV_TARGET {
+  return diffuseMap.Sample(diffuseSampler, input.uv);
 }

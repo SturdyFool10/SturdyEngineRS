@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use crate::backend::factory::create_backend;
-use crate::backend::{factory, Backend, BackendKind};
-use crate::handles::HandleAllocator;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::NativeSurfaceDesc;
+use crate::backend::factory::create_backend;
+use crate::backend::{Backend, BackendKind, factory};
+use crate::handles::HandleAllocator;
 use crate::{
     AdapterInfo, AdapterSelection, BackendRawCapabilities, BindGroupDesc, BindGroupHandle,
     BindingKind, BufferDesc, BufferHandle, BufferStateKey, CanonicalGroupLayout,
@@ -94,7 +94,6 @@ enum DeferredDestroy {
     Buffer(BufferHandle),
     Sampler(SamplerHandle),
     Shader(ShaderHandle),
-    /// Pipeline first — layout must outlive the pipeline per Vulkan spec.
     Pipeline(PipelineHandle),
     PipelineLayout(PipelineLayoutHandle),
     BindGroup(BindGroupHandle),

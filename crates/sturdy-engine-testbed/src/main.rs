@@ -1,197 +1,205 @@
-use std::env;
-use std::process::ExitCode;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{path::PathBuf, time::Instant};
 
-mod push_demo;
-mod textured;
-
-#[cfg(not(target_arch = "wasm32"))]
-use sturdy_engine::NativeSurfaceDesc;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use sturdy_engine::{
-    spirv_words_from_bytes, AdapterSelection, BackendKind, BufferDesc, BufferUsage, DeviceDesc,
-    Engine, Error, Extent3d, Format, ImageCopyRegion, ImageDesc, ImageDimension, ImageUsage,
-    RenderMesh, RenderShader, RenderVertex, Surface, SurfaceHdrPreference, SurfacePresentMode,
-    SurfaceSize, TextureUploadDesc, Vec2, Vec3,
+    BackendKind, Buffer, BufferDesc, BufferUsage, ColorTargetDesc, CullMode, Engine, FrontFace,
+    GraphicsPipelineDesc, NativeSurfaceDesc, Pipeline, PrimitiveTopology, RasterState,
+    Result as EngineResult, Shader, ShaderDesc, ShaderSource, ShaderStage, StageMask, Surface,
+    SurfaceSize, VertexAttributeDesc, VertexBufferLayout, VertexFormat, VertexInputRate,
 };
-use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::{
+    application::ApplicationHandler,
+    dpi::LogicalSize,
+    event::WindowEvent,
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    window::{Window, WindowId},
+};
 
-use push_demo::PushConstantsDemo;
-use textured::TexturedQuadDemo;
+#[allow(dead_code)]
+const VERTEX_SHADER: &str = r#"
+struct VSOut {
+    float4 position : SV_POSITION;
+    float2 uv : TEXCOORD0;
+};
 
-fn main() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("sturdy-engine-testbed failed: {error}");
-            ExitCode::FAILURE
+VSOut vs_main(uint vertex_id : SV_VertexID) {
+    float2 positions[3] = {
+        float2(-1.0, -3.0),
+        float2(-1.0,  1.0),
+        float2( 3.0,  1.0),
+    };
+
+    VSOut output;
+    output.position = float4(positions[vertex_id], 0.0, 1.0);
+    output.uv = positions[vertex_id] * 0.5 + 0.5;
+    return output;
+}
+"#;
+
+#[allow(dead_code)]
+const FRAGMENT_SHADER: &str = r#"
+struct VSOut {
+    float4 position : SV_POSITION;
+    float2 uv : TEXCOORD0;
+};
+
+struct FrameGraphConstants {
+    float time;
+    float aspect;
+    float2 resolution;
+};
+
+float2 rotate2(float2 p, float angle) {
+    float s = sin(angle);
+    float c = cos(angle);
+    return float2(c * p.x - s * p.y, s * p.x + c * p.y);
+}
+
+float opSmoothUnion(float a, float b, float k) {
+    float h = saturate(0.5 + 0.5 * (b - a) / k);
+    return lerp(b, a, h) - k * h * (1.0 - h);
+}
+
+float sphere(float3 p, float radius) {
+    return length(p) - radius;
+}
+
+float torus(float3 p, float2 radius) {
+    float2 q = float2(length(p.xz) - radius.x, p.y);
+    return length(q) - radius.y;
+}
+
+float graphDistance(float3 p, float time) {
+    p.xz = rotate2(p.xz, time * 0.42);
+    p.xy = rotate2(p.xy, sin(time * 0.31) * 0.55);
+
+    float shell = torus(p, float2(0.78 + 0.08 * sin(time * 1.7), 0.22));
+
+    float3 core_p = p;
+    core_p.y += sin(time * 1.3) * 0.12;
+    float core = sphere(core_p, 0.42);
+
+    float3 satellite_p = p;
+    satellite_p.xz = rotate2(satellite_p.xz, -time * 1.25);
+    satellite_p -= float3(0.76, 0.22 * sin(time * 2.1), 0.0);
+    float satellite = sphere(satellite_p, 0.18);
+
+    float shape = opSmoothUnion(shell, core, 0.24);
+    return opSmoothUnion(shape, satellite, 0.18);
+}
+
+float3 estimateNormal(float3 p, float time) {
+    float2 e = float2(0.0015, 0.0);
+    return normalize(float3(
+        graphDistance(p + e.xyy, time) - graphDistance(p - e.xyy, time),
+        graphDistance(p + e.yxy, time) - graphDistance(p - e.yxy, time),
+        graphDistance(p + e.yyx, time) - graphDistance(p - e.yyx, time)
+    ));
+}
+
+float3 shadeGraph(float3 p, float3 ray_dir, float time) {
+    float3 n = estimateNormal(p, time);
+    float3 light_a = normalize(float3(0.45, 0.75, -0.55));
+    float3 light_b = normalize(float3(-0.65, 0.20, 0.70));
+    float rim = pow(saturate(1.0 + dot(n, ray_dir)), 3.0);
+    float bands = 0.5 + 0.5 * sin(9.0 * n.x + 7.0 * n.y + time * 2.2);
+
+    float3 ink = float3(0.045, 0.055, 0.075);
+    float3 copper = float3(0.95, 0.43, 0.18);
+    float3 teal = float3(0.08, 0.82, 0.78);
+    float3 violet = float3(0.45, 0.30, 0.96);
+    float3 material = lerp(copper, teal, bands);
+
+    float diffuse = saturate(dot(n, light_a)) * 0.85 + saturate(dot(n, light_b)) * 0.35;
+    float specular = pow(saturate(dot(reflect(light_a, n), ray_dir)), 22.0);
+    return ink + material * diffuse + violet * rim + float3(1.0, 0.88, 0.62) * specular;
+}
+
+float4 ps_main(VSOut input, uniform FrameGraphConstants graph) : SV_TARGET {
+    float2 uv = input.uv * 2.0 - 1.0;
+    uv.x *= graph.aspect;
+
+    float3 origin = float3(0.0, 0.0, -3.35);
+    float3 ray_dir = normalize(float3(uv, 1.65));
+    float depth = 0.0;
+    float hit = 0.0;
+
+    for (int i = 0; i < 96; ++i) {
+        float3 p = origin + ray_dir * depth;
+        float dist = graphDistance(p, graph.time);
+        if (dist < 0.0015) {
+            hit = 1.0;
+            break;
         }
-    }
-}
-
-fn run() -> Result<(), Error> {
-    let args = Args::parse()?;
-    if args.headless {
-        return run_headless_smoke(&args);
-    }
-
-    show_window(args)
-}
-
-fn run_headless_smoke(args: &Args) -> Result<(), Error> {
-    let engine = Engine::with_desc(args.device_desc())?;
-    print_backend_info(&engine);
-    let target = engine.create_image(ImageDesc {
-        dimension: ImageDimension::D2,
-        extent: Extent3d {
-            width: 640,
-            height: 360,
-            depth: 1,
-        },
-        mip_levels: 1,
-        layers: 1,
-        samples: 1,
-        format: Format::Rgba8Unorm,
-        usage: ImageUsage::RENDER_TARGET | ImageUsage::COPY_SRC,
-        transient: false,
-        clear_value: None,
-        debug_name: Some("headless target"),
-    })?;
-    let mesh = RenderMesh::new(&engine, triangle_vertices().as_slice())?;
-    let mut shader = triangle_shader(&engine)?;
-
-    engine.render_image(&target, |renderer| renderer.draw_mesh(&mesh, &mut shader))?;
-    verify_headless_texture_upload_readback(&engine)?;
-
-    println!(
-        "hello triangle and texture readback completed; target_format={:?}",
-        target.desc().format
-    );
-    Ok(())
-}
-
-fn verify_headless_texture_upload_readback(engine: &Engine) -> Result<(), Error> {
-    if engine.backend_kind() == BackendKind::Null {
-        println!("texture upload readback skipped for null backend");
-        return Ok(());
-    }
-
-    const WIDTH: u32 = 2;
-    const HEIGHT: u32 = 2;
-    let pixels = [
-        255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
-    ];
-    let readback = engine.create_buffer(BufferDesc {
-        size: pixels.len() as u64,
-        usage: BufferUsage::COPY_DST,
-    })?;
-    let mut frame = engine.begin_frame()?;
-    let texture = frame.upload_texture_2d(
-        "headless-readback-texture",
-        TextureUploadDesc {
-            width: WIDTH,
-            height: HEIGHT,
-            format: Format::Rgba8Unorm,
-            usage: ImageUsage::SAMPLED | ImageUsage::COPY_SRC,
-        },
-        &pixels,
-    )?;
-    frame.copy_image_to_buffer(
-        "headless-readback-copy",
-        &texture,
-        &readback,
-        ImageCopyRegion::whole_2d(WIDTH, HEIGHT),
-    )?;
-    frame.flush()?;
-    frame.wait()?;
-
-    let mut actual = vec![0u8; pixels.len()];
-    readback.read(0, &mut actual)?;
-    if actual != pixels {
-        return Err(Error::Unknown(format!(
-            "texture upload readback mismatch: expected {:?}, got {:?}",
-            pixels, actual
-        )));
-    }
-    println!("texture upload readback verified: {} bytes", actual.len());
-    Ok(())
-}
-
-fn show_window(args: Args) -> Result<(), Error> {
-    let event_loop = EventLoop::new()
-        .map_err(|error| Error::Unknown(format!("failed to create event loop: {error}")))?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-
-    let mut app = GraphicalApp::new(args);
-    event_loop
-        .run_app(&mut app)
-        .map_err(|error| Error::Unknown(format!("window event loop failed: {error}")))
-}
-
-struct GraphicalApp {
-    args: Args,
-    app: Option<TestbedApp>,
-    window: Option<Arc<Window>>,
-}
-
-impl GraphicalApp {
-    fn new(args: Args) -> Self {
-        Self {
-            args,
-            app: None,
-            window: None,
+        depth += dist * 0.82;
+        if (depth > 7.0) {
+            break;
         }
     }
 
-    fn paint(&mut self, event_loop: &ActiveEventLoop) -> Result<(), Error> {
-        let Some(app) = self.app.as_mut() else {
-            return Ok(());
-        };
-        app.render_frame()?;
-        event_loop.set_control_flow(ControlFlow::Wait);
-        Ok(())
+    float3 background = float3(0.015, 0.018, 0.026) + 0.17 * float3(uv.y + 0.7, 0.3 + uv.x * 0.2, 0.8);
+    float3 color = background;
+    if (hit > 0.5) {
+        float3 p = origin + ray_dir * depth;
+        color = shadeGraph(p, ray_dir, graph.time);
+        color *= exp(-0.045 * depth * depth);
     }
+
+    float vignette = smoothstep(1.75, 0.25, length(uv));
+    color *= 0.65 + 0.35 * vignette;
+    return float4(pow(saturate(color), float3(0.4545)), 1.0);
+}
+"#;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct FullscreenVertex {
+    position: [f32; 2],
+    uv: [f32; 2],
 }
 
-impl Drop for GraphicalApp {
-    fn drop(&mut self) {
-        self.app.take();
-        self.window.take();
-    }
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct FrameGraphConstants {
+    time: f32,
+    aspect: f32,
+    resolution: [f32; 2],
 }
 
-impl ApplicationHandler for GraphicalApp {
+struct App {
+    renderer: Option<Renderer>,
+    window: Option<Window>,
+}
+
+impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
 
-        let attributes = WindowAttributes::default()
-            .with_title("Sturdy Engine Testbed")
-            .with_inner_size(LogicalSize::new(960.0, 540.0));
-        let window = match event_loop.create_window(attributes) {
-            Ok(window) => Arc::new(window),
+        let window = match event_loop.create_window(
+            Window::default_attributes()
+                .with_title("SturdyEngine reflection shader graph")
+                .with_inner_size(LogicalSize::new(1280.0, 720.0)),
+        ) {
+            Ok(window) => window,
             Err(error) => {
                 eprintln!("failed to create window: {error}");
                 event_loop.exit();
                 return;
             }
         };
-        self.app = match TestbedApp::new(&self.args, &window) {
-            Ok(app) => Some(app),
-            Err(error) => {
-                eprintln!("failed to create testbed app: {error}");
-                event_loop.exit();
-                return;
+
+        match Renderer::new(&window) {
+            Ok(renderer) => {
+                self.renderer = Some(renderer);
+                self.window = Some(window);
             }
-        };
-        self.window = Some(window.clone());
-        window.request_redraw();
+            Err(error) => {
+                eprintln!("failed to initialize renderer: {error}");
+                event_loop.exit();
+            }
+        }
     }
 
     fn window_event(
@@ -210,19 +218,24 @@ impl ApplicationHandler for GraphicalApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                if let Some(app) = self.app.as_mut() {
-                    let _ = app.surface.resize(SurfaceSize {
-                        width: size.width.max(1),
-                        height: size.height.max(1),
-                    });
+                if size.width > 0 && size.height > 0 {
+                    if let Some(renderer) = self.renderer.as_mut() {
+                        if let Err(error) = renderer.resize(size.width, size.height) {
+                            eprintln!("resize failed: {error}");
+                            event_loop.exit();
+                        }
+                    }
                 }
-                window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
-                if let Err(error) = self.paint(event_loop) {
-                    eprintln!("{error}");
-                    event_loop.exit();
+                if let Some(renderer) = self.renderer.as_mut() {
+                    if let Err(error) = renderer.render() {
+                        eprintln!("render failed: {error}");
+                        event_loop.exit();
+                        return;
+                    }
                 }
+                window.request_redraw();
             }
             _ => {}
         }
@@ -235,307 +248,186 @@ impl ApplicationHandler for GraphicalApp {
     }
 }
 
-struct TestbedApp {
+struct Renderer {
     engine: Engine,
     surface: Surface,
-    push_demo: PushConstantsDemo,
-    textured_demo: TexturedQuadDemo,
+    _vertex_shader: Shader,
+    _fragment_shader: Shader,
+    pipeline: Pipeline,
+    fullscreen_triangle: Buffer,
     started_at: Instant,
-    demo: DemoMode,
 }
 
-impl TestbedApp {
-    #[cfg(not(target_arch = "wasm32"))]
-    fn new(args: &Args, window: &Window) -> Result<Self, Error> {
-        let engine = Engine::with_desc(args.device_desc())?;
-        print_backend_info(&engine);
+impl Renderer {
+    fn new(window: &Window) -> EngineResult<Self> {
+        let engine = Engine::with_backend(BackendKind::Auto)?;
+        let surface = engine.create_surface(native_surface_desc(window)?)?;
+        let surface_info = surface.info();
 
-        let size = window.inner_size();
-        let display_handle = window
-            .display_handle()
-            .map_err(|error| Error::Unknown(format!("failed to get display handle: {error}")))?
-            .as_raw();
-        let window_handle = window
-            .window_handle()
-            .map_err(|error| Error::Unknown(format!("failed to get window handle: {error}")))?
-            .as_raw();
-        let surface = engine.create_surface(NativeSurfaceDesc {
-            display_handle,
-            window_handle,
-            size: SurfaceSize {
-                width: size.width.max(1),
-                height: size.height.max(1),
-            },
-            hdr: args.hdr.clone(),
-            preferred_present_mode: args.present_mode.clone(),
+        let vertex_shader = engine.create_shader(ShaderDesc {
+            source: ShaderSource::File(shader_path("shader_graph_vertex.slang")),
+            entry_point: "main".to_owned(),
+            stage: ShaderStage::Vertex,
         })?;
-        let push_demo = PushConstantsDemo::new(&engine)?;
-        let textured_demo = TexturedQuadDemo::new(&engine)?;
+        let fragment_shader = engine.create_shader(ShaderDesc {
+            source: ShaderSource::File(shader_path("shader_graph_fragment.slang")),
+            entry_point: "main".to_owned(),
+            stage: ShaderStage::Fragment,
+        })?;
 
-        println!("{:?} demo swapchain created", args.demo);
+        let pipeline = engine.create_graphics_pipeline(GraphicsPipelineDesc {
+            vertex_shader: vertex_shader.handle(),
+            fragment_shader: Some(fragment_shader.handle()),
+            layout: None,
+            vertex_buffers: vec![VertexBufferLayout {
+                binding: 0,
+                stride: std::mem::size_of::<FullscreenVertex>() as u32,
+                input_rate: VertexInputRate::Vertex,
+            }],
+            vertex_attributes: vec![
+                VertexAttributeDesc {
+                    location: 0,
+                    binding: 0,
+                    format: VertexFormat::Float32x2,
+                    offset: std::mem::offset_of!(FullscreenVertex, position) as u32,
+                },
+                VertexAttributeDesc {
+                    location: 1,
+                    binding: 0,
+                    format: VertexFormat::Float32x2,
+                    offset: std::mem::offset_of!(FullscreenVertex, uv) as u32,
+                },
+            ],
+            color_targets: vec![ColorTargetDesc {
+                format: surface_info.format,
+            }],
+            depth_format: None,
+            topology: PrimitiveTopology::TriangleList,
+            raster: RasterState {
+                cull_mode: CullMode::None,
+                front_face: FrontFace::CounterClockwise,
+            },
+        })?;
+        pipeline.set_debug_name("reflection-driven-raymarch-graph")?;
+
+        let vertices = [
+            FullscreenVertex {
+                position: [-1.0, -3.0],
+                uv: [0.0, -1.0],
+            },
+            FullscreenVertex {
+                position: [-1.0, 1.0],
+                uv: [0.0, 1.0],
+            },
+            FullscreenVertex {
+                position: [3.0, 1.0],
+                uv: [2.0, 1.0],
+            },
+        ];
+        let fullscreen_triangle = engine.create_buffer(BufferDesc {
+            size: std::mem::size_of_val(&vertices) as u64,
+            usage: BufferUsage::VERTEX,
+        })?;
+        fullscreen_triangle.write(0, bytes_of_slice(&vertices))?;
+        fullscreen_triangle.set_debug_name("shader-graph-fullscreen-triangle")?;
+
+        println!(
+            "rendering on {:?} using {:?}; surface {:?} at {}x{}",
+            engine.adapter_name(),
+            engine.backend_kind(),
+            surface_info.format,
+            surface_info.size.width,
+            surface_info.size.height
+        );
+        println!(
+            "pipeline layout is derived from Slang reflection; frame animation uses reflected push constants"
+        );
+
         Ok(Self {
             engine,
             surface,
-            push_demo,
-            textured_demo,
+            _vertex_shader: vertex_shader,
+            _fragment_shader: fragment_shader,
+            pipeline,
+            fullscreen_triangle,
             started_at: Instant::now(),
-            demo: args.demo,
         })
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn new(_backend: BackendKind, _window: &Window) -> Result<Self, Error> {
-        Err(Error::Unsupported(
-            "native engine surfaces are not available on wasm32",
-        ))
+    fn resize(&mut self, width: u32, height: u32) -> EngineResult<()> {
+        self.surface.resize(SurfaceSize { width, height })
     }
 
-    fn render_frame(&mut self) -> Result<(), Error> {
+    fn render(&mut self) -> EngineResult<()> {
         let surface_image = self.surface.acquire_image()?;
+        let desc = surface_image.desc();
+        let constants = FrameGraphConstants {
+            time: self.started_at.elapsed().as_secs_f32(),
+            aspect: desc.extent.width as f32 / desc.extent.height.max(1) as f32,
+            resolution: [desc.extent.width as f32, desc.extent.height as f32],
+        };
+
         let mut frame = self.engine.begin_frame()?;
-        let time_seconds = self.started_at.elapsed().as_secs_f32();
-        let mut textured_frame_resources = None;
-        match self.demo {
-            DemoMode::Showcase => {
-                textured_frame_resources = Some(self.textured_demo.draw(
-                    &mut frame,
-                    &surface_image,
-                    time_seconds,
-                    true,
-                )?);
-                self.push_demo
-                    .draw_gallery(&mut frame, &surface_image, time_seconds)?;
-            }
-            DemoMode::Push => {
-                self.push_demo
-                    .draw(&mut frame, &surface_image, time_seconds)?;
-            }
-            DemoMode::Textured => {
-                textured_frame_resources = Some(self.textured_demo.draw(
-                    &mut frame,
-                    &surface_image,
-                    time_seconds,
-                    true,
-                )?);
-            }
-        }
+        frame
+            .draw_pass("animated-reflection-shader-graph")
+            .color(&surface_image)
+            .clear_color([0.015, 0.018, 0.026, 1.0])
+            .pipeline(&self.pipeline)
+            .push_constants(StageMask::FRAGMENT, bytes_of(&constants))
+            .vertex_buffer(&self.fullscreen_triangle, 0, 0)
+            .draw(3)
+            .submit()?;
         frame.present_image(&surface_image)?;
         frame.flush()?;
         frame.wait()?;
-        drop(textured_frame_resources);
         self.surface.present()
     }
 }
 
-fn triangle_vertices() -> [RenderVertex; 3] {
-    [
-        RenderVertex::new(Vec2::new(0.0, -0.6), Vec3::new(1.0, 0.15, 0.1)),
-        RenderVertex::new(Vec2::new(0.6, 0.6), Vec3::new(0.1, 0.8, 0.25)),
-        RenderVertex::new(Vec2::new(-0.6, 0.6), Vec3::new(0.2, 0.35, 1.0)),
-    ]
+fn native_surface_desc(window: &Window) -> EngineResult<NativeSurfaceDesc> {
+    let size = window.inner_size();
+    let display = window
+        .display_handle()
+        .map_err(|error| sturdy_engine::Error::InvalidInput(error.to_string()))?
+        .as_raw();
+    let window_handle = window
+        .window_handle()
+        .map_err(|error| sturdy_engine::Error::InvalidInput(error.to_string()))?
+        .as_raw();
+    Ok(NativeSurfaceDesc::new(
+        display,
+        window_handle,
+        SurfaceSize {
+            width: size.width.max(1),
+            height: size.height.max(1),
+        },
+    ))
 }
 
-fn triangle_shader(engine: &Engine) -> Result<RenderShader, Error> {
-    RenderShader::new(
-        engine,
-        included_spirv("triangle_vertex.spv")?,
-        included_spirv("triangle_fragment.spv")?,
-    )
+fn shader_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("shaders")
+        .join(name)
 }
 
-fn included_spirv(name: &str) -> Result<Vec<u32>, Error> {
-    match name {
-        "triangle_vertex.spv" => spirv_words_from_bytes(include_bytes!(concat!(
-            env!("OUT_DIR"),
-            "/triangle_vertex.spv"
-        ))),
-        "triangle_fragment.spv" => spirv_words_from_bytes(include_bytes!(concat!(
-            env!("OUT_DIR"),
-            "/triangle_fragment.spv"
-        ))),
-        _ => Err(Error::InvalidInput(format!(
-            "unknown included SPIR-V: {name}"
-        ))),
+fn bytes_of<T>(value: &T) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts((value as *const T).cast::<u8>(), std::mem::size_of::<T>())
     }
 }
 
-fn print_backend_info(engine: &Engine) {
-    println!("backend: {:?}", engine.backend_kind());
-    if let Some(adapter_name) = engine.adapter_name() {
-        println!("adapter: {adapter_name}");
-    }
-
-    let caps = engine.caps();
-    println!(
-        "caps: raytracing={} mesh={} bindless={} max_mips={} frames_in_flight={}",
-        caps.supports_raytracing,
-        caps.supports_mesh_shading,
-        caps.supports_bindless,
-        caps.max_mip_levels,
-        caps.max_frames_in_flight
-    );
-}
-
-struct Args {
-    backend: BackendKind,
-    adapter: AdapterSelection,
-    validation: Option<bool>,
-    present_mode: Option<SurfacePresentMode>,
-    hdr: SurfaceHdrPreference,
-    headless: bool,
-    demo: DemoMode,
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum DemoMode {
-    Showcase,
-    Push,
-    Textured,
-}
-
-impl Args {
-    fn parse() -> Result<Self, Error> {
-        let mut backend = None;
-        let mut adapter = AdapterSelection::Auto;
-        let mut validation = None;
-        let mut present_mode = None;
-        let mut hdr = SurfaceHdrPreference::Sdr;
-        let mut headless = false;
-        let mut demo = DemoMode::Showcase;
-        let mut args = env::args().skip(1);
-
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--headless" => headless = true,
-                "--windowed" => headless = false,
-                "--validation" | "--validation=true" => validation = Some(true),
-                "--no-validation" | "--validation=false" => validation = Some(false),
-                "--adapter" => {
-                    let val = args.next().ok_or(Error::InvalidInput(
-                        "--adapter requires a value: index|name|discrete|integrated|cpu".into(),
-                    ))?;
-                    adapter = parse_adapter(&val)?;
-                }
-                "--present-mode" => {
-                    let val = args.next().ok_or(Error::InvalidInput(
-                        "--present-mode requires a value: fifo|mailbox|immediate|relaxed".into(),
-                    ))?;
-                    present_mode = Some(parse_present_mode(&val)?);
-                }
-                "--hdr" => {
-                    let val = args.next().ok_or(Error::InvalidInput(
-                        "--hdr requires a value: sdr|hdr10|scrgb".into(),
-                    ))?;
-                    hdr = parse_hdr(&val)?;
-                }
-                "--demo" => {
-                    let val = args.next().ok_or(Error::InvalidInput(
-                        "--demo requires a value: showcase|push|textured".into(),
-                    ))?;
-                    demo = parse_demo(&val)?;
-                }
-                other if other.starts_with("--backend=") => {
-                    backend = Some(parse_backend(other.strip_prefix("--backend="))?);
-                }
-                other if other.starts_with("--demo=") => {
-                    demo = parse_demo(other.strip_prefix("--demo=").unwrap_or_default())?;
-                }
-                other if backend.is_none() && !other.starts_with('-') => {
-                    backend = Some(parse_backend(Some(other))?);
-                }
-                other => {
-                    return Err(Error::InvalidInput(format!(
-                        "unknown argument '{other}'\n\
-                         Usage: testbed [backend] [--headless] [--validation] [--no-validation]\n\
-                         \x20        [--adapter <index|name|discrete|integrated|cpu>]\n\
-                         \x20        [--present-mode <fifo|mailbox|immediate|relaxed>]\n\
-                         \x20        [--hdr <sdr|hdr10|scrgb>]\n\
-                         \x20        [--demo <showcase|push|textured>]"
-                    )));
-                }
-            }
-        }
-
-        Ok(Self {
-            backend: backend.unwrap_or(BackendKind::Auto),
-            adapter,
-            validation,
-            present_mode,
-            hdr,
-            headless,
-            demo,
-        })
-    }
-
-    fn device_desc(&self) -> DeviceDesc {
-        DeviceDesc {
-            backend: self.backend,
-            validation: self.validation.unwrap_or(cfg!(debug_assertions)),
-            adapter: self.adapter.clone(),
-            ..DeviceDesc::default()
-        }
+fn bytes_of_slice<T>(values: &[T]) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
     }
 }
 
-fn parse_demo(val: &str) -> Result<DemoMode, Error> {
-    match val.to_ascii_lowercase().as_str() {
-        "showcase" | "all" => Ok(DemoMode::Showcase),
-        "push" | "push-constants" => Ok(DemoMode::Push),
-        "textured" | "texture" => Ok(DemoMode::Textured),
-        other => Err(Error::InvalidInput(format!(
-            "unknown demo '{other}', expected showcase|push|textured"
-        ))),
-    }
-}
-
-fn parse_backend(arg: Option<&str>) -> Result<BackendKind, Error> {
-    match arg.unwrap_or("auto").to_ascii_lowercase().as_str() {
-        "auto" => Ok(BackendKind::Auto),
-        "vulkan" | "vk" => Ok(BackendKind::Vulkan),
-        "d3d12" | "dx12" => Ok(BackendKind::D3d12),
-        "metal" | "mtl" => Ok(BackendKind::Metal),
-        "null" => Ok(BackendKind::Null),
-        other => Err(Error::InvalidInput(format!(
-            "unknown backend '{other}', expected auto|vulkan|d3d12|metal|null"
-        ))),
-    }
-}
-
-fn parse_adapter(val: &str) -> Result<AdapterSelection, Error> {
-    if let Ok(idx) = val.parse::<usize>() {
-        return Ok(AdapterSelection::ByIndex(idx));
-    }
-    match val.to_ascii_lowercase().as_str() {
-        "discrete" | "dgpu" => Ok(AdapterSelection::ByKind(
-            sturdy_engine::AdapterKind::DiscreteGpu,
-        )),
-        "integrated" | "igpu" => Ok(AdapterSelection::ByKind(
-            sturdy_engine::AdapterKind::IntegratedGpu,
-        )),
-        "cpu" | "software" => Ok(AdapterSelection::ByKind(sturdy_engine::AdapterKind::Cpu)),
-        name => Ok(AdapterSelection::ByName(name.to_owned())),
-    }
-}
-
-fn parse_present_mode(val: &str) -> Result<SurfacePresentMode, Error> {
-    match val.to_ascii_lowercase().as_str() {
-        "fifo" | "vsync" => Ok(SurfacePresentMode::Fifo),
-        "mailbox" | "triple" => Ok(SurfacePresentMode::Mailbox),
-        "immediate" | "none" => Ok(SurfacePresentMode::Immediate),
-        "relaxed" | "relaxed-fifo" => Ok(SurfacePresentMode::RelaxedFifo),
-        other => Err(Error::InvalidInput(format!(
-            "unknown present mode '{other}', expected fifo|mailbox|immediate|relaxed"
-        ))),
-    }
-}
-
-fn parse_hdr(val: &str) -> Result<SurfaceHdrPreference, Error> {
-    match val.to_ascii_lowercase().as_str() {
-        "sdr" | "off" => Ok(SurfaceHdrPreference::Sdr),
-        "hdr10" | "hdr" => Ok(SurfaceHdrPreference::Hdr10),
-        "scrgb" | "scrgb-linear" => Ok(SurfaceHdrPreference::ScRgb),
-        other => Err(Error::InvalidInput(format!(
-            "unknown HDR preference '{other}', expected sdr|hdr10|scrgb"
-        ))),
-    }
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let event_loop = EventLoop::new()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.run_app(&mut App {
+        renderer: None,
+        window: None,
+    })?;
+    Ok(())
 }

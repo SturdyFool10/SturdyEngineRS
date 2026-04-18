@@ -538,13 +538,12 @@ mod tests {
     #[test]
     fn gbuffer_stress_test_achieves_aliasing_savings() {
         let usage = ImageUsage::RENDER_TARGET | ImageUsage::SAMPLED;
-        let depth_usage = ImageUsage::DEPTH_STENCIL;
 
         let mut depth = depth_image(ImageHandle(0));
         depth.first_use = 0;
         depth.last_use = 3;
 
-        let mut albedo = VirtualImage {
+        let albedo = VirtualImage {
             handle: ImageHandle(1),
             desc: ImageDesc {
                 extent: Extent3d {
@@ -563,9 +562,8 @@ mod tests {
             first_use: 1,
             last_use: 2,
         };
-        let _ = albedo; // bind
 
-        let mut normal = VirtualImage {
+        let normal = VirtualImage {
             handle: ImageHandle(2),
             desc: ImageDesc {
                 extent: Extent3d {
@@ -589,7 +587,7 @@ mod tests {
         hdr_accum.first_use = 2;
         hdr_accum.last_use = 4;
 
-        let mut postprocess = VirtualImage {
+        let postprocess = VirtualImage {
             handle: ImageHandle(4),
             desc: ImageDesc {
                 extent: Extent3d {

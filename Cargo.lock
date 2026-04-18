@@ -1227,6 +1227,7 @@ dependencies = [
 name = "sturdy-engine-testbed"
 version = "0.1.0"
 dependencies = [
+ "raw-window-handle",
  "sturdy-engine",
  "sturdy-engine-core",
  "winit",

@@ -32,15 +32,15 @@ pub mod surface;
 pub use adapter_info::AdapterInfo;
 pub use adapter_kind::AdapterKind;
 pub use adapter_selection::AdapterSelection;
-pub use backend::{auto_backend_preference_order, available_backend_kinds, Backend, BackendKind};
+pub use backend::{Backend, BackendKind, auto_backend_preference_order, available_backend_kinds};
 pub use backend_features::BackendFeatures;
 pub use binding::{
-    BindGroupDesc, BindGroupEntry, BindingKind, CanonicalBinding, CanonicalGroupLayout,
-    CanonicalPipelineLayout, ResourceBinding, StageMask, UpdateRate, BINDLESS_COUNT,
+    BINDLESS_COUNT, BindGroupDesc, BindGroupEntry, BindingKind, CanonicalBinding,
+    CanonicalGroupLayout, CanonicalPipelineLayout, ResourceBinding, StageMask, UpdateRate,
 };
 pub use buffer::{BufferDesc, BufferUsage};
 pub use caps::Caps;
-pub use device::{enumerate_adapters, Device, DeviceDesc, Frame};
+pub use device::{Device, DeviceDesc, Frame, enumerate_adapters};
 pub use error::{Error, Result};
 pub use external_resource::{
     ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle,
@@ -53,12 +53,13 @@ pub use handles::{
     SurfaceHandle,
 };
 pub use image::{
-    Extent3d, Format, FormatCapabilities, ImageClearValue, ImageDesc, ImageDimension, ImageUsage,
+    Extent3d, Format, FormatCapabilities, ImageBuilder, ImageClearValue, ImageDesc, ImageDimension,
+    ImageRole, ImageUsage,
 };
 pub use limits::Limits;
 pub use native_handles::{
-    native_handle_capabilities_for_backend, NativeHandleCapabilities, NativeHandleCapability,
-    NativeHandleKind, NativeHandleOwnership,
+    NativeHandleCapabilities, NativeHandleCapability, NativeHandleKind, NativeHandleOwnership,
+    native_handle_capabilities_for_backend,
 };
 pub use pipeline::{
     ColorTargetDesc, ComputePipelineDesc, CullMode, FrontFace, GraphicsPipelineDesc,
@@ -82,9 +83,9 @@ pub use shader::{
     ShaderTarget,
 };
 pub use slang::{
-    compile_and_reflect, compile_slang, compile_slang_to_file, compile_slang_to_spirv,
-    reflect_pipeline_layout, reflect_pipeline_layout_with_caps, spirv_words_from_bytes,
-    SlangCompileDesc,
+    SlangCompileDesc, compile_and_reflect, compile_slang, compile_slang_to_file,
+    compile_slang_to_spirv, reflect_pipeline_layout, reflect_pipeline_layout_with_caps,
+    spirv_words_from_bytes,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use surface::NativeSurfaceDesc;

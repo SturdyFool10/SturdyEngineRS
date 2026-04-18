@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ash::{vk, Device};
+use ash::{Device, vk};
 
 use crate::{
     BindGroupDesc, BindGroupHandle, BindingKind, CanonicalBinding, CanonicalPipelineLayout, Error,
@@ -90,10 +90,12 @@ impl DescriptorRegistry {
         let push_ranges = if layout.push_constants_bytes == 0 {
             Vec::new()
         } else {
-            vec![vk::PushConstantRange::default()
-                .stage_flags(push_constant_stages)
-                .offset(0)
-                .size(layout.push_constants_bytes)]
+            vec![
+                vk::PushConstantRange::default()
+                    .stage_flags(push_constant_stages)
+                    .offset(0)
+                    .size(layout.push_constants_bytes),
+            ]
         };
         let info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&set_layouts)

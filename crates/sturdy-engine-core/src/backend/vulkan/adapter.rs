@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 
-use ash::{vk, Instance};
+use ash::{Instance, vk};
 
 use crate::{AdapterInfo, AdapterKind, AdapterSelection, BackendKind, Error, Result};
 
@@ -61,6 +61,7 @@ fn pick_best(instance: &Instance, devices: &[vk::PhysicalDevice]) -> Option<vk::
 fn adapter_info(instance: &Instance, pd: vk::PhysicalDevice) -> AdapterInfo {
     let props = unsafe { instance.get_physical_device_properties(pd) };
     let families = unsafe { instance.get_physical_device_queue_family_properties(pd) };
+    let mem_props = unsafe { instance.get_physical_device_memory_properties(pd) };
 
     let graphics_queue_count = families
         .iter()
@@ -78,6 +79,17 @@ fn adapter_info(instance: &Instance, pd: vk::PhysicalDevice) -> AdapterInfo {
         .map(|f| f.queue_count)
         .sum();
 
+    let vram_bytes: u64 = mem_props.memory_heaps[..mem_props.memory_heap_count as usize]
+        .iter()
+        .filter(|h| h.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+        .map(|h| h.size)
+        .sum();
+
+    let is_software = matches!(
+        props.device_type,
+        vk::PhysicalDeviceType::CPU | vk::PhysicalDeviceType::OTHER
+    );
+
     AdapterInfo {
         name: device_name(instance, pd),
         vendor_id: props.vendor_id,
@@ -85,9 +97,13 @@ fn adapter_info(instance: &Instance, pd: vk::PhysicalDevice) -> AdapterInfo {
         kind: vk_type_to_kind(props.device_type),
         backend: BackendKind::Vulkan,
         driver_version: props.driver_version,
+        driver_name: None,
         graphics_queue_count,
         compute_queue_count,
         transfer_queue_count,
+        vram_bytes,
+        is_software,
+        api_version: props.api_version,
     }
 }
 

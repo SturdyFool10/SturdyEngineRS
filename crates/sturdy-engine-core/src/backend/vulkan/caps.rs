@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 
-use ash::{vk, Instance};
+use ash::{Instance, vk};
 
 use crate::{BackendFeatures, Caps, Format, FormatCapabilities, Limits};
 

@@ -17,6 +17,7 @@ impl DebugUtils {
         }
     }
 
+    #[allow(dead_code)]
     pub fn none() -> Self {
         Self { loader: None }
     }

@@ -16,7 +16,7 @@ mod surfaces;
 
 use std::collections::HashMap;
 
-use ash::{vk, Device as AshDevice, Entry, Instance};
+use ash::{Device as AshDevice, Entry, Instance, vk};
 use std::sync::{Mutex, RwLock};
 use std::{fs, path::PathBuf};
 
@@ -31,7 +31,7 @@ use crate::{
 };
 
 pub use config::VulkanBackendConfig;
-use device::{create_logical_device, DeviceSelection};
+use device::{DeviceSelection, create_logical_device};
 use instance::{create_instance, load_entry};
 use queues::{QueueFamilyMap, VulkanQueues};
 

@@ -1,6 +1,6 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::backend::vulkan::{VulkanBackend, VulkanBackendConfig};
-use crate::backend::{auto_backend_preference_order, Backend, BackendKind, NullBackend};
+use crate::backend::{Backend, BackendKind, NullBackend, auto_backend_preference_order};
 use crate::{AdapterInfo, DeviceDesc, Error, Result};
 
 /// Create the concrete backend requested by a device descriptor.

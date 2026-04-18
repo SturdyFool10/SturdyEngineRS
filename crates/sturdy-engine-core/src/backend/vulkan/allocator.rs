@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use ash::{vk, Device};
+use ash::{Device, vk};
 
 use crate::{Error, Result};
 
