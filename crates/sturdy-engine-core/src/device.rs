@@ -10,7 +10,8 @@ use crate::NativeSurfaceDesc;
 use crate::{
     AdapterInfo, AdapterSelection, BackendRawCapabilities, BindGroupDesc, BindGroupHandle,
     BindingKind, BufferDesc, BufferHandle, BufferStateKey, CanonicalGroupLayout,
-    CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error, FrameHandle, GraphicsPipelineDesc,
+    CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error, ExternalBufferDesc,
+    ExternalImageDesc, FrameHandle, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc,
     ImageDesc, ImageHandle, ImageStateKey, NativeHandleCapabilities, PipelineHandle,
     PipelineLayoutHandle, RenderGraph, ResourceBinding, Result, RgState, SamplerDesc,
     SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection, StageMask, SubmissionHandle,
@@ -246,6 +247,25 @@ impl Device {
         Ok(handle)
     }
 
+    /// Import an externally created image into the engine's handle registry.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the external image and image view were created
+    /// from a compatible backend device, outlive the returned engine handle,
+    /// and match `desc.desc` closely enough for backend commands using the
+    /// image. The engine borrows the native objects and will not destroy them.
+    pub unsafe fn import_external_image(&self, desc: ExternalImageDesc) -> Result<ImageHandle> {
+        desc.validate()?;
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        let handle = ImageHandle(inner.image_handles.alloc());
+        unsafe {
+            inner.backend.import_external_image(handle, desc)?;
+        }
+        inner.images.insert(handle, desc.desc);
+        Ok(handle)
+    }
+
     /// Create an image whose lifetime is tied to one frame.
     ///
     /// On backends that support aliasing (Vulkan) the image is created without
@@ -285,6 +305,25 @@ impl Device {
         let handle = BufferHandle(inner.buffer_handles.alloc());
         inner.backend.create_buffer(handle, desc)?;
         inner.buffers.insert(handle, desc);
+        Ok(handle)
+    }
+
+    /// Import an externally created buffer into the engine's handle registry.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the external buffer was created from a compatible
+    /// backend device, outlives the returned engine handle, and matches
+    /// `desc.desc` closely enough for backend commands using the buffer. The
+    /// engine borrows the native object and will not destroy it.
+    pub unsafe fn import_external_buffer(&self, desc: ExternalBufferDesc) -> Result<BufferHandle> {
+        desc.validate()?;
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        let handle = BufferHandle(inner.buffer_handles.alloc());
+        unsafe {
+            inner.backend.import_external_buffer(handle, desc)?;
+        }
+        inner.buffers.insert(handle, desc.desc);
         Ok(handle)
     }
 
@@ -528,19 +567,55 @@ impl Device {
         Ok(handle)
     }
 
-    pub fn set_image_debug_name(&self, handle: ImageHandle, name: &str) {
+    pub fn set_image_debug_name(&self, handle: ImageHandle, name: &str) -> Result<()> {
         let inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.images.contains_key(&handle) {
+            return Err(Error::InvalidHandle);
+        }
         inner.backend.set_image_debug_name(handle, name);
+        Ok(())
     }
 
-    pub fn set_buffer_debug_name(&self, handle: BufferHandle, name: &str) {
+    pub fn set_buffer_debug_name(&self, handle: BufferHandle, name: &str) -> Result<()> {
         let inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.buffers.contains_key(&handle) {
+            return Err(Error::InvalidHandle);
+        }
         inner.backend.set_buffer_debug_name(handle, name);
+        Ok(())
     }
 
-    pub fn set_pipeline_debug_name(&self, handle: PipelineHandle, name: &str) {
+    pub fn set_pipeline_debug_name(&self, handle: PipelineHandle, name: &str) -> Result<()> {
         let inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.pipelines.contains_key(&handle) {
+            return Err(Error::InvalidHandle);
+        }
         inner.backend.set_pipeline_debug_name(handle, name);
+        Ok(())
+    }
+
+    pub fn supported_gpu_capture_tools(&self) -> Vec<GpuCaptureTool> {
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .supported_gpu_capture_tools()
+    }
+
+    pub fn begin_gpu_capture(&self, desc: &GpuCaptureDesc) -> Result<()> {
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .begin_gpu_capture(desc)
+    }
+
+    pub fn end_gpu_capture(&self, tool: GpuCaptureTool) -> Result<()> {
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .end_gpu_capture(tool)
     }
 
     pub fn destroy_pipeline(&self, handle: PipelineHandle) -> Result<()> {

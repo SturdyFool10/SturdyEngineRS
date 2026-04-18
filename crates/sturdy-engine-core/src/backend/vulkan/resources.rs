@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
 use ash::{vk, Device};
+use vk::Handle;
 
 use crate::{
     AddressMode, BorderColor, BufferDesc, BufferHandle, BufferUsage, CompareOp, Error, FilterMode,
     Format, ImageDesc, ImageHandle, ImageUsage, MipmapMode, Result, SamplerDesc, SamplerHandle,
+    VulkanExternalBuffer, VulkanExternalImage,
 };
 
 use super::allocator::{Allocation, GpuAllocator};
@@ -26,7 +28,8 @@ struct VulkanImage {
 
 struct VulkanBuffer {
     buffer: vk::Buffer,
-    allocation: Allocation,
+    allocation: Option<Allocation>,
+    imported: bool,
 }
 
 impl ResourceRegistry {
@@ -269,6 +272,20 @@ impl ResourceRegistry {
         Ok(())
     }
 
+    pub fn import_external_image(
+        &mut self,
+        handle: ImageHandle,
+        external: VulkanExternalImage,
+        desc: ImageDesc,
+    ) -> Result<()> {
+        self.import_image(
+            handle,
+            vk::Image::from_raw(external.image),
+            vk::ImageView::from_raw(external.image_view),
+            desc,
+        )
+    }
+
     pub fn create_buffer(
         &mut self,
         device: &Device,
@@ -309,15 +326,44 @@ impl ResourceRegistry {
             }
         }
 
-        self.buffers
-            .insert(handle, VulkanBuffer { buffer, allocation });
+        self.buffers.insert(
+            handle,
+            VulkanBuffer {
+                buffer,
+                allocation: Some(allocation),
+                imported: false,
+            },
+        );
         Ok(())
     }
 
     pub fn destroy_buffer(&mut self, device: &Device, handle: BufferHandle) -> Result<()> {
         let buf = self.buffers.remove(&handle).ok_or(Error::InvalidHandle)?;
-        unsafe { device.destroy_buffer(buf.buffer, None) };
-        self.allocator.dealloc(device, buf.allocation);
+        if !buf.imported {
+            unsafe { device.destroy_buffer(buf.buffer, None) };
+            if let Some(allocation) = buf.allocation {
+                self.allocator.dealloc(device, allocation);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn import_external_buffer(
+        &mut self,
+        handle: BufferHandle,
+        external: VulkanExternalBuffer,
+    ) -> Result<()> {
+        if self.buffers.contains_key(&handle) {
+            return Err(Error::InvalidHandle);
+        }
+        self.buffers.insert(
+            handle,
+            VulkanBuffer {
+                buffer: vk::Buffer::from_raw(external.buffer),
+                allocation: None,
+                imported: true,
+            },
+        );
         Ok(())
     }
 
@@ -372,17 +418,20 @@ impl ResourceRegistry {
         if data.is_empty() {
             return Ok(());
         }
-        let base = buf
+        let allocation = buf
             .allocation
+            .as_ref()
+            .ok_or(Error::Unsupported("cannot CPU-write an imported buffer"))?;
+        let base = allocation
             .mapped_ptr
             .ok_or_else(|| Error::Backend("buffer allocation is not host-visible".into()))?;
         let start = offset as usize;
         let end = start + data.len();
-        if end > buf.allocation.size as usize {
+        if end > allocation.size as usize {
             return Err(Error::InvalidInput(format!(
                 "write_buffer out of range: offset={offset} len={} capacity={}",
                 data.len(),
-                buf.allocation.size
+                allocation.size
             )));
         }
         unsafe {
@@ -396,17 +445,20 @@ impl ResourceRegistry {
         if out.is_empty() {
             return Ok(());
         }
-        let base = buf
+        let allocation = buf
             .allocation
+            .as_ref()
+            .ok_or(Error::Unsupported("cannot CPU-read an imported buffer"))?;
+        let base = allocation
             .mapped_ptr
             .ok_or_else(|| Error::Backend("buffer allocation is not host-visible".into()))?;
         let start = offset as usize;
         let end = start + out.len();
-        if end > buf.allocation.size as usize {
+        if end > allocation.size as usize {
             return Err(Error::InvalidInput(format!(
                 "read_buffer out of range: offset={offset} len={} capacity={}",
                 out.len(),
-                buf.allocation.size
+                allocation.size
             )));
         }
         unsafe {
@@ -428,8 +480,12 @@ impl ResourceRegistry {
             }
         }
         for (_, buf) in self.buffers.drain() {
-            unsafe { device.destroy_buffer(buf.buffer, None) };
-            self.allocator.dealloc(device, buf.allocation);
+            if !buf.imported {
+                unsafe { device.destroy_buffer(buf.buffer, None) };
+                if let Some(allocation) = buf.allocation {
+                    self.allocator.dealloc(device, allocation);
+                }
+            }
         }
         for (_, sampler) in self.samplers.drain() {
             unsafe {

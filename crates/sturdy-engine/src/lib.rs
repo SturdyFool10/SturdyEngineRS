@@ -25,15 +25,17 @@ pub use sturdy_engine_core::{
     BindGroupEntry, BindingKind, BorderColor, BufferDesc, BufferUsage, BufferUse, CanonicalBinding,
     CanonicalGroupLayout, CanonicalPipelineLayout, Caps, ColorTargetDesc, CompareOp,
     CompiledShaderArtifact, ComputePipelineDesc, CopyBufferToImageDesc, CopyImageToBufferDesc,
-    CullMode, D3d12RawCapabilities, DispatchDesc, DrawDesc, Error, Extent3d, FilterMode, Format,
-    FrontFace, GraphicsPipelineDesc, ImageDesc, ImageUsage, ImageUse, IndexBufferBinding,
-    IndexFormat, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
+    CullMode, D3d12RawCapabilities, DispatchDesc, DrawDesc, Error, Extent3d, ExternalBufferDesc,
+    ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode, Format, FrontFace,
+    GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc, ImageDesc, ImageUsage, ImageUse,
+    IndexBufferBinding, IndexFormat, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
     NativeHandleCapability, NativeHandleKind, NativeHandleOwnership, PassDesc, PassWork,
     PrimitiveTopology, PushConstants, QueueType, RasterState, ResourceBinding, Result, RgState,
     SamplerDesc, ShaderDesc, ShaderSource, ShaderStage, ShaderTarget, SlangCompileDesc, StageMask,
     SubresourceRange, SurfaceColorSpace, SurfaceEvent, SurfaceHdrPreference, SurfaceInfo,
     SurfacePresentMode, SurfaceRecreateDesc, UpdateRate, VertexAttributeDesc, VertexBufferBinding,
-    VertexBufferLayout, VertexFormat, VertexInputRate, VulkanRawCapabilities,
+    VertexBufferLayout, VertexFormat, VertexInputRate, VulkanExternalBuffer, VulkanExternalImage,
+    VulkanRawCapabilities,
 };
 pub use sturdy_engine_core::{
     DeviceDesc, ImageHandle, SamplerHandle, SubmissionHandle, SurfaceHandle, SurfaceSize,
@@ -97,12 +99,42 @@ impl Engine {
         })
     }
 
+    /// Import a borrowed native image into the engine.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold the backend-specific lifetime and compatibility
+    /// requirements documented by `Device::import_external_image`.
+    pub unsafe fn import_external_image(&self, desc: ExternalImageDesc) -> Result<Image> {
+        let handle = unsafe { self.device.import_external_image(desc)? };
+        Ok(Image {
+            device: self.device.clone(),
+            handle,
+            desc: desc.desc,
+        })
+    }
+
     pub fn create_buffer(&self, desc: BufferDesc) -> Result<Buffer> {
         let handle = self.device.create_buffer(desc)?;
         Ok(Buffer {
             device: self.device.clone(),
             handle,
             desc,
+        })
+    }
+
+    /// Import a borrowed native buffer into the engine.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold the backend-specific lifetime and compatibility
+    /// requirements documented by `Device::import_external_buffer`.
+    pub unsafe fn import_external_buffer(&self, desc: ExternalBufferDesc) -> Result<Buffer> {
+        let handle = unsafe { self.device.import_external_buffer(desc)? };
+        Ok(Buffer {
+            device: self.device.clone(),
+            handle,
+            desc: desc.desc,
         })
     }
 
@@ -234,6 +266,18 @@ impl Engine {
 
     pub fn wait_idle(&self) -> Result<()> {
         self.device.wait_idle()
+    }
+
+    pub fn supported_gpu_capture_tools(&self) -> Vec<GpuCaptureTool> {
+        self.device.supported_gpu_capture_tools()
+    }
+
+    pub fn begin_gpu_capture(&self, desc: &GpuCaptureDesc) -> Result<()> {
+        self.device.begin_gpu_capture(desc)
+    }
+
+    pub fn end_gpu_capture(&self, tool: GpuCaptureTool) -> Result<()> {
+        self.device.end_gpu_capture(tool)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -474,6 +518,10 @@ impl Image {
     pub fn desc(&self) -> ImageDesc {
         self.desc
     }
+
+    pub fn set_debug_name(&self, name: &str) -> Result<()> {
+        self.device.set_image_debug_name(self.handle, name)
+    }
 }
 
 impl Drop for Image {
@@ -503,6 +551,10 @@ impl Buffer {
 
     pub fn read(&self, offset: u64, out: &mut [u8]) -> Result<()> {
         self.device.read_buffer(self.handle, offset, out)
+    }
+
+    pub fn set_debug_name(&self, name: &str) -> Result<()> {
+        self.device.set_buffer_debug_name(self.handle, name)
     }
 }
 
@@ -608,6 +660,10 @@ pub struct Pipeline {
 impl Pipeline {
     pub fn handle(&self) -> core::PipelineHandle {
         self.handle
+    }
+
+    pub fn set_debug_name(&self, name: &str) -> Result<()> {
+        self.device.set_pipeline_debug_name(self.handle, name)
     }
 }
 
@@ -1149,6 +1205,24 @@ impl Frame {
 
     pub fn add_pass(&mut self, pass: PassDesc) -> Result<()> {
         self.inner.graph_mut(|graph| graph.add_pass(pass))
+    }
+
+    pub fn debug_marker(&mut self, name: impl Into<String>) -> Result<()> {
+        self.add_pass(PassDesc {
+            name: name.into(),
+            queue: QueueType::Graphics,
+            shader: None,
+            pipeline: None,
+            bind_groups: Vec::new(),
+            push_constants: None,
+            work: PassWork::None,
+            reads: Vec::new(),
+            writes: Vec::new(),
+            buffer_reads: Vec::new(),
+            buffer_writes: Vec::new(),
+            clear_colors: Vec::new(),
+            clear_depth: None,
+        })
     }
 
     pub fn draw_pass(&mut self, name: impl Into<String>) -> DrawPassBuilder<'_> {

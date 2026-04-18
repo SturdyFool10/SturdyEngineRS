@@ -1,142 +1,194 @@
-# Sturdy Engine Roadmap
+# 🧠 Sturdy Engine — Architecture & API Refactor TODO
 
-## Near-Term Graphics Work
+## 🎯 Goals
 
-- [x] Add indexed draw coverage in the testbed.
-- [x] Replace temporary per-draw Vulkan framebuffer creation with a framebuffer/render-pass cache.
-- [x] Add a windowing and surface system.
-  - [x] Create platform windows and backend surfaces through a runtime-selected window layer.
-  - [x] Keep swapchain/surface ownership separate from the device so surfaces can be resized or fully reconstructed during execution.
-  - [x] Model resize, format changes, color-space changes, and surface recreation as explicit events.
-  - [x] Preserve the ability to reconstruct the surface/swapchain later for HDR mode changes without tearing down the whole engine/device.
+- Full backend-agnostic core (no Vulkan leakage outside backend/)
+- Image-centric high-level API
+- Render graph driven execution
+- Text system integrated as image operations
+- HDR + FP16/FP32 support
+- Strong capability/limit querying
+- GPU enumeration + switching
+- Clean, small, modular file structure
 
-## Reflection-Driven Renderer Todo
+---
 
-Goal: build a Slang reflection-driven renderer that talks directly to Vulkan, D3D12, and Metal, exposes the full useful capability surface of the selected GPU/backend, and lets users construct graph work that is submitted without implicit CPU/GPU flushing unless they explicitly request synchronization.
+# 🔥 Phase 1 — Backend Isolation (CRITICAL FIRST STEP)
 
-API requirement: consuming the engine must stay simple and graphics API agnostic for common work. Users should be able to create resources, build render/compute passes, bind reflected shader parameters, upload textures, and submit frames without writing Vulkan/D3D12/Metal-specific code. Backend-specific escape hatches are allowed for advanced capability access, but they must not leak into the default path.
+## 1. Remove backend leakage from core
 
-### Resource And Binding Foundation
+- [ ] Move backend creation out of `device.rs`
+- [ ] Create `backend/factory.rs`
+  - [ ] `create_backend(desc: &DeviceDesc)`
+  - [ ] `enumerate_adapters(kind: BackendKind)`
+- [ ] Remove all direct Vulkan imports from:
+  - [ ] `device.rs`
+  - [ ] any non-`backend/vulkan/*` modules
+- [ ] Ensure only `backend/vulkan/*` references:
+  - Vulkan types
+  - Vulkan extensions
+  - Vulkan-specific logic
 
-- [x] Represent Slang-reflected descriptor binding kinds, including images, buffers, samplers, and acceleration structures.
-- [x] Create Vulkan descriptor set layouts and pipeline layouts from `CanonicalPipelineLayout`.
-- [x] Create Vulkan descriptor pools/sets from `BindGroupDesc`.
-- [x] Write Vulkan image and buffer descriptors.
-- [x] Add `SamplerHandle`.
-- [x] Add `SamplerDesc` with filter, mip, address, anisotropy, comparison, LOD, and border-color controls.
-- [x] Add `Device::create_sampler` / `destroy_sampler` and ergonomic Rust RAII wrappers.
-- [x] Store and destroy Vulkan `VkSampler` objects.
-- [x] Add `ResourceBinding::Sampler`.
-- [x] Write Vulkan sampler descriptors from bind group entries.
-- [x] Decide whether combined image sampler should be represented as a distinct `BindingKind` or composed from separate image/sampler bindings.
-- [x] Add descriptor validation that verifies resource binding kind matches reflected binding kind before backend descriptor writes.
-- [x] Add tests for sampled image + sampler binding paths.
-- [x] Add an API-agnostic bind group builder for image, buffer, and sampler entries.
-- [x] Add an API-agnostic pipeline layout builder for common reflected binding declarations.
+## 2. Enforce layering rules
 
-### Texture Upload And Copy Work
+- [ ] Core layer (`sturdy-engine-core`) contains:
+  - [ ] traits
+  - [ ] handles
+  - [ ] abstract resources
+  - [ ] graph system
+- [ ] Backend layer contains:
+  - [ ] actual API implementations
+- [ ] Engine layer (`sturdy-engine`) contains:
+  - [ ] ergonomic API
+  - [ ] chaining
+  - [ ] runtime management
 
-- [x] Support `CopyImageToBuffer` pass work for GPU-to-CPU/readback paths.
-- [x] Add `CopyBufferToImageDesc`.
-- [x] Add `PassWork::CopyBufferToImage`.
-- [x] Validate copy image extents, mip level, array layer, aspect, and buffer ranges during graph pass insertion.
-- [x] Record Vulkan `cmd_copy_buffer_to_image`.
-- [x] Add render graph image/buffer state examples for upload staging buffers.
-- [x] Add ergonomic texture creation/upload helper that creates a staging buffer, writes CPU data, schedules copy, and transitions to shader-read.
-- [x] Add testbed textured quad or textured triangle shader that exercises CPU-to-GPU upload and sampler binding.
-- [x] Add readback verification for a small uploaded texture in headless mode.
+---
 
-### Push Constants
+# 🧩 Phase 2 — Capability System Expansion
 
-- [x] Represent `push_constants_bytes` in `CanonicalPipelineLayout`.
-- [x] Create Vulkan push constant ranges when `push_constants_bytes` is non-zero.
-- [x] Reflect push constant size and stage visibility from Slang instead of always setting `push_constants_bytes` to `0`.
-- [x] Preserve push constant byte size when merging graphics shader reflections.
-- [x] Add pass-level push constant data, offset, and stage mask.
-- [x] Record Vulkan `cmd_push_constants` after pipeline bind and before draw/dispatch.
-- [x] Validate push constant byte count against pipeline layout limits and reflected layout.
-- [x] Add a testbed path that animates per-draw data through push constants instead of uniform buffer updates.
+## 3. Expand `Caps`
 
-### Deferred Submission And Synchronization
+- [ ] mesh_shading
+- [ ] ray_tracing
+- [ ] bindless
+- [ ] hdr_output
+- [ ] shader_fp16
+- [ ] shader_fp64
+- [ ] image_fp16_render
+- [ ] image_fp32_render
+- [ ] dynamic_rendering
+- [ ] timeline_semaphores
 
-- [x] Compile render graph passes into barriers and record batches.
-- [x] Record Vulkan command buffers from compiled graph work.
-- [x] Submit Vulkan graph work through a backend `flush` path.
-- [x] Persist whole-resource final graph states across frames for imported images and buffers.
-- [x] Replace whole-resource persistent states with subresource/range-aware state tracking.
-- [x] Stop treating Vulkan flush as submit-and-wait.
-- [x] Add `SubmissionHandle` or equivalent frame/timeline token.
-- [x] Add explicit wait APIs for submission wait, frame wait, readback wait, and device idle.
-- [x] Make presentation wait only on the synchronization needed for the acquired swapchain image.
-- [x] Add deferred destruction tied to submission completion.
-- [x] Add tests that prove graph submission does not CPU-wait unless requested.
-- [x] Keep convenience APIs such as `render_image` and `render_surface` allowed to wait where their contract requires it.
+## 4. Expand `Limits`
 
-### Multithreaded Command Recording
+- [ ] max_texture_2d_size
+- [ ] max_texture_array_layers
+- [ ] max_color_attachments
+- [ ] max_compute_workgroup_size
+- [ ] max_compute_invocations
+- [ ] max_push_constants_size
 
-- [x] Replace the single Vulkan `CommandContext` command pool model with per-thread/per-frame command pools.
-- [x] Make `RecordBatch` drive actual independent command buffer recording.
-- [x] Keep queue submission centralized and externally synchronized per Vulkan queue.
-- [x] Decide primary-command-buffer-per-batch vs secondary-command-buffer-per-pass strategy.
-- [x] Make descriptor, resource, and pipeline registries safely readable during parallel recording.
-- [x] Add frame-local upload arenas and command allocator recycling.
-- [x] Add multi-queue ownership and synchronization support for graphics, compute, and transfer queues.
-- [x] Add tests with independent graph batches that can record in parallel.
+## 5. Add format capabilities
 
-### Transient Resource Memory Aliasing
+- [ ] FormatCapabilities struct
+- [ ] device.format_capabilities(format)
 
-- [x] Track virtual image and buffer lifetimes in the compiled render graph.
-- [x] Count transient image and buffer resources in `AliasPlan`.
-- [x] Expand `AliasPlan` to contain concrete placements: heap/block, offset, size, alignment, lifetime, and compatibility class.
-- [x] Group transient resources by memory type, usage, format/aspect, tiling, sample count, and aliasing compatibility.
-- [x] Interval-pack non-overlapping lifetimes into shared Vulkan memory allocations.
-- [x] Bind transient Vulkan images/buffers to alias-plan offsets instead of independent allocations.
-- [x] Emit required aliasing/discard/layout barriers around reused memory.
-- [x] Add graph compiler diagnostics showing aliasing savings in bytes.
-- [x] Add stress tests for deferred-style resources: GBuffer, depth, HDR, postprocess, and shadow-map lifetimes.
+## 6. Add surface/HDR queries
 
-### Capability, Adapter, And Extension Exposure
+- [ ] SurfaceHdrCaps
+- [ ] HDR10 support
+- [ ] scRGB support
 
-- [x] Expose backend kind, adapter name, and basic normalized caps.
-- [x] Add `AdapterInfo` with vendor ID, device ID, device type, backend, driver version, and queue families.
-- [x] Add adapter enumeration before device creation.
-- [x] Add `AdapterSelection` to `DeviceDesc` so users can pick a graphics card.
-- [x] Respect `DeviceDesc.validation` when constructing backend configs.
-- [x] Expand `Caps` into a richer `BackendFeatures`/`Limits` model.
-- [x] Expose raw backend extension names and feature names.
-- [x] Let users request required, optional, and disabled features/extensions at device creation.
-- [x] Surface unsupported required features as clear creation errors.
-- [x] Add Vulkan feature chain assembly for requested features.
-- [x] Add normalized flags for ray tracing, mesh/task shaders, descriptor indexing, descriptor buffer, timeline semaphores, dynamic rendering, synchronization2, VRS, HDR presentation, and bindless resources.
-- [x] Keep backend-specific escape hatches so users can opt into new graphics API features before the engine has a normalized abstraction.
+---
 
-### HDR, Surface, And Presentation Control
+# 🖼️ Phase 3 — Image System Overhaul
 
-- [x] Create Vulkan surfaces and swapchains.
-- [x] Acquire and present surface images.
-- [x] Resize Vulkan surfaces.
-- [x] Enumerate supported surface formats, present modes, and color spaces.
-- [x] Add HDR preference/configuration to device or surface creation.
-- [x] Let users choose SDR/HDR format and color space when supported.
-- [x] Recreate swapchains for HDR mode changes without recreating the whole device.
-- [x] Expose present mode selection: FIFO, mailbox, immediate, relaxed FIFO where available.
-- [x] Add testbed UI/CLI flags for backend, adapter, validation, present mode, and HDR preference.
+## 7. Expand ImageDesc
 
-### Slang Reflection Completeness
+- [ ] dimension
+- [ ] mip_levels
+- [ ] layers
+- [ ] samples
+- [ ] transient
+- [ ] clear_value
+- [ ] debug_name
 
-- [x] Compile Slang to backend-preferred shader IR for source shaders.
-- [x] Extract descriptor binding ranges into canonical group layouts.
-- [x] Extract push constant ranges.
-- [x] Preserve Vulkan descriptor set/binding indices rather than assuming vector order always matches final binding numbers.
-- [x] Track update rate from Slang attributes or explicit engine metadata.
-- [x] Reflect arrays, bindless descriptor arrays, and unsized arrays correctly.
-- [x] Reflect acceleration structure bindings only when the backend feature is enabled.
-- [x] Add reflection tests for separate textures/samplers, combined-style material blocks, push constants, and bindless arrays.
+## 8. Introduce ImageBuilder
 
-### Low-Level Escape Hatches
+- [ ] fluent API
 
-- [x] Define what native handles can be exported/imported per backend.
-- [x] Allow advanced users to inspect raw Vulkan/D3D12/Metal capability data behind backend-specific APIs.
-- [ ] Add explicit resource import paths for externally created images/buffers where safe.
-- [ ] Add debug object naming and marker APIs.
-- [ ] Add capture/debug integration points for RenderDoc, PIX, and Xcode GPU capture where applicable.
+## 9. Add semantic roles
+
+- [ ] Texture
+- [ ] ColorAttachment
+- [ ] DepthAttachment
+- [ ] Storage
+- [ ] GBuffer
+- [ ] Presentable
+- [ ] Intermediate
+
+---
+
+# 🔗 Phase 4 — Image-Centric API
+
+## 10. GraphFrame
+
+- [ ] image()
+- [ ] swapchain_image()
+- [ ] present()
+
+## 11. ImageNode
+
+- [ ] deferred graph node
+
+## 12. Operations
+
+- [ ] clear()
+- [ ] compute()
+- [ ] fullscreen()
+- [ ] copy_to()
+- [ ] blend_over()
+- [ ] draw()
+
+## 13. Deferred execution
+
+- [ ] build graph, no immediate execution
+
+## 14. Hook into RenderGraph
+
+- [ ] convert chains to passes
+
+---
+
+# ✍️ Phase 6 — Text System Integration
+
+- [ ] layout/shaping split
+- [ ] atlas system
+- [ ] engine adapter
+- [ ] draw_text API
+- [ ] support any writable image
+
+---
+
+# 🌈 Phase 7 — HDR Pipeline
+
+- [ ] HDR formats
+- [ ] tonemap pipeline
+- [ ] fallback handling
+
+---
+
+# 🎮 Phase 8 — GPU Enumeration & Switching
+
+- [ ] AdapterInfo expansion
+- [ ] DeviceManager
+- [ ] runtime switching
+- [ ] logical resources
+
+---
+
+# 📂 Phase 9 — File Structure Cleanup
+
+- [ ] modular files
+- [ ] strict concept separation
+
+---
+
+# 🚀 Phase 10 — Milestone
+
+- [ ] render HDR image
+- [ ] fullscreen shader
+- [ ] present
+- [ ] compute pass
+- [ ] text rendering
+
+---
+
+# 🧠 Principles
+
+- Image-centric
+- Graph-driven
+- Deferred execution
+- Backend isolation
+- Rebuild on GPU switch

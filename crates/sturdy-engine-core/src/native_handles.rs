@@ -41,7 +41,8 @@ pub struct NativeHandleCapability {
     pub kind: NativeHandleKind,
     pub exportable: bool,
     pub importable: bool,
-    pub ownership: NativeHandleOwnership,
+    pub export_ownership: Option<NativeHandleOwnership>,
+    pub import_ownership: Option<NativeHandleOwnership>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -66,21 +67,24 @@ impl NativeHandleCapabilities {
 
 pub fn native_handle_capabilities_for_backend(backend: BackendKind) -> NativeHandleCapabilities {
     let handles = match backend {
-        BackendKind::Vulkan => borrowed_exports(&[
-            NativeHandleKind::VulkanInstance,
-            NativeHandleKind::VulkanPhysicalDevice,
-            NativeHandleKind::VulkanDevice,
-            NativeHandleKind::VulkanQueue,
-            NativeHandleKind::VulkanImage,
-            NativeHandleKind::VulkanImageView,
-            NativeHandleKind::VulkanBuffer,
-            NativeHandleKind::VulkanSampler,
-            NativeHandleKind::VulkanShaderModule,
-            NativeHandleKind::VulkanPipelineLayout,
-            NativeHandleKind::VulkanPipeline,
-            NativeHandleKind::VulkanSurface,
-            NativeHandleKind::VulkanSwapchain,
-        ]),
+        BackendKind::Vulkan => {
+            let mut handles = borrowed_exports(&[
+                NativeHandleKind::VulkanInstance,
+                NativeHandleKind::VulkanPhysicalDevice,
+                NativeHandleKind::VulkanDevice,
+                NativeHandleKind::VulkanQueue,
+                NativeHandleKind::VulkanImageView,
+                NativeHandleKind::VulkanSampler,
+                NativeHandleKind::VulkanShaderModule,
+                NativeHandleKind::VulkanPipelineLayout,
+                NativeHandleKind::VulkanPipeline,
+                NativeHandleKind::VulkanSurface,
+                NativeHandleKind::VulkanSwapchain,
+            ]);
+            handles.push(borrowed_export_import(NativeHandleKind::VulkanImage));
+            handles.push(borrowed_export_import(NativeHandleKind::VulkanBuffer));
+            handles
+        }
         BackendKind::D3d12 => borrowed_exports(&[
             NativeHandleKind::D3d12Adapter,
             NativeHandleKind::D3d12Device,
@@ -101,16 +105,27 @@ pub fn native_handle_capabilities_for_backend(backend: BackendKind) -> NativeHan
 }
 
 fn borrowed_exports(kinds: &[NativeHandleKind]) -> Vec<NativeHandleCapability> {
-    kinds
-        .iter()
-        .copied()
-        .map(|kind| NativeHandleCapability {
-            kind,
-            exportable: true,
-            importable: false,
-            ownership: NativeHandleOwnership::Borrowed,
-        })
-        .collect()
+    kinds.iter().copied().map(borrowed_export).collect()
+}
+
+fn borrowed_export(kind: NativeHandleKind) -> NativeHandleCapability {
+    NativeHandleCapability {
+        kind,
+        exportable: true,
+        importable: false,
+        export_ownership: Some(NativeHandleOwnership::Borrowed),
+        import_ownership: None,
+    }
+}
+
+fn borrowed_export_import(kind: NativeHandleKind) -> NativeHandleCapability {
+    NativeHandleCapability {
+        kind,
+        exportable: true,
+        importable: true,
+        export_ownership: Some(NativeHandleOwnership::Borrowed),
+        import_ownership: Some(NativeHandleOwnership::Imported),
+    }
 }
 
 #[cfg(test)]
@@ -118,16 +133,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn vulkan_native_handle_policy_exposes_borrowed_exports_only() {
+    fn vulkan_native_handle_policy_exposes_borrowed_exports_and_resource_imports() {
         let capabilities = native_handle_capabilities_for_backend(BackendKind::Vulkan);
 
         assert!(capabilities.supports_export(NativeHandleKind::VulkanDevice));
         assert!(capabilities.supports_export(NativeHandleKind::VulkanImage));
-        assert!(!capabilities.supports_import(NativeHandleKind::VulkanImage));
-        assert!(capabilities
-            .handles
-            .iter()
-            .all(|capability| capability.ownership == NativeHandleOwnership::Borrowed));
+        assert!(capabilities.supports_import(NativeHandleKind::VulkanImage));
+        assert!(capabilities.supports_import(NativeHandleKind::VulkanBuffer));
+        assert!(!capabilities.supports_import(NativeHandleKind::VulkanDevice));
+        assert!(
+            capabilities
+                .handles
+                .iter()
+                .all(|capability| capability.export_ownership
+                    == Some(NativeHandleOwnership::Borrowed))
+        );
     }
 
     #[test]

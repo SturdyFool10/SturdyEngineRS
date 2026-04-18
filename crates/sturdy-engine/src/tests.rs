@@ -80,6 +80,68 @@ fn engine_exposes_backend_raw_capabilities() {
 }
 
 #[test]
+fn null_backend_rejects_external_resource_imports() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+
+    let image_result = unsafe {
+        engine.import_external_image(ExternalImageDesc {
+            desc: small_image_desc(),
+            handle: ExternalImageHandle::Vulkan(VulkanExternalImage {
+                image: 1,
+                image_view: 1,
+            }),
+        })
+    };
+    assert!(matches!(image_result, Err(Error::Unsupported(_))));
+
+    let buffer_result = unsafe {
+        engine.import_external_buffer(ExternalBufferDesc {
+            desc: BufferDesc {
+                size: 64,
+                usage: BufferUsage::STORAGE,
+            },
+            handle: ExternalBufferHandle::Vulkan(VulkanExternalBuffer { buffer: 1 }),
+        })
+    };
+    assert!(matches!(buffer_result, Err(Error::Unsupported(_))));
+}
+
+#[test]
+fn debug_names_and_markers_are_accepted_on_null_backend() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let image = engine.create_image(small_image_desc()).unwrap();
+    let buffer = engine
+        .create_buffer(BufferDesc {
+            size: 64,
+            usage: BufferUsage::STORAGE,
+        })
+        .unwrap();
+
+    image.set_debug_name("debug-image").unwrap();
+    buffer.set_debug_name("debug-buffer").unwrap();
+
+    let mut frame = engine.begin_frame().unwrap();
+    frame.debug_marker("debug-marker").unwrap();
+    frame.flush().unwrap();
+}
+
+#[test]
+fn gpu_capture_integration_points_report_unsupported_on_null_backend() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let desc = GpuCaptureDesc::new(GpuCaptureTool::RenderDoc, "capture-test");
+
+    assert!(engine.supported_gpu_capture_tools().is_empty());
+    assert!(matches!(
+        engine.begin_gpu_capture(&desc),
+        Err(Error::Unsupported(_))
+    ));
+    assert!(matches!(
+        engine.end_gpu_capture(GpuCaptureTool::RenderDoc),
+        Err(Error::Unsupported(_))
+    ));
+}
+
+#[test]
 fn bind_group_rejects_resource_kind_mismatch() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     let sampler = engine.create_sampler(SamplerDesc::default()).unwrap();

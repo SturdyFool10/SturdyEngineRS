@@ -23,7 +23,8 @@ use std::{fs, path::PathBuf};
 use crate::backend::{Backend, BackendKind};
 use crate::{
     AdapterInfo, BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, CanonicalPipelineLayout,
-    Caps, CompiledGraph, ComputePipelineDesc, Error, GraphicsPipelineDesc, ImageDesc, ImageHandle,
+    Caps, CompiledGraph, ComputePipelineDesc, Error, ExternalBufferDesc, ExternalBufferHandle,
+    ExternalImageDesc, ExternalImageHandle, GraphicsPipelineDesc, ImageDesc, ImageHandle,
     NativeSurfaceDesc, PipelineHandle, PipelineLayoutHandle, Result, SamplerDesc, SamplerHandle,
     ShaderDesc, ShaderHandle, SubmissionHandle, SurfaceCapabilities, SurfaceHandle, SurfaceInfo,
     SurfaceRecreateDesc, SurfaceSize,
@@ -131,6 +132,20 @@ impl Backend for VulkanBackend {
             .create_image(&self.device, handle, desc)
     }
 
+    unsafe fn import_external_image(
+        &self,
+        handle: ImageHandle,
+        desc: ExternalImageDesc,
+    ) -> Result<()> {
+        match desc.handle {
+            ExternalImageHandle::Vulkan(external) => self
+                .resources
+                .write()
+                .expect("vulkan resource registry rwlock poisoned")
+                .import_external_image(handle, external, desc.desc),
+        }
+    }
+
     fn create_transient_image(&self, handle: ImageHandle, desc: ImageDesc) -> Result<()> {
         self.resources
             .write()
@@ -156,6 +171,20 @@ impl Backend for VulkanBackend {
             .write()
             .expect("vulkan resource registry rwlock poisoned")
             .create_buffer(&self.device, handle, desc)
+    }
+
+    unsafe fn import_external_buffer(
+        &self,
+        handle: BufferHandle,
+        desc: ExternalBufferDesc,
+    ) -> Result<()> {
+        match desc.handle {
+            ExternalBufferHandle::Vulkan(external) => self
+                .resources
+                .write()
+                .expect("vulkan resource registry rwlock poisoned")
+                .import_external_buffer(handle, external),
+        }
     }
 
     fn destroy_buffer(&self, handle: BufferHandle) -> Result<()> {

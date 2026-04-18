@@ -14,6 +14,8 @@ pub mod buffer;
 pub mod caps;
 pub mod device;
 pub mod error;
+pub mod external_resource;
+pub mod gpu_capture;
 pub mod handles;
 pub mod image;
 pub mod limits;
@@ -40,6 +42,11 @@ pub use buffer::{BufferDesc, BufferUsage};
 pub use caps::Caps;
 pub use device::{enumerate_adapters, Device, DeviceDesc, Frame};
 pub use error::{Error, Result};
+pub use external_resource::{
+    ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle,
+    VulkanExternalBuffer, VulkanExternalImage,
+};
+pub use gpu_capture::{GpuCaptureDesc, GpuCaptureTool};
 pub use handles::{
     BindGroupHandle, BufferHandle, DeviceHandle, FrameHandle, ImageHandle, PassHandle,
     PipelineHandle, PipelineLayoutHandle, SamplerHandle, ShaderHandle, SubmissionHandle,

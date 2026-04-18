@@ -3,8 +3,9 @@ use crate::native_handle_capabilities_for_backend;
 use crate::NativeSurfaceDesc;
 use crate::{
     BackendRawCapabilities, BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle,
-    CanonicalPipelineLayout, Caps, CompiledGraph, ComputePipelineDesc, GraphicsPipelineDesc,
-    ImageDesc, ImageHandle, NativeHandleCapabilities, PipelineHandle, PipelineLayoutHandle, Result,
+    CanonicalPipelineLayout, Caps, CompiledGraph, ComputePipelineDesc, ExternalBufferDesc,
+    ExternalImageDesc, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc, ImageDesc,
+    ImageHandle, NativeHandleCapabilities, PipelineHandle, PipelineLayoutHandle, Result,
     SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, ShaderTarget, SubmissionHandle,
     SurfaceCapabilities, SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
 };
@@ -105,6 +106,15 @@ pub trait Backend: Send + Sync {
     fn create_image(&self, _handle: ImageHandle, _desc: ImageDesc) -> Result<()> {
         Ok(())
     }
+    unsafe fn import_external_image(
+        &self,
+        _handle: ImageHandle,
+        _desc: ExternalImageDesc,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "backend does not support external image import",
+        ))
+    }
     /// Create a transient image that may be aliased with other transient images.
     ///
     /// Backends that support aliasing (Vulkan) defer memory binding to flush time.
@@ -117,6 +127,15 @@ pub trait Backend: Send + Sync {
     }
     fn create_buffer(&self, _handle: BufferHandle, _desc: BufferDesc) -> Result<()> {
         Ok(())
+    }
+    unsafe fn import_external_buffer(
+        &self,
+        _handle: BufferHandle,
+        _desc: ExternalBufferDesc,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "backend does not support external buffer import",
+        ))
     }
     fn destroy_buffer(&self, _handle: BufferHandle) -> Result<()> {
         Ok(())
@@ -229,6 +248,19 @@ pub trait Backend: Send + Sync {
     fn set_buffer_debug_name(&self, _handle: BufferHandle, _name: &str) {}
     /// Assign a debug name to a pipeline. No-op when debug utils are unavailable.
     fn set_pipeline_debug_name(&self, _handle: PipelineHandle, _name: &str) {}
+    fn supported_gpu_capture_tools(&self) -> Vec<GpuCaptureTool> {
+        Vec::new()
+    }
+    fn begin_gpu_capture(&self, _desc: &GpuCaptureDesc) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "backend does not support GPU capture",
+        ))
+    }
+    fn end_gpu_capture(&self, _tool: GpuCaptureTool) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "backend does not support GPU capture",
+        ))
+    }
     fn flush(&self, _graph: &CompiledGraph) -> Result<SubmissionHandle>;
     fn wait_submission(&self, _token: SubmissionHandle) -> Result<()> {
         Ok(())
