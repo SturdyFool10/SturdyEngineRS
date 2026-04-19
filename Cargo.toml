@@ -4,6 +4,7 @@ members = [
     "crates/sturdy-engine-ffi",
     "crates/sturdy-engine",
     "crates/sturdy-engine-testbed",
+    "crates/sturdy-engine-macros",
 ]
 resolver = "3"
 

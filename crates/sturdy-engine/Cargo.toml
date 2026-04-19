@@ -13,4 +13,11 @@ path = "src/lib.rs"
 [dependencies]
 bytemuck = "1.20"
 glam = "0.30"
+raw-window-handle = "0.6"
 sturdy-engine-core = { path = "../sturdy-engine-core" }
+sturdy-engine-macros = { path = "../sturdy-engine-macros" }
+winit = { version = "0.30", optional = true }
+
+[features]
+default = ["app-shell"]
+app-shell = ["winit"]

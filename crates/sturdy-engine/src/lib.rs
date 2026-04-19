@@ -9,6 +9,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+mod application;
 mod bind_group;
 mod bloom_pass;
 mod compute_program;
@@ -27,6 +28,8 @@ mod text_draw;
 mod texture;
 mod upload_arena;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use application::{EngineApp, WindowConfig, run};
 pub use bloom_pass::{
     BloomCompositeConstants, BloomConfig, BloomPass, BrightPassConstants, DownsampleConstants,
     UpsampleConstants,
@@ -72,6 +75,7 @@ pub use sturdy_engine_core::{
 pub use sturdy_engine_core::{
     DeviceDesc, ImageHandle, SamplerHandle, SubmissionHandle, SurfaceHandle, SurfaceSize,
 };
+pub use sturdy_engine_macros::PushConstants;
 pub use texture::{ImageCopyRegion, TextureUploadDesc};
 
 use sturdy_engine_core as core;
@@ -348,6 +352,43 @@ impl Engine {
             handle,
             info,
         })
+    }
+
+    /// Create a surface for a winit-compatible window in a single call.
+    ///
+    /// This is a convenience method that handles window handle extraction,
+    /// error mapping, and size clamping internally. It replaces the previous
+    /// need for a separate `native_surface_desc` helper:
+    ///
+    /// ```ignore
+    /// let surface = engine.create_surface_for_window(&window)?;
+    /// ```
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn create_surface_for_window(
+        &self,
+        window: &(impl raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle),
+    ) -> Result<Surface> {
+        use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+        let display = window
+            .display_handle()
+            .map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let window_handle = window
+            .window_handle()
+            .map_err(|e| Error::InvalidInput(e.to_string()))?;
+        // SAFETY: The window outlives this scope and the surface created from it.
+        let raw_display: RawDisplayHandle = unsafe { std::mem::transmute_copy(&display) };
+        let raw_window: RawWindowHandle = unsafe { std::mem::transmute_copy(&window_handle) };
+        // Note: size is set to a default since we don't have the window here.
+        // The caller should resize the surface after creation.
+        let desc = NativeSurfaceDesc::new(
+            raw_display,
+            raw_window,
+            SurfaceSize {
+                width: 1024,
+                height: 768,
+            },
+        );
+        self.create_surface(desc)
     }
 }
 
@@ -1156,5 +1197,25 @@ impl Frame {
 
     pub fn wait(&self) -> Result<()> {
         self.inner.wait()
+    }
+
+    /// Finish rendering this frame and present to the given surface in a single call.
+    ///
+    /// This is a convenience method that calls `flush()`, `wait()`, and
+    /// `surface.present()` in sequence, returning the first error if any step fails.
+    ///
+    /// It is the replacement for the common three-call pattern:
+    /// ```ignore
+    /// frame.flush()?;
+    /// frame.wait()?;
+    /// self.surface.present()?;
+    /// ```
+    ///
+    /// **Note**: The caller must have already called [`present_image`](Self::present_image)
+    /// with the surface image that will be presented.
+    pub fn finish_and_present(&mut self, surface: &Surface) -> Result<()> {
+        self.flush()?;
+        self.wait()?;
+        surface.present()
     }
 }

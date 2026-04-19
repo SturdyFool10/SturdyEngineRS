@@ -1205,7 +1205,10 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam",
+ "raw-window-handle",
  "sturdy-engine-core",
+ "sturdy-engine-macros",
+ "winit",
 ]
 
 [[package]]
@@ -1222,6 +1225,15 @@ name = "sturdy-engine-ffi"
 version = "0.1.0"
 dependencies = [
  "sturdy-engine-core",
+]
+
+[[package]]
+name = "sturdy-engine-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

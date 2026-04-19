@@ -3,10 +3,6 @@ use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, sync::Mute
 use sturdy_engine_core as core;
 
 use crate::{
-    compute_program::ComputeProgram,
-    mesh::Mesh,
-    mesh_program::MeshProgram,
-    sampler_catalog::SamplerPreset,
     Access, BindGroup, BindGroupDesc, BindGroupEntry, BindingKind, Buffer, BufferDesc, BufferUsage,
     ColorTargetDesc, CullMode, DispatchDesc, DrawDesc, Engine, Error, Format, FrontFace,
     GraphicsPipelineDesc, ImageDesc, ImageHandle, ImageRef, IndexBufferBinding, PassDesc, PassWork,
@@ -14,10 +10,14 @@ use crate::{
     ResourceBinding, Result, RgState, Shader, ShaderDesc, ShaderReflection, ShaderSource,
     ShaderStage, StageMask, SubresourceRange, SurfaceImage, VertexAttributeDesc,
     VertexBufferBinding, VertexBufferLayout, VertexFormat, VertexInputRate,
+    compute_program::ComputeProgram, mesh::Mesh, mesh_program::MeshProgram,
+    sampler_catalog::SamplerPreset,
 };
 
-const FULLSCREEN_VERTEX_SHADER: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/fullscreen_vertex.slang"));
+const FULLSCREEN_VERTEX_SHADER: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/fullscreen_vertex.slang"
+));
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -108,6 +108,7 @@ pub struct ShaderProgram {
     fragment: Shader,
     fullscreen_triangle: Buffer,
     reflection: ShaderReflection,
+    stage: ShaderStage,
 }
 
 impl ShaderProgram {
@@ -129,6 +130,21 @@ impl ShaderProgram {
         )
     }
 
+    /// Create a compute `ShaderProgram` from an inline Slang source string.
+    pub fn from_inline_compute(engine: &Engine, source: &str) -> Result<Self> {
+        Self::new(
+            engine,
+            ShaderProgramDesc {
+                vertex: None,
+                fragment: ShaderDesc {
+                    source: ShaderSource::Inline(source.to_owned()),
+                    entry_point: "main".to_owned(),
+                    stage: ShaderStage::Compute,
+                },
+            },
+        )
+    }
+
     /// Load a fragment shader from `path`.
     ///
     /// If the path has a `.spv` extension the file is read as pre-compiled
@@ -138,13 +154,13 @@ impl ShaderProgram {
         let path = path.into();
         let source = if path.extension().and_then(|e| e.to_str()) == Some("spv") {
             let bytes = std::fs::read(&path).map_err(|e| {
-                Error::Unknown(format!("failed to read SPIR-V file {}: {e}", path.display()))
-            })?;
-            ShaderSource::Spirv(crate::spirv_words_from_bytes(&bytes).map_err(|e| {
                 Error::Unknown(format!(
-                    "invalid SPIR-V in {}: {e}",
+                    "failed to read SPIR-V file {}: {e}",
                     path.display()
                 ))
+            })?;
+            ShaderSource::Spirv(crate::spirv_words_from_bytes(&bytes).map_err(|e| {
+                Error::Unknown(format!("invalid SPIR-V in {}: {e}", path.display()))
             })?)
         } else {
             ShaderSource::File(path)
@@ -162,8 +178,38 @@ impl ShaderProgram {
         )
     }
 
+    /// Load a compute shader from `path`.
+    pub fn load_compute(engine: &Engine, path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let source = if path.extension().and_then(|e| e.to_str()) == Some("spv") {
+            let bytes = std::fs::read(&path).map_err(|e| {
+                Error::Unknown(format!(
+                    "failed to read SPIR-V file {}: {e}",
+                    path.display()
+                ))
+            })?;
+            ShaderSource::Spirv(crate::spirv_words_from_bytes(&bytes).map_err(|e| {
+                Error::Unknown(format!("invalid SPIR-V in {}: {e}", path.display()))
+            })?)
+        } else {
+            ShaderSource::File(path)
+        };
+        Self::new(
+            engine,
+            ShaderProgramDesc {
+                vertex: None,
+                fragment: ShaderDesc {
+                    source,
+                    entry_point: "main".to_owned(),
+                    stage: ShaderStage::Compute,
+                },
+            },
+        )
+    }
+
     pub fn new(engine: &Engine, desc: ShaderProgramDesc) -> Result<Self> {
         let vertex = engine.create_shader(desc.vertex.unwrap_or_else(default_vertex_desc))?;
+        let fragment_stage = desc.fragment.stage;
         let fragment = engine.create_shader(desc.fragment)?;
         let reflection = engine.shader_reflection(&fragment)?;
         let pipeline_layout = engine.create_pipeline_layout(reflection.layout.clone())?;
@@ -176,11 +222,34 @@ impl ShaderProgram {
             fragment,
             fullscreen_triangle,
             reflection,
+            stage: fragment_stage,
         })
     }
 
     pub fn reflection(&self) -> &ShaderReflection {
         &self.reflection
+    }
+
+    /// Returns the shader stage for this program (Vertex, Fragment, or Compute).
+    pub fn stage(&self) -> ShaderStage {
+        self.stage
+    }
+
+    /// Returns the `StageMask` corresponding to the reflected shader stage.
+    ///
+    /// This is useful for [`GraphImage::execute_shader_auto`] which infers the
+    /// stage from reflection instead of requiring the caller to pass it.
+    pub fn stage_mask(&self) -> StageMask {
+        match self.stage {
+            ShaderStage::Vertex => StageMask::VERTEX,
+            ShaderStage::Fragment => StageMask::FRAGMENT,
+            ShaderStage::Compute => StageMask::COMPUTE,
+            ShaderStage::Mesh => StageMask::MESH,
+            ShaderStage::Task => StageMask::TASK,
+            ShaderStage::RayGeneration => StageMask::RAY_TRACING,
+            ShaderStage::Miss => StageMask::RAY_TRACING,
+            ShaderStage::ClosestHit => StageMask::RAY_TRACING,
+        }
     }
 
     fn pipeline_handle(&self, format: Format) -> Result<core::PipelineHandle> {
@@ -282,6 +351,7 @@ struct RenderFrameInner {
     declaration_index: u32,
     swapchain_slot: u64,
     flushed: bool,
+    swapchain_extent: core::Extent3d,
 }
 
 #[derive(Copy, Clone)]
@@ -303,6 +373,7 @@ impl RenderFrame {
                 declaration_index: 0,
                 swapchain_slot,
                 flushed: false,
+                swapchain_extent: core::Extent3d::default(),
             })),
         })
     }
@@ -332,6 +403,7 @@ impl RenderFrame {
         let name = "swapchain".to_owned();
         let mut inner = self.inner.borrow_mut();
         inner.frame.import_surface_image(image)?;
+        inner.swapchain_extent = image.desc().extent;
         inner.images_by_name.insert(
             name.clone(),
             GraphImageRecord {
@@ -375,6 +447,100 @@ impl RenderFrame {
         let mut inner = self.inner.borrow_mut();
         inner.frame.present_image(image)
     }
+
+    /// Create a swapchain-sized FP16 HDR color image for rendering.
+    ///
+    /// This is a convenience method that replaces the common pattern:
+    /// ```ignore
+    /// let desc = ImageBuilder::new_2d(Format::Rgba16Float, width, height)
+    ///     .role(ImageRole::ColorAttachment)
+    ///     .build()?;
+    /// let image = frame.image("name", desc)?;
+    /// ```
+    ///
+    /// The image is sized to match the current swapchain image dimensions.
+    pub fn hdr_color_image(&self, name: impl Into<String>) -> Result<GraphImage> {
+        let mut inner = self.inner.borrow_mut();
+        let extent = inner.swapchain_extent;
+        if extent.width == 0 && extent.height == 0 {
+            return Err(Error::InvalidInput(
+                "no swapchain image available for sizing".to_string(),
+            ));
+        }
+
+        let desc = ImageDesc {
+            dimension: crate::ImageDimension::D2,
+            extent,
+            mip_levels: 1,
+            layers: 1,
+            samples: 1,
+            format: Format::Rgba16Float,
+            usage: crate::ImageUsage::SAMPLED | crate::ImageUsage::RENDER_TARGET,
+            transient: false,
+            clear_value: None,
+            debug_name: None,
+        };
+        let name = name.into();
+        let key = GraphImageCacheKey::new(name.clone(), desc, inner.swapchain_slot);
+        let (handle, desc) = inner.engine.cached_graph_image(key, desc)?;
+        inner
+            .frame
+            .inner
+            .graph_mut(|graph| graph.import_image(handle, desc))?;
+        inner
+            .images_by_name
+            .insert(name.clone(), GraphImageRecord { handle, desc });
+        Ok(GraphImage {
+            frame: self.inner.clone(),
+            name,
+            handle,
+            desc,
+        })
+    }
+
+    /// Create an HDR image sized to a specific surface image.
+    ///
+    /// This is a more flexible variant of [`hdr_color_image`](Self::hdr_color_image)
+    /// that allows specifying a custom format and explicitly providing the source
+    /// surface image for sizing.
+    pub fn hdr_image_sized_to(
+        &self,
+        name: impl Into<String>,
+        format: Format,
+        surface_image: &SurfaceImage,
+    ) -> Result<GraphImage> {
+        let mut inner = self.inner.borrow_mut();
+        let slot = inner.swapchain_slot;
+
+        let desc = ImageDesc {
+            dimension: crate::ImageDimension::D2,
+            extent: surface_image.desc().extent,
+            mip_levels: 1,
+            layers: 1,
+            samples: 1,
+            format,
+            usage: crate::ImageUsage::SAMPLED | crate::ImageUsage::RENDER_TARGET,
+            transient: false,
+            clear_value: None,
+            debug_name: None,
+        };
+        let name = name.into();
+        let key = GraphImageCacheKey::new(name.clone(), desc, slot);
+        let (handle, desc) = inner.engine.cached_graph_image(key, desc)?;
+        inner
+            .frame
+            .inner
+            .graph_mut(|graph| graph.import_image(handle, desc))?;
+        inner
+            .images_by_name
+            .insert(name.clone(), GraphImageRecord { handle, desc });
+        Ok(GraphImage {
+            frame: self.inner.clone(),
+            name,
+            handle,
+            desc,
+        })
+    }
 }
 
 impl Drop for RenderFrame {
@@ -414,6 +580,21 @@ impl GraphImage {
         self.execute_shader_inner(shader, None)
     }
 
+    /// Execute this image as the target of a fullscreen pass, inferring the
+    /// shader stage from reflection instead of requiring the caller to pass it.
+    ///
+    /// Falls back to `FRAGMENT` for programs whose reflection does not expose
+    /// a stage.  Keeps the explicit-stage variants for callers that need to
+    /// override the inferred stage.
+    pub fn execute_shader_auto(&self, shader: &ShaderProgram) -> Result<()> {
+        let stages = if shader.reflection().entry_points.is_empty() {
+            StageMask::FRAGMENT
+        } else {
+            shader.stage_mask()
+        };
+        self.execute_shader_with_push_constants(shader, stages, &[])
+    }
+
     pub fn execute_shader_with_push_constants(
         &self,
         shader: &ShaderProgram,
@@ -438,6 +619,21 @@ impl GraphImage {
         stages: StageMask,
         constants: &T,
     ) -> Result<()> {
+        self.execute_shader_with_push_constants(shader, stages, bytemuck::bytes_of(constants))
+    }
+
+    /// Typed variant of [`execute_shader_auto`] that infers the stage from
+    /// shader reflection and accepts a `bytemuck::Pod` push constant directly.
+    pub fn execute_shader_with_constants_auto<T: bytemuck::Pod>(
+        &self,
+        shader: &ShaderProgram,
+        constants: &T,
+    ) -> Result<()> {
+        let stages = if shader.reflection().entry_points.is_empty() {
+            StageMask::FRAGMENT
+        } else {
+            shader.stage_mask()
+        };
         self.execute_shader_with_push_constants(shader, stages, bytemuck::bytes_of(constants))
     }
 
@@ -690,11 +886,7 @@ impl GraphImage {
         );
     }
 
-    pub fn execute_compute(
-        &self,
-        program: &ComputeProgram,
-        groups: [u32; 3],
-    ) -> Result<()> {
+    pub fn execute_compute(&self, program: &ComputeProgram, groups: [u32; 3]) -> Result<()> {
         self.execute_compute_inner(program, None, groups)
     }
 
@@ -820,7 +1012,10 @@ fn reflected_storage_image_reads(reflection: &ShaderReflection) -> Vec<String> {
     reflected_bindings_of_kind(reflection, core::BindingKind::StorageImage)
 }
 
-fn reflected_bindings_of_kind(reflection: &ShaderReflection, kind: core::BindingKind) -> Vec<String> {
+fn reflected_bindings_of_kind(
+    reflection: &ShaderReflection,
+    kind: core::BindingKind,
+) -> Vec<String> {
     reflection
         .layout
         .groups
