@@ -39,12 +39,11 @@
 //! }
 //!
 //! fn main() {
-//!     sturdy_engine::run(
+//!     sturdy_engine::run::<MyApp>(
 //!         WindowConfig::new("My App", 1280, 720)
 //!             .with_title("My Game")
 //!             .with_resizable(true)
 //!             .with_hdr(true),
-//!         MyApp { renderer: None },
 //!     );
 //! }
 //! ```
@@ -205,19 +204,18 @@ impl<'a> ShellFrame<'a> {
 ///
 /// This function creates the event loop, window, and engine, then drives
 /// the application lifecycle by calling the `EngineApp` trait methods.
+/// The app is constructed via `App::init` after the window and surface are
+/// ready — you never need to construct a dummy instance manually.
 ///
 /// # Example
 ///
 /// ```ignore
-/// sturdy_engine::run(
-///     WindowConfig::new("My App", 1280, 720)
-///         .with_title("My Game")
-///         .with_resizable(true),
-///     MyApp { renderer: None },
+/// sturdy_engine::run::<MyApp>(
+///     WindowConfig::new("My App", 1280, 720).with_resizable(true),
 /// );
 /// ```
 #[cfg(not(target_arch = "wasm32"))]
-pub fn run<App: EngineApp>(config: WindowConfig, _app: App)
+pub fn run<App: EngineApp>(config: WindowConfig)
 where
     App::Error: std::fmt::Debug,
 {

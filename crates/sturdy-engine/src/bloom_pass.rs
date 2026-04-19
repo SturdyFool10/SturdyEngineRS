@@ -18,8 +18,8 @@
 //! frame as `"hdr_composite"`.
 
 use crate::{
-    Engine, Format, GraphImage, ImageDesc, ImageUsage, RenderFrame, Result, ShaderProgram,
-    StageMask,
+    push_constants, Engine, Format, GraphImage, ImageDesc, ImageUsage, RenderFrame, Result,
+    ShaderProgram, StageMask,
 };
 
 /// Configuration for the bloom post-processing pass.
@@ -331,37 +331,29 @@ impl BloomPass {
 // Push constant layouts
 // ------------------------------------------------------------------
 
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default)]
+#[push_constants]
+#[derive(Debug, Default)]
 pub struct BrightPassConstants {
     pub threshold: f32,
     pub knee: f32,
     pub _pad: [f32; 2],
 }
-unsafe impl bytemuck::Pod for BrightPassConstants {}
-unsafe impl bytemuck::Zeroable for BrightPassConstants {}
 
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default)]
+#[push_constants]
+#[derive(Debug, Default)]
 pub struct DownsampleConstants {
     pub texel_size: [f32; 2],
 }
-unsafe impl bytemuck::Pod for DownsampleConstants {}
-unsafe impl bytemuck::Zeroable for DownsampleConstants {}
 
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default)]
+#[push_constants]
+#[derive(Debug, Default)]
 pub struct UpsampleConstants {
     pub accum_texel_size: [f32; 2],
 }
-unsafe impl bytemuck::Pod for UpsampleConstants {}
-unsafe impl bytemuck::Zeroable for UpsampleConstants {}
 
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default)]
+#[push_constants]
+#[derive(Debug, Default)]
 pub struct BloomCompositeConstants {
     pub bloom_intensity: f32,
     pub _pad: [f32; 3],
 }
-unsafe impl bytemuck::Pod for BloomCompositeConstants {}
-unsafe impl bytemuck::Zeroable for BloomCompositeConstants {}

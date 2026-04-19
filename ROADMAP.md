@@ -322,35 +322,36 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
   usage, or logical name changes.
 - [x] Retire or recreate cached graph images on swapchain resize and incompatible
   descriptor changes.
-- [ ] Add graph templates for common pass shapes:
-  - [ ] fullscreen color pass
-  - [ ] compute image pass
-  - [ ] downsample pass
-  - [ ] upsample/composite pass
-  - [ ] copy/resolve/pass-through pass
-- [ ] Add graph introspection data for passes, resources, subresources,
-  barriers, aliases, and final states.
-- [ ] Add graph validation for unused outputs, read-before-write,
-  write-after-write hazards, and accidental full-resource barriers when a
-  mip/layer range would be enough.
-- [ ] Add examples showing a multi-pass graph assembled from reflected shaders.
+- [x] Add graph templates for common pass shapes:
+  - [x] fullscreen color pass (`execute_shader`, `execute_shader_auto`)
+  - [x] compute image pass (`execute_compute`)
+  - [x] downsample pass (`image_at_fraction` + `execute_shader_auto`)
+  - [x] upsample/composite pass (`image_sized_to` + `execute_shader_auto`)
+  - [x] copy/resolve/pass-through pass (`ShaderProgram::passthrough` + `GraphImage::blit_from`)
+- [x] Add graph introspection data for passes and images (`RenderFrame::describe` → `GraphReport`)
+- [x] Add graph validation for unused outputs and write-after-write hazards (`RenderFrame::validate` → `Vec<GraphDiagnostic>`)
+- [ ] Add graph validation for read-before-write hazards and accidental full-resource barriers when a mip/layer range would be enough.
+- [x] Add examples showing a multi-pass graph assembled from reflected shaders (testbed: scene → bloom → tonemap).
 
 ## Phase 12.5 — Graph Execution Semantics
 
-- [ ] Treat frame render callbacks as graph recording scopes.
-- [ ] Treat chained image/shader calls as unordered graph operation declarations
+- [x] Treat frame render callbacks as graph recording scopes.
+- [x] Treat chained image/shader calls as unordered graph operation declarations
   unless explicit dependencies or resource hazards require ordering.
-- [ ] Add a graph scheduler that derives execution order from reflected
-  resources, declared image destinations, explicit reads/writes, and
-  subresource ranges.
-- [ ] Preserve source declaration order only as a deterministic tie-breaker for
-  otherwise independent operations.
-- [ ] Derive dependency edges for:
-  - [ ] read-after-write
-  - [ ] write-after-read
-  - [ ] write-after-write
-  - [ ] selected mip/layer hazards
-  - [ ] buffer range hazards
+  **Known limitation**: bind groups are built eagerly at declaration time, so
+  images referenced by a shader must be registered in the frame before the pass
+  is declared. True out-of-order declaration requires deferred bind group
+  construction (tracked as future work).
+- [x] Add a graph scheduler (`schedule_pass_order`) that derives execution order
+  from declared image/buffer reads and writes.
+- [x] Preserve source declaration order as a deterministic tie-breaker for
+  otherwise independent operations (wave-sorted Kahn's).
+- [x] Derive dependency edges for:
+  - [x] read-after-write
+  - [x] write-after-read
+  - [x] write-after-write
+  - [ ] selected mip/layer hazards (requires Phase 14 subresource model)
+  - [x] buffer range hazards
   - [ ] explicit user ordering constraints
 - [ ] Detect graph operations that can run in parallel because their image
   subresources, buffer ranges, queues, and pipeline resources do not conflict.
@@ -358,15 +359,14 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
   dependency level.
 - [ ] Define how graphics, compute, and transfer queues synchronize when graph
   passes cross queue families.
-- [ ] Execute the pending render graph automatically when the render callback
-  returns successfully.
-- [ ] Add `flush()` as an explicit graph execution boundary inside a frame.
-- [ ] After `flush()`, preserve persistent frame resources and clear only the
-  pending graph passes for the next graph segment.
-- [ ] Define error behavior for automatic end-of-render execution and explicit
-  `flush()` execution.
-- [ ] Ensure presentation is appended after the final graph segment unless the
-  caller explicitly presents earlier.
+- [x] Execute the pending render graph automatically when the render callback
+  returns successfully (via `EngineApp` shell + `Drop` auto-flush fallback).
+- [x] Add `flush()` as an explicit graph execution boundary inside a frame.
+- [x] After `flush()`, clear pending passes; persistent images remain cached.
+- [x] Errors from auto-flush (Drop) are silently discarded; explicit `flush()`
+  propagates errors to the caller.
+- [x] Ensure presentation is appended after the final graph segment (`present_image`
+  is now a deferred pending pass, scheduled after its writer).
 
 ## Phase 13 — Procedural Texture Layer
 
@@ -549,13 +549,13 @@ Every push constant struct requires five lines of ceremony: `#[repr(C)]`,
 `#[derive(Copy, Clone)]`, and two `unsafe impl bytemuck::*` blocks. A proc macro
 eliminates this.
 
-- [ ] Add a `PushConstants` derive macro (in a new `sturdy-engine-macros` crate)
-  that emits `#[repr(C)]`, `Copy`, `Clone`, `bytemuck::Pod`, and
-  `bytemuck::Zeroable` impls from a single `#[derive(PushConstants)]` attribute.
-- [ ] Re-export the macro from `sturdy_engine` so users import it from one place.
-- [ ] Apply `#[derive(PushConstants)]` to the engine's own push constant structs
-  (`BrightPassConstants`, `DownsampleConstants`, `ToneBloomConstants`) and remove
-  the hand-written impls.
+- [x] Add a `push_constants` attribute macro (in `sturdy-engine-macros`) that
+  emits `#[repr(C)]`, `Copy`, `Clone`, `bytemuck::Pod`, and `bytemuck::Zeroable`
+  from a single `#[push_constants]` attribute.
+- [x] Re-export the macro from `sturdy_engine` so users import it from one place.
+- [x] Apply `#[push_constants]` to the engine's own push constant structs
+  (`BrightPassConstants`, `DownsampleConstants`, `UpsampleConstants`,
+  `BloomCompositeConstants`) and remove the hand-written impls.
 
 Target: 5 lines of per-struct ceremony become 1 derive attribute.
 

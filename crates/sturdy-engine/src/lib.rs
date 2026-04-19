@@ -29,7 +29,7 @@ mod texture;
 mod upload_arena;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use application::{EngineApp, WindowConfig, run};
+pub use application::{EngineApp, ShellFrame, WindowConfig, run};
 pub use bloom_pass::{
     BloomCompositeConstants, BloomConfig, BloomPass, BrightPassConstants, DownsampleConstants,
     UpsampleConstants,
@@ -46,7 +46,8 @@ pub use text_draw::{TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput
 
 pub use bind_group::BindGroupBuilder;
 pub use frontend_graph::{
-    GraphImage, GraphImageCacheKey, RenderFrame, ShaderProgram, ShaderProgramDesc,
+    DiagnosticLevel, GraphDiagnostic, GraphImage, GraphImageCacheKey, GraphImageInfo, GraphPassInfo,
+    GraphReport, PassKind, RenderFrame, ShaderProgram, ShaderProgramDesc,
 };
 pub use glam::{Vec2, Vec3};
 pub use pipeline_layout::PipelineLayoutBuilder;
@@ -75,7 +76,7 @@ pub use sturdy_engine_core::{
 pub use sturdy_engine_core::{
     DeviceDesc, ImageHandle, SamplerHandle, SubmissionHandle, SurfaceHandle, SurfaceSize,
 };
-pub use sturdy_engine_macros::PushConstants;
+pub use sturdy_engine_macros::push_constants;
 pub use texture::{ImageCopyRegion, TextureUploadDesc};
 
 use sturdy_engine_core as core;

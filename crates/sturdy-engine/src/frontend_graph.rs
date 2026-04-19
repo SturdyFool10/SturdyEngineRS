@@ -19,6 +19,11 @@ const FULLSCREEN_VERTEX_SHADER: &str = include_str!(concat!(
     "/shaders/fullscreen_vertex.slang"
 ));
 
+const PASSTHROUGH_FRAGMENT_SHADER: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/passthrough_fragment.slang"
+));
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct FullscreenVertex {
@@ -93,6 +98,62 @@ impl From<ImageDesc> for GraphImageDescKey {
             clear_value: desc.clear_value,
         }
     }
+}
+
+/// The kind of render pass recorded in the graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassKind {
+    /// Fullscreen triangle pass driven by a fragment shader.
+    Fullscreen,
+    /// Compute dispatch pass.
+    Compute,
+    /// Mesh draw pass.
+    Mesh,
+}
+
+struct PassRecord {
+    name: String,
+    kind: PassKind,
+    reads: Vec<core::ImageHandle>,
+    writes: Vec<core::ImageHandle>,
+}
+
+/// Per-pass information returned by [`RenderFrame::describe`].
+pub struct GraphPassInfo {
+    pub name: String,
+    pub kind: PassKind,
+    /// Names of frame images read by this pass.
+    pub reads: Vec<String>,
+    /// Names of frame images written by this pass.
+    pub writes: Vec<String>,
+}
+
+/// Per-image information returned by [`RenderFrame::describe`].
+pub struct GraphImageInfo {
+    pub name: String,
+    pub format: Format,
+    pub extent: core::Extent3d,
+    pub write_count: usize,
+    pub read_count: usize,
+}
+
+/// A snapshot of the render graph recorded so far in a [`RenderFrame`].
+pub struct GraphReport {
+    pub passes: Vec<GraphPassInfo>,
+    pub images: Vec<GraphImageInfo>,
+}
+
+/// Severity level of a graph diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticLevel {
+    Warning,
+    Error,
+}
+
+/// A diagnostic produced by [`RenderFrame::validate`].
+pub struct GraphDiagnostic {
+    pub level: DiagnosticLevel,
+    pub message: String,
 }
 
 pub struct ShaderProgramDesc {
@@ -176,6 +237,16 @@ impl ShaderProgram {
                 },
             },
         )
+    }
+
+    /// Create a passthrough shader that samples `source` and writes it unchanged.
+    ///
+    /// Use this with [`GraphImage::blit_from`] to implement copy/resolve passes
+    /// without writing a custom shader. The shader expects a frame image named
+    /// `"source"` — call `src.register_as("source")` before `blit_from` if the
+    /// source image was registered under a different name.
+    pub fn passthrough(engine: &Engine) -> Result<Self> {
+        Self::from_inline_fragment(engine, PASSTHROUGH_FRAGMENT_SHADER)
     }
 
     /// Load a compute shader from `path`.
@@ -348,6 +419,9 @@ struct RenderFrameInner {
     images_by_name: HashMap<String, GraphImageRecord>,
     samplers_by_name: HashMap<String, core::SamplerHandle>,
     held_bind_groups: Vec<BindGroup>,
+    pass_records: Vec<PassRecord>,
+    /// Passes queued for submission. Flushed through the scheduler on `flush()`.
+    pending_passes: Vec<PassDesc>,
     declaration_index: u32,
     swapchain_slot: u64,
     flushed: bool,
@@ -370,6 +444,8 @@ impl RenderFrame {
                 images_by_name: HashMap::new(),
                 samplers_by_name: HashMap::new(),
                 held_bind_groups: Vec::new(),
+                pass_records: Vec::new(),
+                pending_passes: Vec::new(),
                 declaration_index: 0,
                 swapchain_slot,
                 flushed: false,
@@ -433,9 +509,187 @@ impl RenderFrame {
         self
     }
 
+    /// Return a snapshot of every pass and image recorded in this frame so far.
+    pub fn describe(&self) -> GraphReport {
+        let inner = self.inner.borrow();
+
+        let handle_to_name = |h: core::ImageHandle| -> Option<String> {
+            inner
+                .images_by_name
+                .iter()
+                .find(|(_, rec)| rec.handle == h)
+                .map(|(name, _)| name.clone())
+        };
+
+        let passes = inner
+            .pass_records
+            .iter()
+            .map(|rec| GraphPassInfo {
+                name: rec.name.clone(),
+                kind: rec.kind,
+                reads: rec.reads.iter().filter_map(|h| handle_to_name(*h)).collect(),
+                writes: rec.writes.iter().filter_map(|h| handle_to_name(*h)).collect(),
+            })
+            .collect();
+
+        let mut write_counts: Vec<(core::ImageHandle, usize)> = Vec::new();
+        let mut read_counts: Vec<(core::ImageHandle, usize)> = Vec::new();
+        let tally = |counts: &mut Vec<(core::ImageHandle, usize)>, h: core::ImageHandle| {
+            if let Some(entry) = counts.iter_mut().find(|(k, _)| *k == h) {
+                entry.1 += 1;
+            } else {
+                counts.push((h, 1));
+            }
+        };
+        for rec in &inner.pass_records {
+            for h in &rec.reads {
+                tally(&mut read_counts, *h);
+            }
+            for h in &rec.writes {
+                tally(&mut write_counts, *h);
+            }
+        }
+
+        let images = inner
+            .images_by_name
+            .iter()
+            .map(|(name, rec)| {
+                let write_count = write_counts
+                    .iter()
+                    .find(|(h, _)| *h == rec.handle)
+                    .map(|(_, c)| *c)
+                    .unwrap_or(0);
+                let read_count = read_counts
+                    .iter()
+                    .find(|(h, _)| *h == rec.handle)
+                    .map(|(_, c)| *c)
+                    .unwrap_or(0);
+                GraphImageInfo {
+                    name: name.clone(),
+                    format: rec.desc.format,
+                    extent: rec.desc.extent,
+                    write_count,
+                    read_count,
+                }
+            })
+            .collect();
+
+        GraphReport { passes, images }
+    }
+
+    /// Validate the recorded graph and return any diagnostics.
+    ///
+    /// Checks for:
+    /// - Write-after-write on the same image with no intervening read.
+    /// - Images written but never subsequently read (potential unused output).
+    pub fn validate(&self) -> Vec<GraphDiagnostic> {
+        let inner = self.inner.borrow();
+        let mut diagnostics = Vec::new();
+
+        let handle_to_name = |h: core::ImageHandle| -> &str {
+            inner
+                .images_by_name
+                .iter()
+                .find(|(_, rec)| rec.handle == h)
+                .map(|(name, _)| name.as_str())
+                .unwrap_or("<unknown>")
+        };
+
+        // Track consecutive-write state: (handle, last-writing-pass-name)
+        let mut pending_writes: Vec<(core::ImageHandle, String)> = Vec::new();
+        let mut ever_read: Vec<core::ImageHandle> = Vec::new();
+
+        for rec in &inner.pass_records {
+            // Reads clear pending write state for those images.
+            for h in &rec.reads {
+                pending_writes.retain(|(k, _)| k != h);
+                if !ever_read.contains(h) {
+                    ever_read.push(*h);
+                }
+            }
+
+            // Writes: flag if the same image is still pending from a previous pass.
+            for h in &rec.writes {
+                if let Some(pos) = pending_writes.iter().position(|(k, _)| k == h) {
+                    let (_, prev_pass) = pending_writes.remove(pos);
+                    diagnostics.push(GraphDiagnostic {
+                        level: DiagnosticLevel::Warning,
+                        message: format!(
+                            "image '{}' is written in '{}' and again in '{}' without an intervening read (write-after-write)",
+                            handle_to_name(*h),
+                            prev_pass,
+                            rec.name,
+                        ),
+                    });
+                }
+                pending_writes.push((*h, rec.name.clone()));
+            }
+        }
+
+        // Any image still pending a read that is not "swapchain" is a potential unused output.
+        for (h, pass_name) in &pending_writes {
+            let name = handle_to_name(*h);
+            if name == "swapchain" {
+                continue;
+            }
+            if !ever_read.contains(h) {
+                diagnostics.push(GraphDiagnostic {
+                    level: DiagnosticLevel::Warning,
+                    message: format!(
+                        "image '{name}' is written in '{pass_name}' but never read — may be an unused output"
+                    ),
+                });
+            }
+        }
+
+        diagnostics
+    }
+
+    /// Create a graph image with the same dimensions as `src` but a different format.
+    ///
+    /// Useful for allocating intermediate images that share a source image's
+    /// resolution (e.g. a depth image at the same size as an HDR color buffer).
+    pub fn image_sized_to(
+        &self,
+        name: impl Into<String>,
+        format: Format,
+        src: &GraphImage,
+    ) -> Result<GraphImage> {
+        let desc = ImageDesc {
+            format,
+            usage: crate::ImageUsage::SAMPLED | crate::ImageUsage::RENDER_TARGET,
+            ..src.desc()
+        };
+        self.image(name, desc)
+    }
+
+    /// Create a graph image at a fraction of `src`'s dimensions, with the same format.
+    ///
+    /// `divisor` is clamped to at least 1. Each dimension is divided by `divisor`
+    /// and floored to at least 1 pixel. Use this to build downsample chains.
+    pub fn image_at_fraction(
+        &self,
+        name: impl Into<String>,
+        src: &GraphImage,
+        divisor: u32,
+    ) -> Result<GraphImage> {
+        let divisor = divisor.max(1);
+        let src_desc = src.desc();
+        let desc = ImageDesc {
+            extent: core::Extent3d {
+                width: (src_desc.extent.width / divisor).max(1),
+                height: (src_desc.extent.height / divisor).max(1),
+                depth: src_desc.extent.depth,
+            },
+            ..src_desc
+        };
+        self.image(name, desc)
+    }
+
     pub fn flush(&self) -> Result<core::SubmissionHandle> {
         let mut inner = self.inner.borrow_mut();
         inner.flushed = true;
+        submit_pending_passes(&mut inner)?;
         inner.frame.flush()
     }
 
@@ -445,7 +699,36 @@ impl RenderFrame {
 
     pub fn present_image(&self, image: &GraphImage) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
-        inner.frame.present_image(image)
+        inner
+            .frame
+            .inner
+            .graph_mut(|g| g.import_image(image.handle(), image.desc()))?;
+        inner.pending_passes.push(PassDesc {
+            name: "present".to_owned(),
+            queue: QueueType::Graphics,
+            shader: None,
+            pipeline: None,
+            bind_groups: Vec::new(),
+            push_constants: None,
+            work: PassWork::None,
+            reads: vec![crate::ImageUse {
+                image: image.handle(),
+                access: Access::Read,
+                state: RgState::Present,
+                subresource: SubresourceRange {
+                    base_mip: 0,
+                    mip_count: 1,
+                    base_layer: 0,
+                    layer_count: 1,
+                },
+            }],
+            writes: Vec::new(),
+            buffer_reads: Vec::new(),
+            buffer_writes: Vec::new(),
+            clear_colors: Vec::new(),
+            clear_depth: None,
+        });
+        Ok(())
     }
 
     /// Create a swapchain-sized FP16 HDR color image for rendering.
@@ -552,6 +835,7 @@ impl Drop for RenderFrame {
         if inner.flushed {
             return;
         }
+        let _ = submit_pending_passes(&mut inner);
         let _ = inner.frame.flush();
     }
 }
@@ -697,8 +981,17 @@ impl GraphImage {
             bind_group.iter().map(|bg| bg.handle()).collect();
         inner.held_bind_groups.extend(bind_group);
 
-        inner.frame.add_pass(PassDesc {
-            name: format!("{declaration_index:04}-execute-{}", self.name),
+        let pass_name = format!("{declaration_index:04}-execute-{}", self.name);
+        let pass_reads: Vec<core::ImageHandle> = reads.iter().map(|u| u.image).collect();
+        inner.pass_records.push(PassRecord {
+            name: pass_name.clone(),
+            kind: PassKind::Fullscreen,
+            reads: pass_reads,
+            writes: vec![self.handle],
+        });
+
+        inner.pending_passes.push(PassDesc {
+            name: pass_name,
             queue: QueueType::Graphics,
             shader: Some(shader.fragment.handle()),
             pipeline: Some(pipeline),
@@ -738,7 +1031,8 @@ impl GraphImage {
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
-        })
+        });
+        Ok(())
     }
 
     pub fn draw_mesh(&self, mesh: &Mesh, program: &MeshProgram) -> Result<()> {
@@ -834,8 +1128,16 @@ impl GraphImage {
             });
         }
 
-        inner.frame.add_pass(PassDesc {
-            name: format!("{declaration_index:04}-draw-mesh-{}", self.name),
+        let pass_name = format!("{declaration_index:04}-draw-mesh-{}", self.name);
+        inner.pass_records.push(PassRecord {
+            name: pass_name.clone(),
+            kind: PassKind::Mesh,
+            reads: Vec::new(),
+            writes: vec![self.handle],
+        });
+
+        inner.pending_passes.push(PassDesc {
+            name: pass_name,
             queue: crate::QueueType::Graphics,
             shader: Some(program.fragment.handle()),
             pipeline: Some(pipeline),
@@ -865,7 +1167,8 @@ impl GraphImage {
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
-        })
+        });
+        Ok(())
     }
 
     /// Register this image under `name` in the frame's image registry.
@@ -884,6 +1187,20 @@ impl GraphImage {
                 desc: self.desc,
             },
         );
+    }
+
+    /// Copy `src` into this image via the built-in passthrough shader.
+    ///
+    /// `src` is temporarily registered as `"source"` in the frame image registry
+    /// before the pass is recorded.  Any prior `"source"` registration is
+    /// overwritten and restored to nothing after this call, so avoid relying on
+    /// a frame image named `"source"` when using `blit_from`.
+    ///
+    /// `passthrough` must be a [`ShaderProgram::passthrough`] program (or any
+    /// shader that reads a frame image named `"source"`).
+    pub fn blit_from(&self, src: &GraphImage, passthrough: &ShaderProgram) -> Result<()> {
+        src.register_as("source");
+        self.execute_shader_auto(passthrough)
     }
 
     pub fn execute_compute(&self, program: &ComputeProgram, groups: [u32; 3]) -> Result<()> {
@@ -962,8 +1279,17 @@ impl GraphImage {
             bind_group.iter().map(|bg| bg.handle()).collect();
         inner.held_bind_groups.extend(bind_group);
 
-        inner.frame.add_pass(PassDesc {
-            name: format!("{declaration_index:04}-compute-{}", self.name),
+        let pass_name = format!("{declaration_index:04}-compute-{}", self.name);
+        let pass_reads: Vec<core::ImageHandle> = reads.iter().map(|u| u.image).collect();
+        inner.pass_records.push(PassRecord {
+            name: pass_name.clone(),
+            kind: PassKind::Compute,
+            reads: pass_reads,
+            writes: vec![self.handle],
+        });
+
+        inner.pending_passes.push(PassDesc {
+            name: pass_name,
             queue: QueueType::Compute,
             shader: Some(program.shader.handle()),
             pipeline: Some(program.pipeline.handle()),
@@ -990,7 +1316,8 @@ impl GraphImage {
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
-        })
+        });
+        Ok(())
     }
 }
 
@@ -1002,6 +1329,129 @@ impl ImageRef for GraphImage {
     fn image_desc(&self) -> ImageDesc {
         self.desc
     }
+}
+
+/// Drain `inner.pending_passes`, schedule them, and submit to the core frame.
+fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
+    if inner.pending_passes.is_empty() {
+        return Ok(());
+    }
+    let order = schedule_pass_order(&inner.pending_passes);
+    // Use Option::take to move each PassDesc out without requiring Clone.
+    let mut slots: Vec<Option<PassDesc>> =
+        inner.pending_passes.drain(..).map(Some).collect();
+    for idx in order {
+        let pass = slots[idx].take().expect("scheduler produced duplicate index");
+        inner.frame.add_pass(pass)?;
+    }
+    Ok(())
+}
+
+/// Returns true if `later` must execute after `earlier` due to a shared resource.
+///
+/// Checks all three hazard types on image and buffer resources:
+/// - RAW (read-after-write): `earlier` writes X, `later` reads X
+/// - WAW (write-after-write): `earlier` writes X, `later` writes X
+/// - WAR (write-after-read): `earlier` reads X, `later` writes X
+fn has_resource_dependency(earlier: &PassDesc, later: &PassDesc) -> bool {
+    let e_img_writes: Vec<_> = earlier.writes.iter().map(|u| u.image).collect();
+    let e_img_reads: Vec<_> = earlier.reads.iter().map(|u| u.image).collect();
+    let l_img_writes: Vec<_> = later.writes.iter().map(|u| u.image).collect();
+    let l_img_reads: Vec<_> = later.reads.iter().map(|u| u.image).collect();
+
+    // RAW and WAW
+    for h in &e_img_writes {
+        if l_img_reads.contains(h) || l_img_writes.contains(h) {
+            return true;
+        }
+    }
+    // WAR
+    for h in &e_img_reads {
+        if l_img_writes.contains(h) {
+            return true;
+        }
+    }
+
+    // Buffer hazards
+    let e_buf_writes: Vec<_> = earlier.buffer_writes.iter().map(|u| u.buffer).collect();
+    let e_buf_reads: Vec<_> = earlier.buffer_reads.iter().map(|u| u.buffer).collect();
+    let l_buf_writes: Vec<_> = later.buffer_writes.iter().map(|u| u.buffer).collect();
+    let l_buf_reads: Vec<_> = later.buffer_reads.iter().map(|u| u.buffer).collect();
+
+    for h in &e_buf_writes {
+        if l_buf_reads.contains(h) || l_buf_writes.contains(h) {
+            return true;
+        }
+    }
+    for h in &e_buf_reads {
+        if l_buf_writes.contains(h) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Returns the indices of `passes` in dependency-correct execution order.
+///
+/// Uses Kahn's topological sort.  Passes with no outstanding dependencies are
+/// processed in declaration order (their original index) as a deterministic
+/// tie-breaker, preserving the user's intent for truly independent passes.
+///
+/// If a cycle is detected (which should not occur in a valid render graph) the
+/// remaining passes are appended in declaration order.
+fn schedule_pass_order(passes: &[PassDesc]) -> Vec<usize> {
+    let n = passes.len();
+    if n <= 1 {
+        return (0..n).collect();
+    }
+
+    // Build forward adjacency: adj[i] lists every j that depends on i.
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut in_degree: Vec<usize> = vec![0; n];
+
+    for i in 0..n {
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            if has_resource_dependency(&passes[i], &passes[j])
+                && !adj[i].contains(&j)
+            {
+                adj[i].push(j);
+                in_degree[j] += 1;
+            }
+        }
+    }
+
+    // Kahn's algorithm — sort each wave by original index for determinism.
+    let mut ready: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
+    let mut result = Vec::with_capacity(n);
+
+    while !ready.is_empty() {
+        ready.sort_unstable();
+        let wave = std::mem::take(&mut ready);
+        for idx in wave {
+            result.push(idx);
+            for &dep in &adj[idx] {
+                in_degree[dep] -= 1;
+                if in_degree[dep] == 0 {
+                    ready.push(dep);
+                }
+            }
+        }
+    }
+
+    // Cycle fallback: append remaining passes in declaration order.
+    if result.len() < n {
+        for i in 0..n {
+            if in_degree[i] > 0 {
+                result.push(i);
+            }
+        }
+    }
+
+    result
 }
 
 fn reflected_image_reads(reflection: &ShaderReflection) -> Vec<String> {
