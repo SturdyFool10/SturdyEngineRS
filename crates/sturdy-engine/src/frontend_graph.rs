@@ -51,6 +51,15 @@ impl GraphImageCacheKey {
     pub(crate) fn debug_name(&self) -> Option<String> {
         (!self.name.is_empty()).then(|| format!("graph-image-{}", self.name))
     }
+
+    /// Returns true when `other` targets the same logical image (same name and
+    /// swapchain slot) but with a different descriptor — i.e. the cached entry
+    /// is stale and should be evicted before inserting `other`.
+    pub(crate) fn is_stale_for(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.swapchain_slot == other.swapchain_slot
+            && self.desc_key != other.desc_key
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
@@ -419,6 +428,17 @@ impl GraphImage {
                 bytes: bytes.to_vec(),
             }),
         )
+    }
+
+    /// Typed variant of [`execute_shader_with_push_constants`] that accepts any
+    /// `bytemuck::Pod` value directly, eliminating the need for unsafe byte-casting at call sites.
+    pub fn execute_shader_with_constants<T: bytemuck::Pod>(
+        &self,
+        shader: &ShaderProgram,
+        stages: StageMask,
+        constants: &T,
+    ) -> Result<()> {
+        self.execute_shader_with_push_constants(shader, stages, bytemuck::bytes_of(constants))
     }
 
     fn execute_shader_inner(

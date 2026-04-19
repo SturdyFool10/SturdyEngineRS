@@ -1228,6 +1228,7 @@ dependencies = [
 name = "sturdy-engine-testbed"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "raw-window-handle",
  "sturdy-engine",
  "sturdy-engine-core",

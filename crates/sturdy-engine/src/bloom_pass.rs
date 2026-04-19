@@ -1,22 +1,24 @@
 //! Configurable bloom post-processing pass.
 //!
-//! Implements the CoD:Advanced Warfare bloom approach:
-//! 1. Bright-pass filter to extract luminance
+//! Pipeline:
+//! 1. Bright-pass filter to extract luminance above threshold
 //! 2. CoD:AW 13-tap downsampling mip-chain
-//! 3. Hermite spline tone-mapping + bloom composite
+//! 3. Tent-filtered pyramid collapse (upsample + accumulate)
+//! 4. HDR composite: scene_color + bloom * intensity → FP16 output
 //!
-//! The pass works with the engine's reflected shader graph pattern —
-//! bind groups are auto-resolved from shader reflection, so only
-//! push constants need to be passed through.
+//! The pass deliberately does **not** tonemap. It outputs a linear-HDR
+//! `GraphImage` named `"hdr_composite"` so that other effects (fog, lens
+//! flares, colour grading) can be inserted in the compositing chain before
+//! the caller's tonemap pass converts to display-referred output.
 //!
 //! # Frame image naming contract
 //!
-//! Before calling [`BloomPass::execute`] the caller **must** have registered a
-//! frame image named `"scene_color"` (the linear-HDR scene buffer).  The
-//! bright-extract and composite shaders bind that name by reflection.
+//! The caller **must** register a frame image named `"scene_color"` before
+//! calling [`BloomPass::execute`]. The returned image is registered in the
+//! frame as `"hdr_composite"`.
 
 use crate::{
-    Engine, Error, Format, GraphImage, ImageDesc, ImageUsage, RenderFrame, Result, ShaderProgram,
+    Engine, Format, GraphImage, ImageDesc, ImageUsage, RenderFrame, Result, ShaderProgram,
     StageMask,
 };
 
@@ -35,24 +37,15 @@ pub struct BloomConfig {
     /// Number of mip levels for the bloom downsampling chain.
     /// 0 means auto (based on source size).
     pub mip_count: u32,
-
-    /// Whether to use the adaptive 13-tap/box filter (true) or always
-    /// use the CoD:AW 13-tap filter for every mip level (false).
-    pub adaptive_filter: bool,
-
-    /// Whether to apply Gaussian accumulation between mip levels.
-    pub gaussian_accumulate: bool,
 }
 
 impl Default for BloomConfig {
     fn default() -> Self {
         Self {
-            threshold: 0.8,
-            knee: 0.05,
-            intensity: 0.5,
+            threshold: 0.6,
+            knee: 0.1,
+            intensity: 0.4,
             mip_count: 0,
-            adaptive_filter: true,
-            gaussian_accumulate: false,
         }
     }
 }
@@ -64,10 +57,8 @@ impl Default for BloomConfig {
 pub struct BloomPass {
     pub bright_extract_program: ShaderProgram,
     pub downsample_program: ShaderProgram,
-
-    /// Hermite spline tone-mapping + bloom composite shader.
-    /// `None` only if the shader failed to compile at build time.
-    pub tonemap_bloom_program: Option<ShaderProgram>,
+    pub upsample_program: ShaderProgram,
+    pub composite_program: ShaderProgram,
 }
 
 impl BloomPass {
@@ -87,19 +78,26 @@ impl BloomPass {
                 "/shaders/bloom_downsample.slang"
             )),
         )?;
-        let tonemap_bloom = ShaderProgram::from_inline_fragment(
+        let upsample = ShaderProgram::from_inline_fragment(
             engine,
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/shaders/bloom_tonemap_composite.slang"
+                "/shaders/bloom_upsample.slang"
             )),
-        )
-        .ok();
+        )?;
+        let composite = ShaderProgram::from_inline_fragment(
+            engine,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/shaders/bloom_composite.slang"
+            )),
+        )?;
 
         Ok(Self {
             bright_extract_program: bright_extract,
             downsample_program: downsample,
-            tonemap_bloom_program: tonemap_bloom,
+            upsample_program: upsample,
+            composite_program: composite,
         })
     }
 
@@ -107,12 +105,14 @@ impl BloomPass {
     pub fn from_programs(
         bright_extract: ShaderProgram,
         downsample: ShaderProgram,
-        tonemap_bloom: Option<ShaderProgram>,
+        upsample: ShaderProgram,
+        composite: ShaderProgram,
     ) -> Self {
         Self {
             bright_extract_program: bright_extract,
             downsample_program: downsample,
-            tonemap_bloom_program: tonemap_bloom,
+            upsample_program: upsample,
+            composite_program: composite,
         }
     }
 
@@ -158,21 +158,24 @@ impl BloomPass {
         Ok(mips)
     }
 
-    /// Run the full bloom + tonemap pipeline.
+    /// Run the bloom pipeline and return the HDR composite image.
     ///
     /// 1. Bright-pass extraction → `bloom_mip_0`
-    /// 2. CoD:AW 13-tap downsampling chain
-    /// 3. Hermite spline tonemap + bloom composite → `output`
+    /// 2. CoD:AW 13-tap downsampling chain → `bloom_mip_N`
+    /// 3. Tent-filtered upsample/accumulate chain → `bloom_up_0`
+    /// 4. HDR composite: `scene_color + bloom_up_0 * intensity` → `"hdr_composite"`
+    ///
+    /// The returned [`GraphImage`] is registered in the frame as `"hdr_composite"`.
+    /// Pass it to a tonemap shader to produce display output.
     ///
     /// **Pre-condition**: the caller must have registered a frame image named
     /// `"scene_color"` before calling this method.
     pub fn execute(
         &self,
         scene_color: &GraphImage,
-        output: &GraphImage,
         frame: &RenderFrame,
         config: &BloomConfig,
-    ) -> Result<()> {
+    ) -> Result<GraphImage> {
         let src_desc = scene_color.desc();
         let src_width = src_desc.extent.width;
         let src_height = src_desc.extent.height;
@@ -191,17 +194,14 @@ impl BloomPass {
 
         // Pass 2: CoD:AW 13-tap downsampling chain
         for level in 0..bloom_mips.len().saturating_sub(1) {
-            let src = &bloom_mips[level];
-            let dst = &bloom_mips[level + 1];
-            self.execute_downsample(src, dst, config)?;
+            self.execute_downsample(&bloom_mips[level], &bloom_mips[level + 1])?;
         }
 
-        // Pass 3: tonemap + bloom composite
-        let tonemap_prog = self.tonemap_bloom_program.as_ref().ok_or_else(|| {
-            Error::Unknown("hermite_tonemap_bloom shader not available".into())
-        })?;
-        let bloom_base = bloom_mips.last().expect("bloom mip chain is non-empty");
-        self.execute_tonemap_composite(output, bloom_base, config, tonemap_prog)
+        // Pass 3: pyramid collapse — tent-upsample and accumulate back to full res
+        let bloom_result = self.execute_upsample_chain(&bloom_mips, frame)?;
+
+        // Pass 4: HDR composite — scene + bloom in linear HDR space, no tonemap
+        self.execute_composite(scene_color, &bloom_result, frame, config)
     }
 
     // ------------------------------------------------------------------
@@ -221,13 +221,7 @@ impl BloomPass {
         )
     }
 
-    fn execute_downsample(
-        &self,
-        input: &GraphImage,
-        output: &GraphImage,
-        _config: &BloomConfig,
-    ) -> Result<()> {
-        // The downsample shader reads "source_tex"; alias the input under that name.
+    fn execute_downsample(&self, input: &GraphImage, output: &GraphImage) -> Result<()> {
         input.register_as("source_tex");
 
         let src_desc = input.desc();
@@ -244,33 +238,92 @@ impl BloomPass {
         )
     }
 
-    fn execute_tonemap_composite(
+    fn execute_upsample_chain(
         &self,
-        output: &GraphImage,
-        bloom: &GraphImage,
-        config: &BloomConfig,
-        tonemap_prog: &ShaderProgram,
-    ) -> Result<()> {
-        // The tonemap shader reads "scene_color" (already in frame) and "bloom_base".
-        bloom.register_as("bloom_base");
+        bloom_mips: &[GraphImage],
+        frame: &RenderFrame,
+    ) -> Result<GraphImage> {
+        let n = bloom_mips.len();
 
-        let desc = output.desc();
-        let constants = ToneBloomConstants {
-            time: 0.0,
-            inverse_resolution: [
-                1.0 / desc.extent.width as f32,
-                1.0 / desc.extent.height as f32,
-            ],
-            bloom_intensity: config.intensity,
-            hdr_color: [1.0; 3],
-            _pad2: [0.0, 0.0],
-            _pad3: 0.0,
+        bloom_mips[n - 1].register_as("bloom_accum");
+
+        let mut last_up: Option<GraphImage> = None;
+
+        for level in (0..n - 1).rev() {
+            let down_desc = bloom_mips[level].desc();
+            let accum_desc = bloom_mips[level + 1].desc();
+
+            let up_desc = ImageDesc {
+                dimension: crate::ImageDimension::D2,
+                extent: down_desc.extent,
+                mip_levels: 1,
+                layers: 1,
+                samples: 1,
+                format: Format::Rgba16Float,
+                usage: ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET,
+                transient: false,
+                clear_value: None,
+                debug_name: None,
+            };
+            let up_image = frame.image(&format!("bloom_up_{level}"), up_desc)?;
+
+            bloom_mips[level].register_as("bloom_down");
+
+            let constants = UpsampleConstants {
+                accum_texel_size: [
+                    1.0 / accum_desc.extent.width as f32,
+                    1.0 / accum_desc.extent.height as f32,
+                ],
+            };
+            up_image.execute_shader_with_push_constants(
+                &self.upsample_program,
+                StageMask::FRAGMENT,
+                bytemuck::bytes_of(&constants),
+            )?;
+
+            up_image.register_as("bloom_accum");
+            last_up = Some(up_image);
+        }
+
+        Ok(last_up.expect("bloom mip chain must have at least 2 levels"))
+    }
+
+    fn execute_composite(
+        &self,
+        scene_color: &GraphImage,
+        bloom: &GraphImage,
+        frame: &RenderFrame,
+        config: &BloomConfig,
+    ) -> Result<GraphImage> {
+        bloom.register_as("bloom_base");
+        // scene_color is already in the frame registry as "scene_color".
+
+        let desc = scene_color.desc();
+        let hdr_desc = ImageDesc {
+            dimension: crate::ImageDimension::D2,
+            extent: desc.extent,
+            mip_levels: 1,
+            layers: 1,
+            samples: 1,
+            format: Format::Rgba16Float,
+            usage: ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET,
+            transient: false,
+            clear_value: None,
+            debug_name: None,
         };
-        output.execute_shader_with_push_constants(
-            tonemap_prog,
+        let hdr_out = frame.image("hdr_composite", hdr_desc)?;
+
+        let constants = BloomCompositeConstants {
+            bloom_intensity: config.intensity,
+            _pad: [0.0; 3],
+        };
+        hdr_out.execute_shader_with_push_constants(
+            &self.composite_program,
             StageMask::FRAGMENT,
             bytemuck::bytes_of(&constants),
-        )
+        )?;
+
+        Ok(hdr_out)
     }
 }
 
@@ -298,25 +351,17 @@ unsafe impl bytemuck::Zeroable for DownsampleConstants {}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
-pub struct ToneBloomConstants {
-    pub time: f32,
-    pub inverse_resolution: [f32; 2],
-    pub bloom_intensity: f32,
-    pub hdr_color: [f32; 3],
-    pub _pad2: [f32; 2],
-    pub _pad3: f32,
+pub struct UpsampleConstants {
+    pub accum_texel_size: [f32; 2],
 }
-unsafe impl bytemuck::Pod for ToneBloomConstants {}
-unsafe impl bytemuck::Zeroable for ToneBloomConstants {}
+unsafe impl bytemuck::Pod for UpsampleConstants {}
+unsafe impl bytemuck::Zeroable for UpsampleConstants {}
 
-/// Push constants for the standard composite pass (fallback).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
-pub struct CompositeConstants {
+pub struct BloomCompositeConstants {
     pub bloom_intensity: f32,
-    pub bloom_padding: [f32; 3],
-    pub scene_padding: [f32; 2],
-    pub _pad: f32,
+    pub _pad: [f32; 3],
 }
-unsafe impl bytemuck::Pod for CompositeConstants {}
-unsafe impl bytemuck::Zeroable for CompositeConstants {}
+unsafe impl bytemuck::Pod for BloomCompositeConstants {}
+unsafe impl bytemuck::Zeroable for BloomCompositeConstants {}

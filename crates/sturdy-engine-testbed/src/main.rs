@@ -21,6 +21,8 @@ struct FrameGraphConstants {
     aspect: f32,
     resolution: [f32; 2],
 }
+unsafe impl bytemuck::Pod for FrameGraphConstants {}
+unsafe impl bytemuck::Zeroable for FrameGraphConstants {}
 
 struct App {
     renderer: Option<Renderer>,
@@ -108,6 +110,7 @@ struct Renderer {
     engine: Engine,
     surface: Surface,
     scene_program: ShaderProgram,
+    tonemap_program: ShaderProgram,
     bloom_pass: BloomPass,
     bloom_config: BloomConfig,
     started_at: Instant,
@@ -135,15 +138,17 @@ impl Renderer {
             "HDR mode: {:?}, tone mapping: {:?}",
             hdr_desc.mode, hdr_desc.tone_mapping,
         );
-        println!("pipeline: scene (FP16) → bloom chain → Hermite tonemap → swapchain");
+        println!("pipeline: scene (FP16) → bloom chain → HDR composite → ACES tonemap → swapchain");
 
         let scene_program = engine.load_shader(shader_path("shader_graph_fragment.slang"))?;
+        let tonemap_program = engine.load_shader(shader_path("tonemap.slang"))?;
         let bloom_pass = BloomPass::new(&engine)?;
 
         Ok(Self {
             engine,
             surface,
             scene_program,
+            tonemap_program,
             bloom_pass,
             bloom_config: BloomConfig::default(),
             started_at: Instant::now(),
@@ -167,20 +172,23 @@ impl Renderer {
                 .role(ImageRole::ColorAttachment)
                 .build()?;
         let scene_color = frame.image("scene_color", scene_desc)?;
-        scene_color.execute_shader_with_push_constants(
+        scene_color.execute_shader_with_constants(
             &self.scene_program,
             StageMask::FRAGMENT,
-            bytes_of(&FrameGraphConstants {
+            &FrameGraphConstants {
                 time: elapsed,
                 aspect: desc.extent.width as f32 / desc.extent.height.max(1) as f32,
                 resolution: [desc.extent.width as f32, desc.extent.height as f32],
-            }),
+            },
         )?;
 
-        // Pass 2: bloom (bright-extract → downsample chain) + Hermite tonemap → swapchain
+        // Pass 2: bloom — bright-extract → downsample → upsample → HDR composite
+        // Returns "hdr_composite" registered in the frame (linear HDR, no tonemap).
+        let _hdr_composite = self.bloom_pass.execute(&scene_color, &frame, &self.bloom_config)?;
+
+        // Pass 3: ACES tonemap — "hdr_composite" → swapchain
         let swapchain_out = frame.swapchain_image(&surface_image)?;
-        self.bloom_pass
-            .execute(&scene_color, &swapchain_out, &frame, &self.bloom_config)?;
+        swapchain_out.execute_shader(&self.tonemap_program)?;
 
         frame.present_image(&swapchain_out)?;
         frame.flush()?;
@@ -213,12 +221,6 @@ fn shader_path(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("shaders")
         .join(name)
-}
-
-fn bytes_of<T>(value: &T) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts((value as *const T).cast::<u8>(), std::mem::size_of::<T>())
-    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

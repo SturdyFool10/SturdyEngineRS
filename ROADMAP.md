@@ -302,7 +302,7 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
   graph compilation.
 - [ ] Validate pass resources against shader reflection before graph submission.
 - [x] Report missing resources with source-level names from Slang reflection.
-- [ ] Support reflected push-constant structs with typed Rust upload helpers.
+- [x] Support reflected push-constant structs with typed Rust upload helpers.
 - [x] Cache graphics and compute pipelines from reflected pass descriptors.
 - [x] Add testbed examples for:
   - [x] fullscreen reflected fragment pass
@@ -320,7 +320,7 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
   index, and relevant usage flags.
 - [x] Reuse cached graph images across frames unless the swapchain, descriptor,
   usage, or logical name changes.
-- [ ] Retire or recreate cached graph images on swapchain resize and incompatible
+- [x] Retire or recreate cached graph images on swapchain resize and incompatible
   descriptor changes.
 - [ ] Add graph templates for common pass shapes:
   - [ ] fullscreen color pass
@@ -463,3 +463,115 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
   a reflected shader graph renders a scene into HDR color, generates a
   procedural animated texture, uses mips for bloom, draws instanced elements,
   composites the result, and presents it.
+
+---
+
+## Phase 18 — Application Shell & Frame Ergonomics
+
+The testbed exposes several categories of boilerplate that a user application
+should not have to write. Every application today requires ~80 lines of winit
+scaffolding, a `NativeSurfaceDesc` extraction helper, a multi-call frame
+submission sequence, per-struct unsafe `bytemuck` impls, and a repeated
+`ImageBuilder` pattern for swapchain-sized FP16 images. This phase eliminates
+each of those in turn.
+
+### 18.1 — Application Shell (winit integration)
+
+The `App` struct and its `ApplicationHandler` impl are identical in every winit
+application using this engine. The engine should own that loop.
+
+- [ ] Add an `EngineApp` trait with the minimum surface an application must
+  implement:
+  - `fn init(engine: &Engine, surface: &Surface) -> Result<Self>`
+  - `fn render(&mut self, frame: RenderFrame, surface_image: &SurfaceImage) -> Result<()>`
+  - `fn resize(&mut self, width: u32, height: u32) -> Result<()>`
+- [ ] Add `sturdy_engine::run(title, width, height, impl EngineApp)` that
+  creates the event loop, creates the window, drives the winit `ApplicationHandler`
+  lifecycle, and calls the trait methods at the right moments.
+- [ ] Handle close, resize, and redraw internally so user code never imports
+  winit directly for standard use cases.
+- [ ] Surface creation from a winit `Window` should live inside the shell, not
+  require a `native_surface_desc` helper in user code.
+- [ ] Provide a `WindowConfig` builder for title, size, resizability, and HDR
+  preference so callers can configure the shell without touching winit types.
+
+Target: the entire `App` + `ApplicationHandler` impl (currently ~80 lines) is
+replaced by implementing `EngineApp` and calling `sturdy_engine::run(...)`.
+
+### 18.2 — Engine Surface Convenience
+
+Even outside the full shell, extracting a `NativeSurfaceDesc` from a winit
+`Window` currently takes 19 lines of handle extraction and error mapping.
+
+- [ ] Add `Engine::create_surface_for_window(window: &impl HasWindowHandle + HasDisplayHandle)`
+  that handles handle extraction, `.as_raw()`, error mapping, and size clamping
+  internally, returning a `Surface`.
+- [ ] Guard the new method behind the same `#[cfg(not(target_arch = "wasm32"))]`
+  gate already used for `NativeSurfaceDesc`.
+
+Target: `native_surface_desc` helper disappears; `Renderer::new` becomes one line.
+
+### 18.3 — Single-Call Frame Submission
+
+Every render function ends with the same three-call sequence:
+`frame.flush()`, `frame.wait()`, `self.surface.present()`. These always appear
+together and failing to call any of them is a bug.
+
+- [ ] Add `RenderFrame::finish_and_present(surface: &Surface)` that calls
+  `flush()`, `wait()`, and `surface.present()` in sequence, returning the first
+  error if any step fails.
+- [ ] Deprecate the separate `flush` + `wait` + `surface.present` pattern for
+  the standard swapchain submission path; keep it available for advanced
+  split-frame use cases.
+
+Target: the last three lines of every `render()` collapse to one.
+
+### 18.4 — Swapchain-Sized Image Helpers
+
+Creating an FP16 intermediate buffer sized to match the swapchain currently
+requires four lines of `ImageBuilder` ceremony. This pattern repeats for every
+HDR intermediate in a frame.
+
+- [ ] Add `RenderFrame::hdr_color_image(name)` that creates a `Rgba16Float`
+  color attachment sized to the current swapchain image, equivalent to the
+  `ImageBuilder::new_2d(Format::Rgba16Float, w, h).role(ColorAttachment).build()`
+  + `frame.image(name, desc)` pair.
+- [ ] Add `RenderFrame::hdr_image_sized_to(name, format, surface_image)` for
+  callers that need a different format or explicit sizing source.
+- [ ] Consider `ImageDesc::hdr_color(width, height)` as the low-level analogue
+  for users who build their own descriptors.
+
+Target: the `ImageBuilder` block in `render()` collapses to one line.
+
+### 18.5 — Push Constant Derive Macro
+
+Every push constant struct requires five lines of ceremony: `#[repr(C)]`,
+`#[derive(Copy, Clone)]`, and two `unsafe impl bytemuck::*` blocks. A proc macro
+eliminates this.
+
+- [ ] Add a `PushConstants` derive macro (in a new `sturdy-engine-macros` crate)
+  that emits `#[repr(C)]`, `Copy`, `Clone`, `bytemuck::Pod`, and
+  `bytemuck::Zeroable` impls from a single `#[derive(PushConstants)]` attribute.
+- [ ] Re-export the macro from `sturdy_engine` so users import it from one place.
+- [ ] Apply `#[derive(PushConstants)]` to the engine's own push constant structs
+  (`BrightPassConstants`, `DownsampleConstants`, `ToneBloomConstants`) and remove
+  the hand-written impls.
+
+Target: 5 lines of per-struct ceremony become 1 derive attribute.
+
+### 18.6 — Stage Mask Inference
+
+`execute_shader_with_constants` and `execute_shader_with_push_constants` require
+the caller to pass `StageMask::FRAGMENT` even though the `ShaderProgram` already
+carries stage information from Slang reflection.
+
+- [ ] Add `GraphImage::execute_shader_with_constants_auto<T: bytemuck::Pod>` (or
+  rename the existing method) that reads the stage mask from the shader's
+  reflected stage instead of requiring the caller to supply it.
+- [ ] Fall back to `FRAGMENT` for programs whose reflection does not expose a
+  stage, matching current behaviour.
+- [ ] Keep the explicit-stage variants for callers that need to override the
+  inferred stage (e.g. a compute-capable pass driven through a fragment entry
+  point for compatibility reasons).
+
+Target: `StageMask::FRAGMENT` disappears from standard fullscreen pass call sites.

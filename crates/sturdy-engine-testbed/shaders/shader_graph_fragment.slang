@@ -107,5 +107,6 @@ float4 main(VSOut input, uniform FrameGraphConstants graph) : SV_TARGET {
 
     float vignette = smoothstep(1.75, 0.25, length(uv));
     color *= 0.65 + 0.35 * vignette;
-    return float4(pow(saturate(color), float3(0.4545)), 1.0);
+    // Output linear HDR — the Hermite tonemapper handles gamma encoding.
+    return float4(color, 1.0);
 }

@@ -70,11 +70,8 @@ float4 main(VSOut input, uniform ToneBloomConstants push) : SV_TARGET {
   // Sample bloom (accumulate from mip-chain base level)
   float3 bloom = bloom_base.SampleLevel(bloom_sampler, input.uv, 0.0).rgb;
 
-  // Apply Hermite spline tone mapping to scene
-  float3 toneMapped = hermiteTonemap(scene);
-
-  // Add bloom with configurable intensity
-  toneMapped += bloom * push.bloomIntensity;
+  // Additive bloom in HDR space before tonemapping, then tonemap the combined result.
+  float3 toneMapped = hermiteTonemap(scene + bloom * push.bloomIntensity);
 
   // Slight vignette for cinematic feel
   float2 uvCenter = input.uv - 0.5;

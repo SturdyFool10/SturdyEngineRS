@@ -28,8 +28,8 @@ mod texture;
 mod upload_arena;
 
 pub use bloom_pass::{
-    BloomConfig, BloomPass, BrightPassConstants, CompositeConstants, DownsampleConstants,
-    ToneBloomConstants,
+    BloomCompositeConstants, BloomConfig, BloomPass, BrightPassConstants, DownsampleConstants,
+    UpsampleConstants,
 };
 pub use compute_program::ComputeProgram;
 pub use device_manager::{AdapterEntry, DeviceManager};
@@ -253,6 +253,10 @@ impl Engine {
         if let Some(image) = cache.get(&key) {
             return Ok((image.handle(), image.desc()));
         }
+
+        // Evict any stale entry that has the same name+slot but a different
+        // descriptor (e.g. after a swapchain resize changed the image dimensions).
+        cache.retain(|k, _| !k.is_stale_for(&key));
 
         let image = self.create_image(desc)?;
         if let Some(name) = key.debug_name() {
