@@ -178,6 +178,24 @@ impl ImageDesc {
         }
     }
 
+    /// Create a 2D FP16 HDR color image descriptor at `width × height`.
+    ///
+    /// Equivalent to `ImageBuilder::new_2d(Format::Rgba16Float, w, h).role(ColorAttachment).build()`.
+    pub fn hdr_color(width: u32, height: u32) -> Self {
+        Self {
+            dimension: ImageDimension::D2,
+            extent: Extent3d { width, height, depth: 1 },
+            mip_levels: 1,
+            layers: 1,
+            samples: 1,
+            format: Format::Rgba16Float,
+            usage: ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET,
+            transient: false,
+            clear_value: None,
+            debug_name: None,
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.extent.width == 0 || self.extent.height == 0 || self.extent.depth == 0 {
             return Err(Error::InvalidInput(

@@ -116,6 +116,35 @@ struct PassRecord {
     kind: PassKind,
     reads: Vec<core::ImageHandle>,
     writes: Vec<core::ImageHandle>,
+    /// Deferred read names for passes whose bind groups are resolved at flush time.
+    /// Resolved lazily by `validate()` and `describe()` against `images_by_name`.
+    deferred_read_names: Vec<String>,
+    skip_read_name: String,
+}
+
+/// Data needed to finish building a pass at flush time when all frame images are registered.
+///
+/// Only created when some read images are not yet registered at declaration time.
+/// Images that *are* registered at declaration time are captured eagerly into
+/// `PassDesc.reads` and `PassRecord.reads`; only the genuinely-unresolved names
+/// live here.  This preserves correct alias-map state for `register_as` users.
+struct DeferredPassResolve {
+    layout_handle: core::PipelineLayoutHandle,
+    reflection: ShaderReflection,
+    /// Binding names that could not be resolved at declaration time.
+    /// Appended to `PassDesc.reads` and the bind group at flush time.
+    unresolved_read_names: Vec<String>,
+    /// Name of the output image — excluded from the read list.
+    skip_name: String,
+    /// For compute passes: the storage-image output bound explicitly.
+    storage_output: Option<(String, ImageHandle)>,
+}
+
+/// A pass queued for deferred scheduling and submission.
+struct PendingPass {
+    desc: PassDesc,
+    /// If Some, `desc.reads` and `desc.bind_groups` are incomplete until flush.
+    deferred: Option<DeferredPassResolve>,
 }
 
 /// Per-pass information returned by [`RenderFrame::describe`].
@@ -421,7 +450,7 @@ struct RenderFrameInner {
     held_bind_groups: Vec<BindGroup>,
     pass_records: Vec<PassRecord>,
     /// Passes queued for submission. Flushed through the scheduler on `flush()`.
-    pending_passes: Vec<PassDesc>,
+    pending_passes: Vec<PendingPass>,
     declaration_index: u32,
     swapchain_slot: u64,
     flushed: bool,
@@ -521,13 +550,25 @@ impl RenderFrame {
                 .map(|(name, _)| name.clone())
         };
 
+        // Resolve effective read names for a record, including deferred names.
+        let effective_read_names = |rec: &PassRecord| -> Vec<String> {
+            let mut names: Vec<String> =
+                rec.reads.iter().filter_map(|h| handle_to_name(*h)).collect();
+            for n in &rec.deferred_read_names {
+                if *n != rec.skip_read_name && !names.contains(n) {
+                    names.push(n.clone());
+                }
+            }
+            names
+        };
+
         let passes = inner
             .pass_records
             .iter()
             .map(|rec| GraphPassInfo {
                 name: rec.name.clone(),
                 kind: rec.kind,
-                reads: rec.reads.iter().filter_map(|h| handle_to_name(*h)).collect(),
+                reads: effective_read_names(rec),
                 writes: rec.writes.iter().filter_map(|h| handle_to_name(*h)).collect(),
             })
             .collect();
@@ -541,9 +582,19 @@ impl RenderFrame {
                 counts.push((h, 1));
             }
         };
+        let name_to_handle = |n: &str| -> Option<core::ImageHandle> {
+            inner.images_by_name.get(n).map(|r| r.handle)
+        };
         for rec in &inner.pass_records {
             for h in &rec.reads {
                 tally(&mut read_counts, *h);
+            }
+            for n in &rec.deferred_read_names {
+                if *n != rec.skip_read_name {
+                    if let Some(h) = name_to_handle(n) {
+                        tally(&mut read_counts, h);
+                    }
+                }
             }
             for h in &rec.writes {
                 tally(&mut write_counts, *h);
@@ -599,9 +650,25 @@ impl RenderFrame {
         let mut pending_writes: Vec<(core::ImageHandle, String)> = Vec::new();
         let mut ever_read: Vec<core::ImageHandle> = Vec::new();
 
+        let name_to_handle = |n: &str| -> Option<core::ImageHandle> {
+            inner.images_by_name.get(n).map(|r| r.handle)
+        };
+
         for rec in &inner.pass_records {
+            // Collect effective reads: resolved handles + deferred name lookups.
+            let mut effective_reads: Vec<core::ImageHandle> = rec.reads.clone();
+            for n in &rec.deferred_read_names {
+                if *n != rec.skip_read_name {
+                    if let Some(h) = name_to_handle(n) {
+                        if !effective_reads.contains(&h) {
+                            effective_reads.push(h);
+                        }
+                    }
+                }
+            }
+
             // Reads clear pending write state for those images.
-            for h in &rec.reads {
+            for h in &effective_reads {
                 pending_writes.retain(|(k, _)| k != h);
                 if !ever_read.contains(h) {
                     ever_read.push(*h);
@@ -639,6 +706,44 @@ impl RenderFrame {
                         "image '{name}' is written in '{pass_name}' but never read — may be an unused output"
                     ),
                 });
+            }
+        }
+
+        // Collect all images written at least once this frame.
+        let ever_written: Vec<core::ImageHandle> = inner
+            .pass_records
+            .iter()
+            .flat_map(|rec| rec.writes.iter().copied())
+            .collect();
+
+        // Warn about reads of images that are never written in this frame.
+        // Persistent images carry data from the previous frame, so this is a
+        // warning rather than an error, but it often indicates a missing pass.
+        for rec in &inner.pass_records {
+            let mut effective_reads: Vec<core::ImageHandle> = rec.reads.clone();
+            for n in &rec.deferred_read_names {
+                if *n != rec.skip_read_name {
+                    if let Some(h) = name_to_handle(n) {
+                        if !effective_reads.contains(&h) {
+                            effective_reads.push(h);
+                        }
+                    }
+                }
+            }
+            for h in &effective_reads {
+                let name = handle_to_name(*h);
+                if name == "swapchain" {
+                    continue;
+                }
+                if !ever_written.contains(h) {
+                    diagnostics.push(GraphDiagnostic {
+                        level: DiagnosticLevel::Warning,
+                        message: format!(
+                            "pass '{}' reads image '{name}' but no pass in this frame writes to it — reading previous frame data",
+                            rec.name,
+                        ),
+                    });
+                }
             }
         }
 
@@ -703,30 +808,33 @@ impl RenderFrame {
             .frame
             .inner
             .graph_mut(|g| g.import_image(image.handle(), image.desc()))?;
-        inner.pending_passes.push(PassDesc {
-            name: "present".to_owned(),
-            queue: QueueType::Graphics,
-            shader: None,
-            pipeline: None,
-            bind_groups: Vec::new(),
-            push_constants: None,
-            work: PassWork::None,
-            reads: vec![crate::ImageUse {
-                image: image.handle(),
-                access: Access::Read,
-                state: RgState::Present,
-                subresource: SubresourceRange {
-                    base_mip: 0,
-                    mip_count: 1,
-                    base_layer: 0,
-                    layer_count: 1,
-                },
-            }],
-            writes: Vec::new(),
-            buffer_reads: Vec::new(),
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                name: "present".to_owned(),
+                queue: QueueType::Graphics,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                work: PassWork::None,
+                reads: vec![crate::ImageUse {
+                    image: image.handle(),
+                    access: Access::Read,
+                    state: RgState::Present,
+                    subresource: SubresourceRange {
+                        base_mip: 0,
+                        mip_count: 1,
+                        base_layer: 0,
+                        layer_count: 1,
+                    },
+                }],
+                writes: Vec::new(),
+                buffer_reads: Vec::new(),
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            },
+            deferred: None,
         });
         Ok(())
     }
@@ -941,96 +1049,69 @@ impl GraphImage {
             )
         })?;
 
-        let mut reads = Vec::new();
-        for binding in reflected_image_reads(shader.reflection()) {
-            if binding == self.name {
-                continue;
-            }
-            let record = inner.images_by_name.get(&binding).copied().ok_or_else(|| {
-                Error::InvalidInput(format!(
-                    "shader requires image '{binding}', but no frame image with that name exists"
-                ))
-            })?;
-            inner
-                .frame
-                .inner
-                .graph_mut(|graph| graph.import_image(record.handle, record.desc))?;
-            reads.push(crate::ImageUse {
-                image: record.handle,
-                access: Access::Read,
-                state: RgState::ShaderRead,
-                subresource: SubresourceRange {
-                    base_mip: 0,
-                    mip_count: 1,
-                    base_layer: 0,
-                    layer_count: 1,
-                },
-            });
-        }
-
         let pipeline = shader.pipeline_handle(self.desc.format)?;
-        let bind_group = build_reflected_bind_group(
-            &inner.engine,
-            &shader.pipeline_layout,
-            shader.reflection(),
-            &inner.images_by_name,
-            &inner.samplers_by_name,
-            None,
-        )?;
-        let bind_group_handles: Vec<core::BindGroupHandle> =
-            bind_group.iter().map(|bg| bg.handle()).collect();
-        inner.held_bind_groups.extend(bind_group);
+        let read_names = reflected_image_reads(shader.reflection());
 
         let pass_name = format!("{declaration_index:04}-execute-{}", self.name);
-        let pass_reads: Vec<core::ImageHandle> = reads.iter().map(|u| u.image).collect();
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
             kind: PassKind::Fullscreen,
-            reads: pass_reads,
+            reads: Vec::new(),
             writes: vec![self.handle],
+            deferred_read_names: read_names.clone(),
+            skip_read_name: self.name.clone(),
         });
 
-        inner.pending_passes.push(PassDesc {
-            name: pass_name,
-            queue: QueueType::Graphics,
-            shader: Some(shader.fragment.handle()),
-            pipeline: Some(pipeline),
-            bind_groups: bind_group_handles,
-            push_constants,
-            work: PassWork::Draw(DrawDesc {
-                vertex_count: 3,
-                instance_count: 1,
-                first_vertex: 0,
-                first_instance: 0,
-                vertex_buffer: Some(VertexBufferBinding {
-                    buffer: shader.fullscreen_triangle.handle(),
-                    binding: 0,
-                    offset: 0,
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                name: pass_name,
+                queue: QueueType::Graphics,
+                shader: Some(shader.fragment.handle()),
+                pipeline: Some(pipeline),
+                bind_groups: Vec::new(), // filled at flush time
+                push_constants,
+                work: PassWork::Draw(DrawDesc {
+                    vertex_count: 3,
+                    instance_count: 1,
+                    first_vertex: 0,
+                    first_instance: 0,
+                    vertex_buffer: Some(VertexBufferBinding {
+                        buffer: shader.fullscreen_triangle.handle(),
+                        binding: 0,
+                        offset: 0,
+                    }),
+                    index_buffer: None,
                 }),
-                index_buffer: None,
+                reads: Vec::new(), // filled at flush time
+                writes: vec![crate::ImageUse {
+                    image: self.handle,
+                    access: Access::Write,
+                    state: RgState::RenderTarget,
+                    subresource: SubresourceRange {
+                        base_mip: 0,
+                        mip_count: 1,
+                        base_layer: 0,
+                        layer_count: 1,
+                    },
+                }],
+                buffer_reads: vec![crate::BufferUse {
+                    buffer: shader.fullscreen_triangle.handle(),
+                    access: Access::Read,
+                    state: RgState::VertexRead,
+                    offset: 0,
+                    size: shader.fullscreen_triangle.desc().size,
+                }],
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            },
+            deferred: Some(DeferredPassResolve {
+                layout_handle: shader.pipeline_layout.handle(),
+                reflection: shader.reflection().clone(),
+                unresolved_read_names: read_names,
+                skip_name: self.name.clone(),
+                storage_output: None,
             }),
-            reads,
-            writes: vec![crate::ImageUse {
-                image: self.handle,
-                access: Access::Write,
-                state: RgState::RenderTarget,
-                subresource: SubresourceRange {
-                    base_mip: 0,
-                    mip_count: 1,
-                    base_layer: 0,
-                    layer_count: 1,
-                },
-            }],
-            buffer_reads: vec![crate::BufferUse {
-                buffer: shader.fullscreen_triangle.handle(),
-                access: Access::Read,
-                state: RgState::VertexRead,
-                offset: 0,
-                size: shader.fullscreen_triangle.desc().size,
-            }],
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
         });
         Ok(())
     }
@@ -1082,18 +1163,6 @@ impl GraphImage {
         }
 
         let pipeline = program.pipeline_handle(self.desc.format)?;
-        let bind_group = build_reflected_bind_group(
-            &inner.engine,
-            &program.pipeline_layout,
-            program.reflection(),
-            &inner.images_by_name,
-            &inner.samplers_by_name,
-            None,
-        )?;
-        let bind_group_handles: Vec<core::BindGroupHandle> =
-            bind_group.iter().map(|bg| bg.handle()).collect();
-        inner.held_bind_groups.extend(bind_group);
-
         let draw_count = if mesh.is_indexed() {
             mesh.index_count
         } else {
@@ -1129,44 +1198,56 @@ impl GraphImage {
         }
 
         let pass_name = format!("{declaration_index:04}-draw-mesh-{}", self.name);
+        let mesh_read_names = reflected_image_reads(program.reflection());
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
             kind: PassKind::Mesh,
             reads: Vec::new(),
             writes: vec![self.handle],
+            deferred_read_names: mesh_read_names,
+            skip_read_name: self.name.clone(),
         });
 
-        inner.pending_passes.push(PassDesc {
-            name: pass_name,
-            queue: crate::QueueType::Graphics,
-            shader: Some(program.fragment.handle()),
-            pipeline: Some(pipeline),
-            bind_groups: bind_group_handles,
-            push_constants,
-            work: PassWork::Draw(DrawDesc {
-                vertex_count: draw_count,
-                instance_count: 1,
-                first_vertex: 0,
-                first_instance: 0,
-                vertex_buffer,
-                index_buffer,
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                name: pass_name,
+                queue: crate::QueueType::Graphics,
+                shader: Some(program.fragment.handle()),
+                pipeline: Some(pipeline),
+                bind_groups: Vec::new(), // filled at flush time
+                push_constants,
+                work: PassWork::Draw(DrawDesc {
+                    vertex_count: draw_count,
+                    instance_count: 1,
+                    first_vertex: 0,
+                    first_instance: 0,
+                    vertex_buffer,
+                    index_buffer,
+                }),
+                reads: Vec::new(),
+                writes: vec![crate::ImageUse {
+                    image: self.handle,
+                    access: Access::Write,
+                    state: RgState::RenderTarget,
+                    subresource: SubresourceRange {
+                        base_mip: 0,
+                        mip_count: 1,
+                        base_layer: 0,
+                        layer_count: 1,
+                    },
+                }],
+                buffer_reads,
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            },
+            deferred: Some(DeferredPassResolve {
+                layout_handle: program.pipeline_layout.handle(),
+                reflection: program.reflection().clone(),
+                unresolved_read_names: reflected_image_reads(program.reflection()),
+                skip_name: self.name.clone(),
+                storage_output: None,
             }),
-            reads: Vec::new(),
-            writes: vec![crate::ImageUse {
-                image: self.handle,
-                access: Access::Write,
-                state: RgState::RenderTarget,
-                subresource: SubresourceRange {
-                    base_mip: 0,
-                    mip_count: 1,
-                    base_layer: 0,
-                    layer_count: 1,
-                },
-            }],
-            buffer_reads,
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
         });
         Ok(())
     }
@@ -1240,82 +1321,55 @@ impl GraphImage {
             .inner
             .graph_mut(|graph| graph.import_image(self.handle, self.desc))?;
 
-        let mut reads = Vec::new();
-        for binding in reflected_storage_image_reads(program.reflection()) {
-            if binding == self.name {
-                continue;
-            }
-            let record = inner.images_by_name.get(&binding).copied().ok_or_else(|| {
-                Error::InvalidInput(format!(
-                    "compute shader requires storage image '{binding}', but no frame image with that name exists"
-                ))
-            })?;
-            inner
-                .frame
-                .inner
-                .graph_mut(|graph| graph.import_image(record.handle, record.desc))?;
-            reads.push(crate::ImageUse {
-                image: record.handle,
-                access: Access::Read,
-                state: RgState::ShaderRead,
-                subresource: SubresourceRange {
-                    base_mip: 0,
-                    mip_count: 1,
-                    base_layer: 0,
-                    layer_count: 1,
-                },
-            });
-        }
-
-        let bind_group = build_reflected_bind_group(
-            &inner.engine,
-            &program.pipeline_layout,
-            program.reflection(),
-            &inner.images_by_name,
-            &inner.samplers_by_name,
-            Some((self.name.as_str(), self.handle)),
-        )?;
-        let bind_group_handles: Vec<core::BindGroupHandle> =
-            bind_group.iter().map(|bg| bg.handle()).collect();
-        inner.held_bind_groups.extend(bind_group);
+        let read_names = reflected_storage_image_reads(program.reflection());
 
         let pass_name = format!("{declaration_index:04}-compute-{}", self.name);
-        let pass_reads: Vec<core::ImageHandle> = reads.iter().map(|u| u.image).collect();
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
             kind: PassKind::Compute,
-            reads: pass_reads,
+            reads: Vec::new(),
             writes: vec![self.handle],
+            deferred_read_names: read_names.clone(),
+            skip_read_name: self.name.clone(),
         });
 
-        inner.pending_passes.push(PassDesc {
-            name: pass_name,
-            queue: QueueType::Compute,
-            shader: Some(program.shader.handle()),
-            pipeline: Some(program.pipeline.handle()),
-            bind_groups: bind_group_handles,
-            push_constants,
-            work: PassWork::Dispatch(DispatchDesc {
-                x: groups[0],
-                y: groups[1],
-                z: groups[2],
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                name: pass_name,
+                queue: QueueType::Compute,
+                shader: Some(program.shader.handle()),
+                pipeline: Some(program.pipeline.handle()),
+                bind_groups: Vec::new(), // filled at flush time
+                push_constants,
+                work: PassWork::Dispatch(DispatchDesc {
+                    x: groups[0],
+                    y: groups[1],
+                    z: groups[2],
+                }),
+                reads: Vec::new(), // filled at flush time
+                writes: vec![crate::ImageUse {
+                    image: self.handle,
+                    access: Access::Write,
+                    state: RgState::ShaderWrite,
+                    subresource: SubresourceRange {
+                        base_mip: 0,
+                        mip_count: 1,
+                        base_layer: 0,
+                        layer_count: 1,
+                    },
+                }],
+                buffer_reads: Vec::new(),
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            },
+            deferred: Some(DeferredPassResolve {
+                layout_handle: program.pipeline_layout.handle(),
+                reflection: program.reflection().clone(),
+                unresolved_read_names: read_names,
+                skip_name: self.name.clone(),
+                storage_output: Some((self.name.clone(), self.handle)),
             }),
-            reads,
-            writes: vec![crate::ImageUse {
-                image: self.handle,
-                access: Access::Write,
-                state: RgState::ShaderWrite,
-                subresource: SubresourceRange {
-                    base_mip: 0,
-                    mip_count: 1,
-                    base_layer: 0,
-                    layer_count: 1,
-                },
-            }],
-            buffer_reads: Vec::new(),
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
         });
         Ok(())
     }
@@ -1331,15 +1385,70 @@ impl ImageRef for GraphImage {
     }
 }
 
-/// Drain `inner.pending_passes`, schedule them, and submit to the core frame.
+/// Drain `inner.pending_passes`, resolve deferred bindings, schedule, and submit.
+///
+/// Three phases:
+/// 1. Resolve deferred reads and build bind groups against the fully-populated
+///    `images_by_name` map (all images declared during the frame are registered).
+/// 2. Run the scheduler on the resolved passes.
+/// 3. Submit passes to the core frame in scheduled order.
 fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
     if inner.pending_passes.is_empty() {
         return Ok(());
     }
-    let order = schedule_pass_order(&inner.pending_passes);
-    // Use Option::take to move each PassDesc out without requiring Clone.
-    let mut slots: Vec<Option<PassDesc>> =
-        inner.pending_passes.drain(..).map(Some).collect();
+
+    // Phase 1: resolve deferred data.
+    let mut resolved: Vec<PassDesc> = Vec::with_capacity(inner.pending_passes.len());
+    for pending in inner.pending_passes.drain(..) {
+        let mut desc = pending.desc;
+        if let Some(deferred) = pending.deferred {
+            // Resolve image read names → ImageUse handles.
+            for name in &deferred.unresolved_read_names {
+                if *name == deferred.skip_name {
+                    continue;
+                }
+                let record = inner.images_by_name.get(name).copied().ok_or_else(|| {
+                    Error::InvalidInput(format!(
+                        "shader requires image '{name}', but no frame image with that name exists"
+                    ))
+                })?;
+                inner
+                    .frame
+                    .inner
+                    .graph_mut(|g| g.import_image(record.handle, record.desc))?;
+                desc.reads.push(crate::ImageUse {
+                    image: record.handle,
+                    access: Access::Read,
+                    state: RgState::ShaderRead,
+                    subresource: SubresourceRange {
+                        base_mip: 0,
+                        mip_count: 1,
+                        base_layer: 0,
+                        layer_count: 1,
+                    },
+                });
+            }
+
+            // Build the bind group now that all images are known.
+            let bind_groups = build_reflected_bind_group(
+                &inner.engine,
+                deferred.layout_handle,
+                &deferred.reflection,
+                &inner.images_by_name,
+                &inner.samplers_by_name,
+                deferred.storage_output.as_ref().map(|(s, h)| (s.as_str(), *h)),
+            )?;
+            desc.bind_groups = bind_groups.iter().map(|bg| bg.handle()).collect();
+            inner.held_bind_groups.extend(bind_groups);
+        }
+        resolved.push(desc);
+    }
+
+    // Phase 2: schedule.
+    let order = schedule_pass_order(&resolved);
+
+    // Phase 3: submit in scheduled order (Option::take avoids needing Clone on PassDesc).
+    let mut slots: Vec<Option<PassDesc>> = resolved.into_iter().map(Some).collect();
     for idx in order {
         let pass = slots[idx].take().expect("scheduler produced duplicate index");
         inner.frame.add_pass(pass)?;
@@ -1482,7 +1591,7 @@ fn reflected_bindings_of_kind(
 /// be bound as a StorageImage under its frame name.
 fn build_reflected_bind_group(
     engine: &Engine,
-    layout: &PipelineLayout,
+    layout_handle: core::PipelineLayoutHandle,
     reflection: &ShaderReflection,
     images_by_name: &HashMap<String, GraphImageRecord>,
     samplers_by_name: &HashMap<String, core::SamplerHandle>,
@@ -1546,7 +1655,7 @@ fn build_reflected_bind_group(
     }
 
     let bind_group = engine.create_bind_group(BindGroupDesc {
-        layout: layout.handle(),
+        layout: layout_handle,
         entries,
     })?;
     Ok(vec![bind_group])

@@ -2,10 +2,10 @@ use std::time::Instant;
 
 use sturdy_engine::{
     BloomConfig, BloomPass, Engine, EngineApp, HdrPipelineDesc, HdrPreference, Result as EngineResult,
-    ShaderProgram, ShellFrame, Surface, SurfaceImage, WindowConfig,
+    ShaderProgram, ShellFrame, Surface, SurfaceImage, WindowConfig, push_constants,
 };
 
-#[sturdy_engine::push_constants]
+#[push_constants]
 struct FrameConstants {
     time: f32,
     aspect: f32,
@@ -61,9 +61,14 @@ impl EngineApp for Testbed {
         // Register the FP16 scene buffer sized to the swapchain.
         let scene_color = frame.hdr_color_image("scene_color")?;
 
-        // Passes are declared in natural dependency order. The scheduler
-        // enforces this order via RAW/WAW/WAR edges and is the foundation for
-        // future parallel-batch detection across independent pass chains.
+        // Passes are declared out of dependency order to exercise the deferred
+        // bind-group system: tonemap is declared before bloom has registered
+        // "hdr_composite". The scheduler resolves reads at flush time and
+        // re-orders passes into the correct RAW execution sequence automatically.
+
+        // Pass 3 declared first: tonemap reads "hdr_composite", writes swapchain.
+        // "hdr_composite" does not exist yet — registered by bloom below.
+        swapchain.execute_shader(&self.tonemap_program)?;
 
         // Pass 1: scene writes "scene_color".
         scene_color.execute_shader_with_constants_auto(
@@ -77,9 +82,6 @@ impl EngineApp for Testbed {
 
         // Pass 2: bloom reads "scene_color", writes "hdr_composite".
         let _hdr_composite = self.bloom_pass.execute(&scene_color, frame, &self.bloom_config)?;
-
-        // Pass 3: tonemap reads "hdr_composite", writes swapchain.
-        swapchain.execute_shader(&self.tonemap_program)?;
         frame.present_image(&swapchain)?;
 
         // In debug builds, validate the recorded graph and print any diagnostics.

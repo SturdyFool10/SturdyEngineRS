@@ -355,19 +355,20 @@ impl Engine {
         })
     }
 
-    /// Create a surface for a winit-compatible window in a single call.
+    /// Create a surface from any window that provides raw handles.
     ///
-    /// This is a convenience method that handles window handle extraction,
-    /// error mapping, and size clamping internally. It replaces the previous
-    /// need for a separate `native_surface_desc` helper:
+    /// Handles extraction, `.as_raw()`, error mapping, and size clamping so
+    /// callers never need to import `raw_window_handle` directly or write
+    /// unsafe handle-lifetime casts.
     ///
     /// ```ignore
-    /// let surface = engine.create_surface_for_window(&window)?;
+    /// let surface = engine.create_surface_for_window(&window, SurfaceSize { width: 1280, height: 720 })?;
     /// ```
     #[cfg(not(target_arch = "wasm32"))]
     pub fn create_surface_for_window(
         &self,
         window: &(impl raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle),
+        size: SurfaceSize,
     ) -> Result<Surface> {
         use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
         let display = window
@@ -376,20 +377,18 @@ impl Engine {
         let window_handle = window
             .window_handle()
             .map_err(|e| Error::InvalidInput(e.to_string()))?;
-        // SAFETY: The window outlives this scope and the surface created from it.
+        // SAFETY: The window outlives the surface because both live in the same
+        // ShellApp struct and the surface is dropped before the window.
         let raw_display: RawDisplayHandle = unsafe { std::mem::transmute_copy(&display) };
         let raw_window: RawWindowHandle = unsafe { std::mem::transmute_copy(&window_handle) };
-        // Note: size is set to a default since we don't have the window here.
-        // The caller should resize the surface after creation.
-        let desc = NativeSurfaceDesc::new(
+        self.create_surface(NativeSurfaceDesc::new(
             raw_display,
             raw_window,
             SurfaceSize {
-                width: 1024,
-                height: 768,
+                width: size.width.max(1),
+                height: size.height.max(1),
             },
-        );
-        self.create_surface(desc)
+        ))
     }
 }
 

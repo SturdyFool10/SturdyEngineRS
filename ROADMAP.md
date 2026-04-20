@@ -330,7 +330,8 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
   - [x] copy/resolve/pass-through pass (`ShaderProgram::passthrough` + `GraphImage::blit_from`)
 - [x] Add graph introspection data for passes and images (`RenderFrame::describe` → `GraphReport`)
 - [x] Add graph validation for unused outputs and write-after-write hazards (`RenderFrame::validate` → `Vec<GraphDiagnostic>`)
-- [ ] Add graph validation for read-before-write hazards and accidental full-resource barriers when a mip/layer range would be enough.
+- [x] Add graph validation for read-before-write hazards (warn when a pass reads an image that no pass in the current frame writes to).
+- [ ] Add graph validation for accidental full-resource barriers when a mip/layer range would be enough (requires Phase 14 subresource model).
 - [x] Add examples showing a multi-pass graph assembled from reflected shaders (testbed: scene → bloom → tonemap).
 
 ## Phase 12.5 — Graph Execution Semantics
@@ -338,10 +339,12 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
 - [x] Treat frame render callbacks as graph recording scopes.
 - [x] Treat chained image/shader calls as unordered graph operation declarations
   unless explicit dependencies or resource hazards require ordering.
-  **Known limitation**: bind groups are built eagerly at declaration time, so
-  images referenced by a shader must be registered in the frame before the pass
-  is declared. True out-of-order declaration requires deferred bind group
-  construction (tracked as future work).
+- [x] Implement deferred bind group construction so passes can be declared in any
+  order regardless of when their input images are registered: read-name resolution
+  and bind group creation are deferred to `submit_pending_passes`, which runs
+  after all declarations in the frame are complete.
+  **Note**: `describe()` / `validate()` called before `flush()` will show empty
+  read-edges for deferred passes; the scheduler itself sees fully-resolved edges.
 - [x] Add a graph scheduler (`schedule_pass_order`) that derives execution order
   from declared image/buffer reads and writes.
 - [x] Preserve source declaration order as a deterministic tie-breaker for
@@ -480,19 +483,19 @@ each of those in turn.
 The `App` struct and its `ApplicationHandler` impl are identical in every winit
 application using this engine. The engine should own that loop.
 
-- [ ] Add an `EngineApp` trait with the minimum surface an application must
+- [x] Add an `EngineApp` trait with the minimum surface an application must
   implement:
   - `fn init(engine: &Engine, surface: &Surface) -> Result<Self>`
   - `fn render(&mut self, frame: RenderFrame, surface_image: &SurfaceImage) -> Result<()>`
   - `fn resize(&mut self, width: u32, height: u32) -> Result<()>`
-- [ ] Add `sturdy_engine::run(title, width, height, impl EngineApp)` that
+- [x] Add `sturdy_engine::run(title, width, height, impl EngineApp)` that
   creates the event loop, creates the window, drives the winit `ApplicationHandler`
   lifecycle, and calls the trait methods at the right moments.
-- [ ] Handle close, resize, and redraw internally so user code never imports
+- [x] Handle close, resize, and redraw internally so user code never imports
   winit directly for standard use cases.
-- [ ] Surface creation from a winit `Window` should live inside the shell, not
+- [x] Surface creation from a winit `Window` should live inside the shell, not
   require a `native_surface_desc` helper in user code.
-- [ ] Provide a `WindowConfig` builder for title, size, resizability, and HDR
+- [x] Provide a `WindowConfig` builder for title, size, resizability, and HDR
   preference so callers can configure the shell without touching winit types.
 
 Target: the entire `App` + `ApplicationHandler` impl (currently ~80 lines) is
@@ -503,10 +506,10 @@ replaced by implementing `EngineApp` and calling `sturdy_engine::run(...)`.
 Even outside the full shell, extracting a `NativeSurfaceDesc` from a winit
 `Window` currently takes 19 lines of handle extraction and error mapping.
 
-- [ ] Add `Engine::create_surface_for_window(window: &impl HasWindowHandle + HasDisplayHandle)`
+- [x] Add `Engine::create_surface_for_window(window: &impl HasWindowHandle + HasDisplayHandle)`
   that handles handle extraction, `.as_raw()`, error mapping, and size clamping
   internally, returning a `Surface`.
-- [ ] Guard the new method behind the same `#[cfg(not(target_arch = "wasm32"))]`
+- [x] Guard the new method behind the same `#[cfg(not(target_arch = "wasm32"))]`
   gate already used for `NativeSurfaceDesc`.
 
 Target: `native_surface_desc` helper disappears; `Renderer::new` becomes one line.
@@ -517,10 +520,10 @@ Every render function ends with the same three-call sequence:
 `frame.flush()`, `frame.wait()`, `self.surface.present()`. These always appear
 together and failing to call any of them is a bug.
 
-- [ ] Add `RenderFrame::finish_and_present(surface: &Surface)` that calls
+- [x] Add `RenderFrame::finish_and_present(surface: &Surface)` that calls
   `flush()`, `wait()`, and `surface.present()` in sequence, returning the first
   error if any step fails.
-- [ ] Deprecate the separate `flush` + `wait` + `surface.present` pattern for
+- [x] Deprecate the separate `flush` + `wait` + `surface.present` pattern for
   the standard swapchain submission path; keep it available for advanced
   split-frame use cases.
 
@@ -532,13 +535,13 @@ Creating an FP16 intermediate buffer sized to match the swapchain currently
 requires four lines of `ImageBuilder` ceremony. This pattern repeats for every
 HDR intermediate in a frame.
 
-- [ ] Add `RenderFrame::hdr_color_image(name)` that creates a `Rgba16Float`
+- [x] Add `RenderFrame::hdr_color_image(name)` that creates a `Rgba16Float`
   color attachment sized to the current swapchain image, equivalent to the
   `ImageBuilder::new_2d(Format::Rgba16Float, w, h).role(ColorAttachment).build()`
   + `frame.image(name, desc)` pair.
-- [ ] Add `RenderFrame::hdr_image_sized_to(name, format, surface_image)` for
+- [x] Add `RenderFrame::hdr_image_sized_to(name, format, surface_image)` for
   callers that need a different format or explicit sizing source.
-- [ ] Consider `ImageDesc::hdr_color(width, height)` as the low-level analogue
+- [x] Add `ImageDesc::hdr_color(width, height)` as the low-level analogue
   for users who build their own descriptors.
 
 Target: the `ImageBuilder` block in `render()` collapses to one line.
@@ -565,12 +568,12 @@ Target: 5 lines of per-struct ceremony become 1 derive attribute.
 the caller to pass `StageMask::FRAGMENT` even though the `ShaderProgram` already
 carries stage information from Slang reflection.
 
-- [ ] Add `GraphImage::execute_shader_with_constants_auto<T: bytemuck::Pod>` (or
+- [x] Add `GraphImage::execute_shader_with_constants_auto<T: bytemuck::Pod>` (or
   rename the existing method) that reads the stage mask from the shader's
   reflected stage instead of requiring the caller to supply it.
-- [ ] Fall back to `FRAGMENT` for programs whose reflection does not expose a
+- [x] Fall back to `FRAGMENT` for programs whose reflection does not expose a
   stage, matching current behaviour.
-- [ ] Keep the explicit-stage variants for callers that need to override the
+- [x] Keep the explicit-stage variants for callers that need to override the
   inferred stage (e.g. a compute-capable pass driven through a fragment entry
   point for compatibility reasons).
 

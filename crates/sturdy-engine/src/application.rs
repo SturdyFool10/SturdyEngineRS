@@ -50,10 +50,9 @@
 
 use std::time::Instant;
 
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use sturdy_engine_core::SurfaceSize;
 
-use crate::{Engine, NativeSurfaceDesc, Result as EngineResult, Surface, SurfaceImage};
+use crate::{Engine, Result as EngineResult, Surface, SurfaceImage};
 
 /// Configuration for the application shell window.
 #[derive(Clone, Debug)]
@@ -243,27 +242,15 @@ where
         )
         .expect("failed to create window");
 
-    // Extract raw handles for surface creation
-    let display = window
-        .display_handle()
-        .expect("failed to get display handle");
-    let window_handle = window.window_handle().expect("failed to get window handle");
-
-    // SAFETY: winit guarantees these raw handles are valid while the window exists.
-    // The window outlives this scope and the surface created from it.
-    let raw_display: RawDisplayHandle = unsafe { std::mem::transmute_copy(&display) };
-    let raw_window: RawWindowHandle = unsafe { std::mem::transmute_copy(&window_handle) };
-
     // Create surface from window
     let surface = engine
-        .create_surface(NativeSurfaceDesc::new(
-            raw_display,
-            raw_window,
+        .create_surface_for_window(
+            &window,
             SurfaceSize {
                 width: config.width.max(1),
                 height: config.height.max(1),
             },
-        ))
+        )
         .expect("failed to create surface");
 
     // Initialize the application
