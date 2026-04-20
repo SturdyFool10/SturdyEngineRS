@@ -17,6 +17,7 @@ struct Testbed {
     tonemap_program: ShaderProgram,
     bloom_pass: BloomPass,
     bloom_config: BloomConfig,
+    bloom_only: bool,
     started_at: Instant,
 }
 
@@ -47,6 +48,7 @@ impl EngineApp for Testbed {
             tonemap_program: engine.load_shader(shader_path("tonemap.slang"))?,
             bloom_pass: BloomPass::new(engine)?,
             bloom_config: BloomConfig::default(),
+            bloom_only: false,
             started_at: Instant::now(),
         })
     }
@@ -81,7 +83,7 @@ impl EngineApp for Testbed {
         )?;
 
         // Pass 2: bloom reads "scene_color", writes "hdr_composite".
-        let _hdr_composite = self.bloom_pass.execute(&scene_color, frame, &self.bloom_config)?;
+        let _hdr_composite = self.bloom_pass.execute(&scene_color, frame, &self.bloom_config, self.bloom_only)?;
         frame.present_image(&swapchain)?;
 
         // In debug builds, validate the recorded graph and print any diagnostics.
@@ -91,6 +93,13 @@ impl EngineApp for Testbed {
         }
 
         Ok(())
+    }
+
+    fn key_pressed(&mut self, key: &str) {
+        if key.eq_ignore_ascii_case("b") {
+            self.bloom_only = !self.bloom_only;
+            eprintln!("bloom-only: {}", self.bloom_only);
+        }
     }
 
     fn resize(&mut self, _width: u32, _height: u32) -> EngineResult<()> {

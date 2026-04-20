@@ -160,6 +160,11 @@ pub trait EngineApp {
     /// Called when the window is resized. The new dimensions are provided
     /// in logical pixels.
     fn resize(&mut self, width: u32, height: u32) -> Result<(), Self::Error>;
+
+    /// Handle a key press. `key` is the logical character string (e.g. `"b"`, `"B"`).
+    ///
+    /// Only called on `ElementState::Pressed`. Default implementation does nothing.
+    fn key_pressed(&mut self, key: &str) {}
 }
 
 /// A render frame wrapper that provides the frame API and surface image.
@@ -323,6 +328,15 @@ where
                     }
                     if let Some(window) = self.window.as_ref() {
                         window.request_redraw();
+                    }
+                }
+            }
+            winit::event::WindowEvent::KeyboardInput { event, .. } => {
+                use winit::event::ElementState;
+                use winit::keyboard::Key;
+                if event.state == ElementState::Pressed {
+                    if let Key::Character(s) = &event.logical_key {
+                        self.app_state.key_pressed(s.as_str());
                     }
                 }
             }

@@ -175,6 +175,7 @@ impl BloomPass {
         scene_color: &GraphImage,
         frame: &RenderFrame,
         config: &BloomConfig,
+        bloom_only: bool,
     ) -> Result<GraphImage> {
         let src_desc = scene_color.desc();
         let src_width = src_desc.extent.width;
@@ -201,7 +202,7 @@ impl BloomPass {
         let bloom_result = self.execute_upsample_chain(&bloom_mips, frame)?;
 
         // Pass 4: HDR composite — scene + bloom in linear HDR space, no tonemap
-        self.execute_composite(scene_color, &bloom_result, frame, config)
+        self.execute_composite(scene_color, &bloom_result, frame, config, bloom_only)
     }
 
     // ------------------------------------------------------------------
@@ -294,6 +295,7 @@ impl BloomPass {
         bloom: &GraphImage,
         frame: &RenderFrame,
         config: &BloomConfig,
+        bloom_only: bool,
     ) -> Result<GraphImage> {
         bloom.register_as("bloom_base");
         // scene_color is already in the frame registry as "scene_color".
@@ -315,7 +317,8 @@ impl BloomPass {
 
         let constants = BloomCompositeConstants {
             bloom_intensity: config.intensity,
-            _pad: [0.0; 3],
+            bloom_only: bloom_only as u32,
+            _pad: [0.0; 2],
         };
         hdr_out.execute_shader_with_push_constants(
             &self.composite_program,
@@ -355,5 +358,7 @@ pub struct UpsampleConstants {
 #[derive(Debug, Default)]
 pub struct BloomCompositeConstants {
     pub bloom_intensity: f32,
-    pub _pad: [f32; 3],
+    /// When non-zero, outputs bloom-only (no scene_color) for debug visualization.
+    pub bloom_only: u32,
+    pub _pad: [f32; 2],
 }

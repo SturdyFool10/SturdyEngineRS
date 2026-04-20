@@ -124,13 +124,18 @@ struct PassRecord {
 
 /// Data needed to finish building a pass at flush time when all frame images are registered.
 ///
-/// Only created when some read images are not yet registered at declaration time.
-/// Images that *are* registered at declaration time are captured eagerly into
-/// `PassDesc.reads` and `PassRecord.reads`; only the genuinely-unresolved names
-/// live here.  This preserves correct alias-map state for `register_as` users.
+/// Reads split into two buckets at declaration time:
+/// - `eager_bindings`: names that were already registered (via `register_as` or earlier
+///   `frame.image` calls) — captured with the correct handle at declaration time so that
+///   re-used alias names like `"source_tex"` don't get overwritten by later declarations.
+/// - `unresolved_read_names`: names not yet registered — resolved against `images_by_name`
+///   at flush time when all frame images exist.
 struct DeferredPassResolve {
     layout_handle: core::PipelineLayoutHandle,
     reflection: ShaderReflection,
+    /// Binding names captured with their correct handles at declaration time.
+    /// Preferred over `images_by_name` when building the bind group at flush time.
+    eager_bindings: HashMap<String, ImageHandle>,
     /// Binding names that could not be resolved at declaration time.
     /// Appended to `PassDesc.reads` and the bind group at flush time.
     unresolved_read_names: Vec<String>,
@@ -1051,14 +1056,17 @@ impl GraphImage {
 
         let pipeline = shader.pipeline_handle(self.desc.format)?;
         let read_names = reflected_image_reads(shader.reflection());
+        let (eager_bindings, unresolved_read_names, eager_uses) =
+            split_read_names(&read_names, &self.name, &inner.images_by_name);
+        let eager_handles: Vec<_> = eager_bindings.values().copied().collect();
 
         let pass_name = format!("{declaration_index:04}-execute-{}", self.name);
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
             kind: PassKind::Fullscreen,
-            reads: Vec::new(),
+            reads: eager_handles,
             writes: vec![self.handle],
-            deferred_read_names: read_names.clone(),
+            deferred_read_names: unresolved_read_names.clone(),
             skip_read_name: self.name.clone(),
         });
 
@@ -1082,7 +1090,7 @@ impl GraphImage {
                     }),
                     index_buffer: None,
                 }),
-                reads: Vec::new(), // filled at flush time
+                reads: eager_uses,
                 writes: vec![crate::ImageUse {
                     image: self.handle,
                     access: Access::Write,
@@ -1108,7 +1116,8 @@ impl GraphImage {
             deferred: Some(DeferredPassResolve {
                 layout_handle: shader.pipeline_layout.handle(),
                 reflection: shader.reflection().clone(),
-                unresolved_read_names: read_names,
+                eager_bindings,
+                unresolved_read_names,
                 skip_name: self.name.clone(),
                 storage_output: None,
             }),
@@ -1199,12 +1208,16 @@ impl GraphImage {
 
         let pass_name = format!("{declaration_index:04}-draw-mesh-{}", self.name);
         let mesh_read_names = reflected_image_reads(program.reflection());
+        let (eager_bindings, unresolved_read_names, eager_uses) =
+            split_read_names(&mesh_read_names, &self.name, &inner.images_by_name);
+        let eager_handles: Vec<_> = eager_bindings.values().copied().collect();
+
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
             kind: PassKind::Mesh,
-            reads: Vec::new(),
+            reads: eager_handles,
             writes: vec![self.handle],
-            deferred_read_names: mesh_read_names,
+            deferred_read_names: unresolved_read_names.clone(),
             skip_read_name: self.name.clone(),
         });
 
@@ -1224,7 +1237,7 @@ impl GraphImage {
                     vertex_buffer,
                     index_buffer,
                 }),
-                reads: Vec::new(),
+                reads: eager_uses,
                 writes: vec![crate::ImageUse {
                     image: self.handle,
                     access: Access::Write,
@@ -1244,7 +1257,8 @@ impl GraphImage {
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
                 reflection: program.reflection().clone(),
-                unresolved_read_names: reflected_image_reads(program.reflection()),
+                eager_bindings,
+                unresolved_read_names,
                 skip_name: self.name.clone(),
                 storage_output: None,
             }),
@@ -1322,14 +1336,17 @@ impl GraphImage {
             .graph_mut(|graph| graph.import_image(self.handle, self.desc))?;
 
         let read_names = reflected_storage_image_reads(program.reflection());
+        let (eager_bindings, unresolved_read_names, eager_uses) =
+            split_read_names(&read_names, &self.name, &inner.images_by_name);
+        let eager_handles: Vec<_> = eager_bindings.values().copied().collect();
 
         let pass_name = format!("{declaration_index:04}-compute-{}", self.name);
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
             kind: PassKind::Compute,
-            reads: Vec::new(),
+            reads: eager_handles,
             writes: vec![self.handle],
-            deferred_read_names: read_names.clone(),
+            deferred_read_names: unresolved_read_names.clone(),
             skip_read_name: self.name.clone(),
         });
 
@@ -1346,7 +1363,7 @@ impl GraphImage {
                     y: groups[1],
                     z: groups[2],
                 }),
-                reads: Vec::new(), // filled at flush time
+                reads: eager_uses,
                 writes: vec![crate::ImageUse {
                     image: self.handle,
                     access: Access::Write,
@@ -1366,7 +1383,8 @@ impl GraphImage {
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
                 reflection: program.reflection().clone(),
-                unresolved_read_names: read_names,
+                eager_bindings,
+                unresolved_read_names,
                 skip_name: self.name.clone(),
                 storage_output: Some((self.name.clone(), self.handle)),
             }),
@@ -1383,6 +1401,47 @@ impl ImageRef for GraphImage {
     fn image_desc(&self) -> ImageDesc {
         self.desc
     }
+}
+
+/// Split `read_names` against the current `images_by_name` snapshot.
+///
+/// Returns `(eager, unresolved, eager_uses)`:
+/// - `eager`: name → handle for names already registered — captured now so alias
+///   rewrites from later `register_as` calls don't corrupt per-pass bindings.
+/// - `unresolved`: names not yet in the registry — resolved at flush time.
+/// - `eager_uses`: `ImageUse` entries ready to append to `PassDesc.reads`.
+fn split_read_names(
+    read_names: &[String],
+    skip_name: &str,
+    images_by_name: &HashMap<String, GraphImageRecord>,
+) -> (HashMap<String, ImageHandle>, Vec<String>, Vec<crate::ImageUse>) {
+    let mut eager: HashMap<String, ImageHandle> = HashMap::new();
+    let mut unresolved: Vec<String> = Vec::new();
+    let mut uses: Vec<crate::ImageUse> = Vec::new();
+
+    for name in read_names {
+        if name == skip_name {
+            continue;
+        }
+        if let Some(rec) = images_by_name.get(name.as_str()) {
+            eager.insert(name.clone(), rec.handle);
+            uses.push(crate::ImageUse {
+                image: rec.handle,
+                access: Access::Read,
+                state: RgState::ShaderRead,
+                subresource: SubresourceRange {
+                    base_mip: 0,
+                    mip_count: 1,
+                    base_layer: 0,
+                    layer_count: 1,
+                },
+            });
+        } else {
+            unresolved.push(name.clone());
+        }
+    }
+
+    (eager, unresolved, uses)
 }
 
 /// Drain `inner.pending_passes`, resolve deferred bindings, schedule, and submit.
@@ -1434,6 +1493,7 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
                 &inner.engine,
                 deferred.layout_handle,
                 &deferred.reflection,
+                &deferred.eager_bindings,
                 &inner.images_by_name,
                 &inner.samplers_by_name,
                 deferred.storage_output.as_ref().map(|(s, h)| (s.as_str(), *h)),
@@ -1587,12 +1647,17 @@ fn reflected_bindings_of_kind(
 
 /// Build a reflected bind group from shader reflection.
 ///
+/// `eager_bindings`: name→handle captured at pass-declaration time; takes priority over
+/// `images_by_name` so that alias rewrites from later `register_as` calls don't corrupt
+/// per-pass bindings (e.g. the bloom downsample chain reusing `"source_tex"`).
+///
 /// `output_image`: for compute passes, the image this pass writes to so it can
 /// be bound as a StorageImage under its frame name.
 fn build_reflected_bind_group(
     engine: &Engine,
     layout_handle: core::PipelineLayoutHandle,
     reflection: &ShaderReflection,
+    eager_bindings: &HashMap<String, ImageHandle>,
     images_by_name: &HashMap<String, GraphImageRecord>,
     samplers_by_name: &HashMap<String, core::SamplerHandle>,
     output_image: Option<(&str, ImageHandle)>,
@@ -1606,15 +1671,24 @@ fn build_reflected_bind_group(
         return Ok(Vec::new());
     }
 
+    // Resolve a binding name to an image handle: prefer eager_bindings (declaration-time
+    // snapshot) over images_by_name (which may have been overwritten by later register_as).
+    let resolve_image = |path: &str| -> Option<ImageHandle> {
+        eager_bindings
+            .get(path)
+            .copied()
+            .or_else(|| images_by_name.get(path).map(|r| r.handle))
+    };
+
     let mut entries = Vec::new();
     for group in &reflection.layout.groups {
         for binding in &group.bindings {
             match binding.kind {
                 BindingKind::SampledImage => {
-                    if let Some(record) = images_by_name.get(&binding.path) {
+                    if let Some(h) = resolve_image(&binding.path) {
                         entries.push(BindGroupEntry {
                             path: binding.path.clone(),
-                            resource: ResourceBinding::Image(record.handle),
+                            resource: ResourceBinding::Image(h),
                         });
                     }
                 }
@@ -1623,10 +1697,10 @@ fn build_reflected_bind_group(
                         if binding.path == name {
                             Some(h)
                         } else {
-                            images_by_name.get(&binding.path).map(|r| r.handle)
+                            resolve_image(&binding.path)
                         }
                     } else {
-                        images_by_name.get(&binding.path).map(|r| r.handle)
+                        resolve_image(&binding.path)
                     };
                     if let Some(h) = handle {
                         entries.push(BindGroupEntry {

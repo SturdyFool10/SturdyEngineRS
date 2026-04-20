@@ -21,11 +21,14 @@ struct VSOut {
 
 struct BloomCompositeConstants {
     float bloomIntensity;
-    float3 _pad;
+    uint bloomOnly;
+    float2 _pad;
 };
 
 float4 main(VSOut input, uniform BloomCompositeConstants push) : SV_TARGET {
     float3 scene = scene_color.SampleLevel(scene_sampler, input.uv, 0.0).rgb;
     float3 bloom  = bloom_base.SampleLevel(bloom_sampler,  input.uv, 0.0).rgb;
+    if (push.bloomOnly != 0)
+        return float4(bloom * push.bloomIntensity, 1.0);
     return float4(scene + bloom * push.bloomIntensity, 1.0);
 }
