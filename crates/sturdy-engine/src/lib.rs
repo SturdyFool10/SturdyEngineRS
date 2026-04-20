@@ -328,6 +328,43 @@ impl Engine {
         Ok(GraphFrame::new(self.clone(), frame))
     }
 
+    /// Generate a 2-D texture from a CPU pixel function, upload it, and return the image.
+    ///
+    /// `fill` receives `(x, y)` for every pixel and returns `[r, g, b, a]` as `u8`.
+    /// The texture is created, uploaded, and the GPU work is submitted synchronously
+    /// before this call returns.  Use this for one-time assets such as noise maps,
+    /// gradient ramps, lookup tables, and debug patterns.
+    ///
+    /// The returned [`Image`] is sampled as `Rgba8Unorm` and ready to use as a
+    /// shader input in subsequent frames.
+    pub fn generate_texture_2d(
+        &self,
+        name: impl Into<String>,
+        width: u32,
+        height: u32,
+        fill: impl Fn(u32, u32) -> [u8; 4],
+    ) -> Result<Image> {
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let rgba = fill(x, y);
+                let i = ((y * width + x) * 4) as usize;
+                pixels[i..i + 4].copy_from_slice(&rgba);
+            }
+        }
+        let name = name.into();
+        let mut frame = self.begin_frame()?;
+        let image = frame.upload_texture_2d(
+            &name,
+            crate::TextureUploadDesc::sampled_rgba8(width, height),
+            &pixels,
+        )?;
+        let _ = image.set_debug_name(&format!("procedural-{name}"));
+        frame.flush()?;
+        frame.wait()?;
+        Ok(image)
+    }
+
     pub fn wait_idle(&self) -> Result<()> {
         self.device.wait_idle()
     }

@@ -300,7 +300,7 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
 - [x] Add shader-side naming conventions for reflected image dependencies.
 - [x] Resolve reflected image dependency names against frame image names before
   graph compilation.
-- [ ] Validate pass resources against shader reflection before graph submission.
+- [x] Validate pass resources against shader reflection before graph submission (pre-flight check in `validate()` surfaces missing-image bindings as `Error`-level diagnostics before flush).
 - [x] Report missing resources with source-level names from Slang reflection.
 - [x] Support reflected push-constant structs with typed Rust upload helpers.
 - [x] Cache graphics and compute pipelines from reflected pass descriptors.
@@ -355,7 +355,7 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
   - [x] write-after-write
   - [ ] selected mip/layer hazards (requires Phase 14 subresource model)
   - [x] buffer range hazards
-  - [ ] explicit user ordering constraints
+  - [x] explicit user ordering constraints (`RenderFrame::order_before(&img_a, &img_b)`)
 - [ ] Detect graph operations that can run in parallel because their image
   subresources, buffer ranges, queues, and pipeline resources do not conflict.
 - [ ] Compile parallel-ready passes into record batches grouped by queue and
@@ -375,8 +375,9 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
 
 - [ ] Introduce a `ProceduralImage` / `GeneratedTexture` concept that owns a
   generation recipe, target image description, update policy, and cache state.
-- [ ] Support CPU-authored procedural textures for small/generated assets:
-  noise, gradients, ramps, masks, lookup tables, and debug patterns.
+- [x] Support CPU-authored procedural textures for small/generated assets:
+  noise, gradients, ramps, masks, lookup tables, and debug patterns
+  (`Engine::generate_texture_2d(name, w, h, fill: Fn(x, y) -> [u8; 4])`).
 - [ ] Support GPU-authored procedural textures through reflected compute or
   fullscreen shader passes.
 - [ ] Support animated procedural textures driven by frame time, frame index,

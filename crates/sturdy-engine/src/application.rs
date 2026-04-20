@@ -164,7 +164,7 @@ pub trait EngineApp {
     /// Handle a key press. `key` is the logical character string (e.g. `"b"`, `"B"`).
     ///
     /// Only called on `ElementState::Pressed`. Default implementation does nothing.
-    fn key_pressed(&mut self, key: &str) {}
+    fn key_pressed(&mut self, _key: &str) {}
 }
 
 /// A render frame wrapper that provides the frame API and surface image.

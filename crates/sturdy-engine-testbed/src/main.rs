@@ -1,8 +1,9 @@
 use std::time::Instant;
 
 use sturdy_engine::{
-    BloomConfig, BloomPass, Engine, EngineApp, HdrPipelineDesc, HdrPreference, Result as EngineResult,
-    ShaderProgram, ShellFrame, Surface, SurfaceImage, WindowConfig, push_constants,
+    BloomConfig, BloomPass, Engine, EngineApp, HdrPipelineDesc, HdrPreference, Image,
+    Result as EngineResult, ShaderProgram, ShellFrame, Surface, SurfaceImage, WindowConfig,
+    push_constants,
 };
 
 #[push_constants]
@@ -17,7 +18,9 @@ struct Testbed {
     tonemap_program: ShaderProgram,
     bloom_pass: BloomPass,
     bloom_config: BloomConfig,
+    bloom_enabled: bool,
     bloom_only: bool,
+    color_lut: Image,
     started_at: Instant,
 }
 
@@ -43,12 +46,24 @@ impl EngineApp for Testbed {
             hdr_desc.mode, hdr_desc.tone_mapping,
         );
 
+        // Warm-shifted color LUT: shadows tinted cool blue, highlights tinted warm gold.
+        // Sampled at luminance in the scene shader for a subtle color-grading effect.
+        let color_lut = engine.generate_texture_2d("color_lut", 256, 1, |x, _| {
+            let t = x as f32 / 255.0;
+            let r = (0.55 + t * 0.55).min(1.0);
+            let g = (0.60 + t * 0.40).min(1.0);
+            let b = (0.80 - t * 0.40).min(1.0);
+            [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 255]
+        })?;
+
         Ok(Self {
             scene_program: engine.load_shader(shader_path("shader_graph_fragment.slang"))?,
             tonemap_program: engine.load_shader(shader_path("tonemap.slang"))?,
             bloom_pass: BloomPass::new(engine)?,
             bloom_config: BloomConfig::default(),
+            bloom_enabled: true,
             bloom_only: false,
+            color_lut,
             started_at: Instant::now(),
         })
     }
@@ -68,6 +83,9 @@ impl EngineApp for Testbed {
         // "hdr_composite". The scheduler resolves reads at flush time and
         // re-orders passes into the correct RAW execution sequence automatically.
 
+        // Make the CPU-generated color LUT available to the scene shader by name.
+        frame.import_image("color_lut", &self.color_lut)?;
+
         // Pass 3 declared first: tonemap reads "hdr_composite", writes swapchain.
         // "hdr_composite" does not exist yet — registered by bloom below.
         swapchain.execute_shader(&self.tonemap_program)?;
@@ -83,7 +101,12 @@ impl EngineApp for Testbed {
         )?;
 
         // Pass 2: bloom reads "scene_color", writes "hdr_composite".
-        let _hdr_composite = self.bloom_pass.execute(&scene_color, frame, &self.bloom_config, self.bloom_only)?;
+        // When bloom is disabled, alias scene_color directly as hdr_composite.
+        if self.bloom_enabled {
+            let _hdr_composite = self.bloom_pass.execute(&scene_color, frame, &self.bloom_config, self.bloom_only)?;
+        } else {
+            scene_color.register_as("hdr_composite");
+        }
         frame.present_image(&swapchain)?;
 
         // In debug builds, validate the recorded graph and print any diagnostics.
@@ -96,9 +119,12 @@ impl EngineApp for Testbed {
     }
 
     fn key_pressed(&mut self, key: &str) {
-        if key.eq_ignore_ascii_case("b") {
+        if key == "b" {
             self.bloom_only = !self.bloom_only;
             eprintln!("bloom-only: {}", self.bloom_only);
+        } else if key == "B" {
+            self.bloom_enabled = !self.bloom_enabled;
+            eprintln!("bloom: {}", if self.bloom_enabled { "on" } else { "off" });
         }
     }
 

@@ -287,6 +287,105 @@ impl Frame {
         })?;
         Ok(image)
     }
+
+    pub fn upload_pixels_to_image(
+        &mut self,
+        name: impl Into<String>,
+        image: &Image,
+        data: &[u8],
+    ) -> Result<()> {
+        let desc = image.desc();
+        let expected_len = texture_upload_byte_count(TextureUploadDesc {
+            width: desc.extent.width,
+            height: desc.extent.height,
+            format: desc.format,
+            usage: desc.usage,
+        })?;
+        if data.len() as u64 != expected_len {
+            return Err(Error::InvalidInput(format!(
+                "texture upload data length {} does not match expected byte count {expected_len}",
+                data.len()
+            )));
+        }
+
+        let allocation = self.upload_arena.upload(&self.engine, data)?;
+        let (staging_handle, staging_desc) = {
+            let staging = self.upload_arena.buffer(allocation);
+            (staging.handle(), staging.desc())
+        };
+
+        let name = name.into();
+        self.inner
+            .graph_mut(|g| g.import_buffer(staging_handle, staging_desc))?;
+        self.inner
+            .graph_mut(|g| g.import_image(image.handle(), image.desc()))?;
+        self.add_pass(PassDesc {
+            name: format!("{name}-copy"),
+            queue: QueueType::Transfer,
+            shader: None,
+            pipeline: None,
+            bind_groups: Vec::new(),
+            push_constants: None,
+            work: PassWork::CopyBufferToImage(CopyBufferToImageDesc {
+                buffer: staging_handle,
+                image: image.handle(),
+                buffer_offset: allocation.offset(),
+                mip_level: 0,
+                base_layer: 0,
+                layer_count: 1,
+                width: desc.extent.width,
+                height: desc.extent.height,
+                depth: 1,
+            }),
+            reads: Vec::new(),
+            writes: vec![ImageUse {
+                image: image.handle(),
+                access: Access::Write,
+                state: RgState::CopyDst,
+                subresource: SubresourceRange {
+                    base_mip: 0,
+                    mip_count: 1,
+                    base_layer: 0,
+                    layer_count: 1,
+                },
+            }],
+            buffer_reads: vec![crate::BufferUse {
+                buffer: staging_handle,
+                access: Access::Read,
+                state: RgState::CopySrc,
+                offset: allocation.offset(),
+                size: expected_len,
+            }],
+            buffer_writes: Vec::new(),
+            clear_colors: Vec::new(),
+            clear_depth: None,
+        })?;
+        self.add_pass(PassDesc {
+            name: format!("{name}-shader-read"),
+            queue: QueueType::Graphics,
+            shader: None,
+            pipeline: None,
+            bind_groups: Vec::new(),
+            push_constants: None,
+            work: PassWork::None,
+            reads: vec![ImageUse {
+                image: image.handle(),
+                access: Access::Read,
+                state: RgState::ShaderRead,
+                subresource: SubresourceRange {
+                    base_mip: 0,
+                    mip_count: 1,
+                    base_layer: 0,
+                    layer_count: 1,
+                },
+            }],
+            writes: Vec::new(),
+            buffer_reads: Vec::new(),
+            buffer_writes: Vec::new(),
+            clear_colors: Vec::new(),
+            clear_depth: None,
+        })
+    }
 }
 
 fn texture_upload_byte_count(desc: TextureUploadDesc) -> Result<u64> {

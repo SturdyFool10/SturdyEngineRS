@@ -456,6 +456,12 @@ struct RenderFrameInner {
     pass_records: Vec<PassRecord>,
     /// Passes queued for submission. Flushed through the scheduler on `flush()`.
     pending_passes: Vec<PendingPass>,
+    /// User-declared ordering constraints: (writer_of_before, writer_of_after).
+    /// Any pass that writes `before` must execute before any pass that writes `after`.
+    ordering_constraints: Vec<(ImageHandle, ImageHandle)>,
+    /// Images explicitly imported from outside the frame graph (e.g. persistent CPU textures).
+    /// These are intentionally read without a same-frame write; suppress the RBW validator warning.
+    externally_imported: std::collections::HashSet<ImageHandle>,
     declaration_index: u32,
     swapchain_slot: u64,
     flushed: bool,
@@ -480,6 +486,8 @@ impl RenderFrame {
                 held_bind_groups: Vec::new(),
                 pass_records: Vec::new(),
                 pending_passes: Vec::new(),
+                ordering_constraints: Vec::new(),
+                externally_imported: std::collections::HashSet::new(),
                 declaration_index: 0,
                 swapchain_slot,
                 flushed: false,
@@ -529,6 +537,79 @@ impl RenderFrame {
         })
     }
 
+    /// Register a pre-existing [`Image`] as a named frame image.
+    ///
+    /// Use this to make textures created outside the frame (e.g. via
+    /// [`Engine::generate_texture_2d`]) visible to shaders by name.
+    /// After calling this, any shader that declares a binding with the same
+    /// name will receive this image.
+    ///
+    /// The image is not cached — it is re-registered every frame at the handle
+    /// it was created with. Call this once per frame before the first
+    /// `execute_shader` that needs it.
+    pub fn import_image(
+        &self,
+        name: impl Into<String>,
+        image: &crate::Image,
+    ) -> Result<GraphImage> {
+        let name = name.into();
+        let mut inner = self.inner.borrow_mut();
+        inner
+            .frame
+            .inner
+            .graph_mut(|graph| graph.import_image(image.handle(), image.desc()))?;
+        inner.images_by_name.insert(
+            name.clone(),
+            GraphImageRecord {
+                handle: image.handle(),
+                desc: image.desc(),
+            },
+        );
+        inner.externally_imported.insert(image.handle());
+        Ok(GraphImage {
+            frame: self.inner.clone(),
+            name,
+            handle: image.handle(),
+            desc: image.desc(),
+        })
+    }
+
+    /// Upload new CPU pixel data into an existing image and register it as a named frame image.
+    ///
+    /// `fill` receives `(x, y)` for each pixel and returns `[r, g, b, a]` as `u8`.
+    /// Records a transfer pass into the frame before returning; any shader pass
+    /// that reads the image will be scheduled after the upload.
+    ///
+    /// The image must have been created with `ImageUsage::COPY_DST` (images from
+    /// [`Engine::generate_texture_2d`] satisfy this). Call once per frame before
+    /// the first `execute_shader` that needs the updated data.
+    pub fn update_texture_2d(
+        &self,
+        name: impl Into<String>,
+        image: &crate::Image,
+        fill: impl Fn(u32, u32) -> [u8; 4],
+    ) -> Result<GraphImage> {
+        let desc = image.desc();
+        let w = desc.extent.width;
+        let h = desc.extent.height;
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let rgba = fill(x, y);
+                let i = ((y * w + x) * 4) as usize;
+                pixels[i..i + 4].copy_from_slice(&rgba);
+            }
+        }
+        let name = name.into();
+        {
+            let mut inner = self.inner.borrow_mut();
+            inner
+                .frame
+                .upload_pixels_to_image(format!("update-{name}"), image, &pixels)?;
+        }
+        self.import_image(name, image)
+    }
+
     /// Register a sampler preset under a name.
     ///
     /// When the engine auto-creates bind groups from shader reflection, any
@@ -541,6 +622,21 @@ impl RenderFrame {
         let handle = inner.engine.sampler_handle(preset);
         inner.samplers_by_name.insert(name.into(), handle);
         self
+    }
+
+    /// Declare that the pass writing `before` must execute before the pass writing `after`.
+    ///
+    /// Use this when resource dependencies cannot be inferred from reads and writes alone —
+    /// for example, when two passes write to different images but must run in a specific
+    /// order for correctness (e.g. a shadow map pass before a lighting pass that uses
+    /// a different input image).
+    ///
+    /// The constraint is a no-op if either image has no writer in the current frame.
+    pub fn order_before(&self, before: &GraphImage, after: &GraphImage) {
+        self.inner
+            .borrow_mut()
+            .ordering_constraints
+            .push((before.handle(), after.handle()));
     }
 
     /// Return a snapshot of every pass and image recorded in this frame so far.
@@ -740,12 +836,36 @@ impl RenderFrame {
                 if name == "swapchain" {
                     continue;
                 }
+                if inner.externally_imported.contains(h) {
+                    continue;
+                }
                 if !ever_written.contains(h) {
                     diagnostics.push(GraphDiagnostic {
                         level: DiagnosticLevel::Warning,
                         message: format!(
                             "pass '{}' reads image '{name}' but no pass in this frame writes to it — reading previous frame data",
                             rec.name,
+                        ),
+                    });
+                }
+            }
+        }
+
+        // Phase 11: pre-flight binding validation.
+        // For passes with unresolved deferred read names, check that those names
+        // exist in images_by_name now (after all declarations). If not, the pass
+        // will fail at flush time — surface the error here for earlier diagnosis.
+        for rec in &inner.pass_records {
+            for name in &rec.deferred_read_names {
+                if *name == rec.skip_read_name {
+                    continue;
+                }
+                if !inner.images_by_name.contains_key(name.as_str()) {
+                    diagnostics.push(GraphDiagnostic {
+                        level: DiagnosticLevel::Error,
+                        message: format!(
+                            "pass '{}' requires image '{}' but it is not registered in this frame",
+                            rec.name, name,
                         ),
                     });
                 }
@@ -1505,7 +1625,7 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
     }
 
     // Phase 2: schedule.
-    let order = schedule_pass_order(&resolved);
+    let order = schedule_pass_order(&resolved, &inner.ordering_constraints);
 
     // Phase 3: submit in scheduled order (Option::take avoids needing Clone on PassDesc).
     let mut slots: Vec<Option<PassDesc>> = resolved.into_iter().map(Some).collect();
@@ -1567,9 +1687,16 @@ fn has_resource_dependency(earlier: &PassDesc, later: &PassDesc) -> bool {
 /// processed in declaration order (their original index) as a deterministic
 /// tie-breaker, preserving the user's intent for truly independent passes.
 ///
+/// `ordering_constraints` is a list of `(before_image, after_image)` pairs declared
+/// via [`RenderFrame::order_before`]: any pass writing `before_image` is forced to
+/// precede any pass writing `after_image`, regardless of resource dependency inference.
+///
 /// If a cycle is detected (which should not occur in a valid render graph) the
 /// remaining passes are appended in declaration order.
-fn schedule_pass_order(passes: &[PassDesc]) -> Vec<usize> {
+fn schedule_pass_order(
+    passes: &[PassDesc],
+    ordering_constraints: &[(ImageHandle, ImageHandle)],
+) -> Vec<usize> {
     let n = passes.len();
     if n <= 1 {
         return (0..n).collect();
@@ -1579,16 +1706,36 @@ fn schedule_pass_order(passes: &[PassDesc]) -> Vec<usize> {
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut in_degree: Vec<usize> = vec![0; n];
 
+    let add_edge = |adj: &mut Vec<Vec<usize>>, in_degree: &mut Vec<usize>, i: usize, j: usize| {
+        if !adj[i].contains(&j) {
+            adj[i].push(j);
+            in_degree[j] += 1;
+        }
+    };
+
     for i in 0..n {
         for j in 0..n {
             if i == j {
                 continue;
             }
-            if has_resource_dependency(&passes[i], &passes[j])
-                && !adj[i].contains(&j)
-            {
-                adj[i].push(j);
-                in_degree[j] += 1;
+            if has_resource_dependency(&passes[i], &passes[j]) {
+                add_edge(&mut adj, &mut in_degree, i, j);
+            }
+        }
+    }
+
+    // Apply user-declared ordering constraints.
+    for (before_img, after_img) in ordering_constraints {
+        // Find the pass that writes before_img and the pass that writes after_img.
+        let before_pass = passes
+            .iter()
+            .position(|p| p.writes.iter().any(|u| u.image == *before_img));
+        let after_pass = passes
+            .iter()
+            .position(|p| p.writes.iter().any(|u| u.image == *after_img));
+        if let (Some(i), Some(j)) = (before_pass, after_pass) {
+            if i != j {
+                add_edge(&mut adj, &mut in_degree, i, j);
             }
         }
     }
