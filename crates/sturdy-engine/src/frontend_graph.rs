@@ -1745,21 +1745,45 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
     Ok(())
 }
 
-/// Returns true if `later` must execute after `earlier` due to a shared resource.
+/// Returns true if `reader` must execute after `writer` due to data flow.
 ///
-/// Checks all three hazard types on image and buffer resources:
-/// - RAW (read-after-write): `earlier` writes X, `later` reads X
-/// - WAW (write-after-write): `earlier` writes X, `later` writes X
-/// - WAR (write-after-read): `earlier` reads X, `later` writes X
-fn has_resource_dependency(earlier: &PassDesc, later: &PassDesc) -> bool {
+/// RAW dependencies are directional regardless of declaration order: a pass
+/// that reads a resource must run after the pass that writes that resource.
+fn has_read_after_write_dependency(writer: &PassDesc, reader: &PassDesc) -> bool {
+    let writer_img_writes: Vec<_> = writer.writes.iter().map(|u| u.image).collect();
+    let reader_img_reads: Vec<_> = reader.reads.iter().map(|u| u.image).collect();
+
+    for h in &writer_img_writes {
+        if reader_img_reads.contains(h) {
+            return true;
+        }
+    }
+
+    let writer_buf_writes: Vec<_> = writer.buffer_writes.iter().map(|u| u.buffer).collect();
+    let reader_buf_reads: Vec<_> = reader.buffer_reads.iter().map(|u| u.buffer).collect();
+
+    for h in &writer_buf_writes {
+        if reader_buf_reads.contains(h) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Returns true when `later` must preserve declaration order after `earlier`.
+///
+/// WAW and WAR hazards do not express data flow, but they still need a stable
+/// ordering. Adding these edges in both directions creates cycles, so callers
+/// only check this for declaration-ordered pass pairs.
+fn has_declaration_order_hazard(earlier: &PassDesc, later: &PassDesc) -> bool {
     let e_img_writes: Vec<_> = earlier.writes.iter().map(|u| u.image).collect();
     let e_img_reads: Vec<_> = earlier.reads.iter().map(|u| u.image).collect();
     let l_img_writes: Vec<_> = later.writes.iter().map(|u| u.image).collect();
-    let l_img_reads: Vec<_> = later.reads.iter().map(|u| u.image).collect();
 
-    // RAW and WAW
+    // WAW
     for h in &e_img_writes {
-        if l_img_reads.contains(h) || l_img_writes.contains(h) {
+        if l_img_writes.contains(h) {
             return true;
         }
     }
@@ -1774,10 +1798,10 @@ fn has_resource_dependency(earlier: &PassDesc, later: &PassDesc) -> bool {
     let e_buf_writes: Vec<_> = earlier.buffer_writes.iter().map(|u| u.buffer).collect();
     let e_buf_reads: Vec<_> = earlier.buffer_reads.iter().map(|u| u.buffer).collect();
     let l_buf_writes: Vec<_> = later.buffer_writes.iter().map(|u| u.buffer).collect();
-    let l_buf_reads: Vec<_> = later.buffer_reads.iter().map(|u| u.buffer).collect();
 
+    // WAW
     for h in &e_buf_writes {
-        if l_buf_reads.contains(h) || l_buf_writes.contains(h) {
+        if l_buf_writes.contains(h) {
             return true;
         }
     }
@@ -1827,7 +1851,17 @@ fn schedule_pass_order(
             if i == j {
                 continue;
             }
-            if has_resource_dependency(&passes[i], &passes[j]) {
+            if has_read_after_write_dependency(&passes[i], &passes[j]) {
+                add_edge(&mut adj, &mut in_degree, i, j);
+            }
+        }
+    }
+
+    for i in 0..n {
+        for j in i + 1..n {
+            if has_declaration_order_hazard(&passes[i], &passes[j])
+                && !has_read_after_write_dependency(&passes[j], &passes[i])
+            {
                 add_edge(&mut adj, &mut in_degree, i, j);
             }
         }
@@ -1998,4 +2032,72 @@ fn build_reflected_bind_group(
         entries,
     })?;
     Ok(vec![bind_group])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image_use(image: u64, access: Access, state: RgState) -> crate::ImageUse {
+        crate::ImageUse {
+            image: core::ImageHandle(image),
+            access,
+            state,
+            subresource: SubresourceRange {
+                base_mip: 0,
+                mip_count: 1,
+                base_layer: 0,
+                layer_count: 1,
+            },
+        }
+    }
+
+    fn pass(name: &str, reads: &[u64], writes: &[u64]) -> PassDesc {
+        PassDesc {
+            name: name.to_owned(),
+            queue: QueueType::Graphics,
+            shader: None,
+            pipeline: None,
+            bind_groups: Vec::new(),
+            push_constants: None,
+            work: PassWork::None,
+            reads: reads
+                .iter()
+                .copied()
+                .map(|image| image_use(image, Access::Read, RgState::ShaderRead))
+                .collect(),
+            writes: writes
+                .iter()
+                .copied()
+                .map(|image| image_use(image, Access::Write, RgState::RenderTarget))
+                .collect(),
+            buffer_reads: Vec::new(),
+            buffer_writes: Vec::new(),
+            clear_colors: Vec::new(),
+            clear_depth: None,
+        }
+    }
+
+    #[test]
+    fn scheduler_keeps_raw_edges_through_declaration_order_waw() {
+        let passes = vec![
+            pass("tonemap", &[2], &[1]),
+            pass("composite", &[], &[2]),
+            pass("hud", &[], &[1]),
+        ];
+
+        assert!(has_read_after_write_dependency(&passes[1], &passes[0]));
+        let order = schedule_pass_order(&passes, &[]);
+        assert_eq!(order, vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn declaration_order_hazards_do_not_create_reverse_waw_edges() {
+        let first = pass("first", &[], &[1]);
+        let second = pass("second", &[], &[1]);
+
+        assert!(has_declaration_order_hazard(&first, &second));
+        assert!(!has_read_after_write_dependency(&first, &second));
+        assert!(!has_read_after_write_dependency(&second, &first));
+    }
 }
