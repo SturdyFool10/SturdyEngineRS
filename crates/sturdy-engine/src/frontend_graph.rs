@@ -114,8 +114,8 @@ pub enum PassKind {
 struct PassRecord {
     name: String,
     kind: PassKind,
-    reads: Vec<core::ImageHandle>,
-    writes: Vec<core::ImageHandle>,
+    reads: Vec<crate::ImageUse>,
+    writes: Vec<crate::ImageUse>,
     /// Deferred read names for passes whose bind groups are resolved at flush time.
     /// Resolved lazily by `validate()` and `describe()` against `images_by_name`.
     deferred_read_names: Vec<String>,
@@ -135,7 +135,7 @@ struct DeferredPassResolve {
     reflection: ShaderReflection,
     /// Binding names captured with their correct handles at declaration time.
     /// Preferred over `images_by_name` when building the bind group at flush time.
-    eager_bindings: HashMap<String, ImageHandle>,
+    eager_bindings: HashMap<String, ImageBinding>,
     /// Binding names that could not be resolved at declaration time.
     /// Appended to `PassDesc.reads` and the bind group at flush time.
     unresolved_read_names: Vec<String>,
@@ -473,6 +473,13 @@ struct RenderFrameInner {
 struct GraphImageRecord {
     handle: ImageHandle,
     desc: ImageDesc,
+    subresource: SubresourceRange,
+}
+
+#[derive(Copy, Clone)]
+struct ImageBinding {
+    handle: ImageHandle,
+    subresource: SubresourceRange,
 }
 
 fn single_subresource() -> SubresourceRange {
@@ -517,9 +524,14 @@ impl RenderFrame {
             .frame
             .inner
             .graph_mut(|graph| graph.import_image(handle, desc))?;
-        inner
-            .images_by_name
-            .insert(name.clone(), GraphImageRecord { handle, desc });
+        inner.images_by_name.insert(
+            name.clone(),
+            GraphImageRecord {
+                handle,
+                desc,
+                subresource: single_subresource(),
+            },
+        );
         Ok(GraphImage {
             frame: self.inner.clone(),
             name,
@@ -538,6 +550,7 @@ impl RenderFrame {
             GraphImageRecord {
                 handle: image.handle(),
                 desc: image.desc(),
+                subresource: single_subresource(),
             },
         );
         Ok(GraphImage {
@@ -574,6 +587,7 @@ impl RenderFrame {
             GraphImageRecord {
                 handle: image.handle(),
                 desc: image.desc(),
+                subresource: single_subresource(),
             },
         );
         inner.externally_imported.insert(image.handle());
@@ -681,7 +695,7 @@ impl RenderFrame {
             let mut names: Vec<String> = rec
                 .reads
                 .iter()
-                .filter_map(|h| handle_to_name(*h))
+                .filter_map(|use_| handle_to_name(use_.image))
                 .collect();
             for n in &rec.deferred_read_names {
                 if *n != rec.skip_read_name && !names.contains(n) {
@@ -701,7 +715,7 @@ impl RenderFrame {
                 writes: rec
                     .writes
                     .iter()
-                    .filter_map(|h| handle_to_name(*h))
+                    .filter_map(|use_| handle_to_name(use_.image))
                     .collect(),
             })
             .collect();
@@ -719,8 +733,8 @@ impl RenderFrame {
             inner.images_by_name.get(n).map(|r| r.handle)
         };
         for rec in &inner.pass_records {
-            for h in &rec.reads {
-                tally(&mut read_counts, *h);
+            for use_ in &rec.reads {
+                tally(&mut read_counts, use_.image);
             }
             for n in &rec.deferred_read_names {
                 if *n != rec.skip_read_name {
@@ -729,8 +743,8 @@ impl RenderFrame {
                     }
                 }
             }
-            for h in &rec.writes {
-                tally(&mut write_counts, *h);
+            for use_ in &rec.writes {
+                tally(&mut write_counts, use_.image);
             }
         }
 
@@ -779,60 +793,74 @@ impl RenderFrame {
                 .unwrap_or("<unknown>")
         };
 
-        // Track consecutive-write state: (handle, last-writing-pass-name)
-        let mut pending_writes: Vec<(core::ImageHandle, String)> = Vec::new();
-        let mut ever_read: Vec<core::ImageHandle> = Vec::new();
+        // Track consecutive-write state: (image use, last-writing-pass-name)
+        let mut pending_writes: Vec<(crate::ImageUse, String)> = Vec::new();
+        let mut ever_read: Vec<crate::ImageUse> = Vec::new();
 
-        let name_to_handle = |n: &str| -> Option<core::ImageHandle> {
-            inner.images_by_name.get(n).map(|r| r.handle)
+        let name_to_use = |n: &str| -> Option<crate::ImageUse> {
+            inner.images_by_name.get(n).map(|r| crate::ImageUse {
+                image: r.handle,
+                access: Access::Read,
+                state: RgState::ShaderRead,
+                subresource: r.subresource,
+            })
         };
 
         for rec in &inner.pass_records {
             // Collect effective reads: resolved handles + deferred name lookups.
-            let mut effective_reads: Vec<core::ImageHandle> = rec.reads.clone();
+            let mut effective_reads: Vec<crate::ImageUse> = rec.reads.clone();
             for n in &rec.deferred_read_names {
                 if *n != rec.skip_read_name {
-                    if let Some(h) = name_to_handle(n) {
-                        if !effective_reads.contains(&h) {
-                            effective_reads.push(h);
+                    if let Some(use_) = name_to_use(n) {
+                        if !effective_reads
+                            .iter()
+                            .any(|existing| image_uses_overlap(existing, &use_))
+                        {
+                            effective_reads.push(use_);
                         }
                     }
                 }
             }
 
             // Reads clear pending write state for those images.
-            for h in &effective_reads {
-                pending_writes.retain(|(k, _)| k != h);
-                if !ever_read.contains(h) {
-                    ever_read.push(*h);
+            for read in &effective_reads {
+                pending_writes.retain(|(write, _)| !image_uses_overlap(write, read));
+                if !ever_read
+                    .iter()
+                    .any(|existing| image_uses_overlap(existing, read))
+                {
+                    ever_read.push(*read);
                 }
             }
 
             // Writes: flag if the same image is still pending from a previous pass.
-            for h in &rec.writes {
-                if let Some(pos) = pending_writes.iter().position(|(k, _)| k == h) {
+            for write in &rec.writes {
+                if let Some(pos) = pending_writes
+                    .iter()
+                    .position(|(pending, _)| image_uses_overlap(pending, write))
+                {
                     let (_, prev_pass) = pending_writes.remove(pos);
                     diagnostics.push(GraphDiagnostic {
                         level: DiagnosticLevel::Warning,
                         message: format!(
                             "image '{}' is written in '{}' and again in '{}' without an intervening read (write-after-write)",
-                            handle_to_name(*h),
+                            handle_to_name(write.image),
                             prev_pass,
                             rec.name,
                         ),
                     });
                 }
-                pending_writes.push((*h, rec.name.clone()));
+                pending_writes.push((*write, rec.name.clone()));
             }
         }
 
         // Any image still pending a read that is not "swapchain" is a potential unused output.
-        for (h, pass_name) in &pending_writes {
-            let name = handle_to_name(*h);
+        for (write, pass_name) in &pending_writes {
+            let name = handle_to_name(write.image);
             if name == "swapchain" {
                 continue;
             }
-            if !ever_read.contains(h) {
+            if !ever_read.iter().any(|read| image_uses_overlap(write, read)) {
                 diagnostics.push(GraphDiagnostic {
                     level: DiagnosticLevel::Warning,
                     message: format!(
@@ -843,7 +871,7 @@ impl RenderFrame {
         }
 
         // Collect all images written at least once this frame.
-        let ever_written: Vec<core::ImageHandle> = inner
+        let ever_written: Vec<crate::ImageUse> = inner
             .pass_records
             .iter()
             .flat_map(|rec| rec.writes.iter().copied())
@@ -853,25 +881,31 @@ impl RenderFrame {
         // Persistent images carry data from the previous frame, so this is a
         // warning rather than an error, but it often indicates a missing pass.
         for rec in &inner.pass_records {
-            let mut effective_reads: Vec<core::ImageHandle> = rec.reads.clone();
+            let mut effective_reads: Vec<crate::ImageUse> = rec.reads.clone();
             for n in &rec.deferred_read_names {
                 if *n != rec.skip_read_name {
-                    if let Some(h) = name_to_handle(n) {
-                        if !effective_reads.contains(&h) {
-                            effective_reads.push(h);
+                    if let Some(use_) = name_to_use(n) {
+                        if !effective_reads
+                            .iter()
+                            .any(|existing| image_uses_overlap(existing, &use_))
+                        {
+                            effective_reads.push(use_);
                         }
                     }
                 }
             }
-            for h in &effective_reads {
-                let name = handle_to_name(*h);
+            for read in &effective_reads {
+                let name = handle_to_name(read.image);
                 if name == "swapchain" {
                     continue;
                 }
-                if inner.externally_imported.contains(h) {
+                if inner.externally_imported.contains(&read.image) {
                     continue;
                 }
-                if !ever_written.contains(h) {
+                if !ever_written
+                    .iter()
+                    .any(|write| image_uses_overlap(write, read))
+                {
                     diagnostics.push(GraphDiagnostic {
                         level: DiagnosticLevel::Warning,
                         message: format!(
@@ -1030,9 +1064,14 @@ impl RenderFrame {
             .frame
             .inner
             .graph_mut(|graph| graph.import_image(handle, desc))?;
-        inner
-            .images_by_name
-            .insert(name.clone(), GraphImageRecord { handle, desc });
+        inner.images_by_name.insert(
+            name.clone(),
+            GraphImageRecord {
+                handle,
+                desc,
+                subresource: single_subresource(),
+            },
+        );
         Ok(GraphImage {
             frame: self.inner.clone(),
             name,
@@ -1074,9 +1113,14 @@ impl RenderFrame {
             .frame
             .inner
             .graph_mut(|graph| graph.import_image(handle, desc))?;
-        inner
-            .images_by_name
-            .insert(name.clone(), GraphImageRecord { handle, desc });
+        inner.images_by_name.insert(
+            name.clone(),
+            GraphImageRecord {
+                handle,
+                desc,
+                subresource: single_subresource(),
+            },
+        );
         Ok(GraphImage {
             frame: self.inner.clone(),
             name,
@@ -1178,7 +1222,7 @@ impl GraphImage {
     }
 
     pub fn execute_shader(&self, shader: &ShaderProgram) -> Result<()> {
-        self.execute_shader_inner(shader, None)
+        self.execute_shader_inner(shader, None, single_subresource())
     }
 
     /// Execute this image as the target of a fullscreen pass, inferring the
@@ -1209,6 +1253,7 @@ impl GraphImage {
                 stages,
                 bytes: bytes.to_vec(),
             }),
+            single_subresource(),
         )
     }
 
@@ -1242,6 +1287,7 @@ impl GraphImage {
         &self,
         shader: &ShaderProgram,
         push_constants: Option<PushConstants>,
+        target_subresource: SubresourceRange,
     ) -> Result<()> {
         let mut inner = self.frame.borrow_mut();
         let declaration_index = inner.declaration_index;
@@ -1262,14 +1308,19 @@ impl GraphImage {
         let read_names = reflected_image_reads(shader.reflection());
         let (eager_bindings, unresolved_read_names, eager_uses) =
             split_read_names(&read_names, &self.name, &inner.images_by_name);
-        let eager_handles: Vec<_> = eager_bindings.values().copied().collect();
 
         let pass_name = format!("{declaration_index:04}-execute-{}", self.name);
+        let target_use = crate::ImageUse {
+            image: self.handle,
+            access: Access::Write,
+            state: RgState::RenderTarget,
+            subresource: target_subresource,
+        };
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
             kind: PassKind::Fullscreen,
-            reads: eager_handles,
-            writes: vec![self.handle],
+            reads: eager_uses.clone(),
+            writes: vec![target_use],
             deferred_read_names: unresolved_read_names.clone(),
             skip_read_name: self.name.clone(),
         });
@@ -1295,12 +1346,7 @@ impl GraphImage {
                     index_buffer: None,
                 }),
                 reads: eager_uses,
-                writes: vec![crate::ImageUse {
-                    image: self.handle,
-                    access: Access::Write,
-                    state: RgState::RenderTarget,
-                    subresource: single_subresource(),
-                }],
+                writes: vec![target_use],
                 buffer_reads: vec![crate::BufferUse {
                     buffer: shader.fullscreen_triangle.handle(),
                     access: Access::Read,
@@ -1484,10 +1530,8 @@ impl GraphImage {
         let mesh_read_names = reflected_image_reads(program.reflection());
         let (eager_bindings, unresolved_read_names, mut eager_uses) =
             split_read_names(&mesh_read_names, &self.name, &inner.images_by_name);
-        let mut eager_handles: Vec<_> = eager_bindings.values().copied().collect();
 
         if program.alpha_blend {
-            eager_handles.push(self.handle);
             eager_uses.push(crate::ImageUse {
                 image: self.handle,
                 access: Access::Read,
@@ -1495,12 +1539,18 @@ impl GraphImage {
                 subresource: single_subresource(),
             });
         }
+        let target_use = crate::ImageUse {
+            image: self.handle,
+            access: Access::Write,
+            state: RgState::RenderTarget,
+            subresource: single_subresource(),
+        };
 
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
             kind: PassKind::Mesh,
-            reads: eager_handles,
-            writes: vec![self.handle],
+            reads: eager_uses.clone(),
+            writes: vec![target_use],
             deferred_read_names: unresolved_read_names.clone(),
             skip_read_name: self.name.clone(),
         });
@@ -1522,12 +1572,7 @@ impl GraphImage {
                     index_buffer,
                 }),
                 reads: eager_uses,
-                writes: vec![crate::ImageUse {
-                    image: self.handle,
-                    access: Access::Write,
-                    state: RgState::RenderTarget,
-                    subresource: single_subresource(),
-                }],
+                writes: vec![target_use],
                 buffer_reads,
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
@@ -1559,6 +1604,7 @@ impl GraphImage {
             GraphImageRecord {
                 handle: self.handle,
                 desc: self.desc,
+                subresource: single_subresource(),
             },
         );
     }
@@ -1617,14 +1663,19 @@ impl GraphImage {
         let read_names = reflected_storage_image_reads(program.reflection());
         let (eager_bindings, unresolved_read_names, eager_uses) =
             split_read_names(&read_names, &self.name, &inner.images_by_name);
-        let eager_handles: Vec<_> = eager_bindings.values().copied().collect();
 
         let pass_name = format!("{declaration_index:04}-compute-{}", self.name);
+        let target_use = crate::ImageUse {
+            image: self.handle,
+            access: Access::Write,
+            state: RgState::ShaderWrite,
+            subresource: single_subresource(),
+        };
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
             kind: PassKind::Compute,
-            reads: eager_handles,
-            writes: vec![self.handle],
+            reads: eager_uses.clone(),
+            writes: vec![target_use],
             deferred_read_names: unresolved_read_names.clone(),
             skip_read_name: self.name.clone(),
         });
@@ -1643,12 +1694,7 @@ impl GraphImage {
                     z: groups[2],
                 }),
                 reads: eager_uses,
-                writes: vec![crate::ImageUse {
-                    image: self.handle,
-                    access: Access::Write,
-                    state: RgState::ShaderWrite,
-                    subresource: single_subresource(),
-                }],
+                writes: vec![target_use],
                 buffer_reads: Vec::new(),
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
@@ -1693,6 +1739,59 @@ impl GraphImageView {
         }
     }
 
+    pub fn execute_shader(&self, shader: &ShaderProgram) -> Result<()> {
+        self.as_image()
+            .execute_shader_inner(shader, None, self.subresource)
+    }
+
+    pub fn execute_shader_auto(&self, shader: &ShaderProgram) -> Result<()> {
+        let stages = if shader.reflection().entry_points.is_empty() {
+            StageMask::FRAGMENT
+        } else {
+            shader.stage_mask()
+        };
+        self.execute_shader_with_push_constants(shader, stages, &[])
+    }
+
+    pub fn execute_shader_with_push_constants(
+        &self,
+        shader: &ShaderProgram,
+        stages: StageMask,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.as_image().execute_shader_inner(
+            shader,
+            Some(PushConstants {
+                offset: 0,
+                stages,
+                bytes: bytes.to_vec(),
+            }),
+            self.subresource,
+        )
+    }
+
+    pub fn execute_shader_with_constants<T: bytemuck::Pod>(
+        &self,
+        shader: &ShaderProgram,
+        stages: StageMask,
+        constants: &T,
+    ) -> Result<()> {
+        self.execute_shader_with_push_constants(shader, stages, bytemuck::bytes_of(constants))
+    }
+
+    pub fn execute_shader_with_constants_auto<T: bytemuck::Pod>(
+        &self,
+        shader: &ShaderProgram,
+        constants: &T,
+    ) -> Result<()> {
+        let stages = if shader.reflection().entry_points.is_empty() {
+            StageMask::FRAGMENT
+        } else {
+            shader.stage_mask()
+        };
+        self.execute_shader_with_push_constants(shader, stages, bytemuck::bytes_of(constants))
+    }
+
     pub fn register_as(&self, name: impl Into<String>) {
         let mut inner = self.frame.borrow_mut();
         inner.images_by_name.insert(
@@ -1700,8 +1799,18 @@ impl GraphImageView {
             GraphImageRecord {
                 handle: self.handle,
                 desc: self.desc,
+                subresource: self.subresource,
             },
         );
+    }
+
+    fn as_image(&self) -> GraphImage {
+        GraphImage {
+            frame: self.frame.clone(),
+            name: self.name.clone(),
+            handle: self.handle,
+            desc: self.desc,
+        }
     }
 }
 
@@ -1762,11 +1871,11 @@ fn split_read_names(
     skip_name: &str,
     images_by_name: &HashMap<String, GraphImageRecord>,
 ) -> (
-    HashMap<String, ImageHandle>,
+    HashMap<String, ImageBinding>,
     Vec<String>,
     Vec<crate::ImageUse>,
 ) {
-    let mut eager: HashMap<String, ImageHandle> = HashMap::new();
+    let mut eager: HashMap<String, ImageBinding> = HashMap::new();
     let mut unresolved: Vec<String> = Vec::new();
     let mut uses: Vec<crate::ImageUse> = Vec::new();
 
@@ -1775,12 +1884,18 @@ fn split_read_names(
             continue;
         }
         if let Some(rec) = images_by_name.get(name.as_str()) {
-            eager.insert(name.clone(), rec.handle);
+            eager.insert(
+                name.clone(),
+                ImageBinding {
+                    handle: rec.handle,
+                    subresource: rec.subresource,
+                },
+            );
             uses.push(crate::ImageUse {
                 image: rec.handle,
                 access: Access::Read,
                 state: RgState::ShaderRead,
-                subresource: single_subresource(),
+                subresource: rec.subresource,
             });
         } else {
             unresolved.push(name.clone());
@@ -1825,7 +1940,7 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
                     image: record.handle,
                     access: Access::Read,
                     state: RgState::ShaderRead,
-                    subresource: single_subresource(),
+                    subresource: record.subresource,
                 });
             }
 
@@ -2064,7 +2179,7 @@ fn reflected_bindings_of_kind(
 
 /// Build a reflected bind group from shader reflection.
 ///
-/// `eager_bindings`: name→handle captured at pass-declaration time; takes priority over
+/// `eager_bindings`: name→image binding captured at pass-declaration time; takes priority over
 /// `images_by_name` so that alias rewrites from later `register_as` calls don't corrupt
 /// per-pass bindings (e.g. the bloom downsample chain reusing `"source_tex"`).
 ///
@@ -2074,7 +2189,7 @@ fn build_reflected_bind_group(
     engine: &Engine,
     layout_handle: core::PipelineLayoutHandle,
     reflection: &ShaderReflection,
-    eager_bindings: &HashMap<String, ImageHandle>,
+    eager_bindings: &HashMap<String, ImageBinding>,
     images_by_name: &HashMap<String, GraphImageRecord>,
     samplers_by_name: &HashMap<String, core::SamplerHandle>,
     buffers_by_name: &HashMap<String, (core::BufferHandle, crate::BufferDesc)>,
@@ -2091,11 +2206,13 @@ fn build_reflected_bind_group(
 
     // Resolve a binding name to an image handle: prefer eager_bindings (declaration-time
     // snapshot) over images_by_name (which may have been overwritten by later register_as).
-    let resolve_image = |path: &str| -> Option<ImageHandle> {
-        eager_bindings
-            .get(path)
-            .copied()
-            .or_else(|| images_by_name.get(path).map(|r| r.handle))
+    let resolve_image = |path: &str| -> Option<ImageBinding> {
+        eager_bindings.get(path).copied().or_else(|| {
+            images_by_name.get(path).map(|r| ImageBinding {
+                handle: r.handle,
+                subresource: r.subresource,
+            })
+        })
     };
 
     let mut entries = Vec::new();
@@ -2103,27 +2220,36 @@ fn build_reflected_bind_group(
         for binding in &group.bindings {
             match binding.kind {
                 BindingKind::SampledImage => {
-                    if let Some(h) = resolve_image(&binding.path) {
+                    if let Some(image) = resolve_image(&binding.path) {
                         entries.push(BindGroupEntry {
                             path: binding.path.clone(),
-                            resource: ResourceBinding::Image(h),
+                            resource: ResourceBinding::ImageView {
+                                image: image.handle,
+                                subresource: image.subresource,
+                            },
                         });
                     }
                 }
                 BindingKind::StorageImage => {
-                    let handle = if let Some((name, h)) = output_image {
+                    let image = if let Some((name, h)) = output_image {
                         if binding.path == name {
-                            Some(h)
+                            Some(ImageBinding {
+                                handle: h,
+                                subresource: single_subresource(),
+                            })
                         } else {
                             resolve_image(&binding.path)
                         }
                     } else {
                         resolve_image(&binding.path)
                     };
-                    if let Some(h) = handle {
+                    if let Some(image) = image {
                         entries.push(BindGroupEntry {
                             path: binding.path.clone(),
-                            resource: ResourceBinding::Image(h),
+                            resource: ResourceBinding::ImageView {
+                                image: image.handle,
+                                subresource: image.subresource,
+                            },
                         });
                     }
                 }
@@ -2329,5 +2455,31 @@ mod tests {
 
         let order = schedule_pass_order(&passes, &[]);
         assert_eq!(order, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn subresource_validation_rejects_out_of_bounds_mips_and_layers() {
+        let desc = ImageDesc {
+            dimension: crate::ImageDimension::D2,
+            extent: core::Extent3d {
+                width: 64,
+                height: 64,
+                depth: 1,
+            },
+            mip_levels: 4,
+            layers: 2,
+            samples: 1,
+            format: Format::Rgba8Unorm,
+            usage: crate::ImageUsage::SAMPLED,
+            transient: false,
+            clear_value: None,
+            debug_name: None,
+        };
+
+        assert!(validate_subresource(desc, SubresourceRange::new(3, 1, 1, 1)).is_ok());
+        assert!(validate_subresource(desc, SubresourceRange::new(4, 1, 0, 1)).is_err());
+        assert!(validate_subresource(desc, SubresourceRange::new(2, 3, 0, 1)).is_err());
+        assert!(validate_subresource(desc, SubresourceRange::new(0, 1, 2, 1)).is_err());
+        assert!(validate_subresource(desc, SubresourceRange::new(0, 1, 1, 2)).is_err());
     }
 }

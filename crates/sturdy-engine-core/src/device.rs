@@ -816,6 +816,7 @@ impl DeviceInner {
     fn validate_binding_resource_handle(&self, resource: ResourceBinding) -> Result<()> {
         match resource {
             ResourceBinding::Image(handle) if self.images.contains_key(&handle) => Ok(()),
+            ResourceBinding::ImageView { image, .. } if self.images.contains_key(&image) => Ok(()),
             ResourceBinding::Buffer(handle) if self.buffers.contains_key(&handle) => Ok(()),
             ResourceBinding::Sampler(handle) if self.samplers.contains_key(&handle) => Ok(()),
             _ => Err(Error::InvalidHandle),
@@ -832,7 +833,7 @@ fn validate_binding_resource_kind(
         (expected, resource),
         (
             BindingKind::SampledImage | BindingKind::StorageImage,
-            ResourceBinding::Image(_)
+            ResourceBinding::Image(_) | ResourceBinding::ImageView { .. }
         ) | (
             BindingKind::UniformBuffer | BindingKind::StorageBuffer,
             ResourceBinding::Buffer(_)
@@ -852,6 +853,7 @@ fn validate_binding_resource_kind(
 fn resource_binding_label(resource: ResourceBinding) -> &'static str {
     match resource {
         ResourceBinding::Image(_) => "image",
+        ResourceBinding::ImageView { .. } => "image view",
         ResourceBinding::Buffer(_) => "buffer",
         ResourceBinding::Sampler(_) => "sampler",
     }

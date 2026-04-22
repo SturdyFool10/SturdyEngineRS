@@ -4,8 +4,8 @@ use ash::{Device, vk};
 mod batch_pool;
 
 use crate::{
-    BufferBarrier, CompiledGraph, Error, Format, ImageBarrier, IndexFormat, PassDesc, PassWork,
-    PushConstants, Result, RgState, SubmissionHandle, SubresourceRange,
+    BufferBarrier, CompiledGraph, Error, Extent3d, Format, ImageBarrier, IndexFormat, PassDesc,
+    PassWork, PushConstants, Result, RgState, SubmissionHandle, SubresourceRange,
 };
 
 use super::debug::DebugUtils;
@@ -454,16 +454,21 @@ impl CommandContext {
 
         let attachments = color_uses
             .iter()
-            .map(|usage| resources.image_view(usage.image))
+            .map(|usage| {
+                resources.image_view_for_subresource(device, usage.image, usage.subresource)
+            })
             .collect::<Result<Vec<_>>>()?;
         let first_desc = resources.image_desc(color_uses[0].image)?;
+        let first_extent = mip_extent(first_desc.extent, color_uses[0].subresource.base_mip);
+        let framebuffer_layers =
+            subresource_layer_count(first_desc.layers, color_uses[0].subresource);
         let framebuffer = pipelines.get_or_create_framebuffer(
             device,
             render_pass,
             &attachments,
-            first_desc.extent.width,
-            first_desc.extent.height,
-            first_desc.layers as u32,
+            first_extent.width,
+            first_extent.height,
+            framebuffer_layers,
         )?;
 
         let clear_values = attachments
@@ -477,8 +482,8 @@ impl CommandContext {
         let render_area = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent: vk::Extent2D {
-                width: first_desc.extent.width,
-                height: first_desc.extent.height,
+                width: first_extent.width,
+                height: first_extent.height,
             },
         };
         let begin = vk::RenderPassBeginInfo::default()
@@ -494,8 +499,8 @@ impl CommandContext {
                 &[vk::Viewport {
                     x: 0.0,
                     y: 0.0,
-                    width: first_desc.extent.width as f32,
-                    height: first_desc.extent.height as f32,
+                    width: first_extent.width as f32,
+                    height: first_extent.height as f32,
                     min_depth: 0.0,
                     max_depth: 1.0,
                 }],
@@ -682,5 +687,22 @@ fn subresource_count(count: u16) -> u32 {
         vk::REMAINING_MIP_LEVELS
     } else {
         count as u32
+    }
+}
+
+fn subresource_layer_count(image_layers: u16, subresource: SubresourceRange) -> u32 {
+    if subresource.layer_count == u16::MAX {
+        u32::from(image_layers.saturating_sub(subresource.base_layer))
+    } else {
+        u32::from(subresource.layer_count)
+    }
+}
+
+fn mip_extent(extent: Extent3d, base_mip: u16) -> Extent3d {
+    let shift = u32::from(base_mip);
+    Extent3d {
+        width: (extent.width >> shift).max(1),
+        height: (extent.height >> shift).max(1),
+        depth: (extent.depth >> shift).max(1),
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Mutex};
 
 use ash::{Device, vk};
 use vk::Handle;
@@ -6,7 +6,7 @@ use vk::Handle;
 use crate::{
     AddressMode, BorderColor, BufferDesc, BufferHandle, BufferUsage, CompareOp, Error, FilterMode,
     Format, ImageDesc, ImageHandle, ImageUsage, MipmapMode, Result, SamplerDesc, SamplerHandle,
-    VulkanExternalBuffer, VulkanExternalImage,
+    SubresourceRange, VulkanExternalBuffer, VulkanExternalImage,
 };
 
 use super::allocator::{Allocation, GpuAllocator};
@@ -14,8 +14,15 @@ use super::allocator::{Allocation, GpuAllocator};
 pub struct ResourceRegistry {
     allocator: GpuAllocator,
     images: HashMap<ImageHandle, VulkanImage>,
+    image_views: Mutex<HashMap<ImageViewKey, vk::ImageView>>,
     buffers: HashMap<BufferHandle, VulkanBuffer>,
     samplers: HashMap<SamplerHandle, vk::Sampler>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+struct ImageViewKey {
+    image: ImageHandle,
+    subresource: SubresourceRange,
 }
 
 struct VulkanImage {
@@ -37,6 +44,7 @@ impl ResourceRegistry {
         Self {
             allocator: GpuAllocator::new(memory_properties),
             images: HashMap::new(),
+            image_views: Mutex::new(HashMap::new()),
             buffers: HashMap::new(),
             samplers: HashMap::new(),
         }
@@ -237,6 +245,14 @@ impl ResourceRegistry {
 
     pub fn destroy_image(&mut self, device: &Device, handle: ImageHandle) -> Result<()> {
         let image = self.images.remove(&handle).ok_or(Error::InvalidHandle)?;
+        destroy_cached_image_views(
+            device,
+            &mut self
+                .image_views
+                .lock()
+                .expect("vulkan image view cache mutex poisoned"),
+            handle,
+        );
         if !image.imported {
             unsafe {
                 device.destroy_image_view(image.view, None);
@@ -468,6 +484,16 @@ impl ResourceRegistry {
     }
 
     pub fn destroy_all(&mut self, device: &Device) {
+        for (_, view) in self
+            .image_views
+            .lock()
+            .expect("vulkan image view cache mutex poisoned")
+            .drain()
+        {
+            unsafe {
+                device.destroy_image_view(view, None);
+            }
+        }
         for (_, image) in self.images.drain() {
             if !image.imported {
                 unsafe {
@@ -509,6 +535,60 @@ impl ResourceRegistry {
             .ok_or(Error::InvalidHandle)
     }
 
+    pub fn image_view_for_subresource(
+        &self,
+        device: &Device,
+        handle: ImageHandle,
+        subresource: SubresourceRange,
+    ) -> Result<vk::ImageView> {
+        let vk_image = self.images.get(&handle).ok_or(Error::InvalidHandle)?;
+        let desc = vk_image.desc;
+        let normalized = normalize_subresource(desc, subresource)?;
+        if normalized.base_mip == 0
+            && normalized.mip_count == desc.mip_levels
+            && normalized.base_layer == 0
+            && normalized.layer_count == desc.layers
+        {
+            return Ok(vk_image.view);
+        }
+
+        let key = ImageViewKey {
+            image: handle,
+            subresource: normalized,
+        };
+        if let Some(view) = self
+            .image_views
+            .lock()
+            .expect("vulkan image view cache mutex poisoned")
+            .get(&key)
+            .copied()
+        {
+            return Ok(view);
+        }
+
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(vk_image.image)
+            .view_type(vk_image_view_type_for_subresource(desc, normalized))
+            .format(vk_format(desc.format)?)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk_aspect_mask(desc.format),
+                base_mip_level: normalized.base_mip as u32,
+                level_count: normalized.mip_count as u32,
+                base_array_layer: normalized.base_layer as u32,
+                layer_count: normalized.layer_count as u32,
+            });
+        let view = unsafe {
+            device
+                .create_image_view(&view_info, None)
+                .map_err(|error| Error::Backend(format!("vkCreateImageView failed: {error:?}")))?
+        };
+        self.image_views
+            .lock()
+            .expect("vulkan image view cache mutex poisoned")
+            .insert(key, view);
+        Ok(view)
+    }
+
     pub fn image_desc(&self, handle: ImageHandle) -> Result<ImageDesc> {
         self.images
             .get(&handle)
@@ -531,6 +611,72 @@ impl ResourceRegistry {
     }
 }
 
+fn destroy_cached_image_views(
+    device: &Device,
+    cache: &mut HashMap<ImageViewKey, vk::ImageView>,
+    handle: ImageHandle,
+) {
+    let stale = cache
+        .keys()
+        .copied()
+        .filter(|key| key.image == handle)
+        .collect::<Vec<_>>();
+    for key in stale {
+        if let Some(view) = cache.remove(&key) {
+            unsafe {
+                device.destroy_image_view(view, None);
+            }
+        }
+    }
+}
+
+fn normalize_subresource(
+    desc: ImageDesc,
+    subresource: SubresourceRange,
+) -> Result<SubresourceRange> {
+    let mip_count = normalize_subresource_count(
+        subresource.base_mip,
+        subresource.mip_count,
+        desc.mip_levels,
+        "mip",
+    )?;
+    let layer_count = normalize_subresource_count(
+        subresource.base_layer,
+        subresource.layer_count,
+        desc.layers,
+        "layer",
+    )?;
+    Ok(SubresourceRange {
+        base_mip: subresource.base_mip,
+        mip_count,
+        base_layer: subresource.base_layer,
+        layer_count,
+    })
+}
+
+fn normalize_subresource_count(base: u16, count: u16, limit: u16, name: &str) -> Result<u16> {
+    if count == 0 {
+        return Err(Error::InvalidInput(format!(
+            "{name} subresource count must be at least 1"
+        )));
+    }
+    if base >= limit {
+        return Err(Error::InvalidInput(format!(
+            "{name} subresource base {base} is outside image limit {limit}"
+        )));
+    }
+    if count == u16::MAX {
+        return Ok(limit - base);
+    }
+    let end = u32::from(base).saturating_add(u32::from(count));
+    if end > u32::from(limit) {
+        return Err(Error::InvalidInput(format!(
+            "{name} subresource range [{base}, {end}) exceeds image limit {limit}"
+        )));
+    }
+    Ok(count)
+}
+
 fn image_type(desc: ImageDesc) -> vk::ImageType {
     match desc.dimension {
         crate::ImageDimension::D1 => vk::ImageType::TYPE_1D,
@@ -544,6 +690,23 @@ fn vk_image_view_type(desc: ImageDesc) -> vk::ImageViewType {
         crate::ImageDimension::D1 if desc.layers > 1 => vk::ImageViewType::TYPE_1D_ARRAY,
         crate::ImageDimension::D1 => vk::ImageViewType::TYPE_1D,
         crate::ImageDimension::D2 if desc.layers > 1 => vk::ImageViewType::TYPE_2D_ARRAY,
+        crate::ImageDimension::D2 => vk::ImageViewType::TYPE_2D,
+        crate::ImageDimension::D3 => vk::ImageViewType::TYPE_3D,
+    }
+}
+
+fn vk_image_view_type_for_subresource(
+    desc: ImageDesc,
+    subresource: SubresourceRange,
+) -> vk::ImageViewType {
+    match desc.dimension {
+        crate::ImageDimension::D1 if subresource.layer_count > 1 => {
+            vk::ImageViewType::TYPE_1D_ARRAY
+        }
+        crate::ImageDimension::D1 => vk::ImageViewType::TYPE_1D,
+        crate::ImageDimension::D2 if subresource.layer_count > 1 => {
+            vk::ImageViewType::TYPE_2D_ARRAY
+        }
         crate::ImageDimension::D2 => vk::ImageViewType::TYPE_2D,
         crate::ImageDimension::D3 => vk::ImageViewType::TYPE_3D,
     }

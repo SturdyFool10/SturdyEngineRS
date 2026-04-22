@@ -408,6 +408,27 @@ fn write_descriptor(
                 device.update_descriptor_sets(&write, &[]);
             }
         }
+        ResourceBinding::ImageView { image, subresource } => {
+            if !matches!(
+                binding.descriptor_type,
+                vk::DescriptorType::SAMPLED_IMAGE | vk::DescriptorType::STORAGE_IMAGE
+            ) {
+                return Err(Error::InvalidInput(
+                    "image resource can only be bound to image descriptors".into(),
+                ));
+            }
+            let info = [vk::DescriptorImageInfo::default()
+                .image_view(resources.image_view_for_subresource(device, image, subresource)?)
+                .image_layout(image_descriptor_layout(binding.descriptor_type))];
+            let write = [vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(binding.binding_index)
+                .descriptor_type(binding.descriptor_type)
+                .image_info(&info)];
+            unsafe {
+                device.update_descriptor_sets(&write, &[]);
+            }
+        }
         ResourceBinding::Sampler(sampler) => {
             if binding.descriptor_type != vk::DescriptorType::SAMPLER {
                 return Err(Error::InvalidInput(
