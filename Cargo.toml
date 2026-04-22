@@ -17,3 +17,78 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 cosmic-text = "0.18"
+
+# Keep engine crates optimized even when building debug/test profiles. This is
+# useful for GPU-facing code paths where debug codegen can distort timings and
+# resize/render behavior.
+[profile.dev.package.sturdy-engine-core]
+opt-level = 3
+codegen-units = 1
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.sturdy-engine]
+opt-level = 3
+codegen-units = 1
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.sturdy-engine-ffi]
+opt-level = 3
+codegen-units = 1
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.sturdy-engine-testbed]
+opt-level = 3
+codegen-units = 1
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.sturdy-engine-macros]
+opt-level = 3
+codegen-units = 1
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.textui]
+opt-level = 3
+codegen-units = 1
+debug-assertions = false
+overflow-checks = false
+
+[profile.test.package.sturdy-engine-core]
+opt-level = 3
+codegen-units = 1
+debug-assertions = false
+overflow-checks = false
+
+[profile.test.package.sturdy-engine]
+opt-level = 3
+codegen-units = 1
+debug-assertions = false
+overflow-checks = false
+
+[profile.test.package.sturdy-engine-ffi]
+opt-level = 3
+codegen-units = 1
+debug-assertions = false
+overflow-checks = false
+
+[profile.test.package.sturdy-engine-testbed]
+opt-level = 3
+codegen-units = 1
+debug-assertions = false
+overflow-checks = false
+
+[profile.test.package.sturdy-engine-macros]
+opt-level = 3
+codegen-units = 1
+debug-assertions = false
+overflow-checks = false
+
+[profile.test.package.textui]
+opt-level = 3
+codegen-units = 1
+debug-assertions = false
+overflow-checks = false

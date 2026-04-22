@@ -2291,7 +2291,6 @@ impl MaterialGraphShaderOptimizationStrategy {
         }
     }
 }
-
 // ------------------------------------------------------------------
 // Material Graph Debug Tools
 // ------------------------------------------------------------------
@@ -3613,7 +3612,6 @@ impl MaterialGraphShaderOptimizationStrategy {
         }
     }
 }
-
 // ------------------------------------------------------------------
 // Material Graph Asset Pipeline
 // ------------------------------------------------------------------
@@ -4143,44 +4141,3 @@ impl MaterialGraphGpuCapture {
         self.capture_state
     }
 }
-
-// ------------------------------------------------------------------
-// Material Graph Shader Optimization
-// ------------------------------------------------------------------
-
-/// Material graph shader optimization for pre-compiled shader artifacts.
-#[derive(Clone, Debug)]
-pub struct MaterialGraphShaderOptimization {
-    /// The optimized material graph for this optimization.
-    pub optimized_graph: MaterialGraph,
-    /// The optimization strategy for this optimization.
-    pub optimization_strategy: MaterialGraphShaderOptimizationStrategy,
-    /// The optimized artifacts for this optimization.
-    pub optimized_artifacts: Vec<crate::CompiledShaderArtifact>,
-}
-
-impl MaterialGraphShaderOptimization {
-    /// Create material graph shader optimization from the given material graph.
-    pub fn new(graph: MaterialGraph) -> Self {
-        Self {
-            optimized_graph: graph,
-            optimization_strategy: MaterialGraphShaderOptimizationStrategy::default(),
-            optimized_artifacts: Vec::new(),
-        }
-    }
-
-    /// Optimize the material graph for this optimization.
-    pub fn optimize(&mut self) -> Result<Self> {
-        self.optimized_artifacts = self.optimized_graph.optimize();
-        Ok(self)
-    }
-
-    /// Get the optimized material graph of this optimization.
-    pub fn optimized_graph(&self) -> &MaterialGraph {
-        &self.optimized_graph
-    }
-
-    /// Get the optimization strategy of this optimization.
-    pub fn optimization_strategy(&self) -> MaterialGraphShaderOptimizationStrategy {
-        self.optimization_strategy
-    }

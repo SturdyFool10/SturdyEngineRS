@@ -1427,9 +1427,24 @@ impl GraphImage {
 
         let pass_name = format!("{declaration_index:04}-draw-mesh-{}", self.name);
         let mesh_read_names = reflected_image_reads(program.reflection());
-        let (eager_bindings, unresolved_read_names, eager_uses) =
+        let (eager_bindings, unresolved_read_names, mut eager_uses) =
             split_read_names(&mesh_read_names, &self.name, &inner.images_by_name);
-        let eager_handles: Vec<_> = eager_bindings.values().copied().collect();
+        let mut eager_handles: Vec<_> = eager_bindings.values().copied().collect();
+
+        if program.alpha_blend {
+            eager_handles.push(self.handle);
+            eager_uses.push(crate::ImageUse {
+                image: self.handle,
+                access: Access::Read,
+                state: RgState::RenderTarget,
+                subresource: SubresourceRange {
+                    base_mip: 0,
+                    mip_count: 1,
+                    base_layer: 0,
+                    layer_count: 1,
+                },
+            });
+        }
 
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
@@ -2099,5 +2114,13 @@ mod tests {
         assert!(has_declaration_order_hazard(&first, &second));
         assert!(!has_read_after_write_dependency(&first, &second));
         assert!(!has_read_after_write_dependency(&second, &first));
+    }
+
+    #[test]
+    fn alpha_overlay_read_write_creates_dependency_on_previous_target_write() {
+        let tonemap = pass("tonemap", &[2], &[1]);
+        let overlay = pass("hud", &[1], &[1]);
+
+        assert!(has_read_after_write_dependency(&tonemap, &overlay));
     }
 }
