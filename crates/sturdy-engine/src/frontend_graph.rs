@@ -386,7 +386,7 @@ impl ShaderProgram {
                         offset: std::mem::offset_of!(FullscreenVertex, uv) as u32,
                     },
                 ],
-                color_targets: vec![ColorTargetDesc { format }],
+                color_targets: vec![ColorTargetDesc::opaque(format)],
                 depth_format: None,
                 topology: PrimitiveTopology::TriangleList,
                 raster: RasterState {
@@ -452,6 +452,7 @@ struct RenderFrameInner {
     frame: crate::Frame,
     images_by_name: HashMap<String, GraphImageRecord>,
     samplers_by_name: HashMap<String, core::SamplerHandle>,
+    buffers_by_name: HashMap<String, (core::BufferHandle, crate::BufferDesc)>,
     held_bind_groups: Vec<BindGroup>,
     pass_records: Vec<PassRecord>,
     /// Passes queued for submission. Flushed through the scheduler on `flush()`.
@@ -483,6 +484,7 @@ impl RenderFrame {
                 frame,
                 images_by_name: HashMap::new(),
                 samplers_by_name: HashMap::new(),
+                buffers_by_name: HashMap::new(),
                 held_bind_groups: Vec::new(),
                 pass_records: Vec::new(),
                 pending_passes: Vec::new(),
@@ -624,6 +626,20 @@ impl RenderFrame {
         self
     }
 
+    /// Register a GPU buffer under a name for the current frame.
+    ///
+    /// When the engine auto-creates bind groups from shader reflection, any
+    /// `StructuredBuffer` or `RWStructuredBuffer` binding whose variable name
+    /// matches `name` will receive this buffer. Call this before the first
+    /// `draw_mesh_instanced` (or other draw) that needs it.
+    pub fn bind_buffer(&self, name: impl Into<String>, buffer: &crate::Buffer) -> &Self {
+        let mut inner = self.inner.borrow_mut();
+        inner
+            .buffers_by_name
+            .insert(name.into(), (buffer.handle(), buffer.desc()));
+        self
+    }
+
     /// Declare that the pass writing `before` must execute before the pass writing `after`.
     ///
     /// Use this when resource dependencies cannot be inferred from reads and writes alone —
@@ -653,8 +669,11 @@ impl RenderFrame {
 
         // Resolve effective read names for a record, including deferred names.
         let effective_read_names = |rec: &PassRecord| -> Vec<String> {
-            let mut names: Vec<String> =
-                rec.reads.iter().filter_map(|h| handle_to_name(*h)).collect();
+            let mut names: Vec<String> = rec
+                .reads
+                .iter()
+                .filter_map(|h| handle_to_name(*h))
+                .collect();
             for n in &rec.deferred_read_names {
                 if *n != rec.skip_read_name && !names.contains(n) {
                     names.push(n.clone());
@@ -670,7 +689,11 @@ impl RenderFrame {
                 name: rec.name.clone(),
                 kind: rec.kind,
                 reads: effective_read_names(rec),
-                writes: rec.writes.iter().filter_map(|h| handle_to_name(*h)).collect(),
+                writes: rec
+                    .writes
+                    .iter()
+                    .filter_map(|h| handle_to_name(*h))
+                    .collect(),
             })
             .collect();
 
@@ -1073,6 +1096,7 @@ impl Drop for RenderFrame {
     }
 }
 
+#[derive(Clone)]
 pub struct GraphImage {
     frame: Rc<RefCell<RenderFrameInner>>,
     name: String,
@@ -1246,7 +1270,7 @@ impl GraphImage {
     }
 
     pub fn draw_mesh(&self, mesh: &Mesh, program: &MeshProgram) -> Result<()> {
-        self.draw_mesh_inner(mesh, program, None)
+        self.draw_mesh_inner(mesh, program, None, None, 1)
     }
 
     pub fn draw_mesh_with_push_constants(
@@ -1264,6 +1288,60 @@ impl GraphImage {
                 stages,
                 bytes: bytes.to_vec(),
             }),
+            None,
+            1,
+        )
+    }
+
+    /// Draw `instance_count` instances of `mesh` using `program`.
+    ///
+    /// `instances` is a storage buffer (`BufferUsage::STORAGE`) whose elements
+    /// match the `StructuredBuffer<InstanceData>` declaration in the vertex shader.
+    /// The buffer must be named `"instances"` in the shader source; that name is
+    /// registered in the frame so the auto-bind system can resolve it.
+    pub fn draw_mesh_instanced(
+        &self,
+        mesh: &Mesh,
+        program: &MeshProgram,
+        instances: &crate::Buffer,
+        instance_count: u32,
+    ) -> Result<()> {
+        self.draw_mesh_inner(
+            mesh,
+            program,
+            None,
+            Some((instances, instance_count)),
+            instance_count,
+        )
+    }
+
+    /// Like `draw_mesh_instanced` but with typed push constants (e.g. a camera matrix).
+    pub fn draw_mesh_instanced_with_push_constants<T: bytemuck::Pod>(
+        &self,
+        mesh: &Mesh,
+        program: &MeshProgram,
+        instances: &crate::Buffer,
+        instance_count: u32,
+        constants: &T,
+    ) -> Result<()> {
+        let stage = {
+            let mask = program.reflection().layout.push_constants_stage_mask;
+            if mask == StageMask::default() {
+                StageMask::VERTEX | StageMask::FRAGMENT
+            } else {
+                mask
+            }
+        };
+        self.draw_mesh_inner(
+            mesh,
+            program,
+            Some(PushConstants {
+                offset: 0,
+                stages: stage,
+                bytes: bytemuck::bytes_of(constants).to_vec(),
+            }),
+            Some((instances, instance_count)),
+            instance_count,
         )
     }
 
@@ -1272,6 +1350,8 @@ impl GraphImage {
         mesh: &Mesh,
         program: &MeshProgram,
         push_constants: Option<PushConstants>,
+        instance_buf: Option<(&crate::Buffer, u32)>,
+        instance_count: u32,
     ) -> Result<()> {
         let mut inner = self.frame.borrow_mut();
         let declaration_index = inner.declaration_index;
@@ -1326,6 +1406,25 @@ impl GraphImage {
             });
         }
 
+        // Register the instance storage buffer under "instances" so the
+        // reflected bind group builder can resolve it by name.
+        if let Some((ibuf, _)) = instance_buf {
+            inner
+                .frame
+                .inner
+                .graph_mut(|g| g.import_buffer(ibuf.handle(), ibuf.desc()))?;
+            inner
+                .buffers_by_name
+                .insert("instances".to_owned(), (ibuf.handle(), ibuf.desc()));
+            buffer_reads.push(crate::BufferUse {
+                buffer: ibuf.handle(),
+                access: Access::Read,
+                state: RgState::ShaderRead,
+                offset: 0,
+                size: ibuf.desc().size,
+            });
+        }
+
         let pass_name = format!("{declaration_index:04}-draw-mesh-{}", self.name);
         let mesh_read_names = reflected_image_reads(program.reflection());
         let (eager_bindings, unresolved_read_names, eager_uses) =
@@ -1351,7 +1450,7 @@ impl GraphImage {
                 push_constants,
                 work: PassWork::Draw(DrawDesc {
                     vertex_count: draw_count,
-                    instance_count: 1,
+                    instance_count,
                     first_vertex: 0,
                     first_instance: 0,
                     vertex_buffer,
@@ -1534,7 +1633,11 @@ fn split_read_names(
     read_names: &[String],
     skip_name: &str,
     images_by_name: &HashMap<String, GraphImageRecord>,
-) -> (HashMap<String, ImageHandle>, Vec<String>, Vec<crate::ImageUse>) {
+) -> (
+    HashMap<String, ImageHandle>,
+    Vec<String>,
+    Vec<crate::ImageUse>,
+) {
     let mut eager: HashMap<String, ImageHandle> = HashMap::new();
     let mut unresolved: Vec<String> = Vec::new();
     let mut uses: Vec<crate::ImageUse> = Vec::new();
@@ -1616,7 +1719,11 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
                 &deferred.eager_bindings,
                 &inner.images_by_name,
                 &inner.samplers_by_name,
-                deferred.storage_output.as_ref().map(|(s, h)| (s.as_str(), *h)),
+                &inner.buffers_by_name,
+                deferred
+                    .storage_output
+                    .as_ref()
+                    .map(|(s, h)| (s.as_str(), *h)),
             )?;
             desc.bind_groups = bind_groups.iter().map(|bg| bg.handle()).collect();
             inner.held_bind_groups.extend(bind_groups);
@@ -1630,7 +1737,9 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
     // Phase 3: submit in scheduled order (Option::take avoids needing Clone on PassDesc).
     let mut slots: Vec<Option<PassDesc>> = resolved.into_iter().map(Some).collect();
     for idx in order {
-        let pass = slots[idx].take().expect("scheduler produced duplicate index");
+        let pass = slots[idx]
+            .take()
+            .expect("scheduler produced duplicate index");
         inner.frame.add_pass(pass)?;
     }
     Ok(())
@@ -1807,6 +1916,7 @@ fn build_reflected_bind_group(
     eager_bindings: &HashMap<String, ImageHandle>,
     images_by_name: &HashMap<String, GraphImageRecord>,
     samplers_by_name: &HashMap<String, core::SamplerHandle>,
+    buffers_by_name: &HashMap<String, (core::BufferHandle, crate::BufferDesc)>,
     output_image: Option<(&str, ImageHandle)>,
 ) -> Result<Vec<BindGroup>> {
     let has_bindings = reflection
@@ -1865,6 +1975,14 @@ fn build_reflected_bind_group(
                         path: binding.path.clone(),
                         resource: ResourceBinding::Sampler(handle),
                     });
+                }
+                BindingKind::StorageBuffer | BindingKind::UniformBuffer => {
+                    if let Some((handle, _)) = buffers_by_name.get(&binding.path) {
+                        entries.push(BindGroupEntry {
+                            path: binding.path.clone(),
+                            resource: ResourceBinding::Buffer(*handle),
+                        });
+                    }
                 }
                 _ => {}
             }

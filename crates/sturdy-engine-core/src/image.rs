@@ -184,7 +184,11 @@ impl ImageDesc {
     pub fn hdr_color(width: u32, height: u32) -> Self {
         Self {
             dimension: ImageDimension::D2,
-            extent: Extent3d { width, height, depth: 1 },
+            extent: Extent3d {
+                width,
+                height,
+                depth: 1,
+            },
             mip_levels: 1,
             layers: 1,
             samples: 1,

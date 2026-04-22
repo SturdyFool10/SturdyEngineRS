@@ -62,7 +62,7 @@ pub use native_handles::{
     native_handle_capabilities_for_backend,
 };
 pub use pipeline::{
-    ColorTargetDesc, ComputePipelineDesc, CullMode, FrontFace, GraphicsPipelineDesc,
+    BlendMode, ColorTargetDesc, ComputePipelineDesc, CullMode, FrontFace, GraphicsPipelineDesc,
     PrimitiveTopology, RasterState, VertexAttributeDesc, VertexBufferLayout, VertexFormat,
     VertexInputRate,
 };

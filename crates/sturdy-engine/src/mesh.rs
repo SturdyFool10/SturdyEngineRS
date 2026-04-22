@@ -1,4 +1,6 @@
-use crate::{Buffer, BufferDesc, BufferUsage, Engine, IndexFormat, Result, VertexAttributeDesc, VertexFormat};
+use crate::{
+    Buffer, BufferDesc, BufferUsage, Engine, IndexFormat, Result, VertexAttributeDesc, VertexFormat,
+};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
@@ -94,9 +96,7 @@ fn upload_slice<T>(engine: &Engine, data: &[T], usage: BufferUsage) -> Result<Bu
 }
 
 fn bytes_of_slice<T>(data: &[T]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data))
-    }
+    unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data)) }
 }
 
 pub(crate) fn vertex2d_attributes() -> Vec<VertexAttributeDesc> {

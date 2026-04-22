@@ -18,8 +18,8 @@
 //! frame as `"hdr_composite"`.
 
 use crate::{
-    push_constants, Engine, Format, GraphImage, ImageDesc, ImageUsage, RenderFrame, Result,
-    ShaderProgram, StageMask,
+    Engine, Format, GraphImage, ImageDesc, MipPyramid, RenderFrame, Result, ShaderProgram,
+    StageMask, push_constants,
 };
 
 /// Configuration for the bloom post-processing pass.
@@ -116,46 +116,14 @@ impl BloomPass {
         }
     }
 
-    /// Allocate the bloom mip-chain intermediate images for the given source size.
-    pub fn create_bloom_mip_chain(
+    fn bloom_mip_pyramid(
         frame: &RenderFrame,
         width: u32,
         height: u32,
         mip_count: u32,
-        format: &Format,
-    ) -> Result<Vec<GraphImage>> {
-        let mut mips = Vec::with_capacity(mip_count as usize);
-
-        for level in 0..mip_count {
-            let mip_width = width.max(1) >> level;
-            let mip_height = height.max(1) >> level;
-
-            if mip_width == 0 || mip_height == 0 {
-                break;
-            }
-
-            let desc = ImageDesc {
-                dimension: crate::ImageDimension::D2,
-                extent: crate::Extent3d {
-                    width: mip_width,
-                    height: mip_height,
-                    depth: 1,
-                },
-                mip_levels: 1,
-                layers: 1,
-                samples: 1,
-                format: if level == 0 { *format } else { Format::Rgba16Float },
-                usage: ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET,
-                transient: false,
-                clear_value: None,
-                debug_name: None,
-            };
-
-            let image = frame.image(&format!("bloom_mip_{level}"), desc)?;
-            mips.push(image);
-        }
-
-        Ok(mips)
+        format: Format,
+    ) -> Result<MipPyramid> {
+        MipPyramid::new(frame, "bloom", width, height, mip_count, format)
     }
 
     /// Run the bloom pipeline and return the HDR composite image.
@@ -188,18 +156,18 @@ impl BloomPass {
         };
 
         let bloom_mips =
-            Self::create_bloom_mip_chain(frame, src_width, src_height, mip_count, &src_desc.format)?;
+            Self::bloom_mip_pyramid(frame, src_width, src_height, mip_count, src_desc.format)?;
 
         // Pass 1: bright-pass filter → bloom_mip_0
-        self.execute_bright_pass(&bloom_mips[0], config)?;
+        self.execute_bright_pass(bloom_mips.base(), config)?;
 
         // Pass 2: CoD:AW 13-tap downsampling chain
         for level in 0..bloom_mips.len().saturating_sub(1) {
-            self.execute_downsample(&bloom_mips[level], &bloom_mips[level + 1])?;
+            self.execute_downsample(bloom_mips.mip(level), bloom_mips.mip(level + 1))?;
         }
 
         // Pass 3: pyramid collapse — tent-upsample and accumulate back to full res
-        let bloom_result = self.execute_upsample_chain(&bloom_mips, frame)?;
+        let bloom_result = self.execute_upsample_chain(bloom_mips.levels(), frame)?;
 
         // Pass 4: HDR composite — scene + bloom in linear HDR space, no tonemap
         self.execute_composite(scene_color, &bloom_result, frame, config, bloom_only)
@@ -245,28 +213,21 @@ impl BloomPass {
         frame: &RenderFrame,
     ) -> Result<GraphImage> {
         let n = bloom_mips.len();
-
         bloom_mips[n - 1].register_as("bloom_accum");
 
-        let mut last_up: Option<GraphImage> = None;
+        let base_desc = bloom_mips[0].desc();
+        let up_chain = MipPyramid::new(
+            frame,
+            "bloom_up",
+            base_desc.extent.width,
+            base_desc.extent.height,
+            (n - 1) as u32,
+            Format::Rgba16Float,
+        )?;
 
         for level in (0..n - 1).rev() {
-            let down_desc = bloom_mips[level].desc();
             let accum_desc = bloom_mips[level + 1].desc();
-
-            let up_desc = ImageDesc {
-                dimension: crate::ImageDimension::D2,
-                extent: down_desc.extent,
-                mip_levels: 1,
-                layers: 1,
-                samples: 1,
-                format: Format::Rgba16Float,
-                usage: ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET,
-                transient: false,
-                clear_value: None,
-                debug_name: None,
-            };
-            let up_image = frame.image(&format!("bloom_up_{level}"), up_desc)?;
+            let up_image = up_chain.mip(level);
 
             bloom_mips[level].register_as("bloom_down");
 
@@ -283,10 +244,9 @@ impl BloomPass {
             )?;
 
             up_image.register_as("bloom_accum");
-            last_up = Some(up_image);
         }
 
-        Ok(last_up.expect("bloom mip chain must have at least 2 levels"))
+        Ok(up_chain.base().clone())
     }
 
     fn execute_composite(
@@ -300,20 +260,8 @@ impl BloomPass {
         bloom.register_as("bloom_base");
         // scene_color is already in the frame registry as "scene_color".
 
-        let desc = scene_color.desc();
-        let hdr_desc = ImageDesc {
-            dimension: crate::ImageDimension::D2,
-            extent: desc.extent,
-            mip_levels: 1,
-            layers: 1,
-            samples: 1,
-            format: Format::Rgba16Float,
-            usage: ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET,
-            transient: false,
-            clear_value: None,
-            debug_name: None,
-        };
-        let hdr_out = frame.image("hdr_composite", hdr_desc)?;
+        let ext = scene_color.desc().extent;
+        let hdr_out = frame.image("hdr_composite", ImageDesc::hdr_color(ext.width, ext.height))?;
 
         let constants = BloomCompositeConstants {
             bloom_intensity: config.intensity,

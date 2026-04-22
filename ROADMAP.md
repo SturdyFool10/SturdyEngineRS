@@ -378,10 +378,10 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
 - [x] Support CPU-authored procedural textures for small/generated assets:
   noise, gradients, ramps, masks, lookup tables, and debug patterns
   (`Engine::generate_texture_2d(name, w, h, fill: Fn(x, y) -> [u8; 4])`).
-- [ ] Support GPU-authored procedural textures through reflected compute or
-  fullscreen shader passes.
-- [ ] Support animated procedural textures driven by frame time, frame index,
-  user parameters, or external data.
+- [x] Support GPU-authored procedural textures through reflected compute or
+  fullscreen shader passes (`GpuProceduralTexture`: persistent image + `ShaderProgram`; `generate` / `generate_with_constants` per frame).
+- [x] Support animated procedural textures driven by frame time, frame index,
+  user parameters, or external data (`RenderFrame::update_texture_2d` called in render loop; testbed animates color LUT every frame).
 - [ ] Allow procedural textures to regenerate:
   - [ ] once at creation
   - [ ] when parameters change
@@ -400,9 +400,9 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
 
 ## Phase 14 — Mip Resources and Mip-Based Effects
 
-- [ ] Add image builders for full mip chains and selected mip counts.
+- [x] Add image builders for full mip chains and selected mip counts (`MipPyramid::new`; bloom updated to use it).
 - [ ] Add subresource-aware graph helpers for addressing individual mips and
-  mip ranges.
+  mip ranges (true single-image multi-mip views; requires backend work).
 - [ ] Add automatic mip generation for sampled textures where format and usage
   support it.
 - [ ] Add explicit mip graph operations:
@@ -422,15 +422,12 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
 
 ## Phase 15 — GPU Instancing as a First-Class Concept
 
-- [ ] Add instance buffer builders with clear per-instance layout
-  declarations.
+- [x] Add instance buffer builders with clear per-instance layout declarations (`InstanceData { model: [[f32;4];4] }`, `InstanceBatch`).
 - [ ] Add reflected validation for instance-rate vertex inputs when available.
-- [ ] Add graph draw helpers for instanced meshes, fullscreen instance fields,
-  sprite batches, and indirect-ready instance buffers.
-- [ ] Add per-instance data upload paths that work with the existing upload
-  arena and deferred frame model.
-- [ ] Add optional storage-buffer-driven instancing for large or variable-size
-  instance data.
+- [x] Add graph draw helpers for instanced meshes (`GraphImage::draw_mesh_instanced`, `draw_mesh_instanced_with_push_constants`).
+- [x] Add per-instance data upload paths that work with the existing upload arena and deferred frame model (static/dynamic split in `InstanceBatch::prepare`).
+- [x] Add optional storage-buffer-driven instancing for large or variable-size instance data (`StructuredBuffer<InstanceData> instances` + `RenderFrame::bind_buffer`).
+- [x] Add scene + camera system (`Scene`, `SceneCamera`, `RenderTarget`, `ObjectKind::Static/Dynamic`, offscreen camera → `RenderTarget` → named frame image for CRT/portal effects).
 - [ ] Add examples for:
   - [ ] many instanced quads
   - [ ] instanced meshes with per-instance color/material parameters

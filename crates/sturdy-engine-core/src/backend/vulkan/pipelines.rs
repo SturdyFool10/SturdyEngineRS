@@ -303,10 +303,20 @@ impl PipelineRegistry {
         let color_blend_attachments = desc
             .color_targets
             .iter()
-            .map(|_| {
-                vk::PipelineColorBlendAttachmentState::default()
-                    .color_write_mask(vk::ColorComponentFlags::RGBA)
-                    .blend_enable(false)
+            .map(|target| {
+                let attachment = vk::PipelineColorBlendAttachmentState::default()
+                    .color_write_mask(vk::ColorComponentFlags::RGBA);
+                match target.blend {
+                    crate::BlendMode::Opaque => attachment.blend_enable(false),
+                    crate::BlendMode::Alpha => attachment
+                        .blend_enable(true)
+                        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+                        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                        .color_blend_op(vk::BlendOp::ADD)
+                        .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                        .alpha_blend_op(vk::BlendOp::ADD),
+                }
             })
             .collect::<Vec<_>>();
         let color_blend =
@@ -422,7 +432,10 @@ fn create_render_pass(device: &Device, desc: &GraphicsPipelineDesc) -> Result<vk
             Ok(vk::AttachmentDescription::default()
                 .format(vk_format(target.format)?)
                 .samples(vk::SampleCountFlags::TYPE_1)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .load_op(match target.blend {
+                    crate::BlendMode::Opaque => vk::AttachmentLoadOp::CLEAR,
+                    crate::BlendMode::Alpha => vk::AttachmentLoadOp::LOAD,
+                })
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)

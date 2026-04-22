@@ -3,23 +3,28 @@ use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 use sturdy_engine_core as core;
 
 use crate::{
-    mesh::{vertex2d_attributes, vertex3d_attributes, Vertex2d, Vertex3d},
     ColorTargetDesc, CullMode, Engine, Error, Format, FrontFace, GraphicsPipelineDesc, Pipeline,
     PipelineLayout, PrimitiveTopology, RasterState, Result, Shader, ShaderDesc, ShaderReflection,
     ShaderSource, ShaderStage, VertexBufferLayout, VertexInputRate,
+    mesh::{Vertex2d, Vertex3d, vertex2d_attributes, vertex3d_attributes},
 };
 
-const DEFAULT_VERTEX_2D: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/mesh_vertex_2d.slang"));
+const DEFAULT_VERTEX_2D: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/mesh_vertex_2d.slang"
+));
 
-const DEFAULT_VERTEX_3D: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/mesh_vertex_3d.slang"));
+const DEFAULT_VERTEX_3D: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/mesh_vertex_3d.slang"
+));
 
 pub struct MeshProgramDesc {
     pub fragment: ShaderDesc,
     /// Custom vertex shader. None uses the built-in for the chosen kind.
     pub vertex: Option<ShaderDesc>,
     pub vertex_kind: MeshVertexKind,
+    pub alpha_blend: bool,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -35,6 +40,7 @@ pub struct MeshProgram {
     pub(crate) vertex: Shader,
     pub(crate) fragment: Shader,
     pub(crate) vertex_kind: MeshVertexKind,
+    pub(crate) alpha_blend: bool,
     pub(crate) reflection: ShaderReflection,
 }
 
@@ -54,6 +60,24 @@ impl MeshProgram {
                 },
                 vertex: None,
                 vertex_kind: MeshVertexKind::V2d,
+                alpha_blend: false,
+            },
+        )
+    }
+
+    /// Load a 2D mesh program that alpha-blends over the render target.
+    pub fn load_2d_alpha(engine: &Engine, fragment_path: impl Into<PathBuf>) -> Result<Self> {
+        Self::new(
+            engine,
+            MeshProgramDesc {
+                fragment: ShaderDesc {
+                    source: ShaderSource::File(fragment_path.into()),
+                    entry_point: "main".to_owned(),
+                    stage: ShaderStage::Fragment,
+                },
+                vertex: None,
+                vertex_kind: MeshVertexKind::V2d,
+                alpha_blend: true,
             },
         )
     }
@@ -81,6 +105,7 @@ impl MeshProgram {
                     stage: ShaderStage::Vertex,
                 }),
                 vertex_kind: MeshVertexKind::V3d,
+                alpha_blend: false,
             },
         )
     }
@@ -106,6 +131,7 @@ impl MeshProgram {
             vertex,
             fragment,
             vertex_kind: desc.vertex_kind,
+            alpha_blend: desc.alpha_blend,
             reflection,
         })
     }
@@ -140,7 +166,11 @@ impl MeshProgram {
                     input_rate: VertexInputRate::Vertex,
                 }],
                 vertex_attributes: attributes,
-                color_targets: vec![ColorTargetDesc { format }],
+                color_targets: vec![if self.alpha_blend {
+                    ColorTargetDesc::alpha_blend(format)
+                } else {
+                    ColorTargetDesc::opaque(format)
+                }],
                 depth_format: None,
                 topology: PrimitiveTopology::TriangleList,
                 raster: RasterState {

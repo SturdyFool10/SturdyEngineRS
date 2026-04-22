@@ -15,16 +15,19 @@ mod bloom_pass;
 mod compute_program;
 mod device_manager;
 mod frontend_graph;
+mod gpu_procedural_texture;
 mod graph_frame;
 mod hdr_pipeline;
 mod mesh;
 mod mesh_program;
+mod mip_pyramid;
 mod pipeline_layout;
 mod quad_batch;
 mod sampler_catalog;
 #[cfg(test)]
 mod tests;
 mod text_draw;
+mod text_engine;
 mod texture;
 mod upload_arena;
 
@@ -36,18 +39,26 @@ pub use bloom_pass::{
 };
 pub use compute_program::ComputeProgram;
 pub use device_manager::{AdapterEntry, DeviceManager};
+pub use gpu_procedural_texture::GpuProceduralTexture;
 pub use graph_frame::{FullscreenPassBuilder, GraphFrame, ImageNode};
 pub use hdr_pipeline::{HdrMode, HdrPipelineDesc, HdrPreference, ToneMappingOp};
 pub use mesh::{Mesh, Vertex2d, Vertex3d};
 pub use mesh_program::{MeshProgram, MeshProgramDesc, MeshVertexKind};
+pub use mip_pyramid::MipPyramid;
 pub use quad_batch::QuadBatch;
 pub use sampler_catalog::SamplerPreset;
-pub use text_draw::{TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput, TextRenderer};
+pub use text_draw::{
+    TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput, TextPlacement, TextRenderer,
+    TextScene, TextSceneQuad, TextTypography,
+};
+pub use text_engine::{
+    PreparedTextDraw, PreparedTextQuad, TextEngine, TextEngineFrame, TextUiRenderer,
+};
 
 pub use bind_group::BindGroupBuilder;
 pub use frontend_graph::{
-    DiagnosticLevel, GraphDiagnostic, GraphImage, GraphImageCacheKey, GraphImageInfo, GraphPassInfo,
-    GraphReport, PassKind, RenderFrame, ShaderProgram, ShaderProgramDesc,
+    DiagnosticLevel, GraphDiagnostic, GraphImage, GraphImageCacheKey, GraphImageInfo,
+    GraphPassInfo, GraphReport, PassKind, RenderFrame, ShaderProgram, ShaderProgramDesc,
 };
 pub use glam::{Vec2, Vec3};
 pub use pipeline_layout::PipelineLayoutBuilder;
@@ -56,12 +67,13 @@ pub use sturdy_engine_core::NativeSurfaceDesc;
 pub use sturdy_engine_core::ShaderReflection;
 pub use sturdy_engine_core::{
     Access, AdapterInfo, AdapterKind, AdapterSelection, AddressMode, BackendKind,
-    BackendRawCapabilities, BindGroupDesc, BindGroupEntry, BindingKind, BorderColor, BufferDesc,
-    BufferUsage, BufferUse, CanonicalBinding, CanonicalGroupLayout, CanonicalPipelineLayout, Caps,
-    ColorTargetDesc, CompareOp, CompiledShaderArtifact, ComputePipelineDesc, CopyBufferToImageDesc,
-    CopyImageToBufferDesc, CullMode, D3d12RawCapabilities, DispatchDesc, DrawDesc, Error, Extent3d,
-    ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode,
-    Format, FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc,
+    BackendRawCapabilities, BindGroupDesc, BindGroupEntry, BindingKind, BlendMode, BorderColor,
+    BufferDesc, BufferUsage, BufferUse, CanonicalBinding, CanonicalGroupLayout,
+    CanonicalPipelineLayout, Caps, ColorTargetDesc, CompareOp, CompiledShaderArtifact,
+    ComputePipelineDesc, CopyBufferToImageDesc, CopyImageToBufferDesc, CullMode,
+    D3d12RawCapabilities, DispatchDesc, DrawDesc, Error, Extent3d, ExternalBufferDesc,
+    ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode, Format,
+    FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc,
     ImageBuilder, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse, IndexBufferBinding,
     IndexFormat, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
     NativeHandleCapability, NativeHandleKind, NativeHandleOwnership, PassDesc, PassWork,

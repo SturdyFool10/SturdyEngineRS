@@ -5,6 +5,7 @@ members = [
     "crates/sturdy-engine",
     "crates/sturdy-engine-testbed",
     "crates/sturdy-engine-macros",
+    "crates/textui",
 ]
 resolver = "3"
 
@@ -13,3 +14,6 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://example.invalid/sturdy-engine"
 rust-version = "1.85"
+
+[workspace.dependencies]
+cosmic-text = "0.18"

@@ -1,4 +1,4 @@
-use crate::{mesh::Vertex2d, Engine, Mesh, Result};
+use crate::{Engine, Mesh, Result, mesh::Vertex2d};
 
 /// Builds a batched mesh of textured, tinted 2D quads.
 ///
@@ -40,15 +40,29 @@ impl QuadBatch {
         let [u0, v0, u1, v1] = uv_rect;
 
         self.vertices.extend_from_slice(&[
-            Vertex2d { position: [x, y],         uv: [u0, v0], color },
-            Vertex2d { position: [x + w, y],     uv: [u1, v0], color },
-            Vertex2d { position: [x + w, y + h], uv: [u1, v1], color },
-            Vertex2d { position: [x, y + h],     uv: [u0, v1], color },
+            Vertex2d {
+                position: [x, y],
+                uv: [u0, v0],
+                color,
+            },
+            Vertex2d {
+                position: [x + w, y],
+                uv: [u1, v0],
+                color,
+            },
+            Vertex2d {
+                position: [x + w, y + h],
+                uv: [u1, v1],
+                color,
+            },
+            Vertex2d {
+                position: [x, y + h],
+                uv: [u0, v1],
+                color,
+            },
         ]);
-        self.indices.extend_from_slice(&[
-            base, base + 1, base + 2,
-            base, base + 2, base + 3,
-        ]);
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         self
     }
 

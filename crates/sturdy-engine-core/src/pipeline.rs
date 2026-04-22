@@ -75,6 +75,30 @@ impl Default for RasterState {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ColorTargetDesc {
     pub format: Format,
+    pub blend: BlendMode,
+}
+
+impl ColorTargetDesc {
+    pub const fn opaque(format: Format) -> Self {
+        Self {
+            format,
+            blend: BlendMode::Opaque,
+        }
+    }
+
+    pub const fn alpha_blend(format: Format) -> Self {
+        Self {
+            format,
+            blend: BlendMode::Alpha,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum BlendMode {
+    #[default]
+    Opaque,
+    Alpha,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
