@@ -22,6 +22,7 @@ mod mesh;
 mod mesh_program;
 mod mip_pyramid;
 mod pipeline_layout;
+mod procedural_texture;
 mod quad_batch;
 mod sampler_catalog;
 #[cfg(test)]
@@ -45,6 +46,9 @@ pub use hdr_pipeline::{HdrMode, HdrPipelineDesc, HdrPreference, ToneMappingOp};
 pub use mesh::{Mesh, Vertex2d, Vertex3d};
 pub use mesh_program::{MeshProgram, MeshProgramDesc, MeshVertexKind};
 pub use mip_pyramid::MipPyramid;
+pub use procedural_texture::{
+    CpuProceduralTexture2d, ProceduralTextureRecipe, ProceduralTextureUpdatePolicy,
+};
 pub use quad_batch::QuadBatch;
 pub use sampler_catalog::SamplerPreset;
 pub use text_draw::{
@@ -419,6 +423,17 @@ impl Engine {
         window: &(impl raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle),
         size: SurfaceSize,
     ) -> Result<Surface> {
+        self.create_surface_for_window_with_hdr(window, size, SurfaceHdrPreference::Sdr)
+    }
+
+    /// Create a surface from a window and request a specific HDR preference.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn create_surface_for_window_with_hdr(
+        &self,
+        window: &(impl raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle),
+        size: SurfaceSize,
+        hdr: SurfaceHdrPreference,
+    ) -> Result<Surface> {
         use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
         let display = window
             .display_handle()
@@ -430,14 +445,16 @@ impl Engine {
         // ShellApp struct and the surface is dropped before the window.
         let raw_display: RawDisplayHandle = unsafe { std::mem::transmute_copy(&display) };
         let raw_window: RawWindowHandle = unsafe { std::mem::transmute_copy(&window_handle) };
-        self.create_surface(NativeSurfaceDesc::new(
+        let mut desc = NativeSurfaceDesc::new(
             raw_display,
             raw_window,
             SurfaceSize {
                 width: size.width.max(1),
                 height: size.height.max(1),
             },
-        ))
+        );
+        desc.hdr = hdr;
+        self.create_surface(desc)
     }
 }
 

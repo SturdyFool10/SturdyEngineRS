@@ -52,7 +52,7 @@ use std::time::Instant;
 
 use sturdy_engine_core::SurfaceSize;
 
-use crate::{Engine, Result as EngineResult, Surface, SurfaceImage};
+use crate::{Engine, Result as EngineResult, Surface, SurfaceHdrPreference, SurfaceImage};
 
 /// Configuration for the application shell window.
 #[derive(Clone, Debug)]
@@ -164,7 +164,9 @@ pub trait EngineApp {
     /// Handle a key press. `key` is the logical character string (e.g. `"b"`, `"B"`).
     ///
     /// Only called on `ElementState::Pressed`. Default implementation does nothing.
-    fn key_pressed(&mut self, _key: &str) {}
+    fn key_pressed(&mut self, _key: &str, _surface: &mut Surface) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 /// A render frame wrapper that provides the frame API and surface image.
@@ -249,11 +251,16 @@ where
 
     // Create surface from window
     let surface = engine
-        .create_surface_for_window(
+        .create_surface_for_window_with_hdr(
             &window,
             SurfaceSize {
                 width: config.width.max(1),
                 height: config.height.max(1),
+            },
+            if config.prefer_hdr {
+                SurfaceHdrPreference::ScRgb
+            } else {
+                SurfaceHdrPreference::Sdr
             },
         )
         .expect("failed to create surface");
@@ -336,7 +343,10 @@ where
                 use winit::keyboard::Key;
                 if event.state == ElementState::Pressed {
                     if let Key::Character(s) = &event.logical_key {
-                        self.app_state.key_pressed(s.as_str());
+                        if let Err(e) = self.app_state.key_pressed(s.as_str(), &mut self.surface) {
+                            eprintln!("key handler failed: {e:?}");
+                            std::process::exit(1);
+                        }
                     }
                 }
             }

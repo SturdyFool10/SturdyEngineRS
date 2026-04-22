@@ -373,7 +373,7 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
 
 ## Phase 13 — Procedural Texture Layer
 
-- [ ] Introduce a `ProceduralImage` / `GeneratedTexture` concept that owns a
+- [x] Introduce a `ProceduralImage` / `GeneratedTexture` concept that owns a
   generation recipe, target image description, update policy, and cache state.
 - [x] Support CPU-authored procedural textures for small/generated assets:
   noise, gradients, ramps, masks, lookup tables, and debug patterns
@@ -382,20 +382,20 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
   fullscreen shader passes (`GpuProceduralTexture`: persistent image + `ShaderProgram`; `generate` / `generate_with_constants` per frame).
 - [x] Support animated procedural textures driven by frame time, frame index,
   user parameters, or external data (`RenderFrame::update_texture_2d` called in render loop; testbed animates color LUT every frame).
-- [ ] Allow procedural textures to regenerate:
-  - [ ] once at creation
-  - [ ] when parameters change
-  - [ ] every frame
-  - [ ] on explicit request
+- [x] Allow procedural textures to regenerate:
+  - [x] once at creation
+  - [x] when parameters change
+  - [x] every frame
+  - [x] on explicit request
 - [ ] Make generated textures compatible with uploaded texture usage sites:
   sampled images, storage images, render targets, and graph intermediates where
   the format/usage allows it.
-- [ ] Add serialization-friendly recipe descriptors so procedural assets can be
+- [x] Add serialization-friendly recipe descriptors so procedural assets can be
   authored without embedding runtime-only closures in asset data.
 - [ ] Add testbed examples for:
   - [ ] static procedural checker/noise texture
   - [ ] animated procedural texture
-  - [ ] procedural mask feeding a reflected shader pass
+  - [x] procedural mask feeding a reflected shader pass
   - [ ] GPU-generated texture feeding a later graph pass
 
 ## Phase 14 — Mip Resources and Mip-Based Effects

@@ -1,5 +1,7 @@
 Texture2D<float4> color_lut;
 SamplerState color_lut_sampler;
+Texture2D<float4> procedural_mask;
+SamplerState procedural_mask_sampler;
 
 struct VSOut {
     float4 position : SV_POSITION;
@@ -115,6 +117,11 @@ float4 main(VSOut input, uniform FrameGraphConstants graph) : SV_TARGET {
     float luma = dot(color, float3(0.2126, 0.7152, 0.0722));
     float3 tint = color_lut.SampleLevel(color_lut_sampler, float2(saturate(luma * 0.5), 0.5), 0).rgb;
     color = color * tint;
+
+    float mask = procedural_mask.SampleLevel(procedural_mask_sampler, input.uv, 0).a;
+    if (hit > 0.5) {
+        color *= lerp(0.94, 1.08, mask);
+    }
 
     // Output linear HDR — the Hermite tonemapper handles gamma encoding.
     return float4(color, 1.0);

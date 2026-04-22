@@ -1,10 +1,12 @@
 use std::time::Instant;
 
 use sturdy_engine::{
-    BloomConfig, BloomPass, Engine, EngineApp, Extent3d, Format, GpuProceduralTexture,
-    HdrPipelineDesc, HdrPreference, Image, ImageDesc, ImageDimension, ImageUsage, Mesh,
-    MeshProgram, QuadBatch, Result as EngineResult, SamplerPreset, ShaderProgram, ShellFrame,
-    Surface, SurfaceImage, TextDrawDesc, TextEngine, TextPlacement, TextTypography, TextUiRenderer,
+    BloomConfig, BloomPass, CpuProceduralTexture2d, Engine, EngineApp, Extent3d, Format,
+    GpuProceduralTexture, HdrPipelineDesc, HdrPreference, Image, ImageDesc, ImageDimension,
+    ImageUsage, Mesh, MeshProgram, ProceduralTextureRecipe, ProceduralTextureUpdatePolicy,
+    QuadBatch, Result as EngineResult, SamplerPreset, ShaderProgram, ShellFrame, Surface,
+    SurfaceColorSpace, SurfaceHdrCaps, SurfaceHdrPreference, SurfaceImage, SurfaceRecreateDesc,
+    TextDrawDesc, TextEngine, TextPlacement, TextTypography, TextUiRenderer, ToneMappingOp,
     WindowConfig, push_constants,
 };
 
@@ -20,6 +22,248 @@ struct LutParams {
     phase: f32,
 }
 
+#[push_constants]
+struct TonemapParams {
+    tonemap_op: u32,
+    hdr_output: u32,
+    exposure: f32,
+    white_point: f32,
+    display_gain: f32,
+    output_gamma: f32,
+    aces_a: f32,
+    aces_b: f32,
+    aces_c: f32,
+    aces_d: f32,
+    aces_e: f32,
+    reinhard_white: f32,
+    hermite_contrast: f32,
+    linear_white: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TonemapSettings {
+    exposure: f32,
+    white_point: f32,
+    display_gain: f32,
+    output_gamma: f32,
+    aces_a: f32,
+    aces_b: f32,
+    aces_c: f32,
+    aces_d: f32,
+    aces_e: f32,
+    reinhard_white: f32,
+    hermite_contrast: f32,
+    linear_white: f32,
+}
+
+impl Default for TonemapSettings {
+    fn default() -> Self {
+        Self {
+            exposure: 1.0,
+            white_point: 4.0,
+            display_gain: 1.0,
+            output_gamma: 2.2,
+            aces_a: 2.51,
+            aces_b: 0.03,
+            aces_c: 2.43,
+            aces_d: 0.59,
+            aces_e: 0.14,
+            reinhard_white: 4.0,
+            hermite_contrast: 1.55,
+            linear_white: 1.25,
+        }
+    }
+}
+
+impl TonemapSettings {
+    fn params(
+        self,
+        tone_mapping: ToneMappingOp,
+        hdr_output: bool,
+        selected_dial: TonemapDial,
+    ) -> TonemapParams {
+        let mut settings = self;
+        settings.sync_operator_white_point(tone_mapping, selected_dial);
+        TonemapParams {
+            tonemap_op: tone_mapping_id(tone_mapping),
+            hdr_output: hdr_output as u32,
+            exposure: settings.exposure,
+            white_point: settings.white_point,
+            display_gain: settings.display_gain,
+            output_gamma: settings.output_gamma,
+            aces_a: settings.aces_a,
+            aces_b: settings.aces_b,
+            aces_c: settings.aces_c,
+            aces_d: settings.aces_d,
+            aces_e: settings.aces_e,
+            reinhard_white: settings.reinhard_white,
+            hermite_contrast: settings.hermite_contrast,
+            linear_white: settings.linear_white,
+        }
+    }
+
+    fn get(self, dial: TonemapDial) -> f32 {
+        match dial {
+            TonemapDial::Exposure => self.exposure,
+            TonemapDial::WhitePoint => self.white_point,
+            TonemapDial::DisplayGain => self.display_gain,
+            TonemapDial::OutputGamma => self.output_gamma,
+            TonemapDial::AcesA => self.aces_a,
+            TonemapDial::AcesB => self.aces_b,
+            TonemapDial::AcesC => self.aces_c,
+            TonemapDial::AcesD => self.aces_d,
+            TonemapDial::AcesE => self.aces_e,
+            TonemapDial::ReinhardWhite => self.reinhard_white,
+            TonemapDial::HermiteContrast => self.hermite_contrast,
+            TonemapDial::LinearWhite => self.linear_white,
+        }
+    }
+
+    fn adjust(&mut self, tone_mapping: ToneMappingOp, dial: TonemapDial, direction: f32) {
+        let step = dial.step();
+        let value = self.get(dial) + step * direction;
+        self.set(dial, value.clamp(dial.min(), dial.max()));
+        self.sync_operator_white_point(tone_mapping, dial);
+    }
+
+    fn reset_for(&mut self, tone_mapping: ToneMappingOp) {
+        let defaults = Self::default();
+        self.exposure = defaults.exposure;
+        self.white_point = defaults.white_point;
+        self.display_gain = defaults.display_gain;
+        self.output_gamma = defaults.output_gamma;
+        match tone_mapping {
+            ToneMappingOp::Aces => {
+                self.aces_a = defaults.aces_a;
+                self.aces_b = defaults.aces_b;
+                self.aces_c = defaults.aces_c;
+                self.aces_d = defaults.aces_d;
+                self.aces_e = defaults.aces_e;
+            }
+            ToneMappingOp::Reinhard => self.reinhard_white = defaults.reinhard_white,
+            ToneMappingOp::Hermite => self.hermite_contrast = defaults.hermite_contrast,
+            ToneMappingOp::Linear => self.linear_white = defaults.linear_white,
+        }
+    }
+
+    fn set(&mut self, dial: TonemapDial, value: f32) {
+        match dial {
+            TonemapDial::Exposure => self.exposure = value,
+            TonemapDial::WhitePoint => self.white_point = value,
+            TonemapDial::DisplayGain => self.display_gain = value,
+            TonemapDial::OutputGamma => self.output_gamma = value,
+            TonemapDial::AcesA => self.aces_a = value,
+            TonemapDial::AcesB => self.aces_b = value,
+            TonemapDial::AcesC => self.aces_c = value,
+            TonemapDial::AcesD => self.aces_d = value,
+            TonemapDial::AcesE => self.aces_e = value,
+            TonemapDial::ReinhardWhite => self.reinhard_white = value,
+            TonemapDial::HermiteContrast => self.hermite_contrast = value,
+            TonemapDial::LinearWhite => self.linear_white = value,
+        }
+    }
+
+    fn sync_operator_white_point(&mut self, tone_mapping: ToneMappingOp, changed: TonemapDial) {
+        if changed != TonemapDial::WhitePoint {
+            return;
+        }
+        match tone_mapping {
+            ToneMappingOp::Reinhard => self.reinhard_white = self.white_point,
+            ToneMappingOp::Linear => self.linear_white = self.white_point,
+            ToneMappingOp::Aces | ToneMappingOp::Hermite => {}
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TonemapDial {
+    Exposure,
+    WhitePoint,
+    DisplayGain,
+    OutputGamma,
+    AcesA,
+    AcesB,
+    AcesC,
+    AcesD,
+    AcesE,
+    ReinhardWhite,
+    HermiteContrast,
+    LinearWhite,
+}
+
+impl TonemapDial {
+    fn next(self) -> Self {
+        match self {
+            Self::Exposure => Self::WhitePoint,
+            Self::WhitePoint => Self::DisplayGain,
+            Self::DisplayGain => Self::OutputGamma,
+            Self::OutputGamma => Self::AcesA,
+            Self::AcesA => Self::AcesB,
+            Self::AcesB => Self::AcesC,
+            Self::AcesC => Self::AcesD,
+            Self::AcesD => Self::AcesE,
+            Self::AcesE => Self::ReinhardWhite,
+            Self::ReinhardWhite => Self::HermiteContrast,
+            Self::HermiteContrast => Self::LinearWhite,
+            Self::LinearWhite => Self::Exposure,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Exposure => "exposure",
+            Self::WhitePoint => "white point",
+            Self::DisplayGain => "display gain",
+            Self::OutputGamma => "SDR gamma",
+            Self::AcesA => "ACES a",
+            Self::AcesB => "ACES b",
+            Self::AcesC => "ACES c",
+            Self::AcesD => "ACES d",
+            Self::AcesE => "ACES e",
+            Self::ReinhardWhite => "Reinhard white",
+            Self::HermiteContrast => "Hermite contrast",
+            Self::LinearWhite => "Linear white",
+        }
+    }
+
+    fn step(self) -> f32 {
+        match self {
+            Self::AcesB | Self::AcesE => 0.01,
+            Self::OutputGamma | Self::HermiteContrast => 0.05,
+            Self::AcesA | Self::AcesC | Self::AcesD => 0.1,
+            Self::Exposure | Self::DisplayGain => 0.1,
+            Self::WhitePoint | Self::ReinhardWhite | Self::LinearWhite => 0.25,
+        }
+    }
+
+    fn min(self) -> f32 {
+        match self {
+            Self::AcesB | Self::AcesE => 0.0,
+            Self::OutputGamma | Self::HermiteContrast => 0.2,
+            Self::Exposure
+            | Self::WhitePoint
+            | Self::DisplayGain
+            | Self::ReinhardWhite
+            | Self::LinearWhite => 0.05,
+            Self::AcesA | Self::AcesC | Self::AcesD => 0.01,
+        }
+    }
+
+    fn max(self) -> f32 {
+        match self {
+            Self::OutputGamma => 4.0,
+            Self::HermiteContrast => 3.0,
+            Self::AcesB | Self::AcesE => 1.0,
+            Self::AcesA | Self::AcesC | Self::AcesD => 8.0,
+            Self::Exposure
+            | Self::WhitePoint
+            | Self::DisplayGain
+            | Self::ReinhardWhite
+            | Self::LinearWhite => 16.0,
+        }
+    }
+}
+
 struct Testbed {
     engine: Engine,
     scene_program: ShaderProgram,
@@ -29,7 +273,13 @@ struct Testbed {
     bloom_config: BloomConfig,
     bloom_enabled: bool,
     bloom_only: bool,
+    hdr_caps: SurfaceHdrCaps,
+    hdr_output: bool,
+    tone_mapping: ToneMappingOp,
+    tonemap_settings: TonemapSettings,
+    selected_tonemap_dial: TonemapDial,
     color_lut: GpuProceduralTexture,
+    procedural_mask: CpuProceduralTexture2d,
     text_engine: TextEngine<TextUiRenderer>,
     hud_atlas_images: Vec<Image>,
     hud_meshes: Vec<Mesh>,
@@ -45,12 +295,14 @@ impl EngineApp for Testbed {
         let hdr_caps = surface.hdr_caps()?;
         let hdr_desc =
             HdrPipelineDesc::select(&hdr_caps, &engine.caps(), HdrPreference::PreferHdr)?;
+        let hdr_output = surface_is_hdr(surface_info.color_space);
 
         println!(
-            "rendering on {:?} using {:?}; surface {:?} at {}x{}",
+            "rendering on {:?} using {:?}; surface {:?}/{:?} at {}x{}",
             engine.adapter_name(),
             engine.backend_kind(),
             surface_info.format,
+            surface_info.color_space,
             surface_info.size.width,
             surface_info.size.height,
         );
@@ -70,6 +322,18 @@ impl EngineApp for Testbed {
             Format::Rgba8Unorm,
             lut_program,
         )?;
+        let procedural_mask = CpuProceduralTexture2d::from_recipe_rgba8(
+            engine,
+            "procedural_mask",
+            512,
+            512,
+            ProceduralTextureUpdatePolicy::Once,
+            ProceduralTextureRecipe::RadialMask {
+                inner_radius: 0.18,
+                outer_radius: 1.0,
+                color: [255, 255, 255, 255],
+            },
+        )?;
 
         Ok(Self {
             engine: engine.clone(),
@@ -80,7 +344,17 @@ impl EngineApp for Testbed {
             bloom_config: BloomConfig::default(),
             bloom_enabled: true,
             bloom_only: false,
+            hdr_caps,
+            hdr_output,
+            tone_mapping: if hdr_output && hdr_desc.tone_mapping == ToneMappingOp::Linear {
+                ToneMappingOp::Aces
+            } else {
+                hdr_desc.tone_mapping
+            },
+            tonemap_settings: TonemapSettings::default(),
+            selected_tonemap_dial: TonemapDial::Exposure,
             color_lut,
+            procedural_mask,
             text_engine: TextEngine::new(TextUiRenderer::with_engine(engine)),
             hud_atlas_images: Vec::new(),
             hud_meshes: Vec::new(),
@@ -116,10 +390,18 @@ impl EngineApp for Testbed {
                 phase: elapsed * 0.4,
             },
         )?;
+        self.procedural_mask.prepare(frame)?;
 
         // Pass 3 declared first: tonemap reads "hdr_composite", writes swapchain.
         // "hdr_composite" does not exist yet — registered by bloom below.
-        swapchain.execute_shader(&self.tonemap_program)?;
+        swapchain.execute_shader_with_constants_auto(
+            &self.tonemap_program,
+            &self.tonemap_settings.params(
+                self.tone_mapping,
+                self.hdr_output,
+                self.selected_tonemap_dial,
+            ),
+        )?;
 
         // Pass 1: scene writes "scene_color".
         scene_color.execute_shader_with_constants_auto(
@@ -156,14 +438,37 @@ impl EngineApp for Testbed {
         Ok(())
     }
 
-    fn key_pressed(&mut self, key: &str) {
+    fn key_pressed(&mut self, key: &str, surface: &mut Surface) -> EngineResult<()> {
         if key == "b" {
             self.bloom_only = !self.bloom_only;
             eprintln!("bloom-only: {}", self.bloom_only);
         } else if key == "B" {
             self.bloom_enabled = !self.bloom_enabled;
             eprintln!("bloom: {}", if self.bloom_enabled { "on" } else { "off" });
+        } else if key == "T" || key == "t" {
+            self.tone_mapping = next_tone_mapping(self.tone_mapping);
+            eprintln!("tone mapping: {}", tone_mapping_label(self.tone_mapping));
+        } else if key == "H" || key == "h" {
+            self.toggle_hdr_output(surface)?;
+        } else if key == "P" || key == "p" {
+            self.selected_tonemap_dial = self.selected_tonemap_dial.next();
+            eprintln!(
+                "tonemap dial: {} = {:.3}",
+                self.selected_tonemap_dial.label(),
+                self.tonemap_settings.get(self.selected_tonemap_dial),
+            );
+        } else if key == "]" || key == "=" || key == "+" {
+            self.adjust_tonemap_dial(1.0);
+        } else if key == "[" || key == "-" || key == "_" {
+            self.adjust_tonemap_dial(-1.0);
+        } else if key == "R" || key == "r" {
+            self.tonemap_settings.reset_for(self.tone_mapping);
+            eprintln!(
+                "reset {} tonemap dials",
+                tone_mapping_label(self.tone_mapping)
+            );
         }
+        Ok(())
     }
 
     fn resize(&mut self, _width: u32, _height: u32) -> EngineResult<()> {
@@ -172,6 +477,50 @@ impl EngineApp for Testbed {
 }
 
 impl Testbed {
+    fn adjust_tonemap_dial(&mut self, direction: f32) {
+        self.tonemap_settings
+            .adjust(self.tone_mapping, self.selected_tonemap_dial, direction);
+        eprintln!(
+            "{} {}: {:.3}",
+            tone_mapping_label(self.tone_mapping),
+            self.selected_tonemap_dial.label(),
+            self.tonemap_settings.get(self.selected_tonemap_dial),
+        );
+    }
+
+    fn toggle_hdr_output(&mut self, surface: &mut Surface) -> EngineResult<()> {
+        let target = if self.hdr_output {
+            SurfaceHdrPreference::Sdr
+        } else if self.hdr_caps.sc_rgb {
+            SurfaceHdrPreference::ScRgb
+        } else if self.hdr_caps.hdr10 {
+            SurfaceHdrPreference::Hdr10
+        } else {
+            eprintln!("HDR output unavailable on this surface");
+            return Ok(());
+        };
+
+        surface.recreate(SurfaceRecreateDesc {
+            size: Some(surface.size()),
+            hdr: Some(target),
+            ..SurfaceRecreateDesc::default()
+        })?;
+
+        self.hdr_output = surface_is_hdr(surface.info().color_space);
+        if !self.hdr_output && self.tone_mapping == ToneMappingOp::Linear {
+            self.tone_mapping = ToneMappingOp::Aces;
+        }
+
+        eprintln!(
+            "HDR output: {} ({:?}, {:?}); tone mapping: {}",
+            if self.hdr_output { "on" } else { "off" },
+            surface.info().format,
+            surface.info().color_space,
+            tone_mapping_label(self.tone_mapping),
+        );
+        Ok(())
+    }
+
     fn draw_hud(
         &mut self,
         frame: &sturdy_engine::RenderFrame,
@@ -180,7 +529,11 @@ impl Testbed {
         height: u32,
     ) -> EngineResult<()> {
         let hud_text = format!(
-            "SturdyEngine testbed\nB  bloom: {}\nb  bloom-only: {}\nResize window to test graph image recreation\nClose window to exit",
+            "SturdyEngine testbed\nT  tone mapping: {}\nP  dial: {} = {:.2}\n[/] adjust dial, R reset curve\nH  HDR output: {}\nB  bloom: {}\nb  bloom-only: {}\nResize window to test graph image recreation\nClose window to exit",
+            tone_mapping_label(self.tone_mapping),
+            self.selected_tonemap_dial.label(),
+            self.tonemap_settings.get(self.selected_tonemap_dial),
+            if self.hdr_output { "on" } else { "off" },
             if self.bloom_enabled { "on" } else { "off" },
             if self.bloom_only { "on" } else { "off" },
         );
@@ -316,6 +669,42 @@ impl Testbed {
     }
 }
 
+fn next_tone_mapping(op: ToneMappingOp) -> ToneMappingOp {
+    match op {
+        ToneMappingOp::Aces => ToneMappingOp::Reinhard,
+        ToneMappingOp::Reinhard => ToneMappingOp::Hermite,
+        ToneMappingOp::Hermite => ToneMappingOp::Linear,
+        ToneMappingOp::Linear => ToneMappingOp::Aces,
+    }
+}
+
+fn tone_mapping_id(op: ToneMappingOp) -> u32 {
+    match op {
+        ToneMappingOp::Aces => 0,
+        ToneMappingOp::Reinhard => 1,
+        ToneMappingOp::Hermite => 2,
+        ToneMappingOp::Linear => 3,
+    }
+}
+
+fn tone_mapping_label(op: ToneMappingOp) -> &'static str {
+    match op {
+        ToneMappingOp::Aces => "ACES",
+        ToneMappingOp::Reinhard => "Reinhard",
+        ToneMappingOp::Hermite => "Hermite",
+        ToneMappingOp::Linear => "Linear",
+    }
+}
+
+fn surface_is_hdr(color_space: SurfaceColorSpace) -> bool {
+    matches!(
+        color_space,
+        SurfaceColorSpace::ExtendedSrgbLinear
+            | SurfaceColorSpace::Hdr10St2084
+            | SurfaceColorSpace::Hdr10Hlg
+    )
+}
+
 fn shader_path(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("shaders")
@@ -324,6 +713,8 @@ fn shader_path(name: &str) -> std::path::PathBuf {
 
 fn main() {
     sturdy_engine::run::<Testbed>(
-        WindowConfig::new("SturdyEngine HDR bloom testbed", 1280, 720).with_resizable(true),
+        WindowConfig::new("SturdyEngine HDR bloom testbed", 1280, 720)
+            .with_resizable(true)
+            .with_hdr(true),
     );
 }
