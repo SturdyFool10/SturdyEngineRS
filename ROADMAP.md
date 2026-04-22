@@ -353,7 +353,7 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
   - [x] read-after-write
   - [x] write-after-read
   - [x] write-after-write
-  - [ ] selected mip/layer hazards (requires Phase 14 subresource model)
+  - [x] selected mip/layer hazards (frontend scheduler uses subresource overlap)
   - [x] buffer range hazards
   - [x] explicit user ordering constraints (`RenderFrame::order_before(&img_a, &img_b)`)
 - [ ] Detect graph operations that can run in parallel because their image
@@ -401,8 +401,9 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
 ## Phase 14 — Mip Resources and Mip-Based Effects
 
 - [x] Add image builders for full mip chains and selected mip counts (`MipPyramid::new`; bloom updated to use it).
-- [ ] Add subresource-aware graph helpers for addressing individual mips and
-  mip ranges (true single-image multi-mip views; requires backend work).
+- [x] Add subresource-aware graph helpers for addressing individual mips and
+  mip ranges (`GraphImageView` exposes validated mip/layer ranges; backend
+  selected image views are still tracked in Phase 17).
 - [ ] Add automatic mip generation for sampled textures where format and usage
   support it.
 - [ ] Add explicit mip graph operations:

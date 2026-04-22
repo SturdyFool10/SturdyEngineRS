@@ -59,6 +59,64 @@ impl SubresourceRange {
         base_layer: 0,
         layer_count: u16::MAX,
     };
+
+    pub fn new(base_mip: u16, mip_count: u16, base_layer: u16, layer_count: u16) -> Self {
+        Self {
+            base_mip,
+            mip_count,
+            base_layer,
+            layer_count,
+        }
+    }
+
+    pub fn mip(mip: u16) -> Self {
+        Self {
+            base_mip: mip,
+            mip_count: 1,
+            base_layer: 0,
+            layer_count: u16::MAX,
+        }
+    }
+
+    pub fn layer(layer: u16) -> Self {
+        Self {
+            base_mip: 0,
+            mip_count: u16::MAX,
+            base_layer: layer,
+            layer_count: 1,
+        }
+    }
+
+    pub fn overlaps(self, other: Self) -> bool {
+        ranges_overlap(
+            self.base_mip,
+            self.mip_count,
+            other.base_mip,
+            other.mip_count,
+        ) && ranges_overlap(
+            self.base_layer,
+            self.layer_count,
+            other.base_layer,
+            other.layer_count,
+        )
+    }
+}
+
+fn ranges_overlap(a_base: u16, a_count: u16, b_base: u16, b_count: u16) -> bool {
+    if a_count == 0 || b_count == 0 {
+        return false;
+    }
+    let a_end = range_end(a_base, a_count);
+    let b_end = range_end(b_base, b_count);
+    u32::from(a_base) < b_end && u32::from(b_base) < a_end
+}
+
+fn range_end(base: u16, count: u16) -> u32 {
+    if count == u16::MAX {
+        u32::from(u16::MAX) + 1
+    } else {
+        u32::from(base).saturating_add(u32::from(count))
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

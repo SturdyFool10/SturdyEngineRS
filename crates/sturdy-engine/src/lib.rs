@@ -62,7 +62,8 @@ pub use text_engine::{
 pub use bind_group::BindGroupBuilder;
 pub use frontend_graph::{
     DiagnosticLevel, GraphDiagnostic, GraphImage, GraphImageCacheKey, GraphImageInfo,
-    GraphPassInfo, GraphReport, PassKind, RenderFrame, ShaderProgram, ShaderProgramDesc,
+    GraphImageView, GraphPassInfo, GraphReport, PassKind, RenderFrame, ShaderProgram,
+    ShaderProgramDesc,
 };
 pub use glam::{Vec2, Vec3};
 pub use pipeline_layout::PipelineLayoutBuilder;

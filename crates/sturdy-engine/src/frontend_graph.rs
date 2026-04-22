@@ -475,6 +475,15 @@ struct GraphImageRecord {
     desc: ImageDesc,
 }
 
+fn single_subresource() -> SubresourceRange {
+    SubresourceRange {
+        base_mip: 0,
+        mip_count: 1,
+        base_layer: 0,
+        layer_count: 1,
+    }
+}
+
 impl RenderFrame {
     pub(crate) fn new(engine: Engine, swapchain_slot: u64) -> Result<Self> {
         let frame = engine.begin_frame()?;
@@ -969,12 +978,7 @@ impl RenderFrame {
                     image: image.handle(),
                     access: Access::Read,
                     state: RgState::Present,
-                    subresource: SubresourceRange {
-                        base_mip: 0,
-                        mip_count: 1,
-                        base_layer: 0,
-                        layer_count: 1,
-                    },
+                    subresource: single_subresource(),
                 }],
                 writes: Vec::new(),
                 buffer_reads: Vec::new(),
@@ -1104,6 +1108,15 @@ pub struct GraphImage {
     desc: ImageDesc,
 }
 
+#[derive(Clone)]
+pub struct GraphImageView {
+    frame: Rc<RefCell<RenderFrameInner>>,
+    name: String,
+    handle: ImageHandle,
+    desc: ImageDesc,
+    subresource: SubresourceRange,
+}
+
 impl GraphImage {
     pub fn name(&self) -> &str {
         &self.name
@@ -1115,6 +1128,53 @@ impl GraphImage {
 
     pub fn desc(&self) -> ImageDesc {
         self.desc
+    }
+
+    pub fn whole_view(&self) -> GraphImageView {
+        GraphImageView {
+            frame: self.frame.clone(),
+            name: self.name.clone(),
+            handle: self.handle,
+            desc: self.desc,
+            subresource: SubresourceRange::WHOLE,
+        }
+    }
+
+    pub fn mip(&self, mip_level: u16) -> Result<GraphImageView> {
+        self.subresource_view(SubresourceRange::new(mip_level, 1, 0, self.desc.layers))
+    }
+
+    pub fn mip_range(&self, base_mip: u16, mip_count: u16) -> Result<GraphImageView> {
+        self.subresource_view(SubresourceRange::new(
+            base_mip,
+            mip_count,
+            0,
+            self.desc.layers,
+        ))
+    }
+
+    pub fn layer(&self, layer: u16) -> Result<GraphImageView> {
+        self.subresource_view(SubresourceRange::new(0, self.desc.mip_levels, layer, 1))
+    }
+
+    pub fn layer_range(&self, base_layer: u16, layer_count: u16) -> Result<GraphImageView> {
+        self.subresource_view(SubresourceRange::new(
+            0,
+            self.desc.mip_levels,
+            base_layer,
+            layer_count,
+        ))
+    }
+
+    pub fn subresource_view(&self, subresource: SubresourceRange) -> Result<GraphImageView> {
+        validate_subresource(self.desc, subresource)?;
+        Ok(GraphImageView {
+            frame: self.frame.clone(),
+            name: self.name.clone(),
+            handle: self.handle,
+            desc: self.desc,
+            subresource,
+        })
     }
 
     pub fn execute_shader(&self, shader: &ShaderProgram) -> Result<()> {
@@ -1239,12 +1299,7 @@ impl GraphImage {
                     image: self.handle,
                     access: Access::Write,
                     state: RgState::RenderTarget,
-                    subresource: SubresourceRange {
-                        base_mip: 0,
-                        mip_count: 1,
-                        base_layer: 0,
-                        layer_count: 1,
-                    },
+                    subresource: single_subresource(),
                 }],
                 buffer_reads: vec![crate::BufferUse {
                     buffer: shader.fullscreen_triangle.handle(),
@@ -1437,12 +1492,7 @@ impl GraphImage {
                 image: self.handle,
                 access: Access::Read,
                 state: RgState::RenderTarget,
-                subresource: SubresourceRange {
-                    base_mip: 0,
-                    mip_count: 1,
-                    base_layer: 0,
-                    layer_count: 1,
-                },
+                subresource: single_subresource(),
             });
         }
 
@@ -1476,12 +1526,7 @@ impl GraphImage {
                     image: self.handle,
                     access: Access::Write,
                     state: RgState::RenderTarget,
-                    subresource: SubresourceRange {
-                        base_mip: 0,
-                        mip_count: 1,
-                        base_layer: 0,
-                        layer_count: 1,
-                    },
+                    subresource: single_subresource(),
                 }],
                 buffer_reads,
                 buffer_writes: Vec::new(),
@@ -1602,12 +1647,7 @@ impl GraphImage {
                     image: self.handle,
                     access: Access::Write,
                     state: RgState::ShaderWrite,
-                    subresource: SubresourceRange {
-                        base_mip: 0,
-                        mip_count: 1,
-                        base_layer: 0,
-                        layer_count: 1,
-                    },
+                    subresource: single_subresource(),
                 }],
                 buffer_reads: Vec::new(),
                 buffer_writes: Vec::new(),
@@ -1625,6 +1665,79 @@ impl GraphImage {
         });
         Ok(())
     }
+}
+
+impl GraphImageView {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn handle(&self) -> ImageHandle {
+        self.handle
+    }
+
+    pub fn desc(&self) -> ImageDesc {
+        self.desc
+    }
+
+    pub fn subresource(&self) -> SubresourceRange {
+        self.subresource
+    }
+
+    pub fn mip_extent(&self) -> core::Extent3d {
+        let mip = u32::from(self.subresource.base_mip);
+        core::Extent3d {
+            width: (self.desc.extent.width >> mip).max(1),
+            height: (self.desc.extent.height >> mip).max(1),
+            depth: (self.desc.extent.depth >> mip).max(1),
+        }
+    }
+
+    pub fn register_as(&self, name: impl Into<String>) {
+        let mut inner = self.frame.borrow_mut();
+        inner.images_by_name.insert(
+            name.into(),
+            GraphImageRecord {
+                handle: self.handle,
+                desc: self.desc,
+            },
+        );
+    }
+}
+
+fn validate_subresource(desc: ImageDesc, subresource: SubresourceRange) -> Result<()> {
+    validate_subresource_axis(
+        "mip",
+        subresource.base_mip,
+        subresource.mip_count,
+        desc.mip_levels,
+    )?;
+    validate_subresource_axis(
+        "layer",
+        subresource.base_layer,
+        subresource.layer_count,
+        desc.layers,
+    )
+}
+
+fn validate_subresource_axis(name: &str, base: u16, count: u16, limit: u16) -> Result<()> {
+    if count == 0 {
+        return Err(Error::InvalidInput(format!(
+            "{name} subresource count must be at least 1"
+        )));
+    }
+    if base >= limit {
+        return Err(Error::InvalidInput(format!(
+            "{name} subresource base {base} is outside image limit {limit}"
+        )));
+    }
+    let end = u32::from(base).saturating_add(u32::from(count));
+    if end > u32::from(limit) {
+        return Err(Error::InvalidInput(format!(
+            "{name} subresource range [{base}, {end}) exceeds image limit {limit}"
+        )));
+    }
+    Ok(())
 }
 
 impl ImageRef for GraphImage {
@@ -1667,12 +1780,7 @@ fn split_read_names(
                 image: rec.handle,
                 access: Access::Read,
                 state: RgState::ShaderRead,
-                subresource: SubresourceRange {
-                    base_mip: 0,
-                    mip_count: 1,
-                    base_layer: 0,
-                    layer_count: 1,
-                },
+                subresource: single_subresource(),
             });
         } else {
             unresolved.push(name.clone());
@@ -1717,12 +1825,7 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
                     image: record.handle,
                     access: Access::Read,
                     state: RgState::ShaderRead,
-                    subresource: SubresourceRange {
-                        base_mip: 0,
-                        mip_count: 1,
-                        base_layer: 0,
-                        layer_count: 1,
-                    },
+                    subresource: single_subresource(),
                 });
             }
 
@@ -1765,11 +1868,12 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
 /// RAW dependencies are directional regardless of declaration order: a pass
 /// that reads a resource must run after the pass that writes that resource.
 fn has_read_after_write_dependency(writer: &PassDesc, reader: &PassDesc) -> bool {
-    let writer_img_writes: Vec<_> = writer.writes.iter().map(|u| u.image).collect();
-    let reader_img_reads: Vec<_> = reader.reads.iter().map(|u| u.image).collect();
-
-    for h in &writer_img_writes {
-        if reader_img_reads.contains(h) {
+    for write in &writer.writes {
+        if reader
+            .reads
+            .iter()
+            .any(|read| image_uses_overlap(write, read))
+        {
             return true;
         }
     }
@@ -1792,19 +1896,23 @@ fn has_read_after_write_dependency(writer: &PassDesc, reader: &PassDesc) -> bool
 /// ordering. Adding these edges in both directions creates cycles, so callers
 /// only check this for declaration-ordered pass pairs.
 fn has_declaration_order_hazard(earlier: &PassDesc, later: &PassDesc) -> bool {
-    let e_img_writes: Vec<_> = earlier.writes.iter().map(|u| u.image).collect();
-    let e_img_reads: Vec<_> = earlier.reads.iter().map(|u| u.image).collect();
-    let l_img_writes: Vec<_> = later.writes.iter().map(|u| u.image).collect();
-
     // WAW
-    for h in &e_img_writes {
-        if l_img_writes.contains(h) {
+    for earlier_write in &earlier.writes {
+        if later
+            .writes
+            .iter()
+            .any(|later_write| image_uses_overlap(earlier_write, later_write))
+        {
             return true;
         }
     }
     // WAR
-    for h in &e_img_reads {
-        if l_img_writes.contains(h) {
+    for earlier_read in &earlier.reads {
+        if later
+            .writes
+            .iter()
+            .any(|later_write| image_uses_overlap(earlier_read, later_write))
+        {
             return true;
         }
     }
@@ -1827,6 +1935,10 @@ fn has_declaration_order_hazard(earlier: &PassDesc, later: &PassDesc) -> bool {
     }
 
     false
+}
+
+fn image_uses_overlap(a: &crate::ImageUse, b: &crate::ImageUse) -> bool {
+    a.image == b.image && a.subresource.overlaps(b.subresource)
 }
 
 /// Returns the indices of `passes` in dependency-correct execution order.
@@ -2058,12 +2170,16 @@ mod tests {
             image: core::ImageHandle(image),
             access,
             state,
-            subresource: SubresourceRange {
-                base_mip: 0,
-                mip_count: 1,
-                base_layer: 0,
-                layer_count: 1,
-            },
+            subresource: single_subresource(),
+        }
+    }
+
+    fn image_use_mip(image: u64, mip: u16, access: Access, state: RgState) -> crate::ImageUse {
+        crate::ImageUse {
+            image: core::ImageHandle(image),
+            access,
+            state,
+            subresource: SubresourceRange::new(mip, 1, 0, 1),
         }
     }
 
@@ -2086,6 +2202,28 @@ mod tests {
                 .copied()
                 .map(|image| image_use(image, Access::Write, RgState::RenderTarget))
                 .collect(),
+            buffer_reads: Vec::new(),
+            buffer_writes: Vec::new(),
+            clear_colors: Vec::new(),
+            clear_depth: None,
+        }
+    }
+
+    fn pass_with_uses(
+        name: &str,
+        reads: Vec<crate::ImageUse>,
+        writes: Vec<crate::ImageUse>,
+    ) -> PassDesc {
+        PassDesc {
+            name: name.to_owned(),
+            queue: QueueType::Graphics,
+            shader: None,
+            pipeline: None,
+            bind_groups: Vec::new(),
+            push_constants: None,
+            work: PassWork::None,
+            reads,
+            writes,
             buffer_reads: Vec::new(),
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
@@ -2122,5 +2260,74 @@ mod tests {
         let overlay = pass("hud", &[1], &[1]);
 
         assert!(has_read_after_write_dependency(&tonemap, &overlay));
+    }
+
+    #[test]
+    fn non_overlapping_mip_writes_do_not_create_declaration_hazard() {
+        let mip0 = pass_with_uses(
+            "mip0",
+            Vec::new(),
+            vec![image_use_mip(1, 0, Access::Write, RgState::RenderTarget)],
+        );
+        let mip1 = pass_with_uses(
+            "mip1",
+            Vec::new(),
+            vec![image_use_mip(1, 1, Access::Write, RgState::RenderTarget)],
+        );
+
+        assert!(!has_declaration_order_hazard(&mip0, &mip1));
+    }
+
+    #[test]
+    fn overlapping_mip_write_and_read_create_raw_dependency() {
+        let writer = pass_with_uses(
+            "writer",
+            Vec::new(),
+            vec![image_use_mip(1, 2, Access::Write, RgState::RenderTarget)],
+        );
+        let reader = pass_with_uses(
+            "reader",
+            vec![image_use_mip(1, 2, Access::Read, RgState::ShaderRead)],
+            Vec::new(),
+        );
+
+        assert!(has_read_after_write_dependency(&writer, &reader));
+    }
+
+    #[test]
+    fn full_resource_access_overlaps_selected_mip() {
+        let full = crate::ImageUse {
+            image: core::ImageHandle(1),
+            access: Access::Write,
+            state: RgState::RenderTarget,
+            subresource: SubresourceRange::WHOLE,
+        };
+        let mip = image_use_mip(1, 3, Access::Read, RgState::ShaderRead);
+
+        assert!(image_uses_overlap(&full, &mip));
+    }
+
+    #[test]
+    fn scheduler_allows_independent_mip_writes_before_dependent_read() {
+        let passes = vec![
+            pass_with_uses(
+                "read-mip1",
+                vec![image_use_mip(1, 1, Access::Read, RgState::ShaderRead)],
+                Vec::new(),
+            ),
+            pass_with_uses(
+                "write-mip0",
+                Vec::new(),
+                vec![image_use_mip(1, 0, Access::Write, RgState::RenderTarget)],
+            ),
+            pass_with_uses(
+                "write-mip1",
+                Vec::new(),
+                vec![image_use_mip(1, 1, Access::Write, RgState::RenderTarget)],
+            ),
+        ];
+
+        let order = schedule_pass_order(&passes, &[]);
+        assert_eq!(order, vec![1, 2, 0]);
     }
 }
