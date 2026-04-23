@@ -26,6 +26,7 @@ mod mip_pyramid;
 mod pipeline_layout;
 mod procedural_texture;
 mod quad_batch;
+mod runtime;
 mod sampler_catalog;
 #[cfg(test)]
 mod tests;
@@ -57,6 +58,11 @@ pub use procedural_texture::{
     CpuProceduralTexture2d, ProceduralTextureRecipe, ProceduralTextureUpdatePolicy,
 };
 pub use quad_batch::QuadBatch;
+pub use runtime::{
+    AppLayer, AppRuntime, RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult,
+    RuntimeController, RuntimeDiagnostics, RuntimeSettingKey, RuntimeSettingsSnapshot,
+    RuntimeSettingsTransaction, SceneRenderContext, UiContext,
+};
 pub use sampler_catalog::SamplerPreset;
 pub use text_draw::{
     TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput, TextPlacement, TextRenderer,
@@ -103,6 +109,13 @@ pub use sturdy_engine_core::{
     DeviceDesc, ImageHandle, SamplerHandle, SubmissionHandle, SurfaceHandle, SurfaceSize,
 };
 pub use sturdy_engine_macros::push_constants;
+pub use sturdy_engine_platform as platform;
+pub use sturdy_engine_platform::{
+    PlatformCapabilityState, PlatformKind, SurfaceTransparency, WindowAppearance,
+    WindowAppearanceCaps, WindowBackdrop, WindowBlurDesc, WindowCornerStyle, WindowEffectQuality,
+    WindowEffectRegion, WindowMaterialKind, WindowMaterialSupport, WindowShadowMode,
+    WindowTransparencyDesc, current_platform,
+};
 pub use texture::{ImageCopyRegion, TextureUploadDesc};
 
 use sturdy_engine_core as core;

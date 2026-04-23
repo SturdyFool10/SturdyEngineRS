@@ -237,6 +237,20 @@ fn bind_group_rejects_duplicate_path() {
 }
 
 #[test]
+fn runtime_controller_placeholder_transaction_is_noop() {
+    let mut controller = RuntimeController::default();
+    let report = controller
+        .transact()
+        .note_change(RuntimeSettingKey("test-setting"))
+        .apply()
+        .unwrap();
+
+    assert!(report.changes.is_empty());
+    assert_eq!(controller.settings(), RuntimeSettingsSnapshot);
+    assert_eq!(controller.diagnostics(), RuntimeDiagnostics);
+}
+
+#[test]
 fn vulkan_writes_sampled_image_and_sampler_descriptors_when_available() {
     let engine = match Engine::with_backend(BackendKind::Vulkan) {
         Ok(engine) => engine,

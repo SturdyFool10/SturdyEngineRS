@@ -1400,6 +1400,7 @@ dependencies = [
  "raw-window-handle",
  "sturdy-engine-core",
  "sturdy-engine-macros",
+ "sturdy-engine-platform",
  "textui",
  "winit",
 ]
@@ -1428,6 +1429,10 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "sturdy-engine-platform"
+version = "0.1.0"
 
 [[package]]
 name = "sturdy-engine-testbed"

@@ -1,493 +1,434 @@
-# 🧠 Sturdy Engine — Architecture & API Refactor TODO
+# Sturdy Engine Roadmap
 
-## 🎯 Goals
+## Product Direction
 
-- Full backend-agnostic core (no Vulkan leakage outside backend/)
-- Image-centric engine API
-- Render graph driven execution
-- Text system integrated as image operations
-- HDR + FP16/FP32 support
-- Strong capability/limit querying
-- GPU enumeration + switching
-- Clean, small, modular file structure
+Sturdy Engine should be worth using in three modes:
 
----
+1. Quick visualization and shader play
+2. Graphical apps and custom UI
+3. Full games, including a path toward footage that can plausibly read as real life
 
-# 🔥 Phase 1 — Backend Isolation (CRITICAL FIRST STEP)
+The simple path must be the best path, not a toy path. A small app should be
+able to open a window, draw something useful, inspect it, and change major
+runtime settings without rebuilding its shell or restarting.
 
-## 1. Remove backend leakage from core
+## Priority Rules
 
-- [x] Move backend creation out of `device.rs`
-- [x] Create `backend/factory.rs`
-  - [x] `create_backend(desc: &DeviceDesc)`
-  - [x] `enumerate_adapters(kind: BackendKind)`
-- [x] Remove all direct Vulkan imports from:
-  - [x] `device.rs`
-  - [x] any non-`backend/vulkan/*` modules
-- [x] Ensure only `backend/vulkan/*` references:
-  - Vulkan types
-  - Vulkan extensions
-  - Vulkan-specific logic
+When choosing what to do next, prefer work that improves:
 
-## 2. Enforce layering rules
+1. the first 30 minutes of using the engine
+2. the amount of application boilerplate removed
+3. the quality of the default app/runtime shell
+4. the ability to scale from simple usage into deeper control without rewrites
+5. the path toward high-end game visuals and stable iteration
 
-- [x] Core layer (`sturdy-engine-core`) contains:
-  - [x] traits
-  - [x] handles
-  - [x] abstract resources
-  - [x] graph system
-- [x] Backend layer contains:
-  - [x] actual API implementations
-- [x] Engine layer (`sturdy-engine`) contains:
-  - [x] Rust wrapper API
-  - [x] chaining
-  - [x] runtime management
+Deprioritize work that is technically sophisticated but does not materially move
+one of the product tracks above.
 
----
+## Runtime Rules
 
-# 🧩 Phase 2 — Capability System Expansion
+These are architectural constraints, not stretch goals:
 
-## 3. Expand `Caps`
+- [ ] Treat “requires restart” as a failure case unless the operating system or driver makes it impossible
+- [ ] Separate settings into:
+  - [ ] immediate apply
+  - [ ] graph/pipeline rebuild
+  - [ ] surface/window recreation
+  - [ ] live device migration
+- [ ] Keep one public runtime settings model that explains which path each setting takes
+- [ ] Make simple runtime settings use the same internal systems as advanced apps instead of separate code paths
+- [ ] Expose capability queries and failure reasons when a requested runtime change cannot be applied exactly
 
-- [x] mesh_shading
-- [x] ray_tracing
-- [x] bindless
-- [x] hdr_output
-- [x] shader_fp16
-- [x] shader_fp64
-- [x] image_fp16_render
-- [x] image_fp32_render
-- [x] dynamic_rendering
-- [x] timeline_semaphores
+## Direction To Roadmap Mapping
 
-## 4. Expand `Limits`
+The runtime direction document is not a separate strategy. It explains how the
+current roadmap should be interpreted and prioritized.
 
-- [x] max_texture_2d_size
-- [x] max_texture_array_layers
-- [x] max_color_attachments
-- [x] max_compute_workgroup_size
-- [x] max_compute_invocations
-- [x] max_push_constants_size
+### What the current testbed proves
 
-## 5. Add format capabilities
+Right now the testbed is still doing engine work in app code:
 
-- [x] FormatCapabilities struct
-- [x] device.format_capabilities(format)
+- [ ] manually assembling the common frame pipeline
+- [ ] manually owning debug controls for AA, bloom, HDR, tone mapping, and debug images
+- [ ] manually managing text atlas uploads and HUD draw plumbing
+- [ ] manually handling HDR surface policy and surface recreation
 
-## 6. Add surface/HDR queries
+Those findings map directly to `P0`. Until they are first-party engine systems,
+the engine is still asking application authors to build the runtime shell
+themselves.
 
-- [x] SurfaceHdrCaps
-- [x] HDR10 support
-- [x] scRGB support
+### Product rule that drives implementation
 
----
+- [ ] Keep the built-in app shell on the same renderer/runtime systems as the advanced path
+- [ ] Keep the debug overlay on the same runtime settings, diagnostics, and graph resources as normal apps
+- [ ] Make “more control” reveal deeper layers of the same stack instead of replacing the stack
 
-# 🖼️ Phase 3 — Image System Overhaul
+### Public runtime model this roadmap is aiming at
 
-## 7. Expand ImageDesc
+The `P0` runtime settings work should converge on one first-party runtime
+controller with:
 
-- [x] dimension
-- [x] mip_levels
-- [x] layers
-- [x] samples
-- [x] transient
-- [x] clear_value
-- [x] debug_name
+- [ ] settings snapshot/query
+- [ ] transaction-style setting updates
+- [ ] diagnostics/query surface
+- [ ] per-setting apply results that distinguish exact apply, degraded apply, and rejection
 
-## 8. Introduce ImageBuilder
+### Apply-path mapping
 
-- [x] fluent API
+Every runtime-facing setting should be classified before implementation work is
+considered complete:
 
-## 9. Add semantic roles
+- [ ] `Immediate`: CPU-state or binding changes that apply next frame
+- [ ] `GraphRebuild`: pass, pipeline, or graph-topology rebuilds without replacing the surface
+- [ ] `SurfaceRecreate`: presentation/swapchain recreation while keeping the app alive
+- [ ] `WindowReconfigure`: native window/compositor/background-effect changes
+- [ ] `DeviceMigration`: live adapter/backend switching without app restart
 
-- [x] Texture
-- [x] ColorAttachment
-- [x] DepthAttachment
-- [x] Storage
-- [x] GBuffer
-- [x] Presentable
-- [x] Intermediate
+### Phase mapping
+
+- [ ] `P0` turns the testbed shell into `AppRuntime`, `DebugShell`, `TextOverlay`, and a real runtime controller
+- [ ] `P1` proves that the shell is useful immediately for debug draw, datavis, and shader playground work
+- [ ] `P2` proves that the same engine path can support real tool/app UI instead of forcing bypasses
+- [ ] `P3` proves that games can reuse the same runtime/debug/settings stack instead of rebuilding it
+- [ ] `P4` uses that stable runtime foundation to push image quality and realistic rendering
+- [ ] `P5` deepens the graph/backend architecture only where it materially supports the product tracks above
 
 ---
 
-# 🔗 Phase 4 — Image-Centric API
+## P0 — App Shell And Runtime Reconfiguration
 
-## 10. GraphFrame
+Until this exists, the engine still asks app authors to assemble too much of the
+runtime by hand.
 
-- [x] image()
-- [x] swapchain_image()
-- [x] present()
+### Prompt-sized execution order
 
-## 11. ImageNode
+These are intended to be small enough to finish in one focused implementation
+prompt. Each chunk should end with code, tests or validation, and roadmap
+checkbox updates.
 
-- [x] deferred graph node
+- [x] `P0.1` Define the first public `AppRuntime` surface and create the minimal type/module skeleton without changing behavior yet
+- [ ] `P0.2` Move swapchain acquire/present ownership behind `AppRuntime` while keeping the existing testbed render path working
+- [ ] `P0.3` Move default HDR scene target allocation/selection behind `AppRuntime`
+- [ ] `P0.4` Move MSAA target allocation and resolve behind `AppRuntime`
+- [ ] `P0.5` Move bloom, AA, and tonemap chain assembly behind `AppRuntime`
+- [ ] `P0.6` Add a named debug image registry owned by the runtime instead of the testbed
+- [ ] `P0.7` Add a runtime diagnostics data model for backend, adapter, HDR, present mode, AA, bloom state, and graph timings
+- [ ] `P0.8` Surface the diagnostics model through a basic first-party overlay hook, even if presentation is still minimal
+- [ ] `P0.9` Internalize motion-vector generation and debug display registration as runtime features rather than testbed-only plumbing
+- [ ] `P0.10` Define the first `TextOverlay` API surface that lets apps request text without touching atlas/page management
+- [ ] `P0.11` Move the existing HUD text path behind `TextOverlay` while preserving current output
+- [ ] `P0.12` Add a first-pass debug action/input binding registry above raw key handling
+- [ ] `P0.13` Define `RuntimeSettingsSnapshot`, setting keys, and a single public settings model
+- [ ] `P0.14` Classify every existing runtime-facing setting into `Immediate`, `GraphRebuild`, `SurfaceRecreate`, `WindowReconfigure`, or `DeviceMigration`
+- [ ] `P0.15` Implement the first `Immediate` runtime settings path for low-risk settings like overlay visibility or post-process dials
+- [ ] `P0.16` Implement the first `GraphRebuild` runtime settings path for AA mode or post-chain topology changes
+- [ ] `P0.17` Implement the first `SurfaceRecreate` runtime settings path for HDR mode or present mode changes without app restart
+- [ ] `P0.18` Add transaction-style runtime settings updates so multiple changes apply coherently in one call
+- [ ] `P0.19` Add `RuntimeApplyReport` / per-setting apply results with exact, degraded, and rejected outcomes
+- [ ] `P0.20` Expose capability queries and failure reasons for unsupported runtime-setting requests
+- [ ] `P0.21` Add runtime shell support for transparent window/background configuration toggles
+- [ ] `P0.22` Add transparent surface clear/present handling where the backend/platform supports it
+- [ ] `P0.23` Define the engine-level window background effect/material abstraction with both presets and explicit descriptors
+- [ ] `P0.24` Implement the first Windows backdrop/material integration through that abstraction
+- [ ] `P0.25` Implement the first macOS material/vibrancy integration through the same abstraction
+- [ ] `P0.26` Implement the first Linux background-effect adapter with graceful fallback behavior
+- [ ] `P0.27` Make transparency/background effects runtime-toggleable without restart through the runtime settings controller
+- [ ] `P0.28` Add Slang shader hot reload with clear in-app compile error reporting
+- [ ] `P0.29` Add first-pass asset hot reload for common asset types used by the testbed
+- [ ] `P0.30` Add stable missing/stale-asset diagnostics surfaced in the runtime overlay or logs
+- [ ] `P0.31` Add screenshot/export helpers to the first-party runtime shell
+- [ ] `P0.32` Add image inspection for named graph resources using the runtime-owned debug image registry
+- [ ] `P0.33` Add a first-pass frame-graph inspection UI or textual inspection surface
+- [ ] `P0.34` Add GPU timing and per-pass timing summaries to runtime diagnostics
+- [ ] `P0.35` Convert one existing sample/testbed path to the first-party runtime shell and remove the equivalent app-side boilerplate
 
-## 12. Operations
+### Chunking rules
 
-- [x] clear()
-- [x] compute()
-- [x] fullscreen()
-- [x] copy_to()
-- [x] blend_over()
-- [x] draw()
+If a roadmap item is still too large for one prompt, split it again until the
+prompt can do all of the following in one pass:
 
-## 13. Deferred execution
+- [ ] define or narrow one public API seam
+- [ ] move one existing responsibility behind that seam
+- [ ] keep one existing sample or testbed path working
+- [ ] verify behavior with a build, test, or sample run
+- [ ] update the relevant roadmap checkboxes
 
-- [x] build graph, no immediate execution
+### Recommended first prompt sequence
 
-## 14. Hook into RenderGraph
+If work starts immediately, do these in order before jumping ahead:
 
-- [x] convert chains to passes
+1. `P0.1`
+2. `P0.2`
+3. `P0.3`
+4. `P0.4`
+5. `P0.6`
+6. `P0.7`
+7. `P0.13`
+8. `P0.14`
+
+### Internalize current testbed boilerplate
+
+- [ ] Add a first-party `AppRuntime` / `AppRenderer` that owns the common frame loop:
+  - [ ] swapchain acquire / present
+  - [ ] HDR/SDR output policy
+  - [ ] default HDR scene target
+  - [ ] MSAA target and resolve
+  - [ ] bloom / AA / tonemap chain
+  - [ ] named debug image outputs
+  - [ ] diagnostics overlay hook
+- [ ] Internalize motion-vector generation/debug display as engine features instead of testbed-only plumbing
+- [ ] Internalize the current HUD text path into a first-party text/debug overlay instead of making apps manage atlas pages, uploads, and quad meshes
+- [ ] Add a first-party debug action registry and input binding layer above raw key events
+- [ ] Internalize standard renderer diagnostics:
+  - [ ] adapter/backend display
+  - [ ] HDR mode
+  - [ ] present mode
+  - [ ] AA mode and actual sample count
+  - [ ] bloom state
+  - [ ] graph timings
+  - [ ] debug image selection
+
+### Runtime settings and no-restart architecture
+
+- [ ] Add a unified runtime settings system for:
+  - [ ] backend selection
+  - [ ] adapter/GPU selection
+  - [ ] HDR mode
+  - [ ] present mode
+  - [ ] surface transparency
+  - [ ] window background effect/material
+  - [ ] antialiasing mode and dials
+  - [ ] post-processing toggles and dials
+  - [ ] shader hot reload and asset hot reload policy
+- [ ] Apply runtime settings changes through the right internal path automatically:
+  - [ ] patch state in place when possible
+  - [ ] rebuild graph/pipelines when needed
+  - [ ] recreate the surface/window when needed
+  - [ ] migrate live resources across devices/backends when needed
+- [ ] Add a transaction-style runtime reconfiguration path so multiple setting changes can be applied coherently in one step
+- [ ] Add explicit notifications for:
+  - [ ] setting accepted as requested
+  - [ ] setting clamped or degraded
+  - [ ] setting rejected with reason
+
+### Window transparency and compositor effects
+
+- [ ] Add window/background transparency support in the application shell
+- [ ] Add surface alpha / transparent clear path support so rendered content can preserve transparency through presentation where the platform allows it
+- [ ] Add engine-level window background effect/material support with both:
+  - [ ] easy presets
+  - [ ] explicit low-level control
+- [ ] Support Windows material/effect families such as blur-behind, acrylic, mica, and tabbed/titlebar variants through one engine API
+- [ ] Support macOS vibrancy/material integration through the same engine API
+- [ ] Support Linux window background effects through a Linux platform adapter with:
+  - [ ] Wayland `ext-background-effect-v1` as the primary background-effect protocol
+  - [ ] compatibility fallbacks for older compositor-specific blur protocols only where needed
+  - [ ] graceful fallback when no compositor effect protocol is available
+- [ ] Let apps toggle transparency and blur/material effects at runtime without restart
+- [ ] Let apps specify whether the window background effect applies to the whole window or engine-managed regions
+
+### First-run usability
+
+- [ ] Add shader hot reload for Slang shaders with clear in-app compile errors
+- [ ] Add asset hot reload for textures, meshes, and other common inputs
+- [ ] Add stable debug/error reporting for missing or stale assets
+- [ ] Add screenshot/export helpers
+- [ ] Add frame graph visualization / inspection UI
+- [ ] Add image inspection for named graph resources
+- [ ] Add GPU timing and pass timing summaries
 
 ---
 
-# ✍️ Phase 6 — Text System Integration
+## P1 — Immediate Utility: Debug Draw, Datavis, And Playground
 
-- [x] layout/shaping split
-- [x] atlas system
-- [x] engine adapter
-- [x] draw_text API
-- [x] support any writable image
+### Debug draw and inspection
 
----
+- [ ] Add immediate-style 2D drawing helpers for:
+  - [ ] lines
+  - [ ] polylines
+  - [ ] rectangles
+  - [ ] circles
+  - [ ] points / markers
+  - [ ] filled shapes
+- [ ] Support layering those primitives with text in the same frame
+- [ ] Expose sane defaults for antialiasing, thickness, color, transforms, and hit testing
+- [ ] Add a built-in debug view picker for motion vectors, bloom chain, AA history, and other named graph images
 
-# 🌈 Phase 7 — HDR Pipeline
+### Data visualization first mile
 
-- [x] HDR formats
-- [x] tonemap pipeline
-- [x] fallback handling
+- [ ] Add a lightweight plotting layer for:
+  - [ ] axes
+  - [ ] linear/log scales
+  - [ ] gridlines
+  - [ ] line series
+  - [ ] scatter series
+  - [ ] bar series
+  - [ ] legends
+  - [ ] value tooltips / nearest-point inspection
+- [ ] Add pan/zoom helpers for 2D data views
+- [ ] Add a simple palette/theme model for quick visualization work
+- [ ] Add a “load data, plot it, inspect it” sample with minimal code
 
----
+### Shader playground usability
 
-# 🎮 Phase 8 — GPU Enumeration & Switching
-
-- [x] AdapterInfo expansion
-- [x] DeviceManager
-- [ ] runtime switching
-- [ ] logical resources
-
----
-
-# 📂 Phase 9 — File Structure Cleanup
-
-- [x] modular files
-- [x] strict concept separation
-
----
-
-# 🚀 Phase 10 — Milestone
-
-- [x] render HDR image
-- [x] fullscreen shader
-- [x] present
-- [x] compute pass
-- [x] text rendering
+- [ ] Add a shader-playground app shell with:
+  - [ ] standard time/frame/resolution uniforms
+  - [ ] quick texture binding helpers
+  - [ ] pause / step / scrub controls
+  - [ ] built-in debug overlays
+  - [ ] one-click debug image switching
+- [ ] Make the default playground path use the same runtime shell as normal apps
 
 ---
 
-# 🧠 Principles
+## P2 — App UI Must Feel Complete
 
-- Image-centric
-- Graph-driven
-- Deferred execution
-- Backend isolation
-- Rebuild on GPU switch
+The Clay/UI foundation is promising, but the app-facing shell is still missing
+core behavior that makes people stay on the engine path instead of bypassing it.
 
----
-
-# Phase 11+ — Reflection-First Graph Systems
-
-The current testbed points at the next technical direction: reflected Slang
-shaders should drive pass inputs, pipeline layouts, graph resource declarations,
-and validation data. The engine should infer layout, binding, barrier, mip
-transition, and draw metadata when that information is available from shader
-reflection and declared resource intent.
-
-Chained frontend calls should record graph operations, not force immediate
-execution order. Graph compilation determines the actual ordering, barriers,
-resource states, and parallel batches from reflection data and declared resource
-uses.
-
-The previous phases remain active where unchecked. These objectives build on
-top of that foundation instead of replacing it.
-
-## Goals
-
-- Make reflected Slang shaders the primary way to describe pass inputs,
-  constants, resource bindings, and pipeline layouts.
-- Support multi-pass render graphs composed from reflected shader passes.
-- Keep the frontend render API destination-oriented: create or fetch graph
-  images, then execute reflected shaders onto those images.
-
----
-
-# Phase 12 — Clay UI Rust Port (In Progress)
-
-## Completed in `crates/clay-ui` (initial architecture pass)
-
-- [x] Backend-neutral Rust crate scaffolded and wired into workspace
-- [x] Type-split module layout (`type` and `feature` files)
-- [x] Core layout tree, sizing modes, align, clip flags, and z ordering
-- [x] Render command generation and batch grouping for queued GPU work
-- [x] Multi-tree context with per-tree target selection (swapchain/offscreen image/named target)
-- [x] Simulated input API for pointer/scroll/focus/activation events
-- [x] Colorlab color usage (`colorlab::Color`) for UI color model
-- [x] Text path integrated with `textui` GPU scene preparation
-- [x] UTF-8 text via native Rust `String` throughout
-- [x] OpenType feature toggles plumbed into text fundamentals
-- [x] Cross-platform font discovery wrapper (`fontdb`-backed)
-- [x] Font discovery wired into `UiContext` text fallback resolution
-- [x] Persistent prepared text scene cache keyed by content/options
-- [x] Tree-level image tiling plans and per-tile image descriptors
-- [x] Limits-to-text-frame-info-and-tile-plan helper
-- [x] AA mode and dial model exposed in the testbed UI
-- [x] Caps-backed MSAA sample limit with support up to 16x where the backend allows it
-- [x] Explicit render-graph hardware MSAA resolve op
-- [x] MSAA pipeline cache keying and Vulkan render pass sample state
-- [x] Basic engine AA fullscreen pass wired into the testbed before tonemapping
-- [x] History-backed TAA ping-pong storage in the engine AA pass
-- [x] Motion-vector-aware TAA reprojection input and camera jitter helpers
-- [x] Direct `TextEngine::prepare_tiled_frame*` helpers for device-limit-safe text atlases
-- [x] Per-slot shader references for background/outline/text fill/text outline/image/custom
-- [x] Gradient model with color stops and per-segment easing metadata
-- [x] User-defined easing registration (`Easing::Custom(id)` + registry)
-- [x] Architectural CPU vs GPU color policy:
-  - [x] Single-color transforms -> CPU
-  - [x] Gradient/multi-color per-pixel -> GPU
-- [x] Image tiling planner for device 2D size limits
-
-## Remaining work (tracked here because it needs deeper engine integration)
+### Text, input, and editing
 
 - [ ] Replace placeholder text-size estimation in layout cache with true `textui`/font-system measurement for layout-time wrapping parity
-- [ ] Implement arena/reuse strategy equivalent to Clay’s low-allocation hot path (persistent frame arenas, slot reuse, tombstone-free freelists)
+- [ ] Add editable text fields with cursor, selection, and clipboard support
+- [ ] Add IME composition support for desktop text entry
+- [ ] Add focus management and keyboard navigation parity
+- [ ] Add a first-party text overlay/panel stack on top of `textui` so apps do not manage atlas images directly
+
+### Widget layer
+
+- [ ] Add a standard widget layer for:
+  - [ ] labels
+  - [ ] buttons
+  - [ ] checkboxes / toggles
+  - [ ] sliders
+  - [ ] text inputs
+  - [ ] lists
+  - [ ] tables
+  - [ ] trees / inspectors
+- [ ] Keep widgets composable with shader-driven visuals instead of forcing a theme-only path
+- [ ] Add first-party inspector/panel patterns for graphics tools and game tools
+
+### Layout and interaction behavior
+
+- [ ] Implement arena/reuse strategy equivalent to Clay’s low-allocation hot path
 - [ ] Add Clay-level scroll physics/momentum and external scroll offset query parity
 - [ ] Add floating/attach-point semantics parity (`attach_to_parent`, `attach_to_id`, clip inheritance, pointer passthrough modes)
 - [ ] Implement child-between-border emission parity and exact border raster semantics
+- [ ] Add virtualized scrolling / large-list support
+- [ ] Add robust app-facing event/state plumbing so users do not need large glue layers
+
+### UI rendering completeness
+
 - [ ] Add full render-graph resource binding generation (bind groups, push constants, per-pass parameter buffers) instead of pass skeletons
-- [ ] Integrate real shader pipelines for all slots in engine runtime (currently handles are plumbed, not authored)
+- [ ] Integrate real shader pipelines for all UI slots in engine runtime
 - [ ] Add GPU gradient shader implementation and parameter packing contract used by engine pipelines
-- [ ] Add text outline rendering path in engine shader side (metadata is present; runtime raster/shader path still required)
+- [ ] Add text outline rendering path in engine shader side
 - [ ] Add offscreen-to-world UI sample path in `sturdy-engine` scene layer
 - [ ] Add UI search/indexing layer on top of font discovery for later UI-wide queries
+- [ ] Add examples for dashboards, inspectors, and multi-panel tools
+
+---
+
+## P3 — Game Development Path
+
+This track must make the engine viable for full games without forcing every
+project to build a custom runtime shell first.
+
+### Frame, time, input, and runtime
+
+- [ ] Add fixed-timestep and interpolation helpers
+- [ ] Add input action/binding helpers above raw key events
+- [ ] Add simple camera controllers for common 2D and 3D cases
+- [ ] Add a default game runtime shell that reuses the same renderer/debug/runtime-settings systems as apps and tools
+
+### Content and iteration loop
+
+- [ ] Add basic asset handles and a simple content-loading story that does not force a large asset system up front
+- [ ] Add stable asset lifetime / reload semantics suitable for real game projects
+- [ ] Add examples for a small 2D game and a small 3D game
+
+### 2D and gameplay-oriented rendering
+
+- [ ] Add a first-class 2D sprite/batch path
+- [ ] Add tilemap / simple layered-scene helpers if they compose cleanly with the graph model
+- [ ] Add examples for many instanced quads
+- [ ] Add examples for instanced meshes with per-instance color/material parameters
+- [ ] Add examples for animated GPU-updated instance data
+- [ ] Add examples for effect-oriented instancing such as layered glow sprites or particles
+
+### Scene and motion data
+
+- [ ] Add reflected validation for instance-rate vertex inputs when available
 - [ ] Add a full scene sample that writes motion vectors from material shaders
-- Treat chained image/shader operations as graph declarations that can be
-  reordered when dependencies allow it.
-- Add a proceduralism layer so textures can come from shader-authored or
-  CPU-authored generators, not only image files or image sequences.
-- Expose mips as a graph resource concept for graphical effects such as
-  bloom, hierarchical blur, downsample chains, luminance pyramids, and stylized
-  texture lookups.
-- Expose GPU instancing as a normal draw concept for repeated geometry,
-  particle-like effects, sprite fields, impostors, and per-instance material
-  variation.
-- Keep the engine backend-agnostic while allowing Vulkan, D3D12, and Metal
-  backends to map these concepts to their native resource and command models.
+- [ ] Add motion-vector-aware scene examples that exercise TAA in realistic content
 
-## Current Testbed Baseline
+---
 
-- The testbed already demonstrates the right shape: Slang source files,
-  reflection-derived pipeline layout, push constants, a fullscreen pass, and a
-  frame graph submission path.
-- The current implementation still requires manual shader grouping, graphics
-  pipeline creation, vertex buffer binding, push-constant upload, and draw
-  command recording.
-- The next layer should define reusable engine primitives such as reflected
-  fullscreen pass, procedural image, mip chain, and instanced draw.
+## P4 — Rendering Features That Matter For Real Images
 
-## Target Frontend Shape
+This is the path that supports high-end game visuals, including the ability to
+convince people the output is real footage when the content is strong enough.
 
-The frontend API should look roughly like:
+### Temporal and image-quality pipeline
 
-```rust
-let scene = engine.load_shader("scene.slang")?;
-let bloom_downsample = engine.load_shader("bloom_downsample.slang")?;
-let bloom_upsample = engine.load_shader("bloom_upsample.slang")?;
-let composite = engine.load_shader("composite.slang")?;
-
-fn render(frame: &mut RenderFrame) -> Result<()> {
-    let hdr = frame.image("hdr_scene", ImageDesc::hdr_color());
-    let bloom = frame.image("bloom_chain", ImageDesc::hdr_mips());
-    let output = frame.swapchain_image();
-
-    hdr.execute_shader(&scene)?;
-    bloom.execute_shader(&bloom_downsample)?;
-    bloom.execute_shader(&bloom_upsample)?;
-    output.execute_shader(&composite)?;
-
-    Ok(())
-}
-```
-
-- `frame.image(name, desc)` returns a logical graph image. The API presents it
-  as image creation, but the engine caches the real backing images per
-  swapchain image and only creates new GPU resources when the requested
-  descriptor/name/cache key is not already resident.
-- `image.execute_shader(shader)` records a graph pass where `image` is the
-  destination resource.
-- Reflected shader metadata declares the source images, samplers, buffers,
-  constants, and storage resources required by the pass.
-- Reflected image names are resolved against the current frame's named graph
-  images and persistent cached images.
-- Chained calls record logical operations. The call order is a declaration
-  order, not necessarily the final execution order.
-- The graph compiler uses reflected resource dependencies, destination images,
-  explicit reads/writes, subresource ranges, and queue capabilities to decide
-  what must happen before what.
-- Independent operations may execute in parallel or in separate queue batches
-  when their resource usage does not conflict.
-- `render()` records graph intent. At the end of the render function, the engine
-  executes the accumulated graph by default.
-- Calling `flush()` executes the graph immediately, clears the pending graph
-  command list, and allows later calls in the same frame to record a new graph
-  segment.
-
-## Phase 11 — Reflected Pass API
-
-- [x] Add an engine-level `ShaderProgram` or `EffectPass` wrapper that groups
-  shader stages, entry points, reflected layout, and pipeline cache keys.
-- [x] Add graph pass builders that map reflected shader parameters to graph
-  resources.
-- [x] Add `GraphImage::execute_shader(shader)` as the primary
-  destination-oriented frontend pass API.
-- [x] Add shader-side naming conventions for reflected image dependencies.
-- [x] Resolve reflected image dependency names against frame image names before
-  graph compilation.
-- [x] Validate pass resources against shader reflection before graph submission (pre-flight check in `validate()` surfaces missing-image bindings as `Error`-level diagnostics before flush).
-- [x] Report missing resources with source-level names from Slang reflection.
-- [x] Support reflected push-constant structs with typed Rust upload helpers.
-- [x] Cache graphics and compute pipelines from reflected pass descriptors.
-- [x] Add testbed examples for:
-  - [x] fullscreen reflected fragment pass
-  - [x] reflected compute pass (ComputeProgram + GraphImage::execute_compute)
-  - [x] reflected image input/output pass (two-pass scene → composite)
-  - [x] reflected uniform/push-constant animation pass
-
-## Phase 12 — Render Graph Composition
-
-- [x] Add named graph resources so passes can connect by semantic names such as
-  `scene_color`, `bright_extract`, `bloom_mips`, and `final_color`.
-- [x] Add per-swapchain-image caches for named graph images and intermediate
-  resources.
-- [x] Key cached graph images by logical name, image descriptor, swapchain image
-  index, and relevant usage flags.
-- [x] Reuse cached graph images across frames unless the swapchain, descriptor,
-  usage, or logical name changes.
-- [x] Retire or recreate cached graph images on swapchain resize and incompatible
-  descriptor changes.
-- [x] Add graph templates for common pass shapes:
-  - [x] fullscreen color pass (`execute_shader`, `execute_shader_auto`)
-  - [x] compute image pass (`execute_compute`)
-  - [x] downsample pass (`image_at_fraction` + `execute_shader_auto`)
-  - [x] upsample/composite pass (`image_sized_to` + `execute_shader_auto`)
-  - [x] copy/resolve/pass-through pass (`ShaderProgram::passthrough` + `GraphImage::blit_from`)
-- [x] Add graph introspection data for passes and images (`RenderFrame::describe` → `GraphReport`)
-- [x] Add graph validation for unused outputs and write-after-write hazards (`RenderFrame::validate` → `Vec<GraphDiagnostic>`)
-- [x] Add graph validation for read-before-write hazards (warn when a pass reads an image that no pass in the current frame writes to).
-- [ ] Add graph validation for accidental full-resource barriers when a mip/layer range would be enough (requires Phase 14 subresource model).
-- [x] Add examples showing a multi-pass graph assembled from reflected shaders (testbed: scene → bloom → tonemap).
-
-## Phase 12.5 — Graph Execution Semantics
-
-- [x] Treat frame render callbacks as graph recording scopes.
-- [x] Treat chained image/shader calls as unordered graph operation declarations
-  unless explicit dependencies or resource hazards require ordering.
-- [x] Implement deferred bind group construction so passes can be declared in any
-  order regardless of when their input images are registered: read-name resolution
-  and bind group creation are deferred to `submit_pending_passes`, which runs
-  after all declarations in the frame are complete.
-  **Note**: `describe()` / `validate()` called before `flush()` will show empty
-  read-edges for deferred passes; the scheduler itself sees fully-resolved edges.
-- [x] Add a graph scheduler (`schedule_pass_order`) that derives execution order
-  from declared image/buffer reads and writes.
-- [x] Preserve source declaration order as a deterministic tie-breaker for
-  otherwise independent operations (wave-sorted Kahn's).
-- [x] Derive dependency edges for:
-  - [x] read-after-write
-  - [x] write-after-read
-  - [x] write-after-write
-  - [x] selected mip/layer hazards (frontend scheduler uses subresource overlap)
-  - [x] buffer range hazards
-  - [x] explicit user ordering constraints (`RenderFrame::order_before(&img_a, &img_b)`)
-- [ ] Detect graph operations that can run in parallel because their image
-  subresources, buffer ranges, queues, and pipeline resources do not conflict.
-- [ ] Compile parallel-ready passes into record batches grouped by queue and
-  dependency level.
-- [ ] Define how graphics, compute, and transfer queues synchronize when graph
-  passes cross queue families.
-- [x] Execute the pending render graph automatically when the render callback
-  returns successfully (via `EngineApp` shell + `Drop` auto-flush fallback).
-- [x] Add `flush()` as an explicit graph execution boundary inside a frame.
-- [x] After `flush()`, clear pending passes; persistent images remain cached.
-- [x] Errors from auto-flush (Drop) are silently discarded; explicit `flush()`
-  propagates errors to the caller.
-- [x] Ensure presentation is appended after the final graph segment (`present_image`
-  is now a deferred pending pass, scheduled after its writer).
-
-## Phase 13 — Procedural Texture Layer
-
-- [x] Introduce a `ProceduralImage` / `GeneratedTexture` concept that owns a
-  generation recipe, target image description, update policy, and cache state.
-- [x] Support CPU-authored procedural textures for small/generated assets:
-  noise, gradients, ramps, masks, lookup tables, and debug patterns
-  (`Engine::generate_texture_2d(name, w, h, fill: Fn(x, y) -> [u8; 4])`).
-- [x] Support GPU-authored procedural textures through reflected compute or
-  fullscreen shader passes (`GpuProceduralTexture`: persistent image + `ShaderProgram`; `generate` / `generate_with_constants` per frame).
-- [x] Support animated procedural textures driven by frame time, frame index,
-  user parameters, or external data (`RenderFrame::update_texture_2d` called in render loop; testbed animates color LUT every frame).
-- [x] Allow procedural textures to regenerate:
-  - [x] once at creation
-  - [x] when parameters change
-  - [x] every frame
-  - [x] on explicit request
-- [ ] Make generated textures compatible with uploaded texture usage sites:
-  sampled images, storage images, render targets, and graph intermediates where
-  the format/usage allows it.
-- [x] Add serialization-friendly recipe descriptors so procedural assets can be
-  authored without embedding runtime-only closures in asset data.
-- [ ] Add testbed examples for:
-  - [ ] static procedural checker/noise texture
-  - [ ] animated procedural texture
-  - [x] procedural mask feeding a reflected shader pass
-  - [ ] GPU-generated texture feeding a later graph pass
-
-## Phase 14 — Mip Resources and Mip-Based Effects
-
-- [x] Add image builders for full mip chains and selected mip counts (`MipPyramid::new`; bloom updated to use it).
-- [x] Add subresource-aware graph helpers for addressing individual mips and
-  mip ranges (`GraphImageView` exposes validated mip/layer ranges; backend
-  selected image views are still tracked in Phase 17).
-- [ ] Add automatic mip generation for sampled textures where format and usage
-  support it.
+- [ ] Add automatic mip generation for sampled textures where format and usage support it
 - [ ] Add explicit mip graph operations:
   - [ ] write mip
   - [ ] read mip
   - [ ] downsample mip N to N+1
   - [ ] upsample/composite mip N+1 into N
   - [ ] transition selected mip ranges
-- [ ] Add sampler controls for lod bias, min/max lod, and mip filter choices in
-  the engine API.
-- [ ] Implement bloom as the reference mip-based effect:
+- [ ] Add sampler controls for lod bias, min/max lod, and mip filter choices in the engine API
+- [ ] Add graph validation for accidental full-resource barriers when a mip/layer range would be enough
+
+### Core post-processing and realism stack
+
+- [ ] Implement bloom as a polished reference mip-based effect:
   - [ ] bright extract
   - [ ] downsample chain
   - [ ] upsample chain
   - [ ] final composite
-- [ ] Add testbed examples that render or sample individual mip levels.
+- [ ] Add stronger temporal AA examples using real motion vectors, camera jitter, and transparency-heavy scenes
+- [ ] Add a robust post stack architecture that can host exposure, bloom, temporal effects, sharpening, grading, film grain, lens effects, and debug views cleanly
+- [ ] Add transparency-heavy validation scenes so temporal and post effects are tested against composited content instead of opaque-only scenes
 
-## Phase 15 — GPU Instancing as a First-Class Concept
+### Photoreal game rendering path
 
-- [x] Add instance buffer builders with clear per-instance layout declarations (`InstanceData { model: [[f32;4];4] }`, `InstanceBatch`).
-- [ ] Add reflected validation for instance-rate vertex inputs when available.
-- [x] Add graph draw helpers for instanced meshes (`GraphImage::draw_mesh_instanced`, `draw_mesh_instanced_with_push_constants`).
-- [x] Add per-instance data upload paths that work with the existing upload arena and deferred frame model (static/dynamic split in `InstanceBatch::prepare`).
-- [x] Add optional storage-buffer-driven instancing for large or variable-size instance data (`StructuredBuffer<InstanceData> instances` + `RenderFrame::bind_buffer`).
-- [x] Add scene + camera system (`Scene`, `SceneCamera`, `RenderTarget`, `ObjectKind::Static/Dynamic`, offscreen camera → `RenderTarget` → named frame image for CRT/portal effects).
-- [ ] Add examples for:
-  - [ ] many instanced quads
-  - [ ] instanced meshes with per-instance color/material parameters
-  - [ ] animated GPU-updated instance data
-  - [ ] effect-oriented instancing, such as layered glow sprites or particles
+- [ ] Add a production-oriented lighting and material roadmap covering:
+  - [ ] physically-based materials and parameter workflows
+  - [ ] image-based lighting and reflection workflows
+  - [ ] shadowing suitable for dense realistic scenes
+  - [ ] atmospheric / volumetric rendering path
+  - [ ] decal and layered-surface workflows
+  - [ ] high-quality translucency / glass / wet surfaces path
+- [ ] Add a roadmap for dense-scene rendering features needed by realistic games:
+  - [ ] streaming-friendly texture and geometry handling
+  - [ ] foliage / clutter / debris instancing patterns
+  - [ ] realistic camera and post controls
+  - [ ] stable temporal accumulation under noisy/high-frequency content
+- [ ] Build a reference scene specifically aimed at realistic output rather than abstract demos
 
-## Phase 16 — Effect Asset Model
+---
+
+## P5 — Render Graph Depth, Backend Maturity, And Live Migration
+
+This work matters, but it should serve the product tracks instead of replacing them.
+
+### Render graph scheduling depth
+
+- [ ] Detect graph operations that can run in parallel because their image subresources, buffer ranges, queues, and pipeline resources do not conflict
+- [ ] Compile parallel-ready passes into record batches grouped by queue and dependency level
+- [ ] Define how graphics, compute, and transfer queues synchronize when graph passes cross queue families
+
+### Procedural and generated resource breadth
+
+- [ ] Make generated textures compatible with uploaded texture usage sites where format/usage allows it
+- [ ] Add testbed examples for:
+  - [ ] static procedural checker/noise texture
+  - [ ] animated procedural texture
+  - [ ] GPU-generated texture feeding a later graph pass
+
+### Effect asset model
 
 - [ ] Define a small effect asset format that can reference:
   - [ ] Slang shader files and entry points
@@ -496,136 +437,48 @@ fn render(frame: &mut RenderFrame) -> Result<()> {
   - [ ] procedural texture recipes
   - [ ] mip policies
   - [ ] instancing inputs
-- [ ] Add stable debug names for all generated resources and passes.
-- [ ] Keep the Rust API and asset format backed by the same engine primitives.
+- [ ] Add stable debug names for all generated resources and passes
+- [ ] Keep the Rust API and asset format backed by the same engine primitives
 
-## Phase 17 — Backend and Capability Work
+### Backend and capability work
 
-- [ ] Ensure image usage flags, format capabilities, and sampler capabilities
-  are checked before enabling procedural, mip, and storage-image paths.
-- [ ] Add backend support for selected mip/layer image views where needed.
-- [ ] Add backend support for copy/blit/compute mip generation paths.
-- [ ] Add backend support for reflected bind group updates that can handle
-  generated images, sampled images, samplers, storage images, uniform buffers,
-  storage buffers, and push constants.
-- [ ] Keep Vulkan as the reference backend while preserving D3D12 and Metal
-  layout constraints in the public model.
+- [ ] Ensure image usage flags, format capabilities, and sampler capabilities are checked before enabling procedural, mip, and storage-image paths
+- [ ] Add backend support for selected mip/layer image views where needed
+- [ ] Add backend support for copy/blit/compute mip generation paths
+- [ ] Add backend support for reflected bind group updates that can handle generated images, sampled images, samplers, storage images, uniform buffers, storage buffers, and push constants
+- [ ] Keep Vulkan as the reference backend while preserving D3D12 and Metal layout constraints in the public model
 
-## Reference Milestone
+### Live backend/device migration
 
-- [ ] Build a new testbed scene that demonstrates the technical target:
-  a reflected shader graph renders a scene into HDR color, generates a
-  procedural animated texture, uses mips for bloom, draws instanced elements,
-  composites the result, and presents it.
+- [ ] Add runtime GPU switching
+- [ ] Add live backend switching without application restart
+- [ ] Add logical resource migration/rebuild support across runtime switching
+- [ ] Add a policy for preserving runtime settings, surface state, and app-facing resources across live migration
+- [ ] Add validation and diagnostics for runtime feature downgrades when the new backend/device cannot match the old configuration
 
 ---
 
-## Phase 18 — Application Shell & Frame Ergonomics
+## Reference Milestones
 
-The testbed exposes several categories of boilerplate that a user application
-should not have to write. Every application today requires ~80 lines of winit
-scaffolding, a `NativeSurfaceDesc` extraction helper, a multi-call frame
-submission sequence, per-struct unsafe `bytemuck` impls, and a repeated
-`ImageBuilder` pattern for swapchain-sized FP16 images. This phase eliminates
-each of those in turn.
+### Milestone A — Worth Using For Quick Work
 
-### 18.1 — Application Shell (winit integration)
+- [ ] Open a window and produce a useful plot or debug view in a short, low-boilerplate sample
+- [ ] Open a shader playground with hot reload and built-in diagnostics
+- [ ] Toggle HDR, AA, transparency, and debug views at runtime without app restart
 
-The `App` struct and its `ApplicationHandler` impl are identical in every winit
-application using this engine. The engine should own that loop.
+### Milestone B — Worth Using For App UI
 
-- [x] Add an `EngineApp` trait with the minimum surface an application must
-  implement:
-  - `fn init(engine: &Engine, surface: &Surface) -> Result<Self>`
-  - `fn render(&mut self, frame: RenderFrame, surface_image: &SurfaceImage) -> Result<()>`
-  - `fn resize(&mut self, width: u32, height: u32) -> Result<()>`
-- [x] Add `sturdy_engine::run(title, width, height, impl EngineApp)` that
-  creates the event loop, creates the window, drives the winit `ApplicationHandler`
-  lifecycle, and calls the trait methods at the right moments.
-- [x] Handle close, resize, and redraw internally so user code never imports
-  winit directly for standard use cases.
-- [x] Surface creation from a winit `Window` should live inside the shell, not
-  require a `native_surface_desc` helper in user code.
-- [x] Provide a `WindowConfig` builder for title, size, resizability, and HDR
-  preference so callers can configure the shell without touching winit types.
+- [ ] Build a multi-panel tool app with editable text, scrolling, focus, and first-party widgets
+- [ ] Enable blur/transparency/material effects for the app window at runtime
+- [ ] Style parts of that UI with custom shaders and offscreen composition
 
-Target: the entire `App` + `ApplicationHandler` impl (currently ~80 lines) is
-replaced by implementing `EngineApp` and calling `sturdy_engine::run(...)`.
+### Milestone C — Worth Using For Games
 
-### 18.2 — Engine Surface Convenience
+- [ ] Build one small 2D game and one small 3D game without rebuilding the runtime shell
+- [ ] Switch graphics settings, post, HDR, and presentation policy live during gameplay
+- [ ] Build one realistic reference scene that stresses motion vectors, temporal stability, post, dense content, and translucent surfaces
 
-Even outside the full shell, extracting a `NativeSurfaceDesc` from a winit
-`Window` currently takes 19 lines of handle extraction and error mapping.
+### Milestone D — Worth Taking Seriously For High-End Rendering
 
-- [x] Add `Engine::create_surface_for_window(window: &impl HasWindowHandle + HasDisplayHandle)`
-  that handles handle extraction, `.as_raw()`, error mapping, and size clamping
-  internally, returning a `Surface`.
-- [x] Guard the new method behind the same `#[cfg(not(target_arch = "wasm32"))]`
-  gate already used for `NativeSurfaceDesc`.
-
-Target: `native_surface_desc` helper disappears; `Renderer::new` becomes one line.
-
-### 18.3 — Single-Call Frame Submission
-
-Every render function ends with the same three-call sequence:
-`frame.flush()`, `frame.wait()`, `self.surface.present()`. These always appear
-together and failing to call any of them is a bug.
-
-- [x] Add `RenderFrame::finish_and_present(surface: &Surface)` that calls
-  `flush()`, `wait()`, and `surface.present()` in sequence, returning the first
-  error if any step fails.
-- [x] Deprecate the separate `flush` + `wait` + `surface.present` pattern for
-  the standard swapchain submission path; keep it available for advanced
-  split-frame use cases.
-
-Target: the last three lines of every `render()` collapse to one.
-
-### 18.4 — Swapchain-Sized Image Helpers
-
-Creating an FP16 intermediate buffer sized to match the swapchain currently
-requires four lines of `ImageBuilder` ceremony. This pattern repeats for every
-HDR intermediate in a frame.
-
-- [x] Add `RenderFrame::hdr_color_image(name)` that creates a `Rgba16Float`
-  color attachment sized to the current swapchain image, equivalent to the
-  `ImageBuilder::new_2d(Format::Rgba16Float, w, h).role(ColorAttachment).build()`
-  + `frame.image(name, desc)` pair.
-- [x] Add `RenderFrame::hdr_image_sized_to(name, format, surface_image)` for
-  callers that need a different format or explicit sizing source.
-- [x] Add `ImageDesc::hdr_color(width, height)` as the low-level analogue
-  for users who build their own descriptors.
-
-Target: the `ImageBuilder` block in `render()` collapses to one line.
-
-### 18.5 — Push Constant Derive Macro
-
-Every push constant struct requires five lines of ceremony: `#[repr(C)]`,
-`#[derive(Copy, Clone)]`, and two `unsafe impl bytemuck::*` blocks. A proc macro
-eliminates this.
-
-- [x] Add a `push_constants` attribute macro (in `sturdy-engine-macros`) that
-  emits `#[repr(C)]`, `Copy`, `Clone`, `bytemuck::Pod`, and `bytemuck::Zeroable`
-  from a single `#[push_constants]` attribute.
-- [x] Re-export the macro from `sturdy_engine` so users import it from one place.
-- [x] Apply `#[push_constants]` to the engine's own push constant structs
-  (`BrightPassConstants`, `DownsampleConstants`, `UpsampleConstants`,
-  `BloomCompositeConstants`) and remove the hand-written impls.
-
-Target: 5 lines of per-struct ceremony become 1 derive attribute.
-
-### 18.6 — Stage Mask Inference
-
-`execute_shader_with_constants` and `execute_shader_with_push_constants` require
-the caller to pass `StageMask::FRAGMENT` even though the `ShaderProgram` already
-carries stage information from Slang reflection.
-
-- [x] Add `GraphImage::execute_shader_with_constants_auto<T: bytemuck::Pod>` (or
-  rename the existing method) that reads the stage mask from the shader's
-  reflected stage instead of requiring the caller to supply it.
-- [x] Fall back to `FRAGMENT` for programs whose reflection does not expose a
-  stage, matching current behaviour.
-- [x] Keep the explicit-stage variants for callers that need to override the
-  inferred stage (e.g. a compute-capable pass driven through a fragment entry
-  point for compatibility reasons).
-
-Target: `StageMask::FRAGMENT` disappears from standard fullscreen pass call sites.
+- [ ] Build a reference scene where the engine’s output is evaluated against the goal of plausibly real-looking realtime footage
+- [ ] Use that scene to drive the next realism-focused rendering priorities instead of guessing from architecture alone

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/sturdy-engine-core",
+    "crates/sturdy-engine-platform",
     "crates/sturdy-engine-ffi",
     "crates/sturdy-engine",
     "crates/sturdy-engine-testbed",
