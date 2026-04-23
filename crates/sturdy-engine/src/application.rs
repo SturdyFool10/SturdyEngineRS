@@ -52,7 +52,10 @@ use std::time::Instant;
 
 use sturdy_engine_core::SurfaceSize;
 
-use crate::{Engine, Result as EngineResult, Surface, SurfaceHdrPreference, SurfaceImage};
+use crate::{
+    AppRuntime, DefaultSceneTargetConfig, Engine, GraphImage, Result as EngineResult, Surface,
+    SurfaceHdrPreference, SurfaceImage,
+};
 
 /// Configuration for the application shell window.
 #[derive(Clone, Debug)]
@@ -174,13 +177,19 @@ pub struct ShellFrame<'a> {
     inner: crate::RenderFrame,
     #[allow(dead_code)]
     surface_image: &'a SurfaceImage,
+    default_scene_target: DefaultSceneTargetConfig,
 }
 
 impl<'a> ShellFrame<'a> {
-    pub(crate) fn new(inner: crate::RenderFrame, surface_image: &'a SurfaceImage) -> Self {
+    pub(crate) fn new(
+        inner: crate::RenderFrame,
+        surface_image: &'a SurfaceImage,
+        default_scene_target: DefaultSceneTargetConfig,
+    ) -> Self {
         Self {
             inner,
             surface_image,
+            default_scene_target,
         }
     }
 
@@ -192,6 +201,16 @@ impl<'a> ShellFrame<'a> {
     /// Get the underlying frame mutably.
     pub fn inner_mut(&mut self) -> &mut crate::RenderFrame {
         &mut self.inner
+    }
+
+    /// Create the runtime-owned default HDR scene target for this frame.
+    pub fn default_hdr_scene_target(
+        &self,
+        name: impl Into<String>,
+        requested_msaa_samples: u8,
+    ) -> EngineResult<GraphImage> {
+        self.default_scene_target
+            .create(&self.inner, name, requested_msaa_samples)
     }
 
     /// Finish rendering and present to the surface.
@@ -274,12 +293,13 @@ where
         }
     };
 
+    let runtime = AppRuntime::new(engine, surface);
+
     // Run event loop
     event_loop
         .run_app(&mut ShellApp {
-            engine,
+            runtime,
             window: Some(window),
-            surface,
             app_state,
             started_at: Instant::now(),
             _config: config,
@@ -290,9 +310,8 @@ where
 // Internal winit ApplicationHandler implementation
 #[cfg(not(target_arch = "wasm32"))]
 struct ShellApp<App: EngineApp> {
-    engine: Engine,
+    runtime: AppRuntime,
     window: Option<winit::window::Window>,
-    surface: Surface,
     app_state: App,
     #[allow(dead_code)]
     started_at: Instant,
@@ -327,7 +346,7 @@ where
                         eprintln!("resize failed: {e:?}");
                         std::process::exit(1);
                     }
-                    if let Err(e) = self.surface.resize(SurfaceSize {
+                    if let Err(e) = self.runtime.surface_mut().resize(SurfaceSize {
                         width: size.width.max(1),
                         height: size.height.max(1),
                     }) {
@@ -343,7 +362,10 @@ where
                 use winit::keyboard::Key;
                 if event.state == ElementState::Pressed {
                     if let Key::Character(s) = &event.logical_key {
-                        if let Err(e) = self.app_state.key_pressed(s.as_str(), &mut self.surface) {
+                        if let Err(e) = self
+                            .app_state
+                            .key_pressed(s.as_str(), self.runtime.surface_mut())
+                        {
                             eprintln!("key handler failed: {e:?}");
                             std::process::exit(1);
                         }
@@ -351,32 +373,26 @@ where
                 }
             }
             winit::event::WindowEvent::RedrawRequested => {
-                let surface_image = match self.surface.acquire_image() {
-                    Ok(img) => img,
+                let mut runtime_frame = match self.runtime.acquire_frame() {
+                    Ok(frame) => frame,
                     Err(e) => {
-                        eprintln!("failed to acquire surface image: {e:?}");
+                        eprintln!("failed to acquire runtime frame: {e:?}");
                         std::process::exit(1);
                     }
                 };
 
-                let frame = self.engine.begin_render_frame_for(&surface_image);
-                let frame = match frame {
-                    Ok(f) => f,
-                    Err(e) => {
-                        eprintln!("failed to begin render frame: {e:?}");
-                        std::process::exit(1);
-                    }
-                };
+                let mut render_frame = runtime_frame.shell_frame();
 
-                let mut render_frame = ShellFrame::new(frame, &surface_image);
-
-                if let Err(e) = self.app_state.render(&mut render_frame, &surface_image) {
+                if let Err(e) = self
+                    .app_state
+                    .render(&mut render_frame, runtime_frame.surface_image())
+                {
                     eprintln!("render failed: {e:?}");
                     std::process::exit(1);
                 }
 
                 // Present
-                if let Err(e) = render_frame.finish_and_present(&self.surface) {
+                if let Err(e) = runtime_frame.finish_and_present() {
                     eprintln!("present failed: {e:?}");
                     std::process::exit(1);
                 }

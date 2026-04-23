@@ -59,9 +59,10 @@ pub use procedural_texture::{
 };
 pub use quad_batch::QuadBatch;
 pub use runtime::{
-    AppLayer, AppRuntime, RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult,
-    RuntimeController, RuntimeDiagnostics, RuntimeSettingKey, RuntimeSettingsSnapshot,
-    RuntimeSettingsTransaction, SceneRenderContext, UiContext,
+    AppLayer, AppRuntime, AppRuntimeFrame, DefaultSceneTargetConfig, RuntimeApplyPath,
+    RuntimeApplyReport, RuntimeChangeResult, RuntimeController, RuntimeDiagnostics,
+    RuntimeSettingKey, RuntimeSettingsSnapshot, RuntimeSettingsTransaction, SceneRenderContext,
+    UiContext,
 };
 pub use sampler_catalog::SamplerPreset;
 pub use text_draw::{

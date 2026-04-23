@@ -107,8 +107,8 @@ prompt. Each chunk should end with code, tests or validation, and roadmap
 checkbox updates.
 
 - [x] `P0.1` Define the first public `AppRuntime` surface and create the minimal type/module skeleton without changing behavior yet
-- [ ] `P0.2` Move swapchain acquire/present ownership behind `AppRuntime` while keeping the existing testbed render path working
-- [ ] `P0.3` Move default HDR scene target allocation/selection behind `AppRuntime`
+- [x] `P0.2` Move swapchain acquire/present ownership behind `AppRuntime` while keeping the existing testbed render path working
+- [x] `P0.3` Move default HDR scene target allocation/selection behind `AppRuntime`
 - [ ] `P0.4` Move MSAA target allocation and resolve behind `AppRuntime`
 - [ ] `P0.5` Move bloom, AA, and tonemap chain assembly behind `AppRuntime`
 - [ ] `P0.6` Add a named debug image registry owned by the runtime instead of the testbed

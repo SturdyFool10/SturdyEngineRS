@@ -379,18 +379,13 @@ impl EngineApp for Testbed {
         frame: &mut ShellFrame<'_>,
         surface_image: &SurfaceImage,
     ) -> EngineResult<()> {
-        let frame = frame.inner();
         let elapsed = self.started_at.elapsed().as_secs_f32();
         let ext = surface_image.desc().extent;
 
         // Register swapchain first — required so hdr_color_image can read the extent.
-        let swapchain = frame.swapchain_image(surface_image)?;
-        let msaa_samples = self.actual_msaa_samples();
-        let scene_target = if msaa_samples > 1 {
-            frame.hdr_color_image_with_samples("scene_color_msaa", msaa_samples)?
-        } else {
-            frame.hdr_color_image("scene_color")?
-        };
+        let swapchain = frame.inner().swapchain_image(surface_image)?;
+        let scene_target = frame.default_hdr_scene_target("scene_color", self.actual_msaa_samples())?;
+        let frame = frame.inner();
 
         // GPU procedural LUT: the generator shader runs on the GPU every frame.
         // The scene shader reads "color_lut" and will be scheduled after this pass.
