@@ -1,0 +1,11 @@
+[package]
+name = "clay-ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+colorlab = { path = "../colorlab" }
+glam.workspace = true
+sturdy-engine-core = { path = "../sturdy-engine-core" }
+textui = { path = "../textui" }
+fontdb = { version = "0.23.0", default-features = false, features = ["fs", "memmap"] }

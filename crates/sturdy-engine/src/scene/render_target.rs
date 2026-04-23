@@ -12,6 +12,7 @@ pub struct RenderTarget {
     name: String,
     width: u32,
     height: u32,
+    samples: u8,
 }
 
 impl RenderTarget {
@@ -26,13 +27,25 @@ impl RenderTarget {
         height: u32,
         format: Format,
     ) -> Result<Self> {
+        Self::with_samples(engine, name, width, height, format, 1)
+    }
+
+    pub fn with_samples(
+        engine: &Engine,
+        name: impl Into<String>,
+        width: u32,
+        height: u32,
+        format: Format,
+        samples: u8,
+    ) -> Result<Self> {
         let name = name.into();
+        let samples = samples.clamp(1, engine.caps().max_color_sample_count.max(1)).min(16);
         let desc = ImageDesc {
             dimension: ImageDimension::D2,
             extent: Extent3d { width, height, depth: 1 },
             mip_levels: 1,
             layers: 1,
-            samples: 1,
+            samples,
             format,
             usage: ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET,
             transient: false,
@@ -41,7 +54,7 @@ impl RenderTarget {
         };
         let image = engine.create_image(desc)?;
         let _ = image.set_debug_name(&format!("render-target-{name}"));
-        Ok(Self { image, name, width, height })
+        Ok(Self { image, name, width, height, samples })
     }
 
     /// Register this target as a writable frame image and return it.
@@ -67,5 +80,9 @@ impl RenderTarget {
 
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    pub fn samples(&self) -> u8 {
+        self.samples
     }
 }

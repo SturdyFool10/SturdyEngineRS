@@ -9,6 +9,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+mod anti_aliasing_pass;
+mod antialiasing;
 mod application;
 mod bind_group;
 mod bloom_pass;
@@ -29,9 +31,14 @@ mod sampler_catalog;
 mod tests;
 mod text_draw;
 mod text_engine;
+mod text_tiling;
 mod texture;
 mod upload_arena;
 
+pub use anti_aliasing_pass::{AntiAliasingPass, taa_jitter_uv, taa_jittered_projection};
+pub use antialiasing::{
+    AntiAliasingConfig, AntiAliasingDial, AntiAliasingMode, FxaaSettings, MsaaSettings, TaaSettings,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use application::{EngineApp, ShellFrame, WindowConfig, run};
 pub use bloom_pass::{
@@ -58,6 +65,7 @@ pub use text_draw::{
 pub use text_engine::{
     PreparedTextDraw, PreparedTextQuad, TextEngine, TextEngineFrame, TextUiRenderer,
 };
+pub use text_tiling::{TiledTextAtlasPage, TiledTextEngineFrame};
 
 pub use bind_group::BindGroupBuilder;
 pub use frontend_graph::{
@@ -82,13 +90,14 @@ pub use sturdy_engine_core::{
     ImageBuilder, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse, IndexBufferBinding,
     IndexFormat, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
     NativeHandleCapability, NativeHandleKind, NativeHandleOwnership, PassDesc, PassWork,
-    PrimitiveTopology, PushConstants, QueueType, RasterState, ResourceBinding, Result, RgState,
-    SamplerDesc, ShaderDesc, ShaderSource, ShaderStage, ShaderTarget, SlangCompileDesc, StageMask,
-    SubresourceRange, SurfaceColorSpace, SurfaceEvent, SurfaceHdrCaps, SurfaceHdrPreference,
-    SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc, UpdateRate, VertexAttributeDesc,
-    VertexBufferBinding, VertexBufferLayout, VertexFormat, VertexInputRate, VulkanExternalBuffer,
-    VulkanExternalImage, VulkanRawCapabilities, compile_slang, compile_slang_to_file,
-    compile_slang_to_spirv, native_handle_capabilities_for_backend, spirv_words_from_bytes,
+    PrimitiveTopology, PushConstants, QueueType, RasterState, ResolveImageDesc, ResourceBinding,
+    Result, RgState, SamplerDesc, ShaderDesc, ShaderSource, ShaderStage, ShaderTarget,
+    SlangCompileDesc, StageMask, SubresourceRange, SurfaceColorSpace, SurfaceEvent, SurfaceHdrCaps,
+    SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc, UpdateRate,
+    VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout, VertexFormat, VertexInputRate,
+    VulkanExternalBuffer, VulkanExternalImage, VulkanRawCapabilities, compile_slang,
+    compile_slang_to_file, compile_slang_to_spirv, native_handle_capabilities_for_backend,
+    spirv_words_from_bytes,
 };
 pub use sturdy_engine_core::{
     DeviceDesc, ImageHandle, SamplerHandle, SubmissionHandle, SurfaceHandle, SurfaceSize,

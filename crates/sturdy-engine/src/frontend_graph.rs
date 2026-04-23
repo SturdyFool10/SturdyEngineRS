@@ -7,8 +7,8 @@ use crate::{
     ColorTargetDesc, CullMode, DispatchDesc, DrawDesc, Engine, Error, Format, FrontFace,
     GraphicsPipelineDesc, ImageDesc, ImageHandle, ImageRef, IndexBufferBinding, PassDesc, PassWork,
     Pipeline, PipelineLayout, PrimitiveTopology, PushConstants, QueueType, RasterState,
-    ResourceBinding, Result, RgState, Shader, ShaderDesc, ShaderReflection, ShaderSource,
-    ShaderStage, StageMask, SubresourceRange, SurfaceImage, VertexAttributeDesc,
+    ResolveImageDesc, ResourceBinding, Result, RgState, Shader, ShaderDesc, ShaderReflection,
+    ShaderSource, ShaderStage, StageMask, SubresourceRange, SurfaceImage, VertexAttributeDesc,
     VertexBufferBinding, VertexBufferLayout, VertexFormat, VertexInputRate,
     compute_program::ComputeProgram, mesh::Mesh, mesh_program::MeshProgram,
     sampler_catalog::SamplerPreset,
@@ -105,6 +105,8 @@ impl From<ImageDesc> for GraphImageDescKey {
 pub enum PassKind {
     /// Fullscreen triangle pass driven by a fragment shader.
     Fullscreen,
+    /// Hardware image resolve pass.
+    Resolve,
     /// Compute dispatch pass.
     Compute,
     /// Mesh draw pass.
@@ -197,7 +199,7 @@ pub struct ShaderProgramDesc {
 
 pub struct ShaderProgram {
     engine: Engine,
-    pipelines: Mutex<HashMap<Format, Pipeline>>,
+    pipelines: Mutex<HashMap<(Format, u8), Pipeline>>,
     pub(crate) pipeline_layout: PipelineLayout,
     vertex: Shader,
     fragment: Shader,
@@ -357,12 +359,13 @@ impl ShaderProgram {
         }
     }
 
-    fn pipeline_handle(&self, format: Format) -> Result<core::PipelineHandle> {
+    fn pipeline_handle(&self, format: Format, samples: u8) -> Result<core::PipelineHandle> {
         let mut pipelines = self
             .pipelines
             .lock()
             .expect("shader program pipeline mutex poisoned");
-        if !pipelines.contains_key(&format) {
+        let key = (format, samples.max(1));
+        if !pipelines.contains_key(&key) {
             let pipeline = self.engine.create_graphics_pipeline(GraphicsPipelineDesc {
                 vertex_shader: self.vertex.handle(),
                 fragment_shader: Some(self.fragment.handle()),
@@ -388,6 +391,7 @@ impl ShaderProgram {
                 ],
                 color_targets: vec![ColorTargetDesc::opaque(format)],
                 depth_format: None,
+                samples: key.1,
                 topology: PrimitiveTopology::TriangleList,
                 raster: RasterState {
                     cull_mode: CullMode::None,
@@ -395,10 +399,10 @@ impl ShaderProgram {
                 },
             })?;
             pipeline.set_debug_name("reflected-fullscreen-program")?;
-            pipelines.insert(format, pipeline);
+            pipelines.insert(key, pipeline);
         }
         pipelines
-            .get(&format)
+            .get(&key)
             .map(Pipeline::handle)
             .ok_or_else(|| Error::Unknown("shader program pipeline cache miss".into()))
     }
@@ -959,6 +963,30 @@ impl RenderFrame {
         self.image(name, desc)
     }
 
+    /// Create a single-sample image with the same extent/format as `src`.
+    pub fn resolve_target_sized_to(
+        &self,
+        name: impl Into<String>,
+        src: &GraphImage,
+    ) -> Result<GraphImage> {
+        let src_desc = src.desc();
+        let desc = ImageDesc {
+            dimension: crate::ImageDimension::D2,
+            extent: src_desc.extent,
+            mip_levels: 1,
+            layers: src_desc.layers,
+            samples: 1,
+            format: src_desc.format,
+            usage: crate::ImageUsage::SAMPLED
+                | crate::ImageUsage::RENDER_TARGET
+                | crate::ImageUsage::COPY_DST,
+            transient: false,
+            clear_value: None,
+            debug_name: Some("resolve-target"),
+        };
+        self.image(name, desc)
+    }
+
     /// Create a graph image at a fraction of `src`'s dimensions, with the same format.
     ///
     /// `divisor` is clamped to at least 1. Each dimension is divided by `divisor`
@@ -1037,6 +1065,15 @@ impl RenderFrame {
     ///
     /// The image is sized to match the current swapchain image dimensions.
     pub fn hdr_color_image(&self, name: impl Into<String>) -> Result<GraphImage> {
+        self.hdr_color_image_with_samples(name, 1)
+    }
+
+    /// Create a swapchain-sized FP16 HDR color image for rendering with an explicit sample count.
+    pub fn hdr_color_image_with_samples(
+        &self,
+        name: impl Into<String>,
+        samples: u8,
+    ) -> Result<GraphImage> {
         let mut inner = self.inner.borrow_mut();
         let extent = inner.swapchain_extent;
         if extent.width == 0 && extent.height == 0 {
@@ -1050,9 +1087,13 @@ impl RenderFrame {
             extent,
             mip_levels: 1,
             layers: 1,
-            samples: 1,
+            samples: samples
+                .clamp(1, inner.engine.caps().max_color_sample_count.max(1))
+                .min(16),
             format: Format::Rgba16Float,
-            usage: crate::ImageUsage::SAMPLED | crate::ImageUsage::RENDER_TARGET,
+            usage: crate::ImageUsage::SAMPLED
+                | crate::ImageUsage::RENDER_TARGET
+                | crate::ImageUsage::COPY_SRC,
             transient: false,
             clear_value: None,
             debug_name: None,
@@ -1232,12 +1273,7 @@ impl GraphImage {
     /// a stage.  Keeps the explicit-stage variants for callers that need to
     /// override the inferred stage.
     pub fn execute_shader_auto(&self, shader: &ShaderProgram) -> Result<()> {
-        let stages = if shader.reflection().entry_points.is_empty() {
-            StageMask::FRAGMENT
-        } else {
-            shader.stage_mask()
-        };
-        self.execute_shader_with_push_constants(shader, stages, &[])
+        self.execute_shader(shader)
     }
 
     pub fn execute_shader_with_push_constants(
@@ -1304,7 +1340,7 @@ impl GraphImage {
             )
         })?;
 
-        let pipeline = shader.pipeline_handle(self.desc.format)?;
+        let pipeline = shader.pipeline_handle(self.desc.format, self.desc.samples)?;
         let read_names = reflected_image_reads(shader.reflection());
         let (eager_bindings, unresolved_read_names, eager_uses) =
             split_read_names(&read_names, &self.name, &inner.images_by_name);
@@ -1472,7 +1508,7 @@ impl GraphImage {
                 .graph_mut(|graph| graph.import_buffer(ib.handle(), ib.desc()))?;
         }
 
-        let pipeline = program.pipeline_handle(self.desc.format)?;
+        let pipeline = program.pipeline_handle(self.desc.format, self.desc.samples)?;
         let draw_count = if mesh.is_indexed() {
             mesh.index_count
         } else {
@@ -1623,6 +1659,103 @@ impl GraphImage {
         self.execute_shader_auto(passthrough)
     }
 
+    /// Resolve a multisampled image into this single-sample image.
+    pub fn resolve_from(&self, src: &GraphImage) -> Result<()> {
+        let src_desc = src.desc();
+        let dst_desc = self.desc();
+        if src_desc.samples <= 1 {
+            return Err(Error::InvalidInput(
+                "resolve source image must have more than one sample".into(),
+            ));
+        }
+        if dst_desc.samples != 1 {
+            return Err(Error::InvalidInput(
+                "resolve destination image must have exactly one sample".into(),
+            ));
+        }
+        if src_desc.format != dst_desc.format {
+            return Err(Error::InvalidInput(
+                "resolve source and destination formats must match".into(),
+            ));
+        }
+        let width = src_desc.extent.width.min(dst_desc.extent.width).max(1);
+        let height = src_desc.extent.height.min(dst_desc.extent.height).max(1);
+        let layer_count = u32::from(src_desc.layers.min(dst_desc.layers)).max(1);
+
+        let mut inner = self.frame.borrow_mut();
+        let declaration_index = inner.declaration_index;
+        inner.declaration_index = inner.declaration_index.saturating_add(1);
+        inner
+            .frame
+            .inner
+            .graph_mut(|graph| graph.import_image(src.handle(), src.desc()))?;
+        inner
+            .frame
+            .inner
+            .graph_mut(|graph| graph.import_image(self.handle, self.desc))?;
+
+        let src_use = crate::ImageUse {
+            image: src.handle(),
+            access: Access::Read,
+            state: RgState::CopySrc,
+            subresource: single_subresource(),
+        };
+        let dst_use = crate::ImageUse {
+            image: self.handle,
+            access: Access::Write,
+            state: RgState::CopyDst,
+            subresource: single_subresource(),
+        };
+        let pass_name = format!("{declaration_index:04}-resolve-{}", self.name);
+        inner.pass_records.push(PassRecord {
+            name: pass_name.clone(),
+            kind: PassKind::Resolve,
+            reads: vec![src_use],
+            writes: vec![dst_use],
+            deferred_read_names: Vec::new(),
+            skip_read_name: self.name.clone(),
+        });
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                name: pass_name,
+                queue: QueueType::Graphics,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                work: PassWork::ResolveImage(ResolveImageDesc {
+                    src: src.handle(),
+                    dst: self.handle,
+                    src_mip_level: 0,
+                    dst_mip_level: 0,
+                    src_base_layer: 0,
+                    dst_base_layer: 0,
+                    layer_count,
+                    width,
+                    height,
+                }),
+                reads: vec![src_use],
+                writes: vec![dst_use],
+                buffer_reads: Vec::new(),
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            },
+            deferred: None,
+        });
+        Ok(())
+    }
+
+    /// Return a single-sample image: resolves `self` when needed, otherwise clones it.
+    pub fn resolve_msaa(&self, frame: &RenderFrame, name: impl Into<String>) -> Result<GraphImage> {
+        if self.desc.samples <= 1 {
+            return Ok(self.clone());
+        }
+        let resolved = frame.resolve_target_sized_to(name, self)?;
+        resolved.resolve_from(self)?;
+        Ok(resolved)
+    }
+
     pub fn execute_compute(&self, program: &ComputeProgram, groups: [u32; 3]) -> Result<()> {
         self.execute_compute_inner(program, None, groups)
     }
@@ -1745,12 +1878,7 @@ impl GraphImageView {
     }
 
     pub fn execute_shader_auto(&self, shader: &ShaderProgram) -> Result<()> {
-        let stages = if shader.reflection().entry_points.is_empty() {
-            StageMask::FRAGMENT
-        } else {
-            shader.stage_mask()
-        };
-        self.execute_shader_with_push_constants(shader, stages, &[])
+        self.execute_shader(shader)
     }
 
     pub fn execute_shader_with_push_constants(

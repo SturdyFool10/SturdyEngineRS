@@ -299,7 +299,7 @@ impl PipelineRegistry {
             .front_face(vk_front_face(desc.raster.front_face))
             .line_width(1.0);
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            .rasterization_samples(vk_samples(desc.samples)?);
         let color_blend_attachments = desc
             .color_targets
             .iter()
@@ -431,7 +431,7 @@ fn create_render_pass(device: &Device, desc: &GraphicsPipelineDesc) -> Result<vk
         .map(|target| {
             Ok(vk::AttachmentDescription::default()
                 .format(vk_format(target.format)?)
-                .samples(vk::SampleCountFlags::TYPE_1)
+                .samples(vk_samples(desc.samples)?)
                 .load_op(match target.blend {
                     crate::BlendMode::Opaque => vk::AttachmentLoadOp::CLEAR,
                     crate::BlendMode::Alpha => vk::AttachmentLoadOp::LOAD,
@@ -460,6 +460,21 @@ fn create_render_pass(device: &Device, desc: &GraphicsPipelineDesc) -> Result<vk
         device
             .create_render_pass(&info, None)
             .map_err(|error| Error::Backend(format!("vkCreateRenderPass failed: {error:?}")))
+    }
+}
+
+fn vk_samples(samples: u8) -> Result<vk::SampleCountFlags> {
+    match samples {
+        1 => Ok(vk::SampleCountFlags::TYPE_1),
+        2 => Ok(vk::SampleCountFlags::TYPE_2),
+        4 => Ok(vk::SampleCountFlags::TYPE_4),
+        8 => Ok(vk::SampleCountFlags::TYPE_8),
+        16 => Ok(vk::SampleCountFlags::TYPE_16),
+        32 => Ok(vk::SampleCountFlags::TYPE_32),
+        64 => Ok(vk::SampleCountFlags::TYPE_64),
+        _ => Err(Error::InvalidInput(format!(
+            "unsupported Vulkan graphics sample count: {samples}"
+        ))),
     }
 }
 

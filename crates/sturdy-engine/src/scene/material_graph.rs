@@ -1051,9 +1051,7 @@ impl MaterialNode {
     /// Render this material node into the render frame.
     pub fn render(&self, frame: &RenderFrame) -> Result<()> {
         let mesh_program = self.material.create_mesh_program(frame.engine)?;
-        let constants = CameraConstants {
-            view_proj: [[1.0; 4]; 4],
-        };
+        let constants = CameraConstants::identity();
         frame.bind_buffer("instances", &self.instance_buffer)?;
         Ok(())
     }
@@ -1061,9 +1059,7 @@ impl MaterialNode {
     /// Render this material node into an explicit output image.
     pub fn render_to(&self, output: &GraphImage, frame: &RenderFrame) -> Result<()> {
         let mesh_program = self.material.create_mesh_program(frame.engine)?;
-        let constants = CameraConstants {
-            view_proj: [[1.0; 4]; 4],
-        };
+        let constants = CameraConstants::identity();
         frame.bind_buffer("instances", &self.instance_buffer)?;
         output.draw_mesh_instanced_with_push_constants(mesh_program, &self.instance_buffer, 1, &constants)?;
         Ok(())
@@ -1137,9 +1133,7 @@ impl RasterizedNode {
     /// Render this rasterized node into the render frame.
     pub fn render(&self, frame: &RenderFrame) -> Result<()> {
         let mesh_program = self.material.create_mesh_program(frame.engine)?;
-        let constants = CameraConstants {
-            view_proj: [[1.0; 4]; 4],
-        };
+        let constants = CameraConstants::identity();
         frame.bind_buffer("instances", &self.instance_buffer)?;
         Ok(())
     }
@@ -1147,9 +1141,7 @@ impl RasterizedNode {
     /// Render this rasterized node into an explicit output image.
     pub fn render_to(&self, output: &GraphImage, frame: &RenderFrame) -> Result<()> {
         let mesh_program = self.material.create_mesh_program(frame.engine)?;
-        let constants = CameraConstants {
-            view_proj: [[1.0; 4]; 4],
-        };
+        let constants = CameraConstants::identity();
         frame.bind_buffer("instances", &self.instance_buffer)?;
         output.draw_mesh_instanced_with_push_constants(mesh_program, &self.instance_buffer, 1, &constants)?;
         Ok(())
@@ -1223,9 +1215,7 @@ impl HybridNode {
     /// Render this hybrid node into the render frame.
     pub fn render(&self, frame: &RenderFrame) -> Result<()> {
         let mesh_program = self.material.create_mesh_program(frame.engine)?;
-        let constants = CameraConstants {
-            view_proj: [[1.0; 4]; 4],
-        };
+        let constants = CameraConstants::identity();
         frame.bind_buffer("instances", &self.instance_buffer)?;
         Ok(())
     }
@@ -1233,9 +1223,7 @@ impl HybridNode {
     /// Render this hybrid node into an explicit output image.
     pub fn render_to(&self, output: &GraphImage, frame: &RenderFrame) -> Result<()> {
         let mesh_program = self.material.create_mesh_program(frame.engine)?;
-        let constants = CameraConstants {
-            view_proj: [[1.0; 4]; 4],
-        };
+        let constants = CameraConstants::identity();
         frame.bind_buffer("instances", &self.instance_buffer)?;
         output.draw_mesh_instanced_with_push_constants(mesh_program, &self.instance_buffer, 1, &constants)?;
         Ok(())

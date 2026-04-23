@@ -55,6 +55,7 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         physical_device,
         vk::Format::R32G32B32A32_SFLOAT,
     );
+    let max_color_sample_count = max_sample_count(lim.framebuffer_color_sample_counts);
 
     let features = BackendFeatures {
         ray_tracing,
@@ -90,12 +91,31 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         supports_raytracing: ray_tracing,
         supports_mesh_shading: mesh_shading,
         supports_bindless: bindless,
+        max_color_sample_count,
         max_mip_levels,
         max_frames_in_flight: 2,
         features,
         limits,
         raw_extension_names,
         raw_feature_names: available_feature_names(instance, physical_device),
+    }
+}
+
+fn max_sample_count(flags: vk::SampleCountFlags) -> u8 {
+    if flags.contains(vk::SampleCountFlags::TYPE_64) {
+        64
+    } else if flags.contains(vk::SampleCountFlags::TYPE_32) {
+        32
+    } else if flags.contains(vk::SampleCountFlags::TYPE_16) {
+        16
+    } else if flags.contains(vk::SampleCountFlags::TYPE_8) {
+        8
+    } else if flags.contains(vk::SampleCountFlags::TYPE_4) {
+        4
+    } else if flags.contains(vk::SampleCountFlags::TYPE_2) {
+        2
+    } else {
+        1
     }
 }
 

@@ -35,7 +35,7 @@ pub enum MeshVertexKind {
 
 pub struct MeshProgram {
     pub(crate) engine: Engine,
-    pub(crate) pipelines: Mutex<HashMap<Format, Pipeline>>,
+    pub(crate) pipelines: Mutex<HashMap<(Format, u8), Pipeline>>,
     pub(crate) pipeline_layout: PipelineLayout,
     pub(crate) vertex: Shader,
     pub(crate) fragment: Shader,
@@ -140,12 +140,17 @@ impl MeshProgram {
         &self.reflection
     }
 
-    pub(crate) fn pipeline_handle(&self, format: Format) -> Result<core::PipelineHandle> {
+    pub(crate) fn pipeline_handle(
+        &self,
+        format: Format,
+        samples: u8,
+    ) -> Result<core::PipelineHandle> {
         let mut pipelines = self
             .pipelines
             .lock()
             .expect("mesh program pipeline mutex poisoned");
-        if !pipelines.contains_key(&format) {
+        let key = (format, samples.max(1));
+        if !pipelines.contains_key(&key) {
             let (vertex_stride, attributes) = match self.vertex_kind {
                 MeshVertexKind::V2d => (
                     std::mem::size_of::<Vertex2d>() as u32,
@@ -172,6 +177,7 @@ impl MeshProgram {
                     ColorTargetDesc::opaque(format)
                 }],
                 depth_format: None,
+                samples: key.1,
                 topology: PrimitiveTopology::TriangleList,
                 raster: RasterState {
                     cull_mode: CullMode::None,
@@ -179,10 +185,10 @@ impl MeshProgram {
                 },
             })?;
             pipeline.set_debug_name("mesh-program")?;
-            pipelines.insert(format, pipeline);
+            pipelines.insert(key, pipeline);
         }
         pipelines
-            .get(&format)
+            .get(&key)
             .map(Pipeline::handle)
             .ok_or_else(|| Error::Unknown("mesh program pipeline cache miss".into()))
     }

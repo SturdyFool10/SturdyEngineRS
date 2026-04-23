@@ -67,6 +67,12 @@ fn creates_sampled_image_and_sampler_bind_group() {
 }
 
 #[test]
+fn anti_aliasing_pass_constructs_builtin_shader() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    AntiAliasingPass::new(&engine).unwrap();
+}
+
+#[test]
 fn engine_exposes_native_handle_capabilities() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     let capabilities = engine.native_handle_capabilities();

@@ -427,6 +427,36 @@ impl CommandContext {
                         })],
                 );
             },
+            PassWork::ResolveImage(resolve) => unsafe {
+                let src_desc = resources.image_desc(resolve.src)?;
+                device.cmd_resolve_image(
+                    command_buffer,
+                    resources.image(resolve.src)?,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    resources.image(resolve.dst)?,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[vk::ImageResolve::default()
+                        .src_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: image_aspect_mask(src_desc.format),
+                            mip_level: resolve.src_mip_level,
+                            base_array_layer: resolve.src_base_layer,
+                            layer_count: resolve.layer_count,
+                        })
+                        .src_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                        .dst_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: image_aspect_mask(src_desc.format),
+                            mip_level: resolve.dst_mip_level,
+                            base_array_layer: resolve.dst_base_layer,
+                            layer_count: resolve.layer_count,
+                        })
+                        .dst_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                        .extent(vk::Extent3D {
+                            width: resolve.width,
+                            height: resolve.height,
+                            depth: 1,
+                        })],
+                );
+            },
         }
         Ok(())
     }

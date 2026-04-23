@@ -222,6 +222,11 @@ impl Device {
     pub fn create_image(&self, desc: ImageDesc) -> Result<ImageHandle> {
         desc.validate()?;
         let mut inner = self.inner.lock().expect("device mutex poisoned");
+        validate_sample_count(
+            desc.samples,
+            inner.backend.caps().max_color_sample_count,
+            "image",
+        )?;
         let handle = ImageHandle(inner.image_handles.alloc());
         inner.backend.create_image(handle, desc)?;
         if let Some(name) = desc.debug_name {
@@ -264,6 +269,11 @@ impl Device {
         };
         desc.validate()?;
         let mut inner = self.inner.lock().expect("device mutex poisoned");
+        validate_sample_count(
+            desc.samples,
+            inner.backend.caps().max_color_sample_count,
+            "transient image",
+        )?;
         let handle = ImageHandle(inner.image_handles.alloc());
         inner.backend.create_transient_image(handle, desc)?;
         if let Some(name) = desc.debug_name {
@@ -520,6 +530,11 @@ impl Device {
             ));
         }
         let mut inner = self.inner.lock().expect("device mutex poisoned");
+        validate_sample_count(
+            desc.samples,
+            inner.backend.caps().max_color_sample_count,
+            "graphics pipeline",
+        )?;
         if !inner.shaders.contains_key(&desc.vertex_shader)
             || desc
                 .fragment_shader
@@ -931,6 +946,21 @@ fn merge_shader_reflections(
     }
 }
 
+fn validate_sample_count(samples: u8, max_supported: u8, label: &str) -> Result<()> {
+    if !matches!(samples, 1 | 2 | 4 | 8 | 16) {
+        return Err(Error::InvalidInput(format!(
+            "{label} sample count must be one of 1, 2, 4, 8, or 16"
+        )));
+    }
+    let max_supported = max_supported.max(1).min(16);
+    if samples > max_supported {
+        return Err(Error::InvalidInput(format!(
+            "{label} sample count {samples} exceeds device max color sample count {max_supported}"
+        )));
+    }
+    Ok(())
+}
+
 fn queue_surface_events(events: &mut Vec<SurfaceEvent>, old: SurfaceInfo, new: SurfaceInfo) {
     if old.size != new.size {
         events.push(SurfaceEvent::Resized {
@@ -1149,5 +1179,17 @@ mod tests {
                 new: info
             }]
         );
+    }
+
+    #[test]
+    fn sample_count_validation_rejects_non_msaa_counts_and_device_overflow() {
+        assert!(validate_sample_count(4, 8, "test image").is_ok());
+        assert!(validate_sample_count(16, 16, "test image").is_ok());
+
+        let invalid = validate_sample_count(3, 16, "test image").unwrap_err();
+        assert!(format!("{invalid}").contains("1, 2, 4, 8, or 16"));
+
+        let unsupported = validate_sample_count(8, 4, "test image").unwrap_err();
+        assert!(format!("{unsupported}").contains("exceeds device max color sample count 4"));
     }
 }

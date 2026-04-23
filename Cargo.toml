@@ -6,6 +6,8 @@ members = [
     "crates/sturdy-engine-testbed",
     "crates/sturdy-engine-macros",
     "crates/textui",
+    "crates/clay-ui",
+    "crates/colorlab",
 ]
 resolver = "3"
 
@@ -17,6 +19,9 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 cosmic-text = "0.18"
+glam = { version = "0.29", features = ["bytemuck"] }
+winit = "0.30"
+serde = { version = "1", features = ["derive"] }
 
 # Keep engine crates optimized even when building debug/test profiles. This is
 # useful for GPU-facing code paths where debug codegen can distort timings and

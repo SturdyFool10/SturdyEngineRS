@@ -12,7 +12,7 @@ use sturdy_engine_core::Extent3d;
 ///
 /// # Typical usage
 ///
-/// ```rust
+/// ```rust,ignore
 /// // At init time:
 /// let lut_program = engine.load_shader("color_lut_gen.slang")?;
 /// let color_lut = GpuProceduralTexture::new(&engine, "color_lut", 256, 1, Format::Rgba8Unorm, lut_program)?;

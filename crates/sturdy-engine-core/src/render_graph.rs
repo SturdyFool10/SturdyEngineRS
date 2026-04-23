@@ -219,6 +219,19 @@ pub struct CopyBufferToImageDesc {
     pub depth: u32,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ResolveImageDesc {
+    pub src: ImageHandle,
+    pub dst: ImageHandle,
+    pub src_mip_level: u32,
+    pub dst_mip_level: u32,
+    pub src_base_layer: u32,
+    pub dst_base_layer: u32,
+    pub layer_count: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum PassWork {
     #[default]
@@ -227,6 +240,7 @@ pub enum PassWork {
     Draw(DrawDesc),
     CopyImageToBuffer(CopyImageToBufferDesc),
     CopyBufferToImage(CopyBufferToImageDesc),
+    ResolveImage(ResolveImageDesc),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -453,6 +467,9 @@ impl RenderGraph {
         if let PassWork::CopyBufferToImage(copy) = pass.work {
             self.validate_copy_buffer_to_image(copy)?;
         }
+        if let PassWork::ResolveImage(resolve) = pass.work {
+            self.validate_resolve_image(resolve)?;
+        }
         self.passes.push(pass);
         Ok(())
     }
@@ -532,6 +549,62 @@ impl RenderGraph {
             copy.height,
             copy.depth,
             copy.layer_count,
+        )
+    }
+
+    fn validate_resolve_image(&self, resolve: ResolveImageDesc) -> Result<()> {
+        if resolve.width == 0 || resolve.height == 0 || resolve.layer_count == 0 {
+            return Err(Error::InvalidInput(
+                "resolve width, height, and layer_count must be non-zero".into(),
+            ));
+        }
+        let src = self
+            .images
+            .iter()
+            .find(|image| image.handle == resolve.src)
+            .ok_or(Error::InvalidHandle)?;
+        let dst = self
+            .images
+            .iter()
+            .find(|image| image.handle == resolve.dst)
+            .ok_or(Error::InvalidHandle)?;
+        if src.desc.samples <= 1 {
+            return Err(Error::InvalidInput(
+                "resolve source image must have more than one sample".into(),
+            ));
+        }
+        if dst.desc.samples != 1 {
+            return Err(Error::InvalidInput(
+                "resolve destination image must have exactly one sample".into(),
+            ));
+        }
+        if src.desc.format != dst.desc.format {
+            return Err(Error::InvalidInput(
+                "resolve source and destination formats must match".into(),
+            ));
+        }
+        if src.desc.extent.depth != 1 || dst.desc.extent.depth != 1 {
+            return Err(Error::InvalidInput(
+                "resolve currently supports 2D images only".into(),
+            ));
+        }
+        validate_copy_fits_image(
+            src.desc,
+            resolve.src_mip_level,
+            resolve.src_base_layer,
+            resolve.layer_count,
+            resolve.width,
+            resolve.height,
+            1,
+        )?;
+        validate_copy_fits_image(
+            dst.desc,
+            resolve.dst_mip_level,
+            resolve.dst_base_layer,
+            resolve.layer_count,
+            resolve.width,
+            resolve.height,
+            1,
         )
     }
 
@@ -1029,6 +1102,126 @@ mod tests {
             first_use: u32::MAX,
             last_use: 0,
         });
+    }
+
+    #[test]
+    fn resolve_image_pass_validates_msaa_source_and_single_sample_destination() {
+        let src = ImageHandle(1);
+        let dst = ImageHandle(2);
+        let mut graph = RenderGraph::new();
+        graph
+            .import_image(
+                src,
+                ImageDesc {
+                    samples: 4,
+                    usage: ImageUsage::COPY_SRC | ImageUsage::RENDER_TARGET,
+                    ..image_desc()
+                },
+            )
+            .unwrap();
+        graph
+            .import_image(
+                dst,
+                ImageDesc {
+                    samples: 1,
+                    usage: ImageUsage::COPY_DST | ImageUsage::SAMPLED,
+                    ..image_desc()
+                },
+            )
+            .unwrap();
+
+        graph
+            .add_pass(PassDesc {
+                name: "resolve-msaa".into(),
+                queue: QueueType::Transfer,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                work: PassWork::ResolveImage(ResolveImageDesc {
+                    src,
+                    dst,
+                    src_mip_level: 0,
+                    dst_mip_level: 0,
+                    src_base_layer: 0,
+                    dst_base_layer: 0,
+                    layer_count: 1,
+                    width: 4,
+                    height: 4,
+                }),
+                reads: vec![ImageUse {
+                    image: src,
+                    access: Access::Read,
+                    state: RgState::CopySrc,
+                    subresource: SubresourceRange::WHOLE,
+                }],
+                writes: vec![ImageUse {
+                    image: dst,
+                    access: Access::Write,
+                    state: RgState::CopyDst,
+                    subresource: SubresourceRange::WHOLE,
+                }],
+                buffer_reads: Vec::new(),
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            })
+            .unwrap();
+
+        let compiled = graph.compile().unwrap();
+        assert_eq!(
+            compiled.passes[0].work,
+            PassWork::ResolveImage(ResolveImageDesc {
+                src,
+                dst,
+                src_mip_level: 0,
+                dst_mip_level: 0,
+                src_base_layer: 0,
+                dst_base_layer: 0,
+                layer_count: 1,
+                width: 4,
+                height: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_image_pass_rejects_single_sample_source() {
+        let src = ImageHandle(1);
+        let dst = ImageHandle(2);
+        let mut graph = RenderGraph::new();
+        graph.import_image(src, image_desc()).unwrap();
+        graph.import_image(dst, image_desc()).unwrap();
+
+        let err = graph
+            .add_pass(PassDesc {
+                name: "bad-resolve".into(),
+                queue: QueueType::Transfer,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                work: PassWork::ResolveImage(ResolveImageDesc {
+                    src,
+                    dst,
+                    src_mip_level: 0,
+                    dst_mip_level: 0,
+                    src_base_layer: 0,
+                    dst_base_layer: 0,
+                    layer_count: 1,
+                    width: 4,
+                    height: 4,
+                }),
+                reads: Vec::new(),
+                writes: Vec::new(),
+                buffer_reads: Vec::new(),
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            })
+            .unwrap_err();
+
+        assert!(format!("{err}").contains("source image must have more than one sample"));
     }
 
     #[test]

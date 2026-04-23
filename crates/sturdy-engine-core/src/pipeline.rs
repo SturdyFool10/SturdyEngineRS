@@ -111,6 +111,7 @@ pub struct GraphicsPipelineDesc {
     pub vertex_attributes: Vec<VertexAttributeDesc>,
     pub color_targets: Vec<ColorTargetDesc>,
     pub depth_format: Option<Format>,
+    pub samples: u8,
     pub topology: PrimitiveTopology,
     pub raster: RasterState,
 }

@@ -15,6 +15,23 @@ use super::{
 #[push_constants]
 pub struct CameraConstants {
     pub view_proj: [[f32; 4]; 4],
+    pub previous_view_proj: [[f32; 4]; 4],
+}
+
+impl CameraConstants {
+    pub fn identity() -> Self {
+        Self {
+            view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+            previous_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+        }
+    }
+
+    pub fn from_camera(camera: &SceneCamera) -> Self {
+        Self {
+            view_proj: camera.view_proj().to_cols_array_2d(),
+            previous_view_proj: camera.previous_view_proj.to_cols_array_2d(),
+        }
+    }
 }
 
 /// A managed collection of meshes, object instances, and cameras.
@@ -186,9 +203,7 @@ impl Scene {
         output: &GraphImage,
         frame: &RenderFrame,
     ) -> Result<()> {
-        let constants = CameraConstants {
-            view_proj: camera.view_proj().to_cols_array_2d(),
-        };
+        let constants = CameraConstants::from_camera(camera);
 
         for batch in self.batches.values() {
             let buf = match &batch.gpu_buffer {

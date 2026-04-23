@@ -218,6 +218,58 @@ top of that foundation instead of replacing it.
 - Support multi-pass render graphs composed from reflected shader passes.
 - Keep the frontend render API destination-oriented: create or fetch graph
   images, then execute reflected shaders onto those images.
+
+---
+
+# Phase 12 — Clay UI Rust Port (In Progress)
+
+## Completed in `crates/clay-ui` (initial architecture pass)
+
+- [x] Backend-neutral Rust crate scaffolded and wired into workspace
+- [x] Type-split module layout (`type` and `feature` files)
+- [x] Core layout tree, sizing modes, align, clip flags, and z ordering
+- [x] Render command generation and batch grouping for queued GPU work
+- [x] Multi-tree context with per-tree target selection (swapchain/offscreen image/named target)
+- [x] Simulated input API for pointer/scroll/focus/activation events
+- [x] Colorlab color usage (`colorlab::Color`) for UI color model
+- [x] Text path integrated with `textui` GPU scene preparation
+- [x] UTF-8 text via native Rust `String` throughout
+- [x] OpenType feature toggles plumbed into text fundamentals
+- [x] Cross-platform font discovery wrapper (`fontdb`-backed)
+- [x] Font discovery wired into `UiContext` text fallback resolution
+- [x] Persistent prepared text scene cache keyed by content/options
+- [x] Tree-level image tiling plans and per-tile image descriptors
+- [x] Limits-to-text-frame-info-and-tile-plan helper
+- [x] AA mode and dial model exposed in the testbed UI
+- [x] Caps-backed MSAA sample limit with support up to 16x where the backend allows it
+- [x] Explicit render-graph hardware MSAA resolve op
+- [x] MSAA pipeline cache keying and Vulkan render pass sample state
+- [x] Basic engine AA fullscreen pass wired into the testbed before tonemapping
+- [x] History-backed TAA ping-pong storage in the engine AA pass
+- [x] Motion-vector-aware TAA reprojection input and camera jitter helpers
+- [x] Direct `TextEngine::prepare_tiled_frame*` helpers for device-limit-safe text atlases
+- [x] Per-slot shader references for background/outline/text fill/text outline/image/custom
+- [x] Gradient model with color stops and per-segment easing metadata
+- [x] User-defined easing registration (`Easing::Custom(id)` + registry)
+- [x] Architectural CPU vs GPU color policy:
+  - [x] Single-color transforms -> CPU
+  - [x] Gradient/multi-color per-pixel -> GPU
+- [x] Image tiling planner for device 2D size limits
+
+## Remaining work (tracked here because it needs deeper engine integration)
+
+- [ ] Replace placeholder text-size estimation in layout cache with true `textui`/font-system measurement for layout-time wrapping parity
+- [ ] Implement arena/reuse strategy equivalent to Clay’s low-allocation hot path (persistent frame arenas, slot reuse, tombstone-free freelists)
+- [ ] Add Clay-level scroll physics/momentum and external scroll offset query parity
+- [ ] Add floating/attach-point semantics parity (`attach_to_parent`, `attach_to_id`, clip inheritance, pointer passthrough modes)
+- [ ] Implement child-between-border emission parity and exact border raster semantics
+- [ ] Add full render-graph resource binding generation (bind groups, push constants, per-pass parameter buffers) instead of pass skeletons
+- [ ] Integrate real shader pipelines for all slots in engine runtime (currently handles are plumbed, not authored)
+- [ ] Add GPU gradient shader implementation and parameter packing contract used by engine pipelines
+- [ ] Add text outline rendering path in engine shader side (metadata is present; runtime raster/shader path still required)
+- [ ] Add offscreen-to-world UI sample path in `sturdy-engine` scene layer
+- [ ] Add UI search/indexing layer on top of font discovery for later UI-wide queries
+- [ ] Add a full scene sample that writes motion vectors from material shaders
 - Treat chained image/shader operations as graph declarations that can be
   reordered when dependencies allow it.
 - Add a proceduralism layer so textures can come from shader-authored or

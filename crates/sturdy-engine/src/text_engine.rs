@@ -1,6 +1,6 @@
 use crate::{
     Engine, TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput, TextPlacement,
-    TextRenderer, TextScene, TextSceneQuad,
+    TextRenderer, TextScene, TextSceneQuad, TiledTextEngineFrame,
 };
 
 /// Prepared text for one frame.
@@ -105,6 +105,35 @@ impl<R: TextRenderer> TextEngine<R> {
             },
             draws,
         }
+    }
+
+    /// Shape text and split atlas pages so no text image exceeds `max_texture_side_px`.
+    pub fn prepare_tiled_frame(
+        &mut self,
+        descs: &[TextDrawDesc],
+        target_width: u32,
+        target_height: u32,
+        max_texture_side_px: u32,
+    ) -> TiledTextEngineFrame {
+        self.prepare_frame(descs, target_width, target_height)
+            .tile_atlas_pages(max_texture_side_px)
+    }
+
+    /// Shape text and tile atlas pages using the engine's 2D image limit.
+    pub fn prepare_tiled_frame_with_engine_limits(
+        &mut self,
+        engine: &Engine,
+        descs: &[TextDrawDesc],
+        target_width: u32,
+        target_height: u32,
+    ) -> TiledTextEngineFrame {
+        let max_side = engine
+            .caps()
+            .limits
+            .max_image_dimension_2d
+            .min(engine.caps().limits.max_texture_2d_size)
+            .max(1);
+        self.prepare_tiled_frame(descs, target_width, target_height, max_side)
     }
 }
 

@@ -1041,7 +1041,7 @@ mod tests {
         // Verify the reflected binding slots match the register declarations.
         let desc = ShaderDesc {
             source: ShaderSource::File(testbed_shader("textured_fragment.slang")),
-            entry_point: "main".into(),
+            entry_point: "ps_main".into(),
             stage: ShaderStage::Fragment,
         };
         let reflection = reflect_pipeline_layout(&desc).expect("reflection should succeed");
@@ -1064,7 +1064,7 @@ mod tests {
     fn reflect_vertex_shader_no_bindings() {
         let desc = ShaderDesc {
             source: ShaderSource::File(testbed_shader("triangle_vertex.slang")),
-            entry_point: "main".into(),
+            entry_point: "vs_main".into(),
             stage: ShaderStage::Vertex,
         };
         let reflection = reflect_pipeline_layout(&desc).expect("reflection should succeed");
@@ -1079,7 +1079,7 @@ mod tests {
     fn reflect_push_constant_size_and_stage() {
         let desc = ShaderDesc {
             source: ShaderSource::File(testbed_shader("push_vertex.slang")),
-            entry_point: "main".into(),
+            entry_point: "vs_main".into(),
             stage: ShaderStage::Vertex,
         };
         let reflection = reflect_pipeline_layout(&desc).expect("reflection should succeed");
@@ -1096,7 +1096,7 @@ mod tests {
         // textured_fragment.slang uses separate Texture2D + SamplerState
         let desc = ShaderDesc {
             source: ShaderSource::File(testbed_shader("textured_fragment.slang")),
-            entry_point: "main".into(),
+            entry_point: "ps_main".into(),
             stage: ShaderStage::Fragment,
         };
         let reflection = reflect_pipeline_layout(&desc).expect("reflection should succeed");
