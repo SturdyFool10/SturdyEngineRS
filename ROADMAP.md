@@ -126,7 +126,7 @@ checkbox updates.
 - [x] `P0.8` Surface the diagnostics model through a basic first-party overlay hook, even if presentation is still minimal
 - [ ] `P0.9` Internalize motion-vector generation and debug display registration as runtime features rather than testbed-only plumbing
 - [x] `P0.9a` Define the runtime motion-vector contract around camera-local motion suitable for TAA and motion blur
-- [ ] `P0.9b` Add first-party support for camera-locked/screen-locked overlay passes that bypass scene motion blur and temporal accumulation
+- [x] `P0.9b` Add first-party support for camera-locked/screen-locked overlay passes that bypass scene motion blur and temporal accumulation
 - [ ] `P0.9c` Add a motion-vector validation/debug mode that makes incorrect object or camera motion obvious in-engine
 - [ ] `P0.10` Define the first `TextOverlay` API surface that lets apps request text without touching atlas/page management
 - [ ] `P0.11` Move the existing HUD text path behind `TextOverlay` while preserving current output

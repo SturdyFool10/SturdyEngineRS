@@ -324,6 +324,7 @@ pub struct RuntimeDiagnostics {
     pub bloom_enabled: Option<bool>,
     pub bloom_only: Option<bool>,
     pub motion_validation: Option<String>,
+    pub camera_locked_passes: Vec<String>,
     pub debug_images: Vec<String>,
     pub graph: RuntimeGraphDiagnostics,
     pub timings: RuntimeTimingSummary,

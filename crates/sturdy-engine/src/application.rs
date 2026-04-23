@@ -367,6 +367,14 @@ impl<'a> ShellFrame<'a> {
                     .as_deref()
                     .unwrap_or("unpublished")
             ),
+            format!(
+                "camera-locked passes: {}",
+                if diagnostics.camera_locked_passes.is_empty() {
+                    "none".to_string()
+                } else {
+                    diagnostics.camera_locked_passes.join(", ")
+                }
+            ),
             format!("debug images: {debug_images}"),
         ]
     }
@@ -402,6 +410,26 @@ impl<'a> ShellFrame<'a> {
             current.debug_images = debug_images;
             current.graph = graph;
         });
+    }
+
+    /// Run a camera-locked/screen-locked pass after world temporal effects.
+    ///
+    /// Use this for reticles, HUD markers, or similar overlays that should be
+    /// composed relative to the camera rather than inheriting world motion blur.
+    pub fn run_camera_locked_pass(
+        &self,
+        name: impl Into<String>,
+        target: &GraphImage,
+        render: impl FnOnce(&crate::RenderFrame, &GraphImage) -> EngineResult<()>,
+    ) -> EngineResult<()> {
+        let name = name.into();
+        render(&self.inner, target)?;
+        self.controller.update_diagnostics(|current| {
+            if !current.camera_locked_passes.iter().any(|entry| entry == &name) {
+                current.camera_locked_passes.push(name);
+            }
+        });
+        Ok(())
     }
 
     /// Run the default HDR post chain from scene color through tonemap.

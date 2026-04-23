@@ -482,7 +482,9 @@ impl EngineApp for Testbed {
         overlay_lines.push("keys: [/]=tonemap .=aa R/U reset B/b bloom H hdr V motion".to_string());
         shell_frame.set_runtime_overlay_lines(overlay_lines);
 
-        self.draw_hud(shell_frame, frame, &swapchain, ext.width, ext.height)?;
+        shell_frame.run_camera_locked_pass("hud_overlay", &swapchain, |frame, target| {
+            self.draw_hud(shell_frame, frame, target, ext.width, ext.height)
+        })?;
         frame.present_image(&swapchain)?;
 
         // In debug builds, validate the recorded graph and print any diagnostics.
