@@ -246,8 +246,9 @@ fn runtime_controller_placeholder_transaction_is_noop() {
         .unwrap();
 
     assert!(report.changes.is_empty());
-    assert_eq!(controller.settings(), RuntimeSettingsSnapshot);
-    assert_eq!(controller.diagnostics(), RuntimeDiagnostics);
+    assert_eq!(controller.settings(), RuntimeSettingsSnapshot::default());
+    assert_eq!(controller.diagnostics(), RuntimeDiagnostics::default());
+    assert!(controller.overlay_lines().is_empty());
 }
 
 #[test]

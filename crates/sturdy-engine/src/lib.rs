@@ -41,7 +41,11 @@ pub use antialiasing::{
     AntiAliasingConfig, AntiAliasingDial, AntiAliasingMode, FxaaSettings, MsaaSettings, TaaSettings,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use application::{EngineApp, ShellFrame, WindowConfig, run};
+pub use application::{
+    EngineApp, MotionVectorLayer, MotionVectorSpace, RuntimeMotionDebugDesc,
+    RuntimeMotionVectorDesc, RuntimePostProcessDesc, RuntimePostProcessOutput, ShellFrame,
+    WindowConfig, run,
+};
 pub use bloom_pass::{
     BloomCompositeConstants, BloomConfig, BloomPass, BrightPassConstants, DownsampleConstants,
     UpsampleConstants,
@@ -59,10 +63,11 @@ pub use procedural_texture::{
 };
 pub use quad_batch::QuadBatch;
 pub use runtime::{
-    AppLayer, AppRuntime, AppRuntimeFrame, DefaultSceneTargetConfig, RuntimeApplyPath,
-    RuntimeApplyReport, RuntimeChangeResult, RuntimeController, RuntimeDiagnostics,
-    RuntimeSettingKey, RuntimeSettingsSnapshot, RuntimeSettingsTransaction, SceneRenderContext,
-    UiContext,
+    AppLayer, AppRuntime, AppRuntimeFrame, DebugImageRegistry, DefaultSceneTargetConfig,
+    RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult, RuntimeController,
+    RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimePassTiming, RuntimeSettingKey,
+    RuntimeSettingsSnapshot, RuntimeSettingsTransaction, RuntimeTimingSummary,
+    SceneRenderContext, UiContext,
 };
 pub use sampler_catalog::SamplerPreset;
 pub use text_draw::{

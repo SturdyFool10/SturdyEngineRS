@@ -53,8 +53,10 @@ use std::time::Instant;
 use sturdy_engine_core::SurfaceSize;
 
 use crate::{
-    AppRuntime, DefaultSceneTargetConfig, Engine, GraphImage, Result as EngineResult, Surface,
-    SurfaceHdrPreference, SurfaceImage,
+    AntiAliasingMode, AntiAliasingPass, AppRuntime, BloomConfig, BloomPass,
+    DebugImageRegistry, DefaultSceneTargetConfig, DiagnosticLevel, Engine, GraphImage,
+    Result as EngineResult, RuntimeController, RuntimeDiagnostics, RuntimeGraphDiagnostics,
+    ShaderProgram, Surface, SurfaceHdrPreference, SurfaceImage,
 };
 
 /// Configuration for the application shell window.
@@ -178,6 +180,52 @@ pub struct ShellFrame<'a> {
     #[allow(dead_code)]
     surface_image: &'a SurfaceImage,
     default_scene_target: DefaultSceneTargetConfig,
+    debug_images: DebugImageRegistry,
+    controller: RuntimeController,
+}
+
+pub struct RuntimeMotionDebugDesc<'a> {
+    pub motion_vectors: RuntimeMotionVectorDesc<'a>,
+    pub target: &'a GraphImage,
+    pub program: &'a ShaderProgram,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MotionVectorSpace {
+    CameraLocal,
+    NonCameraLocal,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MotionVectorLayer {
+    World,
+    CameraLocked,
+}
+
+#[derive(Copy, Clone)]
+pub struct RuntimeMotionVectorDesc<'a> {
+    pub image: &'a GraphImage,
+    pub space: MotionVectorSpace,
+    pub layer: MotionVectorLayer,
+}
+
+pub struct RuntimePostProcessDesc<'a, T: bytemuck::Pod> {
+    pub scene_color: &'a GraphImage,
+    pub motion_vectors: Option<RuntimeMotionVectorDesc<'a>>,
+    pub bloom_pass: Option<&'a BloomPass>,
+    pub bloom_config: Option<&'a BloomConfig>,
+    pub bloom_only: bool,
+    pub aa_pass: &'a AntiAliasingPass,
+    pub aa_mode: AntiAliasingMode,
+    pub swapchain: &'a GraphImage,
+    pub tonemap_program: &'a ShaderProgram,
+    pub tonemap_constants: &'a T,
+    pub motion_debug: Option<RuntimeMotionDebugDesc<'a>>,
+}
+
+pub struct RuntimePostProcessOutput {
+    pub hdr_composite: GraphImage,
+    pub final_color: GraphImage,
 }
 
 impl<'a> ShellFrame<'a> {
@@ -185,11 +233,15 @@ impl<'a> ShellFrame<'a> {
         inner: crate::RenderFrame,
         surface_image: &'a SurfaceImage,
         default_scene_target: DefaultSceneTargetConfig,
+        debug_images: DebugImageRegistry,
+        controller: RuntimeController,
     ) -> Self {
         Self {
             inner,
             surface_image,
             default_scene_target,
+            debug_images,
+            controller,
         }
     }
 
@@ -213,6 +265,195 @@ impl<'a> ShellFrame<'a> {
             .create(&self.inner, name, requested_msaa_samples)
     }
 
+    /// Resolve the runtime-owned default HDR scene target for downstream post-processing.
+    pub fn resolve_default_hdr_scene_target(
+        &self,
+        scene_target: &GraphImage,
+        resolved_name: impl Into<String>,
+    ) -> EngineResult<GraphImage> {
+        self.default_scene_target
+            .resolve(&self.inner, scene_target, resolved_name)
+    }
+
+    /// Register a named debug image with the runtime-owned registry.
+    pub fn register_debug_image(&self, name: impl Into<String>, image: &GraphImage) {
+        self.debug_images.register(image, name);
+    }
+
+    /// Return the names of debug images registered for this frame.
+    pub fn debug_image_names(&self) -> Vec<String> {
+        self.debug_images.names()
+    }
+
+    /// Return the current runtime settings snapshot.
+    pub fn runtime_diagnostics(&self) -> RuntimeDiagnostics {
+        self.controller.diagnostics()
+    }
+
+    /// Return the current engine-owned overlay lines.
+    pub fn runtime_overlay_lines(&self) -> Vec<String> {
+        self.controller.overlay_lines()
+    }
+
+    /// Replace the engine-owned overlay lines for this frame.
+    pub fn set_runtime_overlay_lines<I, S>(&self, lines: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.controller
+            .set_overlay_lines(lines.into_iter().map(Into::into).collect());
+    }
+
+    /// Format the current diagnostics into simple overlay-friendly lines.
+    pub fn default_runtime_overlay_lines(&self) -> Vec<String> {
+        let diagnostics = self.runtime_diagnostics();
+        let debug_images = if diagnostics.debug_images.is_empty() {
+            "none".to_string()
+        } else {
+            diagnostics.debug_images.join(", ")
+        };
+        vec![
+            format!(
+                "runtime: backend={:?} adapter={}",
+                diagnostics.backend,
+                diagnostics
+                    .adapter_name
+                    .as_deref()
+                    .unwrap_or("<unknown>")
+            ),
+            format!(
+                "surface: {:?} {:?} {}",
+                diagnostics.surface_format,
+                diagnostics.surface_color_space,
+                diagnostics
+                    .present_mode
+                    .map(|mode| format!("{mode:?}"))
+                    .unwrap_or_else(|| "present=unknown".to_string())
+            ),
+            format!(
+                "post: aa={} msaa={} bloom={} bloom-only={} hdr={}",
+                diagnostics.aa_mode_label.as_deref().unwrap_or("n/a"),
+                diagnostics
+                    .actual_msaa_samples
+                    .map(|samples| format!("{samples}x"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                diagnostics
+                    .bloom_enabled
+                    .map(|value| if value { "on" } else { "off" })
+                    .unwrap_or("n/a"),
+                diagnostics
+                    .bloom_only
+                    .map(|value| if value { "on" } else { "off" })
+                    .unwrap_or("n/a"),
+                if diagnostics.hdr_output { "on" } else { "off" },
+            ),
+            format!(
+                "graph: passes={} images={} warnings={} errors={} timings={}",
+                diagnostics.graph.pass_count,
+                diagnostics.graph.image_count,
+                diagnostics.graph.warning_count,
+                diagnostics.graph.error_count,
+                if diagnostics.timings.available {
+                    "available"
+                } else {
+                    "pending"
+                },
+            ),
+            format!(
+                "motion: {}",
+                diagnostics
+                    .motion_validation
+                    .as_deref()
+                    .unwrap_or("unpublished")
+            ),
+            format!("debug images: {debug_images}"),
+        ]
+    }
+
+    /// Publish per-frame runtime diagnostics gathered from the current render graph and shell state.
+    pub fn publish_runtime_diagnostics(
+        &self,
+        aa_mode_label: impl Into<String>,
+        actual_msaa_samples: u8,
+        bloom_enabled: bool,
+        bloom_only: bool,
+    ) {
+        let report = self.inner.describe();
+        let diagnostics = self.inner.validate();
+        let graph = RuntimeGraphDiagnostics {
+            pass_count: report.passes.len(),
+            image_count: report.images.len(),
+            warning_count: diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.level == DiagnosticLevel::Warning)
+                .count(),
+            error_count: diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.level == DiagnosticLevel::Error)
+                .count(),
+        };
+        let debug_images = self.debug_image_names();
+        self.controller.update_diagnostics(|current| {
+            current.aa_mode_label = Some(aa_mode_label.into());
+            current.actual_msaa_samples = Some(actual_msaa_samples);
+            current.bloom_enabled = Some(bloom_enabled);
+            current.bloom_only = Some(bloom_only);
+            current.debug_images = debug_images;
+            current.graph = graph;
+        });
+    }
+
+    /// Run the default HDR post chain from scene color through tonemap.
+    pub fn run_default_post_process<T: bytemuck::Pod>(
+        &self,
+        desc: RuntimePostProcessDesc<'_, T>,
+    ) -> EngineResult<RuntimePostProcessOutput> {
+        let show_motion_debug = desc.motion_debug.is_some();
+        let hdr_composite = if let (Some(bloom_pass), Some(bloom_config)) =
+            (desc.bloom_pass, desc.bloom_config)
+        {
+            bloom_pass.execute(desc.scene_color, &self.inner, bloom_config, desc.bloom_only)?
+        } else {
+            desc.scene_color.clone()
+        };
+
+        let (motion_source, motion_validation) = classify_motion_vectors(desc.motion_vectors);
+        self.controller.update_diagnostics(|current| {
+            current.motion_validation = Some(motion_validation);
+        });
+
+        let anti_aliased = desc.aa_pass.execute_with_motion_vectors(
+            &self.inner,
+            &hdr_composite,
+            motion_source,
+            desc.aa_mode,
+        )?;
+
+        let final_input = if let Some(motion_debug) = desc.motion_debug {
+            self.register_debug_image("motion_source", motion_debug.motion_vectors.image);
+            self.inner
+                .set_sampler("motion_sampler", crate::SamplerPreset::Linear);
+            motion_debug.target.execute_shader_auto(motion_debug.program)?;
+            motion_debug.target.clone()
+        } else {
+            self.register_debug_image("hdr_composite", &anti_aliased);
+            anti_aliased.clone()
+        };
+        if show_motion_debug {
+            self.register_debug_image("hdr_composite", &final_input);
+        }
+        desc.swapchain.execute_shader_with_constants_auto(
+            desc.tonemap_program,
+            desc.tonemap_constants,
+        )?;
+
+        Ok(RuntimePostProcessOutput {
+            hdr_composite: final_input,
+            final_color: desc.swapchain.clone(),
+        })
+    }
+
     /// Finish rendering and present to the surface.
     ///
     /// This is a convenience method that calls `flush()`, `wait()`, and
@@ -222,6 +463,28 @@ impl<'a> ShellFrame<'a> {
         self.inner.wait()?;
         surface.present()?;
         Ok(())
+    }
+}
+
+fn classify_motion_vectors(
+    motion_vectors: Option<RuntimeMotionVectorDesc<'_>>,
+) -> (Option<&GraphImage>, String) {
+    match motion_vectors {
+        Some(desc)
+            if desc.space == MotionVectorSpace::CameraLocal
+                && desc.layer == MotionVectorLayer::World =>
+        {
+            (Some(desc.image), "camera-local world motion".to_string())
+        }
+        Some(desc) if desc.layer == MotionVectorLayer::CameraLocked => (
+            None,
+            "camera-locked layer bypasses world temporal motion".to_string(),
+        ),
+        Some(_) => (
+            None,
+            "non-camera-local motion vectors ignored by default temporal path".to_string(),
+        ),
+        None => (None, "no motion vectors supplied".to_string()),
     }
 }
 

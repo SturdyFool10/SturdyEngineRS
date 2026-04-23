@@ -4,11 +4,12 @@ use sturdy_engine::{
     AntiAliasingConfig, AntiAliasingDial, AntiAliasingPass, BloomConfig, BloomPass,
     CpuProceduralTexture2d, Engine, EngineApp, Extent3d, Format, GpuProceduralTexture,
     HdrPipelineDesc, HdrPreference, Image, ImageDesc, ImageDimension, ImageUsage, Mesh,
-    MeshProgram, ProceduralTextureRecipe, ProceduralTextureUpdatePolicy, QuadBatch,
-    Result as EngineResult, SamplerPreset, ShaderProgram, ShellFrame, Surface, SurfaceColorSpace,
-    SurfaceHdrCaps, SurfaceHdrPreference, SurfaceImage, SurfaceRecreateDesc, TextDrawDesc,
-    TextEngine, TextPlacement, TextTypography, TextUiRenderer, TiledTextAtlasPage, ToneMappingOp,
-    WindowConfig, push_constants,
+    MeshProgram, MotionVectorLayer, MotionVectorSpace, ProceduralTextureRecipe,
+    ProceduralTextureUpdatePolicy, QuadBatch, Result as EngineResult, RuntimeMotionDebugDesc,
+    RuntimeMotionVectorDesc, RuntimePostProcessDesc, SamplerPreset, ShaderProgram, ShellFrame,
+    Surface, SurfaceColorSpace, SurfaceHdrCaps, SurfaceHdrPreference, SurfaceImage,
+    SurfaceRecreateDesc, TextDrawDesc, TextEngine, TextPlacement, TextTypography,
+    TextUiRenderer, TiledTextAtlasPage, ToneMappingOp, WindowConfig, push_constants,
 };
 
 #[push_constants]
@@ -379,12 +380,16 @@ impl EngineApp for Testbed {
         frame: &mut ShellFrame<'_>,
         surface_image: &SurfaceImage,
     ) -> EngineResult<()> {
+        let shell_frame = &*frame;
         let elapsed = self.started_at.elapsed().as_secs_f32();
         let ext = surface_image.desc().extent;
 
         // Register swapchain first — required so hdr_color_image can read the extent.
-        let swapchain = frame.inner().swapchain_image(surface_image)?;
-        let scene_target = frame.default_hdr_scene_target("scene_color", self.actual_msaa_samples())?;
+        let swapchain = shell_frame.inner().swapchain_image(surface_image)?;
+        let scene_target =
+            shell_frame.default_hdr_scene_target("scene_color", self.actual_msaa_samples())?;
+        let scene_color =
+            shell_frame.resolve_default_hdr_scene_target(&scene_target, "scene_color")?;
         let frame = frame.inner();
 
         // GPU procedural LUT: the generator shader runs on the GPU every frame.
@@ -406,7 +411,6 @@ impl EngineApp for Testbed {
                 resolution: [ext.width as f32, ext.height as f32],
             },
         )?;
-        let scene_color = scene_target.resolve_msaa(frame, "scene_color")?;
         let motion_vectors = self.motion_vector_image(frame, ext.width, ext.height)?;
         motion_vectors.execute_shader_with_constants_auto(
             &self.motion_program,
@@ -417,39 +421,68 @@ impl EngineApp for Testbed {
             },
         )?;
 
-        // Pass 2: bloom reads "scene_color", writes the HDR composite.
-        let hdr_composite = if self.bloom_enabled {
-            self.bloom_pass
-                .execute(&scene_color, frame, &self.bloom_config, self.bloom_only)?
+        let motion_debug = if self.show_motion_vectors {
+            Some(self.motion_debug_image(frame, ext.width, ext.height)?)
         } else {
-            scene_color.clone()
+            None
         };
+        let tonemap_constants = self.tonemap_settings.params(
+            self.tone_mapping,
+            self.hdr_output,
+            self.selected_tonemap_dial,
+        );
+        let _post = shell_frame.run_default_post_process(RuntimePostProcessDesc {
+            scene_color: &scene_color,
+            motion_vectors: Some(RuntimeMotionVectorDesc {
+                image: &motion_vectors,
+                space: MotionVectorSpace::CameraLocal,
+                layer: MotionVectorLayer::World,
+            }),
+            bloom_pass: self.bloom_enabled.then_some(&self.bloom_pass),
+            bloom_config: self.bloom_enabled.then_some(&self.bloom_config),
+            bloom_only: self.bloom_only,
+            aa_pass: &self.aa_pass,
+            aa_mode: self.aa.mode,
+            swapchain: &swapchain,
+            tonemap_program: &self.tonemap_program,
+            tonemap_constants: &tonemap_constants,
+            motion_debug: motion_debug.as_ref().map(|target| RuntimeMotionDebugDesc {
+                motion_vectors: RuntimeMotionVectorDesc {
+                    image: &motion_vectors,
+                    space: MotionVectorSpace::CameraLocal,
+                    layer: MotionVectorLayer::World,
+                },
+                target,
+                program: &self.motion_debug_program,
+            }),
+        })?;
+        shell_frame.publish_runtime_diagnostics(
+            self.aa.mode.label(),
+            self.actual_msaa_samples(),
+            self.bloom_enabled,
+            self.bloom_only,
+        );
+        let mut overlay_lines = shell_frame.default_runtime_overlay_lines();
+        overlay_lines.push(format!(
+            "controls: T={} P={}={:.2}",
+            tone_mapping_label(self.tone_mapping),
+            self.selected_tonemap_dial.label(),
+            self.tonemap_settings.get(self.selected_tonemap_dial),
+        ));
+        overlay_lines.push(format!(
+            "controls: D={} V={} H={}",
+            self.aa.selected_dial.label(),
+            if self.show_motion_vectors {
+                "shown"
+            } else {
+                "hidden"
+            },
+            if self.hdr_output { "on" } else { "off" },
+        ));
+        overlay_lines.push("keys: [/]=tonemap .=aa R/U reset B/b bloom H hdr V motion".to_string());
+        shell_frame.set_runtime_overlay_lines(overlay_lines);
 
-        let anti_aliased = self.aa_pass.execute_with_motion_vectors(
-            frame,
-            &hdr_composite,
-            Some(&motion_vectors),
-            self.aa.mode,
-        )?;
-        if self.show_motion_vectors {
-            let motion_debug = self.motion_debug_image(frame, ext.width, ext.height)?;
-            motion_vectors.register_as("motion_source");
-            frame.set_sampler("motion_sampler", SamplerPreset::Linear);
-            motion_debug.execute_shader_auto(&self.motion_debug_program)?;
-            motion_debug.register_as("hdr_composite");
-        } else {
-            anti_aliased.register_as("hdr_composite");
-        }
-        swapchain.execute_shader_with_constants_auto(
-            &self.tonemap_program,
-            &self.tonemap_settings.params(
-                self.tone_mapping,
-                self.hdr_output,
-                self.selected_tonemap_dial,
-            ),
-        )?;
-
-        self.draw_hud(frame, &swapchain, ext.width, ext.height)?;
+        self.draw_hud(shell_frame, frame, &swapchain, ext.width, ext.height)?;
         frame.present_image(&swapchain)?;
 
         // In debug builds, validate the recorded graph and print any diagnostics.
@@ -582,29 +615,19 @@ impl Testbed {
 
     fn draw_hud(
         &mut self,
+        shell_frame: &ShellFrame<'_>,
         frame: &sturdy_engine::RenderFrame,
         target: &sturdy_engine::GraphImage,
         width: u32,
         height: u32,
     ) -> EngineResult<()> {
-        let actual_msaa_samples = self.actual_msaa_samples();
-        let hud_text = format!(
-            "SturdyEngine testbed\nT  tone mapping: {}\nP  tonemap dial: {} = {:.2}\nA  aa mode: {}\n   actual MSAA samples: {}x\nD  aa dial: {}\n[/] adjust active dial, R reset tonemap, U reset aa\nH  HDR output: {}\nB  bloom: {}\nb  bloom-only: {}\nV  motion vectors: {}\nResize window to test graph image recreation\nClose window to exit",
-            tone_mapping_label(self.tone_mapping),
-            self.selected_tonemap_dial.label(),
-            self.tonemap_settings.get(self.selected_tonemap_dial),
-            self.aa.mode.label(),
-            actual_msaa_samples,
-            self.aa.selected_dial.label(),
-            if self.hdr_output { "on" } else { "off" },
-            if self.bloom_enabled { "on" } else { "off" },
-            if self.bloom_only { "on" } else { "off" },
-            if self.show_motion_vectors {
-                "shown"
-            } else {
-                "hidden"
-            },
-        );
+        let hud_text = std::iter::once("SturdyEngine testbed".to_string())
+            .chain(shell_frame.runtime_overlay_lines())
+            .chain(std::iter::once(
+                "Resize window to test graph image recreation\nClose window to exit".to_string(),
+            ))
+            .collect::<Vec<_>>()
+            .join("\n");
         let desc = TextDrawDesc::new(hud_text)
             .placement(TextPlacement::Screen2d { x: 18.0, y: 18.0 })
             .typography(

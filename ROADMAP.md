@@ -39,6 +39,16 @@ These are architectural constraints, not stretch goals:
 - [ ] Make simple runtime settings use the same internal systems as advanced apps instead of separate code paths
 - [ ] Expose capability queries and failure reasons when a requested runtime change cannot be applied exactly
 
+## Motion And Multipass Rules
+
+These are product rules for temporal effects and 3D composition quality:
+
+- [ ] Treat camera-local motion vectors as the default contract for post-processing inputs
+- [ ] Make it easy to render camera-locked or screen-locked elements in separate passes so they do not inherit scene motion blur or other temporal artifacts
+- [ ] Treat multipass 3D composition as a first-class engine path, not an awkward escape hatch
+- [ ] Require explicit motion-vector correctness validation for moving cameras, moving objects, animated materials, and camera-locked overlays
+- [ ] Treat incorrect motion vectors as a high-severity rendering bug because they directly damage TAA, motion blur, and temporal stability
+
 ## Direction To Roadmap Mapping
 
 The runtime direction document is not a separate strategy. It explains how the
@@ -109,16 +119,19 @@ checkbox updates.
 - [x] `P0.1` Define the first public `AppRuntime` surface and create the minimal type/module skeleton without changing behavior yet
 - [x] `P0.2` Move swapchain acquire/present ownership behind `AppRuntime` while keeping the existing testbed render path working
 - [x] `P0.3` Move default HDR scene target allocation/selection behind `AppRuntime`
-- [ ] `P0.4` Move MSAA target allocation and resolve behind `AppRuntime`
-- [ ] `P0.5` Move bloom, AA, and tonemap chain assembly behind `AppRuntime`
-- [ ] `P0.6` Add a named debug image registry owned by the runtime instead of the testbed
-- [ ] `P0.7` Add a runtime diagnostics data model for backend, adapter, HDR, present mode, AA, bloom state, and graph timings
-- [ ] `P0.8` Surface the diagnostics model through a basic first-party overlay hook, even if presentation is still minimal
+- [x] `P0.4` Move MSAA target allocation and resolve behind `AppRuntime`
+- [x] `P0.5` Move bloom, AA, and tonemap chain assembly behind `AppRuntime`
+- [x] `P0.6` Add a named debug image registry owned by the runtime instead of the testbed
+- [x] `P0.7` Add a runtime diagnostics data model for backend, adapter, HDR, present mode, AA, bloom state, and graph timings
+- [x] `P0.8` Surface the diagnostics model through a basic first-party overlay hook, even if presentation is still minimal
 - [ ] `P0.9` Internalize motion-vector generation and debug display registration as runtime features rather than testbed-only plumbing
+- [x] `P0.9a` Define the runtime motion-vector contract around camera-local motion suitable for TAA and motion blur
+- [ ] `P0.9b` Add first-party support for camera-locked/screen-locked overlay passes that bypass scene motion blur and temporal accumulation
+- [ ] `P0.9c` Add a motion-vector validation/debug mode that makes incorrect object or camera motion obvious in-engine
 - [ ] `P0.10` Define the first `TextOverlay` API surface that lets apps request text without touching atlas/page management
 - [ ] `P0.11` Move the existing HUD text path behind `TextOverlay` while preserving current output
 - [ ] `P0.12` Add a first-pass debug action/input binding registry above raw key handling
-- [ ] `P0.13` Define `RuntimeSettingsSnapshot`, setting keys, and a single public settings model
+- [x] `P0.13` Define `RuntimeSettingsSnapshot`, setting keys, and a single public settings model
 - [ ] `P0.14` Classify every existing runtime-facing setting into `Immediate`, `GraphRebuild`, `SurfaceRecreate`, `WindowReconfigure`, or `DeviceMigration`
 - [ ] `P0.15` Implement the first `Immediate` runtime settings path for low-risk settings like overlay visibility or post-process dials
 - [ ] `P0.16` Implement the first `GraphRebuild` runtime settings path for AA mode or post-chain topology changes
@@ -177,6 +190,9 @@ If work starts immediately, do these in order before jumping ahead:
   - [ ] named debug image outputs
   - [ ] diagnostics overlay hook
 - [ ] Internalize motion-vector generation/debug display as engine features instead of testbed-only plumbing
+  - [ ] Define the engine motion-vector input contract in terms of camera-local motion
+  - [ ] Distinguish world-scene motion vectors from camera-locked/screen-locked passes
+  - [ ] Keep debug display and post-processing consumers on the same motion-vector interpretation
 - [ ] Internalize the current HUD text path into a first-party text/debug overlay instead of making apps manage atlas pages, uploads, and quad meshes
 - [ ] Add a first-party debug action registry and input binding layer above raw key events
 - [ ] Internalize standard renderer diagnostics:
@@ -360,6 +376,9 @@ project to build a custom runtime shell first.
 
 - [ ] Add reflected validation for instance-rate vertex inputs when available
 - [ ] Add a full scene sample that writes motion vectors from material shaders
+- [ ] Add explicit support for separating world passes from camera-locked/screen-locked passes in 3D scenes
+- [ ] Add a sample where reticles, HUD markers, or weapon/viewmodel layers render in separate passes without inheriting world motion blur
+- [ ] Add validation scenes that catch incorrect per-object motion vectors under camera pan, object motion, and mixed camera/object motion
 - [ ] Add motion-vector-aware scene examples that exercise TAA in realistic content
 
 ---
@@ -391,6 +410,11 @@ convince people the output is real footage when the content is strong enough.
 - [ ] Add stronger temporal AA examples using real motion vectors, camera jitter, and transparency-heavy scenes
 - [ ] Add a robust post stack architecture that can host exposure, bloom, temporal effects, sharpening, grading, film grain, lens effects, and debug views cleanly
 - [ ] Add transparency-heavy validation scenes so temporal and post effects are tested against composited content instead of opaque-only scenes
+- [ ] Add motion-blur validation scenes that specifically verify:
+  - [ ] camera-local vectors produce stable blur during camera motion
+  - [ ] moving objects blur correctly relative to camera motion
+  - [ ] camera-locked overlays and reticles do not blur when the camera moves
+  - [ ] incorrect vectors are easy to spot with built-in debug views
 
 ### Photoreal game rendering path
 
