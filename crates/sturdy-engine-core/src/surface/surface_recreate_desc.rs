@@ -5,6 +5,8 @@ use crate::{
 #[derive(Clone, Debug, Default)]
 pub struct SurfaceRecreateDesc {
     pub size: Option<SurfaceSize>,
+    /// Surface transparency/compositing preference. `None` keeps the existing preference.
+    pub transparent: Option<bool>,
     /// HDR preference override.  `None` keeps the surface's existing preference.
     pub hdr: Option<SurfaceHdrPreference>,
     /// Preferred swapchain format.  `None` lets the backend choose.

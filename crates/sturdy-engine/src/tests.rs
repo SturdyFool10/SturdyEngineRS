@@ -241,14 +241,284 @@ fn runtime_controller_placeholder_transaction_is_noop() {
     let mut controller = RuntimeController::default();
     let report = controller
         .transact()
-        .note_change(RuntimeSettingKey("test-setting"))
+        .note_change(RuntimeSettingKey::OverlayVisibility)
         .apply()
         .unwrap();
 
-    assert!(report.changes.is_empty());
+    assert_eq!(
+        report.changes,
+        vec![RuntimeChangeResult::Applied {
+            setting: RuntimeSettingId::from(RuntimeSettingKey::OverlayVisibility),
+            path: RuntimeApplyPath::Immediate,
+        }]
+    );
     assert_eq!(controller.settings(), RuntimeSettingsSnapshot::default());
     assert_eq!(controller.diagnostics(), RuntimeDiagnostics::default());
     assert!(controller.overlay_lines().is_empty());
+}
+
+#[test]
+fn runtime_setting_keys_report_expected_apply_paths() {
+    assert_eq!(
+        RuntimeSettingKey::HdrMode.apply_path(),
+        RuntimeApplyPath::SurfaceRecreate
+    );
+    assert_eq!(
+        RuntimeSettingKey::AntiAliasingMode.apply_path(),
+        RuntimeApplyPath::GraphRebuild
+    );
+    assert_eq!(
+        RuntimeSettingKey::OverlayVisibility.apply_path(),
+        RuntimeApplyPath::Immediate
+    );
+}
+
+#[test]
+fn runtime_controller_registers_app_settings_and_records_changes() {
+    let mut controller = RuntimeController::default();
+    controller
+        .register_app_setting(
+            RuntimeSettingDescriptor::new(
+                RuntimeSettingId::app("textures.resolution"),
+                "Texture Resolution",
+                RuntimeApplyPath::Immediate,
+                "high",
+            )
+            .with_description("Select the active texture asset resolution tier.")
+            .with_options(vec![
+                RuntimeSettingOption {
+                    value: "low".into(),
+                    label: "Low".to_string(),
+                },
+                RuntimeSettingOption {
+                    value: "medium".into(),
+                    label: "Medium".to_string(),
+                },
+                RuntimeSettingOption {
+                    value: "high".into(),
+                    label: "High".to_string(),
+                },
+            ]),
+        )
+        .unwrap();
+
+    let starting_revision = controller.settings_revision();
+    let report = controller
+        .transact()
+        .set_app_value("textures.resolution", "medium")
+        .apply()
+        .unwrap();
+
+    assert_eq!(
+        report.changes,
+        vec![RuntimeChangeResult::Applied {
+            setting: RuntimeSettingId::app("textures.resolution"),
+            path: RuntimeApplyPath::Immediate,
+        }]
+    );
+    assert_eq!(
+        controller.setting_value(RuntimeSettingId::app("textures.resolution")),
+        Some(RuntimeSettingValue::Text("medium".to_string()))
+    );
+
+    let changes = controller.setting_changes_since(starting_revision);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].setting, RuntimeSettingId::app("textures.resolution"));
+    assert_eq!(changes[0].value, RuntimeSettingValue::Text("medium".to_string()));
+    assert_eq!(changes[0].path, RuntimeApplyPath::Immediate);
+}
+
+#[test]
+fn runtime_controller_rejects_invalid_setting_value_kind() {
+    let mut controller = RuntimeController::default();
+    let report = controller
+        .transact()
+        .set_engine_value(RuntimeSettingKey::OverlayVisibility, "visible")
+        .apply()
+        .unwrap();
+
+    assert!(matches!(
+        &report.changes[0],
+        RuntimeChangeResult::Rejected { setting, .. }
+            if setting == &RuntimeSettingId::from(RuntimeSettingKey::OverlayVisibility)
+    ));
+    assert_eq!(
+        controller.setting_value(RuntimeSettingKey::OverlayVisibility),
+        Some(RuntimeSettingValue::Bool(true))
+    );
+}
+
+#[test]
+fn runtime_controller_reports_setting_support_and_menu_metadata() {
+    let controller = RuntimeController::default();
+    let overlay_entry = controller
+        .setting_entry(RuntimeSettingKey::OverlayVisibility)
+        .unwrap();
+
+    assert_eq!(overlay_entry.descriptor.options.len(), 2);
+    assert_eq!(
+        controller.setting_support(RuntimeSettingKey::OverlayVisibility),
+        Some(RuntimeSettingSupport::supported())
+    );
+}
+
+#[test]
+fn runtime_controller_rejects_unsupported_engine_setting_changes() {
+    let mut controller = RuntimeController::default();
+
+    let report = controller
+        .transact()
+        .set_engine_value(RuntimeSettingKey::BackendSelection, "Vulkan")
+        .apply()
+        .unwrap();
+
+    assert!(matches!(
+        &report.changes[0],
+        RuntimeChangeResult::Rejected { setting, reason }
+            if setting == &RuntimeSettingId::from(RuntimeSettingKey::BackendSelection)
+                && reason.contains("not implemented")
+    ));
+}
+
+#[test]
+fn keybind_serializes_and_parses_round_trip() {
+    let binding = Keybind::new([KeyModifier::Ctrl, KeyModifier::Shift], Some("KeyK".to_string()));
+    let serialized = binding.to_string();
+
+    assert_eq!(serialized, "Ctrl+Shift+KeyK");
+    assert_eq!(serialized.parse::<Keybind>().unwrap(), binding);
+    assert_eq!(binding.display_label(), "Ctrl+Shift+K");
+}
+
+#[test]
+fn keybind_capture_finishes_modifier_only_binding_on_last_release() {
+    let mut capture = KeybindCapture::new();
+    let press_ctrl = KeyInput {
+        key: KeyToken::Modifier(KeyModifier::Ctrl),
+        state: KeyInputState::Pressed,
+        modifiers: KeyModifiers {
+            ctrl: true,
+            ..KeyModifiers::default()
+        },
+        repeat: false,
+        text: None,
+    };
+    let press_shift = KeyInput {
+        key: KeyToken::Modifier(KeyModifier::Shift),
+        state: KeyInputState::Pressed,
+        modifiers: KeyModifiers {
+            ctrl: true,
+            shift: true,
+            ..KeyModifiers::default()
+        },
+        repeat: false,
+        text: None,
+    };
+    let release_shift = KeyInput {
+        key: KeyToken::Modifier(KeyModifier::Shift),
+        state: KeyInputState::Released,
+        modifiers: KeyModifiers {
+            ctrl: true,
+            ..KeyModifiers::default()
+        },
+        repeat: false,
+        text: None,
+    };
+    let release_ctrl = KeyInput {
+        key: KeyToken::Modifier(KeyModifier::Ctrl),
+        state: KeyInputState::Released,
+        modifiers: KeyModifiers::default(),
+        repeat: false,
+        text: None,
+    };
+
+    assert!(capture.handle_input(&press_ctrl).is_none());
+    assert!(capture.handle_input(&press_shift).is_none());
+    assert!(capture.handle_input(&release_shift).is_none());
+
+    let binding = capture.handle_input(&release_ctrl).unwrap();
+    assert_eq!(binding.to_string(), "Ctrl+Shift");
+}
+
+#[test]
+fn keybind_capture_uses_first_non_modifier_with_current_modifiers() {
+    let mut capture = KeybindCapture::new();
+    let press_ctrl = KeyInput {
+        key: KeyToken::Modifier(KeyModifier::Ctrl),
+        state: KeyInputState::Pressed,
+        modifiers: KeyModifiers {
+            ctrl: true,
+            ..KeyModifiers::default()
+        },
+        repeat: false,
+        text: None,
+    };
+    let press_k = KeyInput {
+        key: KeyToken::key("KeyK"),
+        state: KeyInputState::Pressed,
+        modifiers: KeyModifiers {
+            ctrl: true,
+            ..KeyModifiers::default()
+        },
+        repeat: false,
+        text: Some("k".to_string()),
+    };
+    let press_j = KeyInput {
+        key: KeyToken::key("KeyJ"),
+        state: KeyInputState::Pressed,
+        modifiers: KeyModifiers {
+            ctrl: true,
+            ..KeyModifiers::default()
+        },
+        repeat: false,
+        text: Some("j".to_string()),
+    };
+
+    assert!(capture.handle_input(&press_ctrl).is_none());
+    let binding = capture.handle_input(&press_k).unwrap();
+    assert_eq!(binding.to_string(), "Ctrl+KeyK");
+    assert_eq!(capture.handle_input(&press_j).unwrap(), binding);
+}
+
+#[test]
+fn action_binding_registry_rebinds_action_from_capture() {
+    let mut registry = ActionBindingRegistry::new();
+    registry.set_binding("toggle_overlay", "Ctrl+KeyO".parse().unwrap());
+    registry.request_rebind("toggle_overlay");
+
+    let change = registry
+        .handle_input(&KeyInput {
+            key: KeyToken::Modifier(KeyModifier::Alt),
+            state: KeyInputState::Pressed,
+            modifiers: KeyModifiers {
+                alt: true,
+                ..KeyModifiers::default()
+            },
+            repeat: false,
+            text: None,
+        })
+        .is_none();
+    assert!(change);
+
+    let change = registry
+        .handle_input(&KeyInput {
+            key: KeyToken::key("KeyP"),
+            state: KeyInputState::Pressed,
+            modifiers: KeyModifiers {
+                alt: true,
+                ..KeyModifiers::default()
+            },
+            repeat: false,
+            text: Some("p".to_string()),
+        })
+        .unwrap();
+
+    assert_eq!(change.action, "toggle_overlay");
+    assert_eq!(change.binding.to_string(), "Alt+KeyP");
+    assert_eq!(
+        registry.binding("toggle_overlay").unwrap().to_string(),
+        "Alt+KeyP"
+    );
 }
 
 #[test]

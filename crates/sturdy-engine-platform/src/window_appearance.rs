@@ -1,6 +1,18 @@
 use crate::{WindowEffectRegion, WindowMaterialKind};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum WindowAppearancePreset {
+    None,
+    Transparent,
+    Blur,
+    ThinMaterial,
+    ThickMaterial,
+    NoiseMaterial,
+    TitlebarMaterial,
+    HudMaterial,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum SurfaceTransparency {
     Disabled,
     Enabled,
@@ -131,6 +143,40 @@ impl WindowAppearance {
                 ..WindowMaterialDesc::default()
             }),
             ..Self::default()
+        }
+    }
+
+    pub fn from_preset(preset: WindowAppearancePreset) -> Self {
+        match preset {
+            WindowAppearancePreset::None => Self::default(),
+            WindowAppearancePreset::Transparent => Self::transparent(),
+            WindowAppearancePreset::Blur => Self::blurred(),
+            WindowAppearancePreset::ThinMaterial => {
+                Self::material(WindowMaterialKind::ThinTranslucent)
+            }
+            WindowAppearancePreset::ThickMaterial => {
+                Self::material(WindowMaterialKind::ThickTranslucent)
+            }
+            WindowAppearancePreset::NoiseMaterial => {
+                Self::material(WindowMaterialKind::NoiseTranslucent)
+            }
+            WindowAppearancePreset::TitlebarMaterial => {
+                Self::material(WindowMaterialKind::TitlebarTranslucent)
+            }
+            WindowAppearancePreset::HudMaterial => Self::material(WindowMaterialKind::Hud),
+        }
+    }
+
+    pub fn preset_name(preset: WindowAppearancePreset) -> &'static str {
+        match preset {
+            WindowAppearancePreset::None => "None",
+            WindowAppearancePreset::Transparent => "Transparent",
+            WindowAppearancePreset::Blur => "Blur",
+            WindowAppearancePreset::ThinMaterial => "ThinTranslucent",
+            WindowAppearancePreset::ThickMaterial => "ThickTranslucent",
+            WindowAppearancePreset::NoiseMaterial => "NoiseTranslucent",
+            WindowAppearancePreset::TitlebarMaterial => "TitlebarTranslucent",
+            WindowAppearancePreset::HudMaterial => "Hud",
         }
     }
 }

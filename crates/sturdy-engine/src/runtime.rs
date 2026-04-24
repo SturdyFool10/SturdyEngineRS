@@ -5,12 +5,25 @@
 //! it establishes the engine-owned types and access patterns without changing
 //! the existing application shell behavior yet.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::{Arc, Mutex},
+};
 
 use crate::{
-    BackendKind, Engine, Format, GraphImage, RenderFrame, Result, Surface, SurfaceColorSpace,
-    SurfaceImage, SurfacePresentMode, SurfaceSize,
+    current_window_appearance_caps, BackendKind, Engine, Error, Format, GraphImage,
+    PlatformCapabilityState, RenderFrame, Result, Surface, SurfaceCapabilities,
+    SurfaceColorSpace, SurfaceImage, SurfacePresentMode, SurfaceSize, WindowCornerStyle,
+    WindowMaterialKind,
 };
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum WindowMode {
+    #[default]
+    Windowed,
+    BorderlessFullscreen,
+}
 
 /// Engine-owned runtime shell state.
 ///
@@ -37,6 +50,15 @@ impl AppRuntime {
                 hdr_enabled: surface_is_hdr(surface.info().color_space),
                 present_mode: None,
                 surface_size: surface.info().size,
+                window_title: "Sturdy Engine".to_string(),
+                window_size: surface.info().size,
+                window_position: None,
+                window_mode: WindowMode::Windowed,
+                window_decorations: true,
+                window_resizable: false,
+                window_maximized: false,
+                window_always_on_top: false,
+                window_corner_style: WindowCornerStyle::Default,
             }),
             engine,
             surface,
@@ -83,13 +105,17 @@ impl AppRuntime {
     /// Refresh runtime settings/diagnostics snapshots from the current engine and surface state.
     pub fn refresh_controller_state(&self) {
         let surface_info = self.surface.info();
+        let hdr_caps = self.surface.hdr_caps().ok();
+        let surface_caps = self.surface.capabilities().ok();
         self.controller.set_settings(RuntimeSettingsSnapshot {
             backend: self.engine.backend_kind(),
             adapter_name: self.engine.adapter_name(),
             hdr_enabled: surface_is_hdr(surface_info.color_space),
             present_mode: None,
             surface_size: surface_info.size,
+            ..self.controller.settings()
         });
+        self.controller.sync_engine_capabilities(hdr_caps, surface_caps);
         self.controller.update_diagnostics(|diagnostics| {
             diagnostics.backend = self.engine.backend_kind();
             diagnostics.adapter_name = self.engine.adapter_name();
@@ -217,11 +243,7 @@ pub struct RuntimeController {
 impl RuntimeController {
     pub fn new(settings: RuntimeSettingsSnapshot) -> Self {
         Self {
-            shared: Arc::new(Mutex::new(RuntimeShared {
-                settings,
-                diagnostics: RuntimeDiagnostics::default(),
-                overlay_lines: Vec::new(),
-            })),
+            shared: Arc::new(Mutex::new(RuntimeShared::new(settings))),
         }
     }
 
@@ -240,6 +262,131 @@ impl RuntimeController {
             controller: self,
             pending: Vec::new(),
         }
+    }
+
+    /// Register an application-owned runtime setting.
+    pub fn register_app_setting(
+        &self,
+        descriptor: RuntimeSettingDescriptor,
+    ) -> Result<RuntimeSettingEntry> {
+        let id = descriptor.id.clone();
+        if !matches!(id, RuntimeSettingId::App(_)) {
+            return Err(Error::InvalidInput(
+                "application settings must use RuntimeSettingId::App".to_string(),
+            ));
+        }
+
+        let mut shared = self.shared.lock().expect("runtime controller poisoned");
+        if shared.setting_entries.contains_key(&id) {
+            return Err(Error::InvalidInput(format!(
+                "runtime setting `{}` is already registered",
+                id
+            )));
+        }
+        let entry = RuntimeSettingEntry::new(RuntimeSettingSource::App, descriptor, 0);
+        shared.setting_entries.insert(id.clone(), entry.clone());
+        Ok(entry)
+    }
+
+    /// Return the current value of one runtime setting.
+    pub fn setting_value(&self, id: impl Into<RuntimeSettingId>) -> Option<RuntimeSettingValue> {
+        self.setting_entry(id).map(|entry| entry.value)
+    }
+
+    pub fn bool_setting(&self, id: impl Into<RuntimeSettingId>) -> Option<bool> {
+        match self.setting_value(id)? {
+            RuntimeSettingValue::Bool(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn integer_setting(&self, id: impl Into<RuntimeSettingId>) -> Option<i64> {
+        match self.setting_value(id)? {
+            RuntimeSettingValue::Integer(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn float_setting(&self, id: impl Into<RuntimeSettingId>) -> Option<f64> {
+        match self.setting_value(id)? {
+            RuntimeSettingValue::Float(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn text_setting(&self, id: impl Into<RuntimeSettingId>) -> Option<String> {
+        match self.setting_value(id)? {
+            RuntimeSettingValue::Text(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Return one registered runtime setting, including menu metadata.
+    pub fn setting_entry(&self, id: impl Into<RuntimeSettingId>) -> Option<RuntimeSettingEntry> {
+        self.shared
+            .lock()
+            .expect("runtime controller poisoned")
+            .setting_entries
+            .get(&id.into())
+            .cloned()
+    }
+
+    /// Return every registered runtime setting.
+    pub fn setting_entries(&self) -> Vec<RuntimeSettingEntry> {
+        let mut entries = self
+            .shared
+            .lock()
+            .expect("runtime controller poisoned")
+            .setting_entries
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.descriptor.label.cmp(&right.descriptor.label));
+        entries
+    }
+
+    /// Return support/capability information for one runtime setting.
+    pub fn setting_support(&self, id: impl Into<RuntimeSettingId>) -> Option<RuntimeSettingSupport> {
+        self.shared
+            .lock()
+            .expect("runtime controller poisoned")
+            .setting_entries
+            .get(&id.into())
+            .map(|entry| entry.support.clone())
+    }
+
+    /// Return support/capability information for all runtime settings.
+    pub fn setting_supports(&self) -> Vec<(RuntimeSettingId, RuntimeSettingSupport)> {
+        let mut supports = self
+            .shared
+            .lock()
+            .expect("runtime controller poisoned")
+            .setting_entries
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry.support.clone()))
+            .collect::<Vec<_>>();
+        supports.sort_by(|left, right| left.0.label().cmp(&right.0.label()));
+        supports
+    }
+
+    /// Return the current settings change serial.
+    pub fn settings_revision(&self) -> u64 {
+        self.shared
+            .lock()
+            .expect("runtime controller poisoned")
+            .settings_revision
+    }
+
+    /// Return every settings change recorded after `revision`.
+    pub fn setting_changes_since(&self, revision: u64) -> Vec<RuntimeSettingChange> {
+        self.shared
+            .lock()
+            .expect("runtime controller poisoned")
+            .change_log
+            .iter()
+            .filter(|change| change.revision > revision)
+            .cloned()
+            .collect()
     }
 
     /// Return the current runtime diagnostics snapshot.
@@ -261,10 +408,20 @@ impl RuntimeController {
     }
 
     pub(crate) fn set_settings(&self, settings: RuntimeSettingsSnapshot) {
+        let mut shared = self.shared.lock().expect("runtime controller poisoned");
+        shared.sync_engine_snapshot(&settings);
+        shared.settings = settings;
+    }
+
+    pub(crate) fn sync_engine_capabilities(
+        &self,
+        hdr_caps: Option<crate::SurfaceHdrCaps>,
+        surface_caps: Option<SurfaceCapabilities>,
+    ) {
         self.shared
             .lock()
             .expect("runtime controller poisoned")
-            .settings = settings;
+            .sync_engine_capabilities(hdr_caps, surface_caps.as_ref());
     }
 
     pub(crate) fn update_diagnostics(&self, f: impl FnOnce(&mut RuntimeDiagnostics)) {
@@ -296,6 +453,15 @@ pub struct RuntimeSettingsSnapshot {
     pub hdr_enabled: bool,
     pub present_mode: Option<SurfacePresentMode>,
     pub surface_size: SurfaceSize,
+    pub window_title: String,
+    pub window_size: SurfaceSize,
+    pub window_position: Option<(i32, i32)>,
+    pub window_mode: WindowMode,
+    pub window_decorations: bool,
+    pub window_resizable: bool,
+    pub window_maximized: bool,
+    pub window_always_on_top: bool,
+    pub window_corner_style: WindowCornerStyle,
 }
 
 impl Default for RuntimeSettingsSnapshot {
@@ -306,6 +472,15 @@ impl Default for RuntimeSettingsSnapshot {
             hdr_enabled: false,
             present_mode: None,
             surface_size: SurfaceSize { width: 1, height: 1 },
+            window_title: "Sturdy Engine".to_string(),
+            window_size: SurfaceSize { width: 1, height: 1 },
+            window_position: None,
+            window_mode: WindowMode::Windowed,
+            window_decorations: true,
+            window_resizable: false,
+            window_maximized: false,
+            window_always_on_top: false,
+            window_corner_style: WindowCornerStyle::Default,
         }
     }
 }
@@ -324,6 +499,7 @@ pub struct RuntimeDiagnostics {
     pub bloom_enabled: Option<bool>,
     pub bloom_only: Option<bool>,
     pub motion_validation: Option<String>,
+    pub motion_warning: Option<String>,
     pub camera_locked_passes: Vec<String>,
     pub debug_images: Vec<String>,
     pub graph: RuntimeGraphDiagnostics,
@@ -358,6 +534,302 @@ struct RuntimeShared {
     settings: RuntimeSettingsSnapshot,
     diagnostics: RuntimeDiagnostics,
     overlay_lines: Vec<String>,
+    setting_entries: HashMap<RuntimeSettingId, RuntimeSettingEntry>,
+    settings_revision: u64,
+    change_log: Vec<RuntimeSettingChange>,
+}
+
+impl RuntimeShared {
+    fn new(settings: RuntimeSettingsSnapshot) -> Self {
+        let mut shared = Self {
+            settings: settings.clone(),
+            diagnostics: RuntimeDiagnostics::default(),
+            overlay_lines: Vec::new(),
+            setting_entries: default_setting_entries(&settings),
+            settings_revision: 0,
+            change_log: Vec::new(),
+        };
+        shared.sync_engine_snapshot(&settings);
+        shared.sync_engine_capabilities(None, None);
+        shared
+    }
+
+    fn sync_engine_snapshot(&mut self, settings: &RuntimeSettingsSnapshot) {
+        self.sync_engine_value(
+            RuntimeSettingKey::BackendSelection,
+            RuntimeSettingValue::Text(format!("{:?}", settings.backend)),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::AdapterSelection,
+            RuntimeSettingValue::Text(
+                settings
+                    .adapter_name
+                    .clone()
+                    .unwrap_or_else(|| "Auto".to_string()),
+            ),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::HdrMode,
+            RuntimeSettingValue::Bool(settings.hdr_enabled),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::PresentMode,
+            RuntimeSettingValue::Text(
+                settings
+                    .present_mode
+                    .map(|mode| format!("{mode:?}"))
+                    .unwrap_or_else(|| "Auto".to_string()),
+            ),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::WindowTitle,
+            RuntimeSettingValue::Text(settings.window_title.clone()),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::WindowWidth,
+            RuntimeSettingValue::Integer(settings.window_size.width as i64),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::WindowHeight,
+            RuntimeSettingValue::Integer(settings.window_size.height as i64),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::WindowPositionX,
+            RuntimeSettingValue::Integer(
+                settings.window_position.map(|(x, _)| x as i64).unwrap_or(0),
+            ),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::WindowPositionY,
+            RuntimeSettingValue::Integer(
+                settings.window_position.map(|(_, y)| y as i64).unwrap_or(0),
+            ),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::WindowMode,
+            RuntimeSettingValue::Text(window_mode_setting_name(settings.window_mode).to_string()),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::WindowDecorations,
+            RuntimeSettingValue::Bool(settings.window_decorations),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::WindowResizable,
+            RuntimeSettingValue::Bool(settings.window_resizable),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::WindowMaximized,
+            RuntimeSettingValue::Bool(settings.window_maximized),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::WindowAlwaysOnTop,
+            RuntimeSettingValue::Bool(settings.window_always_on_top),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::WindowCornerStyle,
+            RuntimeSettingValue::Text(
+                window_corner_style_setting_name(settings.window_corner_style).to_string(),
+            ),
+        );
+    }
+
+    fn sync_engine_capabilities(
+        &mut self,
+        hdr_caps: Option<crate::SurfaceHdrCaps>,
+        surface_caps: Option<&SurfaceCapabilities>,
+    ) {
+        if let Some(entry) = self
+            .setting_entries
+            .get_mut(&RuntimeSettingId::from(RuntimeSettingKey::HdrMode))
+        {
+            let hdr_available = hdr_caps.map(|caps| caps.hdr10 || caps.sc_rgb).unwrap_or(false);
+            entry.descriptor.options = bool_options(if hdr_available {
+                &[false, true]
+            } else {
+                &[false]
+            });
+            entry.support = if hdr_available {
+                RuntimeSettingSupport::supported()
+            } else {
+                RuntimeSettingSupport::unsupported(
+                    "HDR output is unavailable on the current surface".to_string(),
+                )
+            };
+        }
+
+        if let Some(entry) = self
+            .setting_entries
+            .get_mut(&RuntimeSettingId::from(RuntimeSettingKey::PresentMode))
+        {
+            if let Some(surface_caps) = surface_caps {
+                let mut options = vec![RuntimeSettingOption {
+                    value: RuntimeSettingValue::Text("Auto".to_string()),
+                    label: "Auto".to_string(),
+                }];
+                options.extend(surface_caps.present_modes.iter().map(|mode| RuntimeSettingOption {
+                    value: RuntimeSettingValue::Text(surface_present_mode_name(*mode).to_string()),
+                    label: format!("{mode:?}"),
+                }));
+                entry.descriptor.options = options;
+                entry.support = RuntimeSettingSupport::supported();
+            } else {
+                entry.support = RuntimeSettingSupport::unsupported(
+                    "surface present modes could not be queried".to_string(),
+                );
+            }
+        }
+
+        let appearance_caps = current_window_appearance_caps();
+        if let Some(entry) = self
+            .setting_entries
+            .get_mut(&RuntimeSettingId::from(RuntimeSettingKey::SurfaceTransparency))
+        {
+            entry.support = capability_state_to_support(
+                appearance_caps.transparency,
+                "runtime surface transparency changes are unavailable on this platform",
+            );
+        }
+        if let Some(entry) = self
+            .setting_entries
+            .get_mut(&RuntimeSettingId::from(RuntimeSettingKey::WindowBackgroundEffect))
+        {
+            let mut options = vec![RuntimeSettingOption {
+                value: RuntimeSettingValue::Text("None".to_string()),
+                label: "None".to_string(),
+            }];
+            if appearance_caps.transparency.is_some_and(is_capability_supported) {
+                options.push(RuntimeSettingOption {
+                    value: RuntimeSettingValue::Text("Transparent".to_string()),
+                    label: "Transparent".to_string(),
+                });
+            }
+            if appearance_caps.blur.is_some_and(is_capability_supported) {
+                options.push(RuntimeSettingOption {
+                    value: RuntimeSettingValue::Text("Blur".to_string()),
+                    label: "Blur".to_string(),
+                });
+            }
+            for material in &appearance_caps.materials {
+                options.push(RuntimeSettingOption {
+                    value: RuntimeSettingValue::Text(window_material_setting_name(material.kind).to_string()),
+                    label: window_material_setting_name(material.kind).to_string(),
+                });
+            }
+            entry.descriptor.options = options;
+            let has_effects =
+                appearance_caps.blur.is_some_and(is_capability_supported)
+                    || !appearance_caps.materials.is_empty();
+            entry.support = if has_effects {
+                RuntimeSettingSupport::supported()
+            } else {
+                RuntimeSettingSupport::unsupported(
+                    "window background effects are unavailable on this platform".to_string(),
+                )
+            };
+        }
+        if let Some(entry) = self
+            .setting_entries
+            .get_mut(&RuntimeSettingId::from(RuntimeSettingKey::WindowCornerStyle))
+        {
+            entry.support = if matches!(crate::current_platform(), crate::PlatformKind::Windows) {
+                RuntimeSettingSupport::supported()
+            } else {
+                RuntimeSettingSupport::unsupported(
+                    "window corner style changes are unavailable on this platform".to_string(),
+                )
+            };
+        }
+
+        self.set_unsupported(
+            RuntimeSettingKey::BackendSelection,
+            "live backend migration is not implemented yet",
+        );
+        self.set_unsupported(
+            RuntimeSettingKey::AdapterSelection,
+            "live adapter migration is not implemented yet",
+        );
+        self.set_unsupported(
+            RuntimeSettingKey::ShaderHotReloadPolicy,
+            "shader hot reload policy changes are not implemented yet",
+        );
+        self.set_unsupported(
+            RuntimeSettingKey::AssetHotReloadPolicy,
+            "asset hot reload policy changes are not implemented yet",
+        );
+    }
+
+    fn set_unsupported(&mut self, setting: RuntimeSettingKey, reason: &str) {
+        if let Some(entry) = self.setting_entries.get_mut(&RuntimeSettingId::from(setting)) {
+            entry.support = RuntimeSettingSupport::unsupported(reason.to_string());
+        }
+    }
+
+    fn sync_engine_value(&mut self, setting: RuntimeSettingKey, value: RuntimeSettingValue) {
+        let id = RuntimeSettingId::from(setting);
+        if let Some(entry) = self.setting_entries.get_mut(&id) {
+            entry.value = value;
+        }
+    }
+
+    fn apply_value(
+        &mut self,
+        id: RuntimeSettingId,
+        value: RuntimeSettingValue,
+    ) -> RuntimeChangeResult {
+        let Some(entry) = self.setting_entries.get_mut(&id) else {
+            return RuntimeChangeResult::Rejected {
+                setting: id,
+                reason: "setting is not registered".to_string(),
+            };
+        };
+
+        if !entry.support.is_supported {
+            return RuntimeChangeResult::Rejected {
+                setting: id,
+                reason: entry
+                    .support
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "setting is unsupported on the current runtime".to_string()),
+            };
+        }
+
+        if !entry.descriptor.accepts_value(&value) {
+            return RuntimeChangeResult::Rejected {
+                setting: id,
+                reason: format!(
+                    "value `{}` does not match setting schema",
+                    value.serialized()
+                ),
+            };
+        }
+
+        if entry.value == value {
+            return RuntimeChangeResult::Applied {
+                setting: id,
+                path: entry.descriptor.apply_path,
+            };
+        }
+
+        entry.value = value.clone();
+        self.settings_revision += 1;
+        entry.revision = self.settings_revision;
+        self.change_log.push(RuntimeSettingChange {
+            setting: id.clone(),
+            value,
+            path: entry.descriptor.apply_path,
+            revision: self.settings_revision,
+        });
+        if self.change_log.len() > 256 {
+            let excess = self.change_log.len() - 256;
+            self.change_log.drain(0..excess);
+        }
+
+        RuntimeChangeResult::Applied {
+            setting: id,
+            path: entry.descriptor.apply_path,
+        }
+    }
 }
 
 /// Runtime-owned registry of named graph images exposed for inspection/debugging.
@@ -398,9 +870,372 @@ pub enum RuntimeApplyPath {
     DeviceMigration,
 }
 
-/// Identifier for a runtime-facing setting.
+/// Identifier for one runtime setting, including app-defined settings.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum RuntimeSettingId {
+    Engine(RuntimeSettingKey),
+    App(String),
+}
+
+impl RuntimeSettingId {
+    pub fn app(name: impl Into<String>) -> Self {
+        Self::App(name.into())
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Self::Engine(setting) => setting.label().to_string(),
+            Self::App(name) => name.clone(),
+        }
+    }
+}
+
+impl fmt::Display for RuntimeSettingId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Engine(setting) => write!(f, "engine:{}", setting.name()),
+            Self::App(name) => write!(f, "app:{name}"),
+        }
+    }
+}
+
+impl From<RuntimeSettingKey> for RuntimeSettingId {
+    fn from(value: RuntimeSettingKey) -> Self {
+        Self::Engine(value)
+    }
+}
+
+/// Serialized value used by both engine and application-defined settings.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RuntimeSettingValue {
+    Bool(bool),
+    Integer(i64),
+    Float(f64),
+    Text(String),
+}
+
+impl RuntimeSettingValue {
+    pub fn serialized(&self) -> String {
+        match self {
+            Self::Bool(value) => value.to_string(),
+            Self::Integer(value) => value.to_string(),
+            Self::Float(value) => value.to_string(),
+            Self::Text(value) => value.clone(),
+        }
+    }
+}
+
+impl fmt::Display for RuntimeSettingValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.serialized())
+    }
+}
+
+impl From<bool> for RuntimeSettingValue {
+    fn from(value: bool) -> Self {
+        Self::Bool(value)
+    }
+}
+
+impl From<i64> for RuntimeSettingValue {
+    fn from(value: i64) -> Self {
+        Self::Integer(value)
+    }
+}
+
+impl From<f64> for RuntimeSettingValue {
+    fn from(value: f64) -> Self {
+        Self::Float(value)
+    }
+}
+
+impl From<String> for RuntimeSettingValue {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for RuntimeSettingValue {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_string())
+    }
+}
+
+/// Optional menu metadata for enumerated settings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeSettingOption {
+    pub value: RuntimeSettingValue,
+    pub label: String,
+}
+
+/// Setting definition shared by engine and application settings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeSettingDescriptor {
+    pub id: RuntimeSettingId,
+    pub label: String,
+    pub description: Option<String>,
+    pub apply_path: RuntimeApplyPath,
+    pub default_value: RuntimeSettingValue,
+    pub options: Vec<RuntimeSettingOption>,
+}
+
+impl RuntimeSettingDescriptor {
+    pub fn new(
+        id: impl Into<RuntimeSettingId>,
+        label: impl Into<String>,
+        apply_path: RuntimeApplyPath,
+        default_value: impl Into<RuntimeSettingValue>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            description: None,
+            apply_path,
+            default_value: default_value.into(),
+            options: Vec::new(),
+        }
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn with_options(mut self, options: Vec<RuntimeSettingOption>) -> Self {
+        self.options = options;
+        self
+    }
+
+    fn accepts_value(&self, value: &RuntimeSettingValue) -> bool {
+        let same_kind = std::mem::discriminant(&self.default_value) == std::mem::discriminant(value);
+        same_kind
+            && (self.options.is_empty() || self.options.iter().any(|option| option.value == *value))
+    }
+}
+
+/// Runtime-visible state for one registered setting.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeSettingEntry {
+    pub descriptor: RuntimeSettingDescriptor,
+    pub value: RuntimeSettingValue,
+    pub source: RuntimeSettingSource,
+    pub support: RuntimeSettingSupport,
+    pub revision: u64,
+}
+
+impl RuntimeSettingEntry {
+    fn new(
+        source: RuntimeSettingSource,
+        descriptor: RuntimeSettingDescriptor,
+        revision: u64,
+    ) -> Self {
+        Self {
+            value: descriptor.default_value.clone(),
+            descriptor,
+            source,
+            support: RuntimeSettingSupport::supported(),
+            revision,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RuntimeSettingKey(pub &'static str);
+pub struct RuntimeSettingSupport {
+    pub is_supported: bool,
+    pub reason: Option<String>,
+}
+
+impl RuntimeSettingSupport {
+    pub fn supported() -> Self {
+        Self {
+            is_supported: true,
+            reason: None,
+        }
+    }
+
+    pub fn unsupported(reason: String) -> Self {
+        Self {
+            is_supported: false,
+            reason: Some(reason),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeSettingSource {
+    Engine,
+    App,
+}
+
+/// Recorded runtime setting change that systems can poll and react to incrementally.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeSettingChange {
+    pub setting: RuntimeSettingId,
+    pub value: RuntimeSettingValue,
+    pub path: RuntimeApplyPath,
+    pub revision: u64,
+}
+
+/// Identifier for a runtime-facing setting.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum RuntimeSettingKey {
+    BackendSelection,
+    AdapterSelection,
+    HdrMode,
+    PresentMode,
+    WindowTitle,
+    WindowWidth,
+    WindowHeight,
+    WindowPositionX,
+    WindowPositionY,
+    WindowMode,
+    WindowDecorations,
+    WindowResizable,
+    WindowMaximized,
+    WindowAlwaysOnTop,
+    WindowCornerStyle,
+    SurfaceTransparency,
+    WindowBackgroundEffect,
+    AntiAliasingMode,
+    AntiAliasingDial,
+    BloomEnabled,
+    BloomOnly,
+    ToneMappingOperator,
+    ToneMappingDial,
+    MotionDebugView,
+    OverlayVisibility,
+    ShaderHotReloadPolicy,
+    AssetHotReloadPolicy,
+}
+
+impl RuntimeSettingKey {
+    pub const fn known_settings() -> &'static [RuntimeSettingKey] {
+        &[
+            Self::BackendSelection,
+            Self::AdapterSelection,
+            Self::HdrMode,
+            Self::PresentMode,
+            Self::WindowTitle,
+            Self::WindowWidth,
+            Self::WindowHeight,
+            Self::WindowPositionX,
+            Self::WindowPositionY,
+            Self::WindowMode,
+            Self::WindowDecorations,
+            Self::WindowResizable,
+            Self::WindowMaximized,
+            Self::WindowAlwaysOnTop,
+            Self::WindowCornerStyle,
+            Self::SurfaceTransparency,
+            Self::WindowBackgroundEffect,
+            Self::AntiAliasingMode,
+            Self::AntiAliasingDial,
+            Self::BloomEnabled,
+            Self::BloomOnly,
+            Self::ToneMappingOperator,
+            Self::ToneMappingDial,
+            Self::MotionDebugView,
+            Self::OverlayVisibility,
+            Self::ShaderHotReloadPolicy,
+            Self::AssetHotReloadPolicy,
+        ]
+    }
+
+    pub const fn apply_path(self) -> RuntimeApplyPath {
+        match self {
+            Self::BackendSelection | Self::AdapterSelection => RuntimeApplyPath::DeviceMigration,
+            Self::HdrMode | Self::PresentMode | Self::SurfaceTransparency => {
+                RuntimeApplyPath::SurfaceRecreate
+            }
+            Self::WindowTitle
+            | Self::WindowWidth
+            | Self::WindowHeight
+            | Self::WindowPositionX
+            | Self::WindowPositionY
+            | Self::WindowMode
+            | Self::WindowDecorations
+            | Self::WindowResizable
+            | Self::WindowMaximized
+            | Self::WindowAlwaysOnTop
+            | Self::WindowCornerStyle
+            | Self::WindowBackgroundEffect => RuntimeApplyPath::WindowReconfigure,
+            Self::AntiAliasingMode
+            | Self::ShaderHotReloadPolicy
+            | Self::AssetHotReloadPolicy => RuntimeApplyPath::GraphRebuild,
+            Self::AntiAliasingDial
+            | Self::BloomEnabled
+            | Self::BloomOnly
+            | Self::ToneMappingOperator
+            | Self::ToneMappingDial
+            | Self::MotionDebugView
+            | Self::OverlayVisibility => RuntimeApplyPath::Immediate,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::BackendSelection => "backend_selection",
+            Self::AdapterSelection => "adapter_selection",
+            Self::HdrMode => "hdr_mode",
+            Self::PresentMode => "present_mode",
+            Self::WindowTitle => "window_title",
+            Self::WindowWidth => "window_width",
+            Self::WindowHeight => "window_height",
+            Self::WindowPositionX => "window_position_x",
+            Self::WindowPositionY => "window_position_y",
+            Self::WindowMode => "window_mode",
+            Self::WindowDecorations => "window_decorations",
+            Self::WindowResizable => "window_resizable",
+            Self::WindowMaximized => "window_maximized",
+            Self::WindowAlwaysOnTop => "window_always_on_top",
+            Self::WindowCornerStyle => "window_corner_style",
+            Self::SurfaceTransparency => "surface_transparency",
+            Self::WindowBackgroundEffect => "window_background_effect",
+            Self::AntiAliasingMode => "anti_aliasing_mode",
+            Self::AntiAliasingDial => "anti_aliasing_dial",
+            Self::BloomEnabled => "bloom_enabled",
+            Self::BloomOnly => "bloom_only",
+            Self::ToneMappingOperator => "tone_mapping_operator",
+            Self::ToneMappingDial => "tone_mapping_dial",
+            Self::MotionDebugView => "motion_debug_view",
+            Self::OverlayVisibility => "overlay_visibility",
+            Self::ShaderHotReloadPolicy => "shader_hot_reload_policy",
+            Self::AssetHotReloadPolicy => "asset_hot_reload_policy",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::BackendSelection => "backend selection",
+            Self::AdapterSelection => "adapter selection",
+            Self::HdrMode => "hdr mode",
+            Self::PresentMode => "present mode",
+            Self::WindowTitle => "window title",
+            Self::WindowWidth => "window width",
+            Self::WindowHeight => "window height",
+            Self::WindowPositionX => "window position x",
+            Self::WindowPositionY => "window position y",
+            Self::WindowMode => "window mode",
+            Self::WindowDecorations => "window decorations",
+            Self::WindowResizable => "window resizable",
+            Self::WindowMaximized => "window maximized",
+            Self::WindowAlwaysOnTop => "window always on top",
+            Self::WindowCornerStyle => "window corner style",
+            Self::SurfaceTransparency => "surface transparency",
+            Self::WindowBackgroundEffect => "window background effect",
+            Self::AntiAliasingMode => "anti-aliasing mode",
+            Self::AntiAliasingDial => "anti-aliasing dial",
+            Self::BloomEnabled => "bloom enabled",
+            Self::BloomOnly => "bloom only",
+            Self::ToneMappingOperator => "tone-mapping operator",
+            Self::ToneMappingDial => "tone-mapping dial",
+            Self::MotionDebugView => "motion debug view",
+            Self::OverlayVisibility => "overlay visibility",
+            Self::ShaderHotReloadPolicy => "shader hot-reload policy",
+            Self::AssetHotReloadPolicy => "asset hot-reload policy",
+        }
+    }
+}
 
 /// Result of applying a set of runtime changes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -412,16 +1247,16 @@ pub struct RuntimeApplyReport {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeChangeResult {
     Applied {
-        setting: RuntimeSettingKey,
+        setting: RuntimeSettingId,
         path: RuntimeApplyPath,
     },
     Degraded {
-        setting: RuntimeSettingKey,
+        setting: RuntimeSettingId,
         path: RuntimeApplyPath,
         reason: String,
     },
     Rejected {
-        setting: RuntimeSettingKey,
+        setting: RuntimeSettingId,
         reason: String,
     },
 }
@@ -429,26 +1264,361 @@ pub enum RuntimeChangeResult {
 /// Mutable transaction over runtime settings.
 pub struct RuntimeSettingsTransaction<'a> {
     controller: &'a mut RuntimeController,
-    pending: Vec<RuntimeSettingKey>,
+    pending: Vec<RuntimePendingSettingChange>,
+}
+
+#[derive(Clone, Debug)]
+enum RuntimePendingSettingChange {
+    Note(RuntimeSettingId),
+    Set {
+        setting: RuntimeSettingId,
+        value: RuntimeSettingValue,
+    },
 }
 
 impl<'a> RuntimeSettingsTransaction<'a> {
     /// Record a placeholder change request.
-    ///
-    /// The initial runtime slice only establishes the transaction surface.
     pub fn note_change(mut self, setting: RuntimeSettingKey) -> Self {
-        self.pending.push(setting);
+        self.pending
+            .push(RuntimePendingSettingChange::Note(setting.into()));
+        self
+    }
+
+    /// Update an engine-owned runtime setting.
+    pub fn set_engine_value(
+        mut self,
+        setting: RuntimeSettingKey,
+        value: impl Into<RuntimeSettingValue>,
+    ) -> Self {
+        self.pending.push(RuntimePendingSettingChange::Set {
+            setting: setting.into(),
+            value: value.into(),
+        });
+        self
+    }
+
+    /// Update an application-owned runtime setting.
+    pub fn set_app_value(
+        mut self,
+        setting: impl Into<String>,
+        value: impl Into<RuntimeSettingValue>,
+    ) -> Self {
+        self.pending.push(RuntimePendingSettingChange::Set {
+            setting: RuntimeSettingId::app(setting),
+            value: value.into(),
+        });
         self
     }
 
     /// Apply the pending transaction.
-    ///
-    /// This is currently a no-op placeholder that returns an empty report while
-    /// the runtime reconfiguration machinery is being built.
     pub fn apply(self) -> Result<RuntimeApplyReport> {
-        let _ = self.controller;
-        let _ = self.pending;
-        Ok(RuntimeApplyReport::default())
+        let mut shared = self
+            .controller
+            .shared
+            .lock()
+            .expect("runtime controller poisoned");
+        let mut report = RuntimeApplyReport::default();
+        for pending in self.pending {
+            let result = match pending {
+                RuntimePendingSettingChange::Note(setting) => {
+                    match shared.setting_entries.get(&setting) {
+                        Some(entry) => RuntimeChangeResult::Applied {
+                            setting,
+                            path: entry.descriptor.apply_path,
+                        },
+                        None => RuntimeChangeResult::Rejected {
+                            setting,
+                            reason: "setting is not registered".to_string(),
+                        },
+                    }
+                }
+                RuntimePendingSettingChange::Set { setting, value } => {
+                    shared.apply_value(setting, value)
+                }
+            };
+            report.changes.push(result);
+        }
+        Ok(report)
+    }
+}
+
+fn default_setting_entries(
+    settings: &RuntimeSettingsSnapshot,
+) -> HashMap<RuntimeSettingId, RuntimeSettingEntry> {
+    let descriptors = [
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::BackendSelection,
+            "Graphics API",
+            RuntimeSettingKey::BackendSelection.apply_path(),
+            format!("{:?}", settings.backend),
+        )
+        .with_description("Select the runtime graphics backend."),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::AdapterSelection,
+            "Graphics Adapter",
+            RuntimeSettingKey::AdapterSelection.apply_path(),
+            settings
+                .adapter_name
+                .clone()
+                .unwrap_or_else(|| "Auto".to_string()),
+        )
+        .with_description("Select the physical adapter used by the runtime."),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::HdrMode,
+            "HDR Output",
+            RuntimeSettingKey::HdrMode.apply_path(),
+            settings.hdr_enabled,
+        )
+        .with_description("Enable or disable HDR output when the surface supports it.")
+        .with_options(bool_options(&[false, true])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::PresentMode,
+            "Present Mode",
+            RuntimeSettingKey::PresentMode.apply_path(),
+            settings
+                .present_mode
+                .map(|mode| format!("{mode:?}"))
+                .unwrap_or_else(|| "Auto".to_string()),
+        )
+        .with_options(vec![RuntimeSettingOption {
+            value: RuntimeSettingValue::Text("Auto".to_string()),
+            label: "Auto".to_string(),
+        }]),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::WindowTitle,
+            "Window Title",
+            RuntimeSettingKey::WindowTitle.apply_path(),
+            settings.window_title.clone(),
+        ),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::WindowWidth,
+            "Window Width",
+            RuntimeSettingKey::WindowWidth.apply_path(),
+            settings.window_size.width as i64,
+        ),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::WindowHeight,
+            "Window Height",
+            RuntimeSettingKey::WindowHeight.apply_path(),
+            settings.window_size.height as i64,
+        ),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::WindowPositionX,
+            "Window Position X",
+            RuntimeSettingKey::WindowPositionX.apply_path(),
+            settings.window_position.map(|(x, _)| x as i64).unwrap_or(0),
+        ),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::WindowPositionY,
+            "Window Position Y",
+            RuntimeSettingKey::WindowPositionY.apply_path(),
+            settings.window_position.map(|(_, y)| y as i64).unwrap_or(0),
+        ),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::WindowMode,
+            "Window Mode",
+            RuntimeSettingKey::WindowMode.apply_path(),
+            window_mode_setting_name(settings.window_mode),
+        )
+        .with_options(text_options(&["Windowed", "BorderlessFullscreen"])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::WindowDecorations,
+            "Window Decorations",
+            RuntimeSettingKey::WindowDecorations.apply_path(),
+            settings.window_decorations,
+        )
+        .with_options(bool_options(&[false, true])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::WindowResizable,
+            "Window Resizable",
+            RuntimeSettingKey::WindowResizable.apply_path(),
+            settings.window_resizable,
+        )
+        .with_options(bool_options(&[false, true])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::WindowMaximized,
+            "Window Maximized",
+            RuntimeSettingKey::WindowMaximized.apply_path(),
+            settings.window_maximized,
+        )
+        .with_options(bool_options(&[false, true])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::WindowAlwaysOnTop,
+            "Window Always On Top",
+            RuntimeSettingKey::WindowAlwaysOnTop.apply_path(),
+            settings.window_always_on_top,
+        )
+        .with_options(bool_options(&[false, true])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::WindowCornerStyle,
+            "Window Corner Style",
+            RuntimeSettingKey::WindowCornerStyle.apply_path(),
+            window_corner_style_setting_name(settings.window_corner_style),
+        )
+        .with_options(text_options(&["Default", "Rounded", "Square"])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::SurfaceTransparency,
+            "Surface Transparency",
+            RuntimeSettingKey::SurfaceTransparency.apply_path(),
+            false,
+        )
+        .with_options(bool_options(&[false, true])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::WindowBackgroundEffect,
+            "Window Background Effect",
+            RuntimeSettingKey::WindowBackgroundEffect.apply_path(),
+            "None",
+        ),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::AntiAliasingMode,
+            "Anti-Aliasing Mode",
+            RuntimeSettingKey::AntiAliasingMode.apply_path(),
+            "Off",
+        )
+        .with_options(text_options(&["Off", "MSAA", "FXAA", "TAA", "FXAA+TAA"])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::AntiAliasingDial,
+            "Anti-Aliasing Dial",
+            RuntimeSettingKey::AntiAliasingDial.apply_path(),
+            1.0_f64,
+        ),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::BloomEnabled,
+            "Bloom Enabled",
+            RuntimeSettingKey::BloomEnabled.apply_path(),
+            true,
+        )
+        .with_options(bool_options(&[false, true])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::BloomOnly,
+            "Bloom Only",
+            RuntimeSettingKey::BloomOnly.apply_path(),
+            false,
+        )
+        .with_options(bool_options(&[false, true])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::ToneMappingOperator,
+            "Tone Mapping Operator",
+            RuntimeSettingKey::ToneMappingOperator.apply_path(),
+            "Aces",
+        )
+        .with_options(text_options(&["Aces", "Reinhard", "Hermite", "Linear"])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::ToneMappingDial,
+            "Tone Mapping Dial",
+            RuntimeSettingKey::ToneMappingDial.apply_path(),
+            1.0_f64,
+        ),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::MotionDebugView,
+            "Motion Debug View",
+            RuntimeSettingKey::MotionDebugView.apply_path(),
+            false,
+        )
+        .with_options(bool_options(&[false, true])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::OverlayVisibility,
+            "Overlay Visibility",
+            RuntimeSettingKey::OverlayVisibility.apply_path(),
+            true,
+        )
+        .with_options(bool_options(&[false, true])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::ShaderHotReloadPolicy,
+            "Shader Hot Reload Policy",
+            RuntimeSettingKey::ShaderHotReloadPolicy.apply_path(),
+            "Manual",
+        )
+        .with_options(text_options(&["Manual"])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::AssetHotReloadPolicy,
+            "Asset Hot Reload Policy",
+            RuntimeSettingKey::AssetHotReloadPolicy.apply_path(),
+            "Manual",
+        )
+        .with_options(text_options(&["Manual"])),
+    ];
+
+    descriptors
+        .into_iter()
+        .map(|descriptor| {
+            let id = descriptor.id.clone();
+            (
+                id,
+                RuntimeSettingEntry::new(RuntimeSettingSource::Engine, descriptor, 0),
+            )
+        })
+        .collect()
+}
+
+fn bool_options(values: &[bool]) -> Vec<RuntimeSettingOption> {
+    values
+        .iter()
+        .copied()
+        .map(|value| RuntimeSettingOption {
+            value: RuntimeSettingValue::Bool(value),
+            label: if value { "On" } else { "Off" }.to_string(),
+        })
+        .collect()
+}
+
+fn text_options(values: &[&str]) -> Vec<RuntimeSettingOption> {
+    values
+        .iter()
+        .map(|value| RuntimeSettingOption {
+            value: RuntimeSettingValue::Text((*value).to_string()),
+            label: (*value).to_string(),
+        })
+        .collect()
+}
+
+fn surface_present_mode_name(mode: SurfacePresentMode) -> &'static str {
+    match mode {
+        SurfacePresentMode::Fifo => "Fifo",
+        SurfacePresentMode::Mailbox => "Mailbox",
+        SurfacePresentMode::Immediate => "Immediate",
+        SurfacePresentMode::RelaxedFifo => "RelaxedFifo",
+    }
+}
+
+const fn window_mode_setting_name(mode: WindowMode) -> &'static str {
+    match mode {
+        WindowMode::Windowed => "Windowed",
+        WindowMode::BorderlessFullscreen => "BorderlessFullscreen",
+    }
+}
+
+const fn window_corner_style_setting_name(style: WindowCornerStyle) -> &'static str {
+    match style {
+        WindowCornerStyle::Default => "Default",
+        WindowCornerStyle::Rounded => "Rounded",
+        WindowCornerStyle::Square => "Square",
+    }
+}
+
+fn capability_state_to_support(
+    state: Option<PlatformCapabilityState>,
+    unsupported_reason: &str,
+) -> RuntimeSettingSupport {
+    if state.is_some_and(is_capability_supported) {
+        RuntimeSettingSupport::supported()
+    } else {
+        RuntimeSettingSupport::unsupported(unsupported_reason.to_string())
+    }
+}
+
+const fn is_capability_supported(state: PlatformCapabilityState) -> bool {
+    !matches!(state, PlatformCapabilityState::Unsupported)
+}
+
+const fn window_material_setting_name(kind: WindowMaterialKind) -> &'static str {
+    match kind {
+        WindowMaterialKind::Auto => "Auto",
+        WindowMaterialKind::ThinTranslucent => "ThinTranslucent",
+        WindowMaterialKind::ThickTranslucent => "ThickTranslucent",
+        WindowMaterialKind::NoiseTranslucent => "NoiseTranslucent",
+        WindowMaterialKind::TitlebarTranslucent => "TitlebarTranslucent",
+        WindowMaterialKind::Hud => "Hud",
     }
 }
 

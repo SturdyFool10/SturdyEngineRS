@@ -3,13 +3,12 @@ use std::time::Instant;
 use sturdy_engine::{
     AntiAliasingConfig, AntiAliasingDial, AntiAliasingPass, BloomConfig, BloomPass,
     CpuProceduralTexture2d, Engine, EngineApp, Extent3d, Format, GpuProceduralTexture,
-    HdrPipelineDesc, HdrPreference, Image, ImageDesc, ImageDimension, ImageUsage, Mesh,
-    MeshProgram, MotionVectorLayer, MotionVectorSpace, ProceduralTextureRecipe,
-    ProceduralTextureUpdatePolicy, QuadBatch, Result as EngineResult, RuntimeMotionDebugDesc,
-    RuntimeMotionVectorDesc, RuntimePostProcessDesc, SamplerPreset, ShaderProgram, ShellFrame,
-    Surface, SurfaceColorSpace, SurfaceHdrCaps, SurfaceHdrPreference, SurfaceImage,
-    SurfaceRecreateDesc, TextDrawDesc, TextEngine, TextPlacement, TextTypography,
-    TextUiRenderer, TiledTextAtlasPage, ToneMappingOp, WindowConfig, push_constants,
+    HdrPipelineDesc, HdrPreference, ImageDesc, ImageDimension, ImageUsage, MotionVectorLayer,
+    MotionVectorSpace, ProceduralTextureRecipe, ProceduralTextureUpdatePolicy,
+    Result as EngineResult, RuntimeController, RuntimeMotionDebugDesc, RuntimeMotionVectorDesc,
+    RuntimePostProcessDesc, RuntimeSettingDescriptor, RuntimeSettingId, RuntimeSettingKey,
+    RuntimeSettingOption, ShaderProgram, ShellFrame, Surface, SurfaceColorSpace, SurfaceImage,
+    TextOverlay, ToneMappingOp, WindowConfig, push_constants,
 };
 
 #[push_constants]
@@ -119,13 +118,6 @@ impl TonemapSettings {
             TonemapDial::HermiteContrast => self.hermite_contrast,
             TonemapDial::LinearWhite => self.linear_white,
         }
-    }
-
-    fn adjust(&mut self, tone_mapping: ToneMappingOp, dial: TonemapDial, direction: f32) {
-        let step = dial.step();
-        let value = self.get(dial) + step * direction;
-        self.set(dial, value.clamp(dial.min(), dial.max()));
-        self.sync_operator_white_point(tone_mapping, dial);
     }
 
     fn reset_for(&mut self, tone_mapping: ToneMappingOp) {
@@ -272,14 +264,12 @@ struct Testbed {
     motion_program: ShaderProgram,
     motion_debug_program: ShaderProgram,
     tonemap_program: ShaderProgram,
-    hud_program: MeshProgram,
     bloom_pass: BloomPass,
     aa_pass: AntiAliasingPass,
     bloom_config: BloomConfig,
     bloom_enabled: bool,
     bloom_only: bool,
     show_motion_vectors: bool,
-    hdr_caps: SurfaceHdrCaps,
     hdr_output: bool,
     tone_mapping: ToneMappingOp,
     tonemap_settings: TonemapSettings,
@@ -287,11 +277,44 @@ struct Testbed {
     aa: AntiAliasingConfig,
     color_lut: GpuProceduralTexture,
     procedural_mask: CpuProceduralTexture2d,
-    text_engine: TextEngine<TextUiRenderer>,
-    hud_atlas_images: Vec<Image>,
-    hud_meshes: Vec<Mesh>,
-    hud_mesh_pages: Vec<u32>,
+    text_overlay: TextOverlay,
+    runtime_controller: Option<RuntimeController>,
+    texture_resolution: TextureResolutionTier,
     started_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextureResolutionTier {
+    Low,
+    Medium,
+    High,
+}
+
+impl TextureResolutionTier {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    fn size(self) -> u32 {
+        match self {
+            Self::Low => 256,
+            Self::Medium => 512,
+            Self::High => 1024,
+        }
+    }
+
+    fn from_setting(value: &str) -> Option<Self> {
+        match value {
+            "low" | "Low" => Some(Self::Low),
+            "medium" | "Medium" => Some(Self::Medium),
+            "high" | "High" => Some(Self::High),
+            _ => None,
+        }
+    }
 }
 
 impl EngineApp for Testbed {
@@ -348,14 +371,12 @@ impl EngineApp for Testbed {
             motion_program: engine.load_shader(shader_path("motion_vectors.slang"))?,
             motion_debug_program: engine.load_shader(shader_path("motion_vector_debug.slang"))?,
             tonemap_program: engine.load_shader(shader_path("tonemap.slang"))?,
-            hud_program: MeshProgram::load_2d_alpha(engine, shader_path("hud_text.slang"))?,
             bloom_pass: BloomPass::new(engine)?,
             aa_pass: AntiAliasingPass::new(engine)?,
             bloom_config: BloomConfig::default(),
             bloom_enabled: true,
             bloom_only: false,
             show_motion_vectors: false,
-            hdr_caps,
             hdr_output,
             tone_mapping: if hdr_output && hdr_desc.tone_mapping == ToneMappingOp::Linear {
                 ToneMappingOp::Aces
@@ -367,10 +388,9 @@ impl EngineApp for Testbed {
             aa: AntiAliasingConfig::default(),
             color_lut,
             procedural_mask,
-            text_engine: TextEngine::new(TextUiRenderer::with_engine(engine)),
-            hud_atlas_images: Vec::new(),
-            hud_meshes: Vec::new(),
-            hud_mesh_pages: Vec::new(),
+            text_overlay: TextOverlay::new(engine)?,
+            runtime_controller: None,
+            texture_resolution: TextureResolutionTier::Medium,
             started_at: Instant::now(),
         })
     }
@@ -381,6 +401,13 @@ impl EngineApp for Testbed {
         surface_image: &SurfaceImage,
     ) -> EngineResult<()> {
         let shell_frame = &*frame;
+        let runtime_controller = shell_frame.runtime_controller();
+        if self.runtime_controller.is_none() {
+            self.register_runtime_settings(&runtime_controller)?;
+            self.seed_runtime_settings(&runtime_controller)?;
+            self.runtime_controller = Some(runtime_controller.clone());
+        }
+
         let elapsed = self.started_at.elapsed().as_secs_f32();
         let ext = surface_image.desc().extent;
 
@@ -462,25 +489,45 @@ impl EngineApp for Testbed {
             self.bloom_enabled,
             self.bloom_only,
         );
-        let mut overlay_lines = shell_frame.default_runtime_overlay_lines();
-        overlay_lines.push(format!(
-            "controls: T={} P={}={:.2}",
-            tone_mapping_label(self.tone_mapping),
-            self.selected_tonemap_dial.label(),
-            self.tonemap_settings.get(self.selected_tonemap_dial),
-        ));
-        overlay_lines.push(format!(
-            "controls: D={} V={} H={}",
-            self.aa.selected_dial.label(),
-            if self.show_motion_vectors {
-                "shown"
-            } else {
-                "hidden"
-            },
-            if self.hdr_output { "on" } else { "off" },
-        ));
-        overlay_lines.push("keys: [/]=tonemap .=aa R/U reset B/b bloom H hdr V motion".to_string());
-        shell_frame.set_runtime_overlay_lines(overlay_lines);
+        if runtime_controller
+            .bool_setting(RuntimeSettingKey::OverlayVisibility)
+            .unwrap_or(true)
+        {
+            let mut overlay_lines = shell_frame.default_runtime_overlay_lines();
+            overlay_lines.push(format!(
+                "controls: T={} P={}={:.2}",
+                tone_mapping_label(self.tone_mapping),
+                self.selected_tonemap_dial.label(),
+                self.tonemap_settings.get(self.selected_tonemap_dial),
+            ));
+            overlay_lines.push(format!(
+                "controls: D={} V={} H={} T={} FX={} tex={}",
+                self.aa.selected_dial.label(),
+                if self.show_motion_vectors {
+                    "shown"
+                } else {
+                    "hidden"
+                },
+                if self.hdr_output { "on" } else { "off" },
+                if runtime_controller
+                    .bool_setting(RuntimeSettingKey::SurfaceTransparency)
+                    .unwrap_or(false)
+                {
+                    "on"
+                } else {
+                    "off"
+                },
+                runtime_controller
+                    .text_setting(RuntimeSettingKey::WindowBackgroundEffect)
+                    .unwrap_or_else(|| "None".to_string()),
+                self.texture_resolution.label(),
+            ));
+            overlay_lines.push(
+                "keys: [/]=tonemap .=aa R/U reset B/b bloom H hdr V motion O overlay X transparency G effect 1/2/3 tex"
+                    .to_string(),
+            );
+            shell_frame.set_runtime_overlay_lines(overlay_lines);
+        }
 
         shell_frame.run_camera_locked_pass("hud_overlay", &swapchain, |frame, target| {
             self.draw_hud(shell_frame, frame, target, ext.width, ext.height)
@@ -496,28 +543,64 @@ impl EngineApp for Testbed {
         Ok(())
     }
 
-    fn key_pressed(&mut self, key: &str, surface: &mut Surface) -> EngineResult<()> {
+    fn key_pressed(&mut self, key: &str, _surface: &mut Surface) -> EngineResult<()> {
+        let mut runtime_controller = self.runtime_controller.clone();
         if key == "b" {
-            self.bloom_only = !self.bloom_only;
-            eprintln!("bloom-only: {}", self.bloom_only);
+            if let Some(controller) = runtime_controller.as_mut() {
+                let next = !controller
+                    .bool_setting(RuntimeSettingKey::BloomOnly)
+                    .unwrap_or(self.bloom_only);
+                controller
+                    .transact()
+                    .set_engine_value(RuntimeSettingKey::BloomOnly, next)
+                    .apply()?;
+                eprintln!("bloom-only: {next}");
+            }
         } else if key == "B" {
-            self.bloom_enabled = !self.bloom_enabled;
-            eprintln!("bloom: {}", if self.bloom_enabled { "on" } else { "off" });
+            if let Some(controller) = runtime_controller.as_mut() {
+                let next = !controller
+                    .bool_setting(RuntimeSettingKey::BloomEnabled)
+                    .unwrap_or(self.bloom_enabled);
+                controller
+                    .transact()
+                    .set_engine_value(RuntimeSettingKey::BloomEnabled, next)
+                    .apply()?;
+                eprintln!("bloom: {}", if next { "on" } else { "off" });
+            }
         } else if key == "V" || key == "v" {
-            self.show_motion_vectors = !self.show_motion_vectors;
-            eprintln!(
-                "motion vectors: {}",
-                if self.show_motion_vectors {
-                    "shown"
-                } else {
-                    "hidden"
-                }
-            );
+            if let Some(controller) = runtime_controller.as_mut() {
+                let next = !controller
+                    .bool_setting(RuntimeSettingKey::MotionDebugView)
+                    .unwrap_or(self.show_motion_vectors);
+                controller
+                    .transact()
+                    .set_engine_value(RuntimeSettingKey::MotionDebugView, next)
+                    .apply()?;
+                eprintln!("motion vectors: {}", if next { "shown" } else { "hidden" });
+            }
         } else if key == "T" || key == "t" {
-            self.tone_mapping = next_tone_mapping(self.tone_mapping);
-            eprintln!("tone mapping: {}", tone_mapping_label(self.tone_mapping));
+            if let Some(controller) = runtime_controller.as_mut() {
+                let next = next_tone_mapping(self.tone_mapping);
+                controller
+                    .transact()
+                    .set_engine_value(
+                        RuntimeSettingKey::ToneMappingOperator,
+                        tone_mapping_setting_name(next),
+                    )
+                    .apply()?;
+                eprintln!("tone mapping: {}", tone_mapping_label(next));
+            }
         } else if key == "H" || key == "h" {
-            self.toggle_hdr_output(surface)?;
+            if let Some(controller) = runtime_controller.as_mut() {
+                let next = !controller
+                    .bool_setting(RuntimeSettingKey::HdrMode)
+                    .unwrap_or(self.hdr_output);
+                controller
+                    .transact()
+                    .set_engine_value(RuntimeSettingKey::HdrMode, next)
+                    .apply()?;
+                eprintln!("HDR output requested: {}", if next { "on" } else { "off" });
+            }
         } else if key == "P" || key == "p" {
             self.selected_tonemap_dial = self.selected_tonemap_dial.next();
             eprintln!(
@@ -526,30 +609,137 @@ impl EngineApp for Testbed {
                 self.tonemap_settings.get(self.selected_tonemap_dial),
             );
         } else if key == "A" || key == "a" {
-            self.aa.next_mode();
-            eprintln!("aa mode: {}", self.aa.mode.label());
+            let mut next = self.aa.clone();
+            next.next_mode();
+            if let Some(controller) = runtime_controller.as_mut() {
+                controller
+                    .transact()
+                    .set_engine_value(RuntimeSettingKey::AntiAliasingMode, aa_mode_setting_name(next.mode))
+                    .apply()?;
+            }
+            eprintln!("aa mode: {}", next.mode.label());
         } else if key == "D" || key == "d" {
             self.aa.cycle_dial();
             eprintln!("aa dial: {}", self.aa.selected_dial.label());
+        } else if key == "O" || key == "o" {
+            if let Some(controller) = runtime_controller.as_mut() {
+                let visible = !controller
+                    .bool_setting(RuntimeSettingKey::OverlayVisibility)
+                    .unwrap_or(true);
+                controller
+                    .transact()
+                    .set_engine_value(RuntimeSettingKey::OverlayVisibility, visible)
+                    .apply()?;
+                eprintln!("overlay: {}", if visible { "shown" } else { "hidden" });
+            }
+        } else if key == "X" || key == "x" {
+            if let Some(controller) = runtime_controller.as_mut() {
+                let enabled = !controller
+                    .bool_setting(RuntimeSettingKey::SurfaceTransparency)
+                    .unwrap_or(false);
+                controller
+                    .transact()
+                    .set_engine_value(RuntimeSettingKey::SurfaceTransparency, enabled)
+                    .apply()?;
+                eprintln!("surface transparency: {}", if enabled { "on" } else { "off" });
+            }
+        } else if key == "G" || key == "g" {
+            self.cycle_window_background_effect()?;
+        } else if key == "1" {
+            self.set_texture_resolution_setting(TextureResolutionTier::Low)?;
+        } else if key == "2" {
+            self.set_texture_resolution_setting(TextureResolutionTier::Medium)?;
+        } else if key == "3" {
+            self.set_texture_resolution_setting(TextureResolutionTier::High)?;
         } else if key == "]" || key == "=" || key == "+" {
-            self.adjust_tonemap_dial(1.0);
+            let value = self.preview_tonemap_dial(1.0);
+            if let Some(controller) = runtime_controller.as_mut() {
+                controller
+                    .transact()
+                    .set_engine_value(RuntimeSettingKey::ToneMappingDial, value as f64)
+                    .apply()?;
+            }
+            eprintln!(
+                "{} {}: {:.3}",
+                tone_mapping_label(self.tone_mapping),
+                self.selected_tonemap_dial.label(),
+                value
+            );
         } else if key == "[" || key == "-" || key == "_" {
-            self.adjust_tonemap_dial(-1.0);
+            let value = self.preview_tonemap_dial(-1.0);
+            if let Some(controller) = runtime_controller.as_mut() {
+                controller
+                    .transact()
+                    .set_engine_value(RuntimeSettingKey::ToneMappingDial, value as f64)
+                    .apply()?;
+            }
+            eprintln!(
+                "{} {}: {:.3}",
+                tone_mapping_label(self.tone_mapping),
+                self.selected_tonemap_dial.label(),
+                value
+            );
         } else if key == "." || key == ">" {
-            self.adjust_aa_dial(1.0);
+            let value = self.preview_aa_dial(1.0);
+            if let Some(controller) = runtime_controller.as_mut() {
+                controller
+                    .transact()
+                    .set_engine_value(RuntimeSettingKey::AntiAliasingDial, value as f64)
+                    .apply()?;
+            }
+            eprintln!("aa {}: {:.3}", self.aa.selected_dial.label(), value);
         } else if key == "," || key == "<" {
-            self.adjust_aa_dial(-1.0);
+            let value = self.preview_aa_dial(-1.0);
+            if let Some(controller) = runtime_controller.as_mut() {
+                controller
+                    .transact()
+                    .set_engine_value(RuntimeSettingKey::AntiAliasingDial, value as f64)
+                    .apply()?;
+            }
+            eprintln!("aa {}: {:.3}", self.aa.selected_dial.label(), value);
         } else if key == "R" || key == "r" {
             self.tonemap_settings.reset_for(self.tone_mapping);
+            if let Some(controller) = runtime_controller.as_mut() {
+                controller
+                    .transact()
+                    .set_engine_value(
+                        RuntimeSettingKey::ToneMappingDial,
+                        self.tonemap_settings.get(self.selected_tonemap_dial) as f64,
+                    )
+                    .apply()?;
+            }
             eprintln!(
                 "reset {} tonemap dials",
                 tone_mapping_label(self.tone_mapping)
             );
         } else if key == "U" || key == "u" {
             self.aa = AntiAliasingConfig::default();
+            if let Some(controller) = runtime_controller.as_mut() {
+                controller
+                    .transact()
+                    .set_engine_value(
+                        RuntimeSettingKey::AntiAliasingMode,
+                        aa_mode_setting_name(self.aa.mode),
+                    )
+                    .set_engine_value(
+                        RuntimeSettingKey::AntiAliasingDial,
+                        self.current_aa_dial_value() as f64,
+                    )
+                    .apply()?;
+            }
             eprintln!("reset aa dials");
         }
         Ok(())
+    }
+
+    fn runtime_settings_changed(
+        &mut self,
+        controller: &RuntimeController,
+        changes: &[sturdy_engine::RuntimeSettingChange],
+        surface: &mut Surface,
+    ) -> EngineResult<()> {
+        self.runtime_controller = Some(controller.clone());
+        self.apply_runtime_settings(controller, changes, surface)
     }
 
     fn resize(&mut self, _width: u32, _height: u32) -> EngineResult<()> {
@@ -558,61 +748,214 @@ impl EngineApp for Testbed {
 }
 
 impl Testbed {
-    fn adjust_tonemap_dial(&mut self, direction: f32) {
-        self.tonemap_settings
-            .adjust(self.tone_mapping, self.selected_tonemap_dial, direction);
-        eprintln!(
-            "{} {}: {:.3}",
-            tone_mapping_label(self.tone_mapping),
-            self.selected_tonemap_dial.label(),
-            self.tonemap_settings.get(self.selected_tonemap_dial),
-        );
+    fn register_runtime_settings(&mut self, controller: &RuntimeController) -> EngineResult<()> {
+        controller.register_app_setting(
+            RuntimeSettingDescriptor::new(
+                RuntimeSettingId::app("testbed.texture_resolution"),
+                "Texture Resolution",
+                sturdy_engine::RuntimeApplyPath::Immediate,
+                self.texture_resolution.label(),
+            )
+            .with_description("Swap the procedural mask texture resolution immediately.")
+            .with_options(vec![
+                RuntimeSettingOption {
+                    value: "low".into(),
+                    label: "Low".to_string(),
+                },
+                RuntimeSettingOption {
+                    value: "medium".into(),
+                    label: "Medium".to_string(),
+                },
+                RuntimeSettingOption {
+                    value: "high".into(),
+                    label: "High".to_string(),
+                },
+            ]),
+        )?;
+        Ok(())
     }
 
-    fn adjust_aa_dial(&mut self, direction: f32) {
-        if self.aa.selected_dial == AntiAliasingDial::Mode {
-            if direction.is_sign_positive() {
-                self.aa.next_mode();
-            }
-            eprintln!("aa mode: {}", self.aa.mode.label());
-        } else {
-            self.aa
-                .adjust(direction, self.engine.caps().max_color_sample_count);
-            eprintln!("aa {}: {:?}", self.aa.selected_dial.label(), self.aa.mode);
+    fn seed_runtime_settings(&mut self, controller: &RuntimeController) -> EngineResult<()> {
+        let mut controller = controller.clone();
+        controller
+            .transact()
+            .set_engine_value(RuntimeSettingKey::BloomEnabled, self.bloom_enabled)
+            .set_engine_value(RuntimeSettingKey::BloomOnly, self.bloom_only)
+            .set_engine_value(RuntimeSettingKey::MotionDebugView, self.show_motion_vectors)
+            .set_engine_value(RuntimeSettingKey::HdrMode, self.hdr_output)
+            .set_engine_value(
+                RuntimeSettingKey::ToneMappingOperator,
+                tone_mapping_setting_name(self.tone_mapping),
+            )
+            .set_engine_value(
+                RuntimeSettingKey::ToneMappingDial,
+                self.tonemap_settings.get(self.selected_tonemap_dial) as f64,
+            )
+            .set_engine_value(
+                RuntimeSettingKey::AntiAliasingMode,
+                aa_mode_setting_name(self.aa.mode),
+            )
+            .set_engine_value(
+                RuntimeSettingKey::AntiAliasingDial,
+                self.current_aa_dial_value() as f64,
+            )
+            .set_engine_value(RuntimeSettingKey::OverlayVisibility, true)
+            .set_app_value("testbed.texture_resolution", self.texture_resolution.label())
+            .apply()?;
+        Ok(())
+    }
+
+    fn apply_runtime_settings(
+        &mut self,
+        controller: &RuntimeController,
+        changes: &[sturdy_engine::RuntimeSettingChange],
+        surface: &Surface,
+    ) -> EngineResult<()> {
+        self.bloom_enabled = controller
+            .bool_setting(RuntimeSettingKey::BloomEnabled)
+            .unwrap_or(self.bloom_enabled);
+        self.bloom_only = controller
+            .bool_setting(RuntimeSettingKey::BloomOnly)
+            .unwrap_or(self.bloom_only);
+        self.show_motion_vectors = controller
+            .bool_setting(RuntimeSettingKey::MotionDebugView)
+            .unwrap_or(self.show_motion_vectors);
+        self.hdr_output = surface_is_hdr(surface.info().color_space);
+        if let Some(tone_mapping) = controller
+            .text_setting(RuntimeSettingKey::ToneMappingOperator)
+            .and_then(|value| parse_tone_mapping_setting(&value))
+        {
+            self.tone_mapping = tone_mapping;
         }
+        if let Some(aa_mode) = controller
+            .text_setting(RuntimeSettingKey::AntiAliasingMode)
+            .and_then(|value| parse_aa_mode_setting(&value, self.actual_msaa_samples()))
+        {
+            self.aa.mode = aa_mode;
+        }
+
+        for change in changes {
+            if change.setting == RuntimeSettingId::from(RuntimeSettingKey::ToneMappingDial)
+                && let sturdy_engine::RuntimeSettingValue::Float(value) = change.value
+            {
+                self.apply_tonemap_dial_value(value as f32);
+            }
+            if change.setting == RuntimeSettingId::from(RuntimeSettingKey::AntiAliasingDial)
+                && let sturdy_engine::RuntimeSettingValue::Float(value) = change.value
+            {
+                self.apply_aa_dial_value(value as f32);
+            }
+            if change.setting == RuntimeSettingId::app("testbed.texture_resolution")
+                && let sturdy_engine::RuntimeSettingValue::Text(value) = &change.value
+                && let Some(tier) = TextureResolutionTier::from_setting(value)
+            {
+                self.recreate_procedural_mask(tier)?;
+            }
+        }
+        Ok(())
     }
 
-    fn toggle_hdr_output(&mut self, surface: &mut Surface) -> EngineResult<()> {
-        let target = if self.hdr_output {
-            SurfaceHdrPreference::Sdr
-        } else if self.hdr_caps.sc_rgb {
-            SurfaceHdrPreference::ScRgb
-        } else if self.hdr_caps.hdr10 {
-            SurfaceHdrPreference::Hdr10
+    fn recreate_procedural_mask(&mut self, tier: TextureResolutionTier) -> EngineResult<()> {
+        if self.texture_resolution == tier {
+            return Ok(());
+        }
+        self.procedural_mask = CpuProceduralTexture2d::from_recipe_rgba8(
+            &self.engine,
+            "procedural_mask",
+            tier.size(),
+            tier.size(),
+            ProceduralTextureUpdatePolicy::Once,
+            ProceduralTextureRecipe::RadialMask {
+                inner_radius: 0.18,
+                outer_radius: 1.0,
+                color: [255, 255, 255, 255],
+            },
+        )?;
+        self.texture_resolution = tier;
+        eprintln!("texture resolution: {}", tier.label());
+        Ok(())
+    }
+
+    fn set_texture_resolution_setting(&mut self, tier: TextureResolutionTier) -> EngineResult<()> {
+        if let Some(controller) = self.runtime_controller.as_mut() {
+            controller
+                .transact()
+                .set_app_value("testbed.texture_resolution", tier.label())
+                .apply()?;
         } else {
-            eprintln!("HDR output unavailable on this surface");
+            self.recreate_procedural_mask(tier)?;
+        }
+        Ok(())
+    }
+
+    fn cycle_window_background_effect(&mut self) -> EngineResult<()> {
+        let Some(controller) = self.runtime_controller.as_mut() else {
             return Ok(());
         };
-
-        surface.recreate(SurfaceRecreateDesc {
-            size: Some(surface.size()),
-            hdr: Some(target),
-            ..SurfaceRecreateDesc::default()
-        })?;
-
-        self.hdr_output = surface_is_hdr(surface.info().color_space);
-        if !self.hdr_output && self.tone_mapping == ToneMappingOp::Linear {
-            self.tone_mapping = ToneMappingOp::Aces;
+        let entry = match controller.setting_entry(RuntimeSettingKey::WindowBackgroundEffect) {
+            Some(entry) => entry,
+            None => return Ok(()),
+        };
+        let options = entry.descriptor.options;
+        if options.is_empty() {
+            return Ok(());
         }
-
-        eprintln!(
-            "HDR output: {} ({:?}, {:?}); tone mapping: {}",
-            if self.hdr_output { "on" } else { "off" },
-            surface.info().format,
-            surface.info().color_space,
-            tone_mapping_label(self.tone_mapping),
-        );
+        let current = controller
+            .text_setting(RuntimeSettingKey::WindowBackgroundEffect)
+            .unwrap_or_else(|| "None".to_string());
+        let current_index = options
+            .iter()
+            .position(|option| option.value.serialized() == current)
+            .unwrap_or(0);
+        let next = &options[(current_index + 1) % options.len()];
+        controller
+            .transact()
+            .set_engine_value(
+                RuntimeSettingKey::WindowBackgroundEffect,
+                next.value.serialized(),
+            )
+            .apply()?;
+        eprintln!("window background effect: {}", next.label);
         Ok(())
+    }
+
+    fn preview_tonemap_dial(&self, direction: f32) -> f32 {
+        let dial = self.selected_tonemap_dial;
+        (self.tonemap_settings.get(dial) + dial.step() * direction)
+            .clamp(dial.min(), dial.max())
+    }
+
+    fn apply_tonemap_dial_value(&mut self, value: f32) {
+        self.tonemap_settings.set(
+            self.selected_tonemap_dial,
+            value.clamp(
+                self.selected_tonemap_dial.min(),
+                self.selected_tonemap_dial.max(),
+            ),
+        );
+        self.tonemap_settings
+            .sync_operator_white_point(self.tone_mapping, self.selected_tonemap_dial);
+    }
+
+    fn preview_aa_dial(&self, direction: f32) -> f32 {
+        let mut preview = self.aa.clone();
+        preview.adjust(direction, self.engine.caps().max_color_sample_count);
+        aa_dial_value(preview.mode, preview.selected_dial)
+    }
+
+    fn apply_aa_dial_value(&mut self, value: f32) {
+        if self.aa.selected_dial == AntiAliasingDial::Mode {
+            return;
+        }
+        apply_aa_value(
+            &mut self.aa,
+            value,
+            self.engine.caps().max_color_sample_count,
+        );
+    }
+
+    fn current_aa_dial_value(&self) -> f32 {
+        aa_dial_value(self.aa.mode, self.aa.selected_dial)
     }
 
     fn draw_hud(
@@ -630,93 +973,8 @@ impl Testbed {
             ))
             .collect::<Vec<_>>()
             .join("\n");
-        let desc = TextDrawDesc::new(hud_text)
-            .placement(TextPlacement::Screen2d { x: 18.0, y: 18.0 })
-            .typography(
-                TextTypography::default()
-                    .font_size(18.0)
-                    .line_height(24.0)
-                    .weight(600),
-            )
-            .color([0.92, 0.98, 1.0, 1.0])
-            .max_width(460.0);
-        let tiled_text_frame = self.text_engine.prepare_tiled_frame_with_engine_limits(
-            &self.engine,
-            &[desc],
-            width,
-            height,
-        );
-        if tiled_text_frame.draws.is_empty() || tiled_text_frame.atlas_pages.is_empty() {
-            return Ok(());
-        }
-
-        self.ensure_hud_atlas_images(&tiled_text_frame.atlas_pages)?;
-        self.hud_meshes.clear();
-        self.hud_mesh_pages.clear();
-
-        for page in &tiled_text_frame.atlas_pages {
-            let mut batch = QuadBatch::new();
-            for draw in &tiled_text_frame.draws {
-                for quad in &draw.quads {
-                    if quad.atlas_page != page.page_index {
-                        continue;
-                    }
-                    let x0 = quad.positions[0][0];
-                    let y0 = quad.positions[0][1];
-                    let x1 = quad.positions[1][0];
-                    let y2 = quad.positions[2][1];
-                    let ndc_x = x0 / width.max(1) as f32 * 2.0 - 1.0;
-                    let ndc_y = 1.0 - y0 / height.max(1) as f32 * 2.0;
-                    let ndc_w = (x1 - x0) / width.max(1) as f32 * 2.0;
-                    let ndc_h = -(y2 - y0) / height.max(1) as f32 * 2.0;
-                    batch.push(
-                        [ndc_x, ndc_y],
-                        [ndc_w, ndc_h],
-                        [
-                            quad.uvs[0][0],
-                            quad.uvs[2][1],
-                            quad.uvs[2][0],
-                            quad.uvs[0][1],
-                        ],
-                        quad.color,
-                    );
-                }
-            }
-            if !batch.is_empty() {
-                self.hud_meshes.push(batch.build(&self.engine)?);
-                self.hud_mesh_pages.push(page.page_index);
-            }
-        }
-
-        for (mesh_index, page_index) in self.hud_mesh_pages.iter().copied().enumerate() {
-            let Some(page) = tiled_text_frame
-                .atlas_pages
-                .iter()
-                .find(|page| page.page_index == page_index)
-            else {
-                continue;
-            };
-            let Some(image) = self.hud_atlas_images.get(page.page_index as usize) else {
-                continue;
-            };
-            let pixels = page.pixels.clone();
-            let page_width = page.size_px[0];
-            frame.update_texture_2d("text_atlas", image, move |x, y| {
-                let index = ((y * page_width + x) * 4) as usize;
-                [
-                    pixels[index],
-                    pixels[index + 1],
-                    pixels[index + 2],
-                    pixels[index + 3],
-                ]
-            })?;
-            frame.set_sampler("text_atlas_sampler", SamplerPreset::Linear);
-            if let Some(mesh) = self.hud_meshes.get(mesh_index) {
-                target.draw_mesh(mesh, &self.hud_program)?;
-            }
-        }
-
-        Ok(())
+        self.text_overlay
+            .draw_screen_text(frame, target, width, height, hud_text, 18.0, 18.0)
     }
 
     fn actual_msaa_samples(&self) -> u8 {
@@ -773,50 +1031,6 @@ impl Testbed {
         )
     }
 
-    fn ensure_hud_atlas_images(&mut self, pages: &[TiledTextAtlasPage]) -> EngineResult<()> {
-        for page in pages {
-            let index = page.page_index as usize;
-            let needs_image = self
-                .hud_atlas_images
-                .get(index)
-                .map(|image| {
-                    let desc = image.desc();
-                    desc.extent.width != page.size_px[0] || desc.extent.height != page.size_px[1]
-                })
-                .unwrap_or(true);
-            if !needs_image {
-                continue;
-            }
-            while self.hud_atlas_images.len() <= index {
-                self.hud_atlas_images
-                    .push(self.create_hud_atlas_image(1, 1)?);
-            }
-            self.hud_atlas_images[index] =
-                self.create_hud_atlas_image(page.size_px[0], page.size_px[1])?;
-        }
-        Ok(())
-    }
-
-    fn create_hud_atlas_image(&self, width: u32, height: u32) -> EngineResult<Image> {
-        let image = self.engine.create_image(ImageDesc {
-            dimension: ImageDimension::D2,
-            extent: Extent3d {
-                width: width.max(1),
-                height: height.max(1),
-                depth: 1,
-            },
-            mip_levels: 1,
-            layers: 1,
-            samples: 1,
-            format: Format::Rgba8Unorm,
-            usage: ImageUsage::SAMPLED | ImageUsage::COPY_DST,
-            transient: false,
-            clear_value: None,
-            debug_name: Some("hud text atlas"),
-        })?;
-        let _ = image.set_debug_name("hud-text-atlas");
-        Ok(image)
-    }
 }
 
 fn next_tone_mapping(op: ToneMappingOp) -> ToneMappingOp {
@@ -843,6 +1057,147 @@ fn tone_mapping_label(op: ToneMappingOp) -> &'static str {
         ToneMappingOp::Reinhard => "Reinhard",
         ToneMappingOp::Hermite => "Hermite",
         ToneMappingOp::Linear => "Linear",
+    }
+}
+
+fn tone_mapping_setting_name(op: ToneMappingOp) -> &'static str {
+    match op {
+        ToneMappingOp::Aces => "Aces",
+        ToneMappingOp::Reinhard => "Reinhard",
+        ToneMappingOp::Hermite => "Hermite",
+        ToneMappingOp::Linear => "Linear",
+    }
+}
+
+fn parse_tone_mapping_setting(value: &str) -> Option<ToneMappingOp> {
+    match value {
+        "Aces" | "ACES" => Some(ToneMappingOp::Aces),
+        "Reinhard" => Some(ToneMappingOp::Reinhard),
+        "Hermite" => Some(ToneMappingOp::Hermite),
+        "Linear" => Some(ToneMappingOp::Linear),
+        _ => None,
+    }
+}
+
+fn aa_mode_setting_name(mode: sturdy_engine::AntiAliasingMode) -> &'static str {
+    match mode {
+        sturdy_engine::AntiAliasingMode::Off => "Off",
+        sturdy_engine::AntiAliasingMode::Msaa(_) => "MSAA",
+        sturdy_engine::AntiAliasingMode::Fxaa(_) => "FXAA",
+        sturdy_engine::AntiAliasingMode::Taa(_) => "TAA",
+        sturdy_engine::AntiAliasingMode::FxaaTaa { .. } => "FXAA+TAA",
+    }
+}
+
+fn parse_aa_mode_setting(
+    value: &str,
+    current_msaa_samples: u8,
+) -> Option<sturdy_engine::AntiAliasingMode> {
+    match value {
+        "Off" | "off" => Some(sturdy_engine::AntiAliasingMode::Off),
+        "MSAA" => Some(sturdy_engine::AntiAliasingMode::Msaa(sturdy_engine::MsaaSettings {
+            samples: current_msaa_samples.max(1),
+        })),
+        "FXAA" => Some(sturdy_engine::AntiAliasingMode::Fxaa(Default::default())),
+        "TAA" => Some(sturdy_engine::AntiAliasingMode::Taa(Default::default())),
+        "FXAA+TAA" => Some(sturdy_engine::AntiAliasingMode::FxaaTaa {
+            fxaa: Default::default(),
+            taa: Default::default(),
+        }),
+        _ => None,
+    }
+}
+
+fn aa_dial_value(mode: sturdy_engine::AntiAliasingMode, dial: AntiAliasingDial) -> f32 {
+    match (mode, dial) {
+        (sturdy_engine::AntiAliasingMode::Msaa(settings), AntiAliasingDial::MsaaSamples) => {
+            settings.samples as f32
+        }
+        (sturdy_engine::AntiAliasingMode::Fxaa(settings), AntiAliasingDial::FxaaSubpixelQuality)
+        | (
+            sturdy_engine::AntiAliasingMode::FxaaTaa { fxaa: settings, .. },
+            AntiAliasingDial::FxaaSubpixelQuality,
+        ) => settings.subpixel_quality,
+        (sturdy_engine::AntiAliasingMode::Fxaa(settings), AntiAliasingDial::FxaaEdgeThreshold)
+        | (
+            sturdy_engine::AntiAliasingMode::FxaaTaa { fxaa: settings, .. },
+            AntiAliasingDial::FxaaEdgeThreshold,
+        ) => settings.edge_threshold,
+        (sturdy_engine::AntiAliasingMode::Fxaa(settings), AntiAliasingDial::FxaaEdgeThresholdMin)
+        | (
+            sturdy_engine::AntiAliasingMode::FxaaTaa { fxaa: settings, .. },
+            AntiAliasingDial::FxaaEdgeThresholdMin,
+        ) => settings.edge_threshold_min,
+        (sturdy_engine::AntiAliasingMode::Taa(settings), AntiAliasingDial::TaaHistoryWeight)
+        | (
+            sturdy_engine::AntiAliasingMode::FxaaTaa { taa: settings, .. },
+            AntiAliasingDial::TaaHistoryWeight,
+        ) => settings.history_weight,
+        (sturdy_engine::AntiAliasingMode::Taa(settings), AntiAliasingDial::TaaJitterScale)
+        | (
+            sturdy_engine::AntiAliasingMode::FxaaTaa { taa: settings, .. },
+            AntiAliasingDial::TaaJitterScale,
+        ) => settings.jitter_scale,
+        (sturdy_engine::AntiAliasingMode::Taa(settings), AntiAliasingDial::TaaClampFactor)
+        | (
+            sturdy_engine::AntiAliasingMode::FxaaTaa { taa: settings, .. },
+            AntiAliasingDial::TaaClampFactor,
+        ) => settings.clamp_factor,
+        _ => 1.0,
+    }
+}
+
+fn apply_aa_value(
+    config: &mut AntiAliasingConfig,
+    value: f32,
+    max_msaa_samples: u8,
+) {
+    match (&mut config.mode, config.selected_dial) {
+        (sturdy_engine::AntiAliasingMode::Msaa(settings), AntiAliasingDial::MsaaSamples) => {
+            let rounded = value.round().clamp(1.0, max_msaa_samples.max(1) as f32);
+            let candidates = [1.0_f32, 2.0, 4.0, 8.0, 16.0];
+            settings.samples = candidates
+                .into_iter()
+                .min_by(|left, right| {
+                    (left - rounded)
+                        .abs()
+                        .partial_cmp(&(right - rounded).abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or(1.0)
+                .min(max_msaa_samples.max(1) as f32) as u8;
+        }
+        (sturdy_engine::AntiAliasingMode::Fxaa(settings), AntiAliasingDial::FxaaSubpixelQuality)
+        | (
+            sturdy_engine::AntiAliasingMode::FxaaTaa { fxaa: settings, .. },
+            AntiAliasingDial::FxaaSubpixelQuality,
+        ) => settings.subpixel_quality = value.clamp(0.0, 1.0),
+        (sturdy_engine::AntiAliasingMode::Fxaa(settings), AntiAliasingDial::FxaaEdgeThreshold)
+        | (
+            sturdy_engine::AntiAliasingMode::FxaaTaa { fxaa: settings, .. },
+            AntiAliasingDial::FxaaEdgeThreshold,
+        ) => settings.edge_threshold = value.clamp(0.0, 1.0),
+        (sturdy_engine::AntiAliasingMode::Fxaa(settings), AntiAliasingDial::FxaaEdgeThresholdMin)
+        | (
+            sturdy_engine::AntiAliasingMode::FxaaTaa { fxaa: settings, .. },
+            AntiAliasingDial::FxaaEdgeThresholdMin,
+        ) => settings.edge_threshold_min = value.clamp(0.0, 1.0),
+        (sturdy_engine::AntiAliasingMode::Taa(settings), AntiAliasingDial::TaaHistoryWeight)
+        | (
+            sturdy_engine::AntiAliasingMode::FxaaTaa { taa: settings, .. },
+            AntiAliasingDial::TaaHistoryWeight,
+        ) => settings.history_weight = value.clamp(0.0, 1.0),
+        (sturdy_engine::AntiAliasingMode::Taa(settings), AntiAliasingDial::TaaJitterScale)
+        | (
+            sturdy_engine::AntiAliasingMode::FxaaTaa { taa: settings, .. },
+            AntiAliasingDial::TaaJitterScale,
+        ) => settings.jitter_scale = value.max(0.0),
+        (sturdy_engine::AntiAliasingMode::Taa(settings), AntiAliasingDial::TaaClampFactor)
+        | (
+            sturdy_engine::AntiAliasingMode::FxaaTaa { taa: settings, .. },
+            AntiAliasingDial::TaaClampFactor,
+        ) => settings.clamp_factor = value.max(0.0),
+        _ => {}
     }
 }
 

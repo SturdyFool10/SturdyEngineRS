@@ -1433,6 +1433,16 @@ dependencies = [
 [[package]]
 name = "sturdy-engine-platform"
 version = "0.1.0"
+dependencies = [
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "raw-window-handle",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "windows-sys 0.59.0",
+]
 
 [[package]]
 name = "sturdy-engine-testbed"

@@ -20,6 +20,7 @@ struct VulkanSurface {
     swapchain: VulkanSwapchain,
     acquired_image_index: Option<u32>,
     size: SurfaceSize,
+    transparent: bool,
     hdr: SurfaceHdrPreference,
     preferred_present_mode: Option<SurfacePresentMode>,
     /// Signaled by vkAcquireNextImageKHR when the swapchain image is ready.
@@ -102,6 +103,7 @@ impl SurfaceRegistry {
                 physical_device,
                 surface,
                 desc.size,
+                desc.transparent,
                 desc.hdr.preferred_formats(),
                 desc.preferred_present_mode.as_ref(),
                 vk::SwapchainKHR::null(),
@@ -126,6 +128,7 @@ impl SurfaceRegistry {
                 swapchain,
                 acquired_image_index: None,
                 size: desc.size,
+                transparent: desc.transparent,
                 hdr: desc.hdr,
                 preferred_present_mode: desc.preferred_present_mode,
                 image_available,
@@ -157,6 +160,7 @@ impl SurfaceRegistry {
             physical_device,
             surface.surface,
             size,
+            surface.transparent,
             preferred_formats,
             preferred_present_mode,
             old_swapchain,
@@ -186,6 +190,9 @@ impl SurfaceRegistry {
         if let Some(hdr) = desc.hdr {
             surface.hdr = hdr;
         }
+        if let Some(transparent) = desc.transparent {
+            surface.transparent = transparent;
+        }
         if desc.preferred_present_mode.is_some() {
             surface.preferred_present_mode = desc.preferred_present_mode;
         }
@@ -200,6 +207,7 @@ impl SurfaceRegistry {
             physical_device,
             surface.surface,
             size,
+            surface.transparent,
             preferred_formats,
             preferred_present_mode,
             old_swapchain,
@@ -404,6 +412,7 @@ fn create_swapchain(
     physical_device: vk::PhysicalDevice,
     surface: vk::SurfaceKHR,
     size: SurfaceSize,
+    transparent: bool,
     preferred_formats: &[(Format, SurfaceColorSpace)],
     preferred_present_mode: Option<&SurfacePresentMode>,
     old_swapchain: vk::SwapchainKHR,
@@ -440,6 +449,7 @@ fn create_swapchain(
     let present_mode = choose_present_mode(&present_modes, preferred_present_mode);
     let extent = choose_extent(&capabilities, size);
     let image_count = choose_image_count(&capabilities);
+    let composite_alpha = choose_composite_alpha(&capabilities, transparent);
     let create_info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface)
         .min_image_count(image_count)
@@ -450,7 +460,7 @@ fn create_swapchain(
         .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(capabilities.current_transform)
-        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        .composite_alpha(composite_alpha)
         .present_mode(present_mode)
         .clipped(true)
         .old_swapchain(old_swapchain);
@@ -609,6 +619,34 @@ fn choose_image_count(capabilities: &vk::SurfaceCapabilitiesKHR) -> u32 {
         preferred
     } else {
         preferred.min(capabilities.max_image_count)
+    }
+}
+
+fn choose_composite_alpha(
+    capabilities: &vk::SurfaceCapabilitiesKHR,
+    transparent: bool,
+) -> vk::CompositeAlphaFlagsKHR {
+    let supported = capabilities.supported_composite_alpha;
+    if transparent {
+        for candidate in [
+            vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED,
+            vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED,
+            vk::CompositeAlphaFlagsKHR::INHERIT,
+            vk::CompositeAlphaFlagsKHR::OPAQUE,
+        ] {
+            if supported.contains(candidate) {
+                return candidate;
+            }
+        }
+    }
+    if supported.contains(vk::CompositeAlphaFlagsKHR::OPAQUE) {
+        vk::CompositeAlphaFlagsKHR::OPAQUE
+    } else if supported.contains(vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED) {
+        vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED
+    } else if supported.contains(vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED) {
+        vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED
+    } else {
+        vk::CompositeAlphaFlagsKHR::INHERIT
     }
 }
 

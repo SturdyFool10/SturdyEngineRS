@@ -54,10 +54,19 @@ use sturdy_engine_core::SurfaceSize;
 
 use crate::{
     AntiAliasingMode, AntiAliasingPass, AppRuntime, BloomConfig, BloomPass,
-    DebugImageRegistry, DefaultSceneTargetConfig, DiagnosticLevel, Engine, GraphImage,
-    Result as EngineResult, RuntimeController, RuntimeDiagnostics, RuntimeGraphDiagnostics,
-    ShaderProgram, Surface, SurfaceHdrPreference, SurfaceImage,
+    DebugImageRegistry, DefaultSceneTargetConfig, DiagnosticLevel, Engine, GraphImage, KeyInput,
+    KeyModifiers, Result as EngineResult, RuntimeController, RuntimeDiagnostics,
+    RuntimeGraphDiagnostics, RuntimeSettingChange, RuntimeSettingId, RuntimeSettingKey,
+    ShaderProgram, Surface, SurfaceHdrPreference, SurfaceImage, SurfacePresentMode,
+    SurfaceRecreateDesc, SurfaceTransparency, WindowAppearance, WindowAppearancePreset,
+    WindowBackdrop, WindowCornerStyle, WindowMaterialKind, WindowMode, WindowTransparencyDesc,
+    apply_native_window_appearance_for_window,
 };
+
+#[cfg(target_os = "windows")]
+use winit::platform::windows::{BackdropType, WindowAttributesExtWindows, WindowExtWindows};
+#[cfg(target_os = "macos")]
+use winit::platform::macos::WindowAttributesExtMacOS;
 
 /// Configuration for the application shell window.
 #[derive(Clone, Debug)]
@@ -65,8 +74,14 @@ pub struct WindowConfig {
     title: String,
     width: u32,
     height: u32,
+    position: Option<(i32, i32)>,
     resizable: bool,
+    decorations: bool,
+    maximized: bool,
+    always_on_top: bool,
+    window_mode: WindowMode,
     prefer_hdr: bool,
+    appearance: WindowAppearance,
 }
 
 impl WindowConfig {
@@ -76,8 +91,14 @@ impl WindowConfig {
             title: title.into(),
             width,
             height,
+            position: None,
             resizable: false,
+            decorations: true,
+            maximized: false,
+            always_on_top: false,
+            window_mode: WindowMode::Windowed,
             prefer_hdr: false,
+            appearance: WindowAppearance::default(),
         }
     }
 
@@ -94,9 +115,48 @@ impl WindowConfig {
         self
     }
 
+    pub fn with_position(mut self, x: i32, y: i32) -> Self {
+        self.position = Some((x, y));
+        self
+    }
+
     /// Set whether the window is resizable.
     pub fn with_resizable(mut self, resizable: bool) -> Self {
         self.resizable = resizable;
+        self
+    }
+
+    pub fn with_decorations(mut self, decorations: bool) -> Self {
+        self.decorations = decorations;
+        self
+    }
+
+    pub fn with_borderless(mut self, borderless: bool) -> Self {
+        self.decorations = !borderless;
+        self
+    }
+
+    pub fn with_maximized(mut self, maximized: bool) -> Self {
+        self.maximized = maximized;
+        self
+    }
+
+    pub fn with_always_on_top(mut self, always_on_top: bool) -> Self {
+        self.always_on_top = always_on_top;
+        self
+    }
+
+    pub fn with_window_mode(mut self, mode: WindowMode) -> Self {
+        self.window_mode = mode;
+        self
+    }
+
+    pub fn with_borderless_fullscreen(mut self, enabled: bool) -> Self {
+        self.window_mode = if enabled {
+            WindowMode::BorderlessFullscreen
+        } else {
+            WindowMode::Windowed
+        };
         self
     }
 
@@ -104,6 +164,37 @@ impl WindowConfig {
     pub fn with_hdr(mut self, prefer_hdr: bool) -> Self {
         self.prefer_hdr = prefer_hdr;
         self
+    }
+
+    pub fn with_window_appearance(mut self, appearance: WindowAppearance) -> Self {
+        self.appearance = appearance;
+        self
+    }
+
+    pub fn with_window_corner_style(mut self, corner_style: WindowCornerStyle) -> Self {
+        self.appearance.corner_style = Some(corner_style);
+        self
+    }
+
+    pub fn with_window_appearance_preset(mut self, preset: WindowAppearancePreset) -> Self {
+        self.appearance = WindowAppearance::from_preset(preset);
+        self
+    }
+
+    pub fn with_transparency(mut self, enabled: bool) -> Self {
+        self.appearance.transparency = if enabled {
+            SurfaceTransparency::Enabled
+        } else {
+            SurfaceTransparency::Disabled
+        };
+        if !enabled && !matches!(self.appearance.backdrop, WindowBackdrop::None) {
+            self.appearance.backdrop = WindowBackdrop::None;
+        }
+        self
+    }
+
+    pub fn appearance(&self) -> WindowAppearance {
+        self.appearance
     }
 
     /// Get the title.
@@ -124,6 +215,26 @@ impl WindowConfig {
     /// Get whether the window is resizable.
     pub fn resizable(&self) -> bool {
         self.resizable
+    }
+
+    pub fn decorations(&self) -> bool {
+        self.decorations
+    }
+
+    pub fn maximized(&self) -> bool {
+        self.maximized
+    }
+
+    pub fn always_on_top(&self) -> bool {
+        self.always_on_top
+    }
+
+    pub fn position(&self) -> Option<(i32, i32)> {
+        self.position
+    }
+
+    pub fn window_mode(&self) -> WindowMode {
+        self.window_mode
     }
 
     /// Get whether HDR is preferred.
@@ -170,6 +281,25 @@ pub trait EngineApp {
     ///
     /// Only called on `ElementState::Pressed`. Default implementation does nothing.
     fn key_pressed(&mut self, _key: &str, _surface: &mut Surface) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Handle a structured key input event for keybind matching/rebinding.
+    fn key_input(
+        &mut self,
+        _input: &KeyInput,
+        _surface: &mut Surface,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Apply runtime setting changes before rendering.
+    fn runtime_settings_changed(
+        &mut self,
+        _controller: &RuntimeController,
+        _changes: &[RuntimeSettingChange],
+        _surface: &mut Surface,
+    ) -> Result<(), Self::Error> {
         Ok(())
     }
 }
@@ -290,6 +420,11 @@ impl<'a> ShellFrame<'a> {
         self.controller.diagnostics()
     }
 
+    /// Return the shared runtime controller for settings/diagnostics queries.
+    pub fn runtime_controller(&self) -> RuntimeController {
+        self.controller.clone()
+    }
+
     /// Return the current engine-owned overlay lines.
     pub fn runtime_overlay_lines(&self) -> Vec<String> {
         self.controller.overlay_lines()
@@ -366,6 +501,13 @@ impl<'a> ShellFrame<'a> {
                     .motion_validation
                     .as_deref()
                     .unwrap_or("unpublished")
+            ),
+            format!(
+                "motion warning: {}",
+                diagnostics
+                    .motion_warning
+                    .as_deref()
+                    .unwrap_or("none")
             ),
             format!(
                 "camera-locked passes: {}",
@@ -446,9 +588,11 @@ impl<'a> ShellFrame<'a> {
             desc.scene_color.clone()
         };
 
-        let (motion_source, motion_validation) = classify_motion_vectors(desc.motion_vectors);
+        let (motion_source, motion_validation, motion_warning) =
+            classify_motion_vectors(desc.motion_vectors);
         self.controller.update_diagnostics(|current| {
             current.motion_validation = Some(motion_validation);
+            current.motion_warning = motion_warning;
         });
 
         let anti_aliased = desc.aa_pass.execute_with_motion_vectors(
@@ -463,6 +607,7 @@ impl<'a> ShellFrame<'a> {
             self.inner
                 .set_sampler("motion_sampler", crate::SamplerPreset::Linear);
             motion_debug.target.execute_shader_auto(motion_debug.program)?;
+            self.register_debug_image("motion_debug_view", motion_debug.target);
             motion_debug.target.clone()
         } else {
             self.register_debug_image("hdr_composite", &anti_aliased);
@@ -496,23 +641,38 @@ impl<'a> ShellFrame<'a> {
 
 fn classify_motion_vectors(
     motion_vectors: Option<RuntimeMotionVectorDesc<'_>>,
-) -> (Option<&GraphImage>, String) {
+) -> (Option<&GraphImage>, String, Option<String>) {
     match motion_vectors {
         Some(desc)
             if desc.space == MotionVectorSpace::CameraLocal
                 && desc.layer == MotionVectorLayer::World =>
         {
-            (Some(desc.image), "camera-local world motion".to_string())
+            (
+                Some(desc.image),
+                "camera-local world motion".to_string(),
+                None,
+            )
         }
         Some(desc) if desc.layer == MotionVectorLayer::CameraLocked => (
             None,
             "camera-locked layer bypasses world temporal motion".to_string(),
+            Some(
+                "camera-locked content should be composed in a dedicated post-temporal pass"
+                    .to_string(),
+            ),
         ),
         Some(_) => (
             None,
             "non-camera-local motion vectors ignored by default temporal path".to_string(),
+            Some(
+                "default temporal effects require camera-local world motion vectors".to_string(),
+            ),
         ),
-        None => (None, "no motion vectors supplied".to_string()),
+        None => (
+            None,
+            "no motion vectors supplied".to_string(),
+            Some("temporal effects are running without explicit motion vectors".to_string()),
+        ),
     }
 }
 
@@ -536,9 +696,9 @@ where
     App::Error: std::fmt::Debug,
 {
     use winit::{
-        dpi::LogicalSize,
+        dpi::{LogicalPosition, LogicalSize},
         event_loop::{ControlFlow, EventLoop},
-        window::Window,
+        window::{Window, WindowLevel},
     };
 
     // Create the engine
@@ -549,15 +709,34 @@ where
     event_loop.set_control_flow(ControlFlow::Poll);
 
     // Create window
+    let mut attributes = Window::default_attributes()
+        .with_title(&config.title)
+        .with_inner_size(LogicalSize::new(config.width as f64, config.height as f64))
+        .with_resizable(config.resizable)
+        .with_decorations(config.decorations)
+        .with_maximized(config.maximized)
+        .with_window_level(if config.always_on_top {
+            WindowLevel::AlwaysOnTop
+        } else {
+            WindowLevel::Normal
+        })
+        .with_fullscreen(fullscreen_for_mode(config.window_mode));
+    if let Some((x, y)) = config.position {
+        attributes = attributes.with_position(LogicalPosition::new(x as f64, y as f64));
+    }
+
     #[allow(deprecated)]
     let window = event_loop
-        .create_window(
-            Window::default_attributes()
-                .with_title(&config.title)
-                .with_inner_size(LogicalSize::new(config.width as f64, config.height as f64))
-                .with_resizable(config.resizable),
-        )
+        .create_window(apply_window_appearance_to_attributes(attributes, config.appearance))
         .expect("failed to create window");
+
+    if let Err(err) = apply_native_window_appearance_for_window(
+        &window,
+        Some((window.inner_size().width, window.inner_size().height)),
+        config.appearance,
+    ) {
+        eprintln!("native window appearance setup fell back to winit: {err}");
+    }
 
     // Create surface from window
     let surface = engine
@@ -584,7 +763,12 @@ where
         }
     };
 
-    let runtime = AppRuntime::new(engine, surface);
+    let mut runtime = AppRuntime::new(engine, surface);
+    seed_window_settings(runtime.controller_mut(), &config)
+        .expect("failed to seed runtime window settings");
+    runtime
+        .controller()
+        .set_settings(window_settings_snapshot(&window, &config, runtime.controller()));
 
     // Run event loop
     event_loop
@@ -592,6 +776,8 @@ where
             runtime,
             window: Some(window),
             app_state,
+            modifiers: KeyModifiers::default(),
+            applied_settings_revision: 0,
             started_at: Instant::now(),
             _config: config,
         })
@@ -604,6 +790,8 @@ struct ShellApp<App: EngineApp> {
     runtime: AppRuntime,
     window: Option<winit::window::Window>,
     app_state: App,
+    modifiers: KeyModifiers,
+    applied_settings_revision: u64,
     #[allow(dead_code)]
     started_at: Instant,
     _config: WindowConfig,
@@ -614,6 +802,17 @@ impl<App: EngineApp> winit::application::ApplicationHandler for ShellApp<App>
 where
     App::Error: std::fmt::Debug,
 {
+    fn new_events(
+        &mut self,
+        _event_loop: &winit::event_loop::ActiveEventLoop,
+        _cause: winit::event::StartCause,
+    ) {
+        if let Err(e) = self.apply_pending_runtime_settings() {
+            eprintln!("runtime settings apply failed: {e:?}");
+            std::process::exit(1);
+        }
+    }
+
     fn resumed(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
         // Window already created
         if let Some(window) = self.window.as_ref() {
@@ -644,13 +843,34 @@ where
                         eprintln!("surface resize failed: {e:?}");
                     }
                     if let Some(window) = self.window.as_ref() {
+                        let snapshot =
+                            window_settings_snapshot(window, &self._config, self.runtime.controller());
+                        self.runtime.controller().set_settings(snapshot);
+                        apply_window_appearance_from_settings(window, self.runtime.controller());
                         window.request_redraw();
                     }
                 }
             }
+            winit::event::WindowEvent::Moved(position) => {
+                if let Some(window) = self.window.as_ref() {
+                    let mut snapshot =
+                        window_settings_snapshot(window, &self._config, self.runtime.controller());
+                    snapshot.window_position = Some((position.x, position.y));
+                    self.runtime.controller().set_settings(snapshot);
+                }
+            }
+            winit::event::WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = crate::input::key_modifiers_from_winit(modifiers.state());
+            }
             winit::event::WindowEvent::KeyboardInput { event, .. } => {
                 use winit::event::ElementState;
                 use winit::keyboard::Key;
+                if let Some(input) = crate::input::KeyInput::from_winit(&event, self.modifiers) {
+                    if let Err(e) = self.app_state.key_input(&input, self.runtime.surface_mut()) {
+                        eprintln!("key input handler failed: {e:?}");
+                        std::process::exit(1);
+                    }
+                }
                 if event.state == ElementState::Pressed {
                     if let Key::Character(s) = &event.logical_key {
                         if let Err(e) = self
@@ -700,5 +920,459 @@ where
         if let Some(window) = self.window.as_ref() {
             window.request_redraw();
         }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<App: EngineApp> ShellApp<App>
+where
+    App::Error: std::fmt::Debug,
+{
+    fn apply_pending_runtime_settings(&mut self) -> Result<(), App::Error> {
+        let controller = self.runtime.controller().clone();
+        let changes = controller.setting_changes_since(self.applied_settings_revision);
+        if changes.is_empty() {
+            self.applied_settings_revision = controller.settings_revision();
+            return Ok(());
+        }
+
+        self.apply_engine_runtime_settings(&controller, &changes);
+        self.app_state.runtime_settings_changed(
+            &controller,
+            &changes,
+            self.runtime.surface_mut(),
+        )?;
+        self.applied_settings_revision = controller.settings_revision();
+        Ok(())
+    }
+
+    fn apply_engine_runtime_settings(
+        &mut self,
+        controller: &RuntimeController,
+        changes: &[RuntimeSettingChange],
+    ) {
+        if let Some(window) = self.window.as_ref() {
+            apply_window_runtime_settings(window, controller, changes);
+            let snapshot = window_settings_snapshot(window, &self._config, self.runtime.controller());
+            self.runtime.controller().set_settings(snapshot);
+        }
+
+        let affects_native_window = changes.iter().any(|change| {
+            matches!(
+                change.setting,
+                RuntimeSettingId::Engine(RuntimeSettingKey::WindowCornerStyle)
+                    | RuntimeSettingId::Engine(RuntimeSettingKey::SurfaceTransparency)
+                    | RuntimeSettingId::Engine(RuntimeSettingKey::WindowBackgroundEffect)
+            )
+        });
+        if affects_native_window {
+            if let Some(window) = self.window.as_ref() {
+                apply_window_appearance_from_settings(window, controller);
+                let snapshot =
+                    window_settings_snapshot(window, &self._config, self.runtime.controller());
+                self.runtime.controller().set_settings(snapshot);
+            }
+        }
+
+        if !changes.iter().any(|change| {
+            matches!(
+                change.setting,
+                RuntimeSettingId::Engine(RuntimeSettingKey::HdrMode)
+                    | RuntimeSettingId::Engine(RuntimeSettingKey::PresentMode)
+                    | RuntimeSettingId::Engine(RuntimeSettingKey::SurfaceTransparency)
+            )
+        }) {
+            return;
+        }
+
+        let hdr_preference = if controller
+            .bool_setting(RuntimeSettingKey::HdrMode)
+            .unwrap_or(false)
+        {
+            match self.runtime.surface().hdr_caps() {
+                Ok(caps) if caps.sc_rgb => Some(SurfaceHdrPreference::ScRgb),
+                Ok(caps) if caps.hdr10 => Some(SurfaceHdrPreference::Hdr10),
+                _ => Some(SurfaceHdrPreference::Sdr),
+            }
+        } else {
+            Some(SurfaceHdrPreference::Sdr)
+        };
+
+        let preferred_present_mode = controller
+            .text_setting(RuntimeSettingKey::PresentMode)
+            .and_then(|value| parse_present_mode_setting(&value));
+        let transparent = controller.bool_setting(RuntimeSettingKey::SurfaceTransparency);
+
+        let surface_size = self.runtime.surface().size();
+        if let Err(e) = self.runtime.surface_mut().recreate(SurfaceRecreateDesc {
+            size: Some(surface_size),
+            transparent,
+            hdr: hdr_preference,
+            preferred_present_mode,
+            ..SurfaceRecreateDesc::default()
+        }) {
+            eprintln!("surface recreation from runtime settings failed: {e:?}");
+            std::process::exit(1);
+        }
+        self.runtime.refresh_controller_state();
+        if let Some(window) = self.window.as_ref() {
+            let snapshot = window_settings_snapshot(window, &self._config, self.runtime.controller());
+            self.runtime.controller().set_settings(snapshot);
+        }
+    }
+}
+
+fn parse_present_mode_setting(value: &str) -> Option<SurfacePresentMode> {
+    match value {
+        "Auto" => None,
+        "Fifo" => Some(SurfacePresentMode::Fifo),
+        "Mailbox" => Some(SurfacePresentMode::Mailbox),
+        "Immediate" => Some(SurfacePresentMode::Immediate),
+        "RelaxedFifo" => Some(SurfacePresentMode::RelaxedFifo),
+        _ => None,
+    }
+}
+
+fn apply_window_appearance_to_attributes(
+    mut attributes: winit::window::WindowAttributes,
+    appearance: WindowAppearance,
+) -> winit::window::WindowAttributes {
+    let wants_transparent = appearance.transparency == SurfaceTransparency::Enabled;
+    attributes = attributes.with_transparent(wants_transparent);
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        attributes = attributes.with_blur(matches!(
+            appearance.backdrop,
+            WindowBackdrop::Blurred(_) | WindowBackdrop::Material(_)
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        attributes = attributes.with_system_backdrop(windows_backdrop_for_appearance(appearance));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let titlebar_transparent = matches!(
+            appearance.backdrop,
+            WindowBackdrop::Material(material)
+                if material.kind == WindowMaterialKind::TitlebarTranslucent
+        );
+        attributes = attributes.with_titlebar_transparent(titlebar_transparent);
+    }
+
+    attributes
+}
+
+fn seed_window_settings(
+    controller: &mut RuntimeController,
+    config: &WindowConfig,
+) -> Result<(), crate::Error> {
+    let (transparent, effect) = window_effect_setting_from_appearance(config.appearance);
+    controller
+        .transact()
+        .set_engine_value(RuntimeSettingKey::WindowTitle, config.title.clone())
+        .set_engine_value(RuntimeSettingKey::WindowWidth, config.width as i64)
+        .set_engine_value(RuntimeSettingKey::WindowHeight, config.height as i64)
+        .set_engine_value(
+            RuntimeSettingKey::WindowPositionX,
+            config.position.map(|(x, _)| x as i64).unwrap_or(0),
+        )
+        .set_engine_value(
+            RuntimeSettingKey::WindowPositionY,
+            config.position.map(|(_, y)| y as i64).unwrap_or(0),
+        )
+        .set_engine_value(
+            RuntimeSettingKey::WindowMode,
+            window_mode_setting(config.window_mode),
+        )
+        .set_engine_value(RuntimeSettingKey::WindowDecorations, config.decorations)
+        .set_engine_value(RuntimeSettingKey::WindowResizable, config.resizable)
+        .set_engine_value(RuntimeSettingKey::WindowMaximized, config.maximized)
+        .set_engine_value(RuntimeSettingKey::WindowAlwaysOnTop, config.always_on_top)
+        .set_engine_value(
+            RuntimeSettingKey::WindowCornerStyle,
+            corner_style_setting(config.appearance.corner_style.unwrap_or(WindowCornerStyle::Default)),
+        )
+        .set_engine_value(RuntimeSettingKey::SurfaceTransparency, transparent)
+        .set_engine_value(RuntimeSettingKey::WindowBackgroundEffect, effect)
+        .apply()?;
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_window_appearance_from_settings(
+    window: &winit::window::Window,
+    controller: &RuntimeController,
+) {
+    let appearance = window_appearance_from_settings(controller);
+    let wants_transparency = appearance.transparency == SurfaceTransparency::Enabled;
+
+    window.set_transparent(wants_transparency);
+
+    let native_result = apply_native_window_appearance_for_window(
+        window,
+        Some((window.inner_size().width, window.inner_size().height)),
+        appearance,
+    );
+    if let Err(err) = native_result {
+        eprintln!("native window appearance apply fell back to winit: {err}");
+
+        #[cfg(target_os = "windows")]
+        {
+            window.set_system_backdrop(windows_backdrop_for_appearance(appearance));
+        }
+
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            window.set_blur(matches!(
+                appearance.backdrop,
+                WindowBackdrop::Blurred(_) | WindowBackdrop::Material(_)
+            ));
+        }
+    }
+}
+
+fn window_appearance_from_settings(controller: &RuntimeController) -> WindowAppearance {
+    let effect = controller
+        .text_setting(RuntimeSettingKey::WindowBackgroundEffect)
+        .unwrap_or_else(|| "None".to_string());
+    let transparent = controller
+        .bool_setting(RuntimeSettingKey::SurfaceTransparency)
+        .unwrap_or(false);
+    let appearance = match effect.as_str() {
+        "Auto" => WindowAppearance::material(WindowMaterialKind::Auto),
+        "Transparent" => WindowAppearance {
+            transparency: SurfaceTransparency::Enabled,
+            backdrop: WindowBackdrop::Transparent(WindowTransparencyDesc::default()),
+            ..WindowAppearance::default()
+        },
+        "Blur" => WindowAppearance::from_preset(WindowAppearancePreset::Blur),
+        "ThinTranslucent" => WindowAppearance::from_preset(WindowAppearancePreset::ThinMaterial),
+        "ThickTranslucent" => WindowAppearance::from_preset(WindowAppearancePreset::ThickMaterial),
+        "NoiseTranslucent" => WindowAppearance::from_preset(WindowAppearancePreset::NoiseMaterial),
+        "TitlebarTranslucent" => {
+            WindowAppearance::from_preset(WindowAppearancePreset::TitlebarMaterial)
+        }
+        "Hud" => WindowAppearance::from_preset(WindowAppearancePreset::HudMaterial),
+        _ => WindowAppearance::default(),
+    };
+    if transparent || !matches!(appearance.backdrop, WindowBackdrop::None) {
+        let mut appearance = WindowAppearance {
+            transparency: SurfaceTransparency::Enabled,
+            ..appearance
+        };
+        appearance.corner_style = Some(corner_style_from_settings(controller));
+        appearance
+    } else {
+        let mut appearance = appearance;
+        appearance.corner_style = Some(corner_style_from_settings(controller));
+        appearance
+    }
+}
+
+fn window_effect_setting_from_appearance(appearance: WindowAppearance) -> (bool, String) {
+    let effect = match appearance.backdrop {
+        WindowBackdrop::None => "None",
+        WindowBackdrop::Transparent(_) => "Transparent",
+        WindowBackdrop::Blurred(_) => "Blur",
+        WindowBackdrop::Material(material) => match material.kind {
+            WindowMaterialKind::Auto => "Auto",
+            WindowMaterialKind::ThinTranslucent => "ThinTranslucent",
+            WindowMaterialKind::ThickTranslucent => "ThickTranslucent",
+            WindowMaterialKind::NoiseTranslucent => "NoiseTranslucent",
+            WindowMaterialKind::TitlebarTranslucent => "TitlebarTranslucent",
+            WindowMaterialKind::Hud => "Hud",
+        },
+    };
+    (
+        appearance.transparency == SurfaceTransparency::Enabled,
+        effect.to_string(),
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_window_runtime_settings(
+    window: &winit::window::Window,
+    controller: &RuntimeController,
+    changes: &[RuntimeSettingChange],
+) {
+    use winit::{
+        dpi::{PhysicalPosition, PhysicalSize},
+        window::WindowLevel,
+    };
+
+    let mut resize_requested = false;
+    let mut position_requested = false;
+
+    for change in changes {
+        match change.setting {
+            RuntimeSettingId::Engine(RuntimeSettingKey::WindowTitle) => {
+                if let Some(title) = controller.text_setting(RuntimeSettingKey::WindowTitle) {
+                    window.set_title(&title);
+                }
+            }
+            RuntimeSettingId::Engine(RuntimeSettingKey::WindowWidth)
+            | RuntimeSettingId::Engine(RuntimeSettingKey::WindowHeight) => {
+                resize_requested = true;
+            }
+            RuntimeSettingId::Engine(RuntimeSettingKey::WindowPositionX)
+            | RuntimeSettingId::Engine(RuntimeSettingKey::WindowPositionY) => {
+                position_requested = true;
+            }
+            RuntimeSettingId::Engine(RuntimeSettingKey::WindowMode) => {
+                let mode = controller
+                    .text_setting(RuntimeSettingKey::WindowMode)
+                    .as_deref()
+                    .map(window_mode_from_setting)
+                    .unwrap_or(WindowMode::Windowed);
+                window.set_fullscreen(fullscreen_for_mode(mode));
+            }
+            RuntimeSettingId::Engine(RuntimeSettingKey::WindowDecorations) => {
+                if let Some(value) = controller.bool_setting(RuntimeSettingKey::WindowDecorations) {
+                    window.set_decorations(value);
+                }
+            }
+            RuntimeSettingId::Engine(RuntimeSettingKey::WindowResizable) => {
+                if let Some(value) = controller.bool_setting(RuntimeSettingKey::WindowResizable) {
+                    window.set_resizable(value);
+                }
+            }
+            RuntimeSettingId::Engine(RuntimeSettingKey::WindowMaximized) => {
+                if let Some(value) = controller.bool_setting(RuntimeSettingKey::WindowMaximized) {
+                    window.set_maximized(value);
+                }
+            }
+            RuntimeSettingId::Engine(RuntimeSettingKey::WindowAlwaysOnTop) => {
+                if let Some(value) = controller.bool_setting(RuntimeSettingKey::WindowAlwaysOnTop) {
+                    window.set_window_level(if value {
+                        WindowLevel::AlwaysOnTop
+                    } else {
+                        WindowLevel::Normal
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if resize_requested {
+        let width = controller
+            .integer_setting(RuntimeSettingKey::WindowWidth)
+            .unwrap_or(window.inner_size().width as i64)
+            .max(1) as u32;
+        let height = controller
+            .integer_setting(RuntimeSettingKey::WindowHeight)
+            .unwrap_or(window.inner_size().height as i64)
+            .max(1) as u32;
+        let _ = window.request_inner_size(PhysicalSize::new(width, height));
+    }
+
+    if position_requested {
+        let x = controller
+            .integer_setting(RuntimeSettingKey::WindowPositionX)
+            .unwrap_or(0) as i32;
+        let y = controller
+            .integer_setting(RuntimeSettingKey::WindowPositionY)
+            .unwrap_or(0) as i32;
+        window.set_outer_position(PhysicalPosition::new(x, y));
+    }
+}
+
+fn window_mode_setting(mode: WindowMode) -> &'static str {
+    match mode {
+        WindowMode::Windowed => "Windowed",
+        WindowMode::BorderlessFullscreen => "BorderlessFullscreen",
+    }
+}
+
+fn window_mode_from_setting(value: &str) -> WindowMode {
+    match value {
+        "BorderlessFullscreen" => WindowMode::BorderlessFullscreen,
+        _ => WindowMode::Windowed,
+    }
+}
+
+fn window_mode_from_fullscreen(fullscreen: bool) -> WindowMode {
+    if fullscreen {
+        WindowMode::BorderlessFullscreen
+    } else {
+        WindowMode::Windowed
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fullscreen_for_mode(mode: WindowMode) -> Option<winit::window::Fullscreen> {
+    match mode {
+        WindowMode::Windowed => None,
+        WindowMode::BorderlessFullscreen => Some(winit::window::Fullscreen::Borderless(None)),
+    }
+}
+
+fn corner_style_setting(style: WindowCornerStyle) -> &'static str {
+    match style {
+        WindowCornerStyle::Default => "Default",
+        WindowCornerStyle::Rounded => "Rounded",
+        WindowCornerStyle::Square => "Square",
+    }
+}
+
+fn corner_style_from_settings(controller: &RuntimeController) -> WindowCornerStyle {
+    match controller
+        .text_setting(RuntimeSettingKey::WindowCornerStyle)
+        .as_deref()
+    {
+        Some("Rounded") => WindowCornerStyle::Rounded,
+        Some("Square") => WindowCornerStyle::Square,
+        _ => WindowCornerStyle::Default,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn window_settings_snapshot(
+    window: &winit::window::Window,
+    config: &WindowConfig,
+    controller: &RuntimeController,
+) -> crate::RuntimeSettingsSnapshot {
+    let mut settings = controller.settings();
+    settings.window_title = controller
+        .text_setting(RuntimeSettingKey::WindowTitle)
+        .unwrap_or_else(|| config.title.clone());
+    settings.window_size = SurfaceSize {
+        width: window.inner_size().width.max(1),
+        height: window.inner_size().height.max(1),
+    };
+    settings.window_position = window.outer_position().ok().map(|position| (position.x, position.y));
+    settings.window_mode = window_mode_from_fullscreen(window.fullscreen().is_some());
+    settings.window_decorations = controller
+        .bool_setting(RuntimeSettingKey::WindowDecorations)
+        .unwrap_or(config.decorations);
+    settings.window_resizable = controller
+        .bool_setting(RuntimeSettingKey::WindowResizable)
+        .unwrap_or(config.resizable);
+    settings.window_maximized = controller
+        .bool_setting(RuntimeSettingKey::WindowMaximized)
+        .unwrap_or(config.maximized);
+    settings.window_always_on_top = controller
+        .bool_setting(RuntimeSettingKey::WindowAlwaysOnTop)
+        .unwrap_or(config.always_on_top);
+    settings.window_corner_style = corner_style_from_settings(controller);
+    settings
+}
+
+#[cfg(target_os = "windows")]
+fn windows_backdrop_for_appearance(appearance: WindowAppearance) -> BackdropType {
+    match appearance.backdrop {
+        WindowBackdrop::Material(material) => match material.kind {
+            WindowMaterialKind::Auto => BackdropType::Auto,
+            WindowMaterialKind::ThinTranslucent => BackdropType::MainWindow,
+            WindowMaterialKind::NoiseTranslucent => BackdropType::TransientWindow,
+            WindowMaterialKind::TitlebarTranslucent => BackdropType::TabbedWindow,
+            WindowMaterialKind::ThickTranslucent
+            | WindowMaterialKind::Hud => BackdropType::TransientWindow,
+        },
+        _ => BackdropType::None,
     }
 }

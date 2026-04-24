@@ -20,6 +20,7 @@ mod frontend_graph;
 mod gpu_procedural_texture;
 mod graph_frame;
 mod hdr_pipeline;
+mod input;
 mod mesh;
 mod mesh_program;
 mod mip_pyramid;
@@ -32,6 +33,7 @@ mod sampler_catalog;
 mod tests;
 mod text_draw;
 mod text_engine;
+mod text_overlay;
 mod text_tiling;
 mod texture;
 mod upload_arena;
@@ -55,6 +57,10 @@ pub use device_manager::{AdapterEntry, DeviceManager};
 pub use gpu_procedural_texture::GpuProceduralTexture;
 pub use graph_frame::{FullscreenPassBuilder, GraphFrame, ImageNode};
 pub use hdr_pipeline::{HdrMode, HdrPipelineDesc, HdrPreference, ToneMappingOp};
+pub use input::{
+    ActionBindingRegistry, BindingChange, KeyInput, KeyInputState, KeyModifier, KeyModifiers,
+    KeyToken, Keybind, KeybindCapture,
+};
 pub use mesh::{Mesh, Vertex2d, Vertex3d};
 pub use mesh_program::{MeshProgram, MeshProgramDesc, MeshVertexKind};
 pub use mip_pyramid::MipPyramid;
@@ -65,9 +71,10 @@ pub use quad_batch::QuadBatch;
 pub use runtime::{
     AppLayer, AppRuntime, AppRuntimeFrame, DebugImageRegistry, DefaultSceneTargetConfig,
     RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult, RuntimeController,
-    RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimePassTiming, RuntimeSettingKey,
-    RuntimeSettingsSnapshot, RuntimeSettingsTransaction, RuntimeTimingSummary,
-    SceneRenderContext, UiContext,
+    RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimePassTiming, RuntimeSettingChange,
+    RuntimeSettingDescriptor, RuntimeSettingEntry, RuntimeSettingId, RuntimeSettingKey,
+    RuntimeSettingOption, RuntimeSettingSource, RuntimeSettingSupport, RuntimeSettingValue, RuntimeSettingsSnapshot,
+    RuntimeSettingsTransaction, RuntimeTimingSummary, SceneRenderContext, UiContext, WindowMode,
 };
 pub use sampler_catalog::SamplerPreset;
 pub use text_draw::{
@@ -77,6 +84,7 @@ pub use text_draw::{
 pub use text_engine::{
     PreparedTextDraw, PreparedTextQuad, TextEngine, TextEngineFrame, TextUiRenderer,
 };
+pub use text_overlay::TextOverlay;
 pub use text_tiling::{TiledTextAtlasPage, TiledTextEngineFrame};
 
 pub use bind_group::BindGroupBuilder;
@@ -104,8 +112,9 @@ pub use sturdy_engine_core::{
     NativeHandleCapability, NativeHandleKind, NativeHandleOwnership, PassDesc, PassWork,
     PrimitiveTopology, PushConstants, QueueType, RasterState, ResolveImageDesc, ResourceBinding,
     Result, RgState, SamplerDesc, ShaderDesc, ShaderSource, ShaderStage, ShaderTarget,
-    SlangCompileDesc, StageMask, SubresourceRange, SurfaceColorSpace, SurfaceEvent, SurfaceHdrCaps,
-    SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc, UpdateRate,
+    SlangCompileDesc, StageMask, SubresourceRange, SurfaceCapabilities, SurfaceColorSpace,
+    SurfaceEvent, SurfaceFormatInfo, SurfaceHdrCaps, SurfaceHdrPreference, SurfaceInfo,
+    SurfacePresentMode, SurfaceRecreateDesc, UpdateRate,
     VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout, VertexFormat, VertexInputRate,
     VulkanExternalBuffer, VulkanExternalImage, VulkanRawCapabilities, compile_slang,
     compile_slang_to_file, compile_slang_to_spirv, native_handle_capabilities_for_backend,
@@ -117,10 +126,12 @@ pub use sturdy_engine_core::{
 pub use sturdy_engine_macros::push_constants;
 pub use sturdy_engine_platform as platform;
 pub use sturdy_engine_platform::{
-    PlatformCapabilityState, PlatformKind, SurfaceTransparency, WindowAppearance,
-    WindowAppearanceCaps, WindowBackdrop, WindowBlurDesc, WindowCornerStyle, WindowEffectQuality,
-    WindowEffectRegion, WindowMaterialKind, WindowMaterialSupport, WindowShadowMode,
-    WindowTransparencyDesc, current_platform,
+    NativeWindowAppearanceError, PlatformCapabilityState, PlatformKind, SurfaceTransparency,
+    WindowAppearance, WindowAppearanceCaps, WindowAppearancePreset, WindowBackdrop,
+    WindowBlurDesc, WindowCornerStyle, WindowEffectQuality, WindowEffectRegion,
+    WindowMaterialKind, WindowMaterialSupport, WindowShadowMode, WindowTransparencyDesc,
+    apply_native_window_appearance, apply_native_window_appearance_for_window, current_platform,
+    current_window_appearance_caps,
 };
 pub use texture::{ImageCopyRegion, TextureUploadDesc};
 
@@ -695,6 +706,10 @@ impl Surface {
 
     pub fn hdr_caps(&self) -> Result<SurfaceHdrCaps> {
         self.device.surface_hdr_caps(self.handle)
+    }
+
+    pub fn capabilities(&self) -> Result<SurfaceCapabilities> {
+        self.device.query_surface_capabilities(self.handle)
     }
 
     pub fn acquire_image(&self) -> Result<SurfaceImage> {

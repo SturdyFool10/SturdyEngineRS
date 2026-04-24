@@ -127,25 +127,25 @@ checkbox updates.
 - [ ] `P0.9` Internalize motion-vector generation and debug display registration as runtime features rather than testbed-only plumbing
 - [x] `P0.9a` Define the runtime motion-vector contract around camera-local motion suitable for TAA and motion blur
 - [x] `P0.9b` Add first-party support for camera-locked/screen-locked overlay passes that bypass scene motion blur and temporal accumulation
-- [ ] `P0.9c` Add a motion-vector validation/debug mode that makes incorrect object or camera motion obvious in-engine
-- [ ] `P0.10` Define the first `TextOverlay` API surface that lets apps request text without touching atlas/page management
-- [ ] `P0.11` Move the existing HUD text path behind `TextOverlay` while preserving current output
-- [ ] `P0.12` Add a first-pass debug action/input binding registry above raw key handling
+- [x] `P0.9c` Add a motion-vector validation/debug mode that makes incorrect object or camera motion obvious in-engine
+- [x] `P0.10` Define the first `TextOverlay` API surface that lets apps request text without touching atlas/page management
+- [x] `P0.11` Move the existing HUD text path behind `TextOverlay` while preserving current output
+- [x] `P0.12` Add a first-pass debug action/input binding registry above raw key handling
 - [x] `P0.13` Define `RuntimeSettingsSnapshot`, setting keys, and a single public settings model
-- [ ] `P0.14` Classify every existing runtime-facing setting into `Immediate`, `GraphRebuild`, `SurfaceRecreate`, `WindowReconfigure`, or `DeviceMigration`
-- [ ] `P0.15` Implement the first `Immediate` runtime settings path for low-risk settings like overlay visibility or post-process dials
-- [ ] `P0.16` Implement the first `GraphRebuild` runtime settings path for AA mode or post-chain topology changes
-- [ ] `P0.17` Implement the first `SurfaceRecreate` runtime settings path for HDR mode or present mode changes without app restart
-- [ ] `P0.18` Add transaction-style runtime settings updates so multiple changes apply coherently in one call
-- [ ] `P0.19` Add `RuntimeApplyReport` / per-setting apply results with exact, degraded, and rejected outcomes
-- [ ] `P0.20` Expose capability queries and failure reasons for unsupported runtime-setting requests
-- [ ] `P0.21` Add runtime shell support for transparent window/background configuration toggles
-- [ ] `P0.22` Add transparent surface clear/present handling where the backend/platform supports it
-- [ ] `P0.23` Define the engine-level window background effect/material abstraction with both presets and explicit descriptors
-- [ ] `P0.24` Implement the first Windows backdrop/material integration through that abstraction
-- [ ] `P0.25` Implement the first macOS material/vibrancy integration through the same abstraction
-- [ ] `P0.26` Implement the first Linux background-effect adapter with graceful fallback behavior
-- [ ] `P0.27` Make transparency/background effects runtime-toggleable without restart through the runtime settings controller
+- [x] `P0.14` Classify every existing runtime-facing setting into `Immediate`, `GraphRebuild`, `SurfaceRecreate`, `WindowReconfigure`, or `DeviceMigration`
+- [x] `P0.15` Implement the first `Immediate` runtime settings path for low-risk settings like overlay visibility or post-process dials
+- [x] `P0.16` Implement the first `GraphRebuild` runtime settings path for AA mode or post-chain topology changes
+- [x] `P0.17` Implement the first `SurfaceRecreate` runtime settings path for HDR mode or present mode changes without app restart
+- [x] `P0.18` Add transaction-style runtime settings updates so multiple changes apply coherently in one call
+- [x] `P0.19` Add `RuntimeApplyReport` / per-setting apply results with exact, degraded, and rejected outcomes
+- [x] `P0.20` Expose capability queries and failure reasons for unsupported runtime-setting requests
+- [x] `P0.21` Add runtime shell support for transparent window/background configuration toggles
+- [x] `P0.22` Add transparent surface clear/present handling where the backend/platform supports it
+- [x] `P0.23` Define the engine-level window background effect/material abstraction with both presets and explicit descriptors
+- [x] `P0.24` Implement the first Windows backdrop/material integration through that abstraction
+- [x] `P0.25` Implement the first macOS material/vibrancy integration through the same abstraction
+- [x] `P0.26` Implement the first Linux background-effect adapter with graceful fallback behavior
+- [x] `P0.27` Make transparency/background effects runtime-toggleable without restart through the runtime settings controller
 - [ ] `P0.28` Add Slang shader hot reload with clear in-app compile error reporting
 - [ ] `P0.29` Add first-pass asset hot reload for common asset types used by the testbed
 - [ ] `P0.30` Add stable missing/stale-asset diagnostics surfaced in the runtime overlay or logs
@@ -216,24 +216,28 @@ If work starts immediately, do these in order before jumping ahead:
   - [ ] antialiasing mode and dials
   - [ ] post-processing toggles and dials
   - [ ] shader hot reload and asset hot reload policy
+- [x] Let applications register their own runtime settings alongside engine-owned settings
+- [x] Make setting metadata and current values queryable anywhere through a shared runtime controller
+- [x] Add a polled settings change stream so systems like asset loading can react immediately to app-defined settings such as texture resolution tiers
 - [ ] Apply runtime settings changes through the right internal path automatically:
-  - [ ] patch state in place when possible
-  - [ ] rebuild graph/pipelines when needed
-  - [ ] recreate the surface/window when needed
+  - [x] patch state in place when possible
+  - [x] rebuild graph/pipelines when needed
+  - [x] recreate the surface/window when needed
   - [ ] migrate live resources across devices/backends when needed
 - [ ] Add a transaction-style runtime reconfiguration path so multiple setting changes can be applied coherently in one step
 - [ ] Add explicit notifications for:
   - [ ] setting accepted as requested
   - [ ] setting clamped or degraded
   - [ ] setting rejected with reason
+- [x] Prove one app-defined runtime setting can trigger immediate asset swaps through the shared controller path
 
 ### Window transparency and compositor effects
 
 - [ ] Add window/background transparency support in the application shell
 - [ ] Add surface alpha / transparent clear path support so rendered content can preserve transparency through presentation where the platform allows it
 - [ ] Add engine-level window background effect/material support with both:
-  - [ ] easy presets
-  - [ ] explicit low-level control
+  - [x] easy presets
+  - [x] explicit low-level control
 - [ ] Support Windows material/effect families such as blur-behind, acrylic, mica, and tabbed/titlebar variants through one engine API
 - [ ] Support macOS vibrancy/material integration through the same engine API
 - [ ] Support Linux window background effects through a Linux platform adapter with:

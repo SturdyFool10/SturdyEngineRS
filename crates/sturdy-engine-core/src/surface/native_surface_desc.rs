@@ -7,6 +7,7 @@ pub struct NativeSurfaceDesc {
     pub display_handle: RawDisplayHandle,
     pub window_handle: RawWindowHandle,
     pub size: SurfaceSize,
+    pub transparent: bool,
     /// HDR output preference.  Backends use this to choose the swapchain format
     /// and color space.  Defaults to `Sdr`.
     pub hdr: SurfaceHdrPreference,
@@ -24,6 +25,7 @@ impl NativeSurfaceDesc {
             display_handle,
             window_handle,
             size,
+            transparent: false,
             hdr: SurfaceHdrPreference::Sdr,
             preferred_present_mode: None,
         }
