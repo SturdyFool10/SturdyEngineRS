@@ -381,6 +381,42 @@ fn runtime_controller_rejects_unsupported_engine_setting_changes() {
 }
 
 #[test]
+fn runtime_controller_records_apply_notifications_for_applied_and_rejected_requests() {
+    let mut controller = RuntimeController::default();
+    let starting_revision = controller.apply_notifications_revision();
+
+    let report = controller
+        .transact()
+        .set_engine_value(RuntimeSettingKey::OverlayVisibility, false)
+        .set_engine_value(RuntimeSettingKey::BackendSelection, "Vulkan")
+        .apply()
+        .unwrap();
+
+    assert_eq!(controller.last_apply_report(), Some(report.clone()));
+
+    let notifications = controller.apply_notifications_since(starting_revision);
+    assert_eq!(
+        notifications,
+        vec![
+            RuntimeApplyNotification {
+                revision: starting_revision + 1,
+                result: RuntimeChangeResult::Applied {
+                    setting: RuntimeSettingId::from(RuntimeSettingKey::OverlayVisibility),
+                    path: RuntimeApplyPath::Immediate,
+                },
+            },
+            RuntimeApplyNotification {
+                revision: starting_revision + 2,
+                result: RuntimeChangeResult::Rejected {
+                    setting: RuntimeSettingId::from(RuntimeSettingKey::BackendSelection),
+                    reason: "live backend migration is not implemented yet".to_string(),
+                },
+            },
+        ]
+    );
+}
+
+#[test]
 fn keybind_serializes_and_parses_round_trip() {
     let binding = Keybind::new([KeyModifier::Ctrl, KeyModifier::Shift], Some("KeyK".to_string()));
     let serialized = binding.to_string();

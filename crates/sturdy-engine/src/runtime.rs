@@ -421,6 +421,38 @@ impl RuntimeController {
             .collect()
     }
 
+    /// Return the current apply-notification revision.
+    pub fn apply_notifications_revision(&self) -> u64 {
+        self.shared
+            .lock()
+            .expect("runtime controller poisoned")
+            .apply_notifications_revision
+    }
+
+    /// Return apply notifications recorded after `revision`.
+    ///
+    /// Unlike `setting_changes_since`, this includes rejected requests and
+    /// no-op accepted requests so applications can surface exact outcomes.
+    pub fn apply_notifications_since(&self, revision: u64) -> Vec<RuntimeApplyNotification> {
+        self.shared
+            .lock()
+            .expect("runtime controller poisoned")
+            .apply_notifications
+            .iter()
+            .filter(|notification| notification.revision > revision)
+            .cloned()
+            .collect()
+    }
+
+    /// Return the most recent runtime apply report, if any transaction has run.
+    pub fn last_apply_report(&self) -> Option<RuntimeApplyReport> {
+        self.shared
+            .lock()
+            .expect("runtime controller poisoned")
+            .last_apply_report
+            .clone()
+    }
+
     /// Return the current runtime diagnostics snapshot.
     ///
     /// The returned snapshot includes any active shader compile errors and asset
@@ -760,6 +792,9 @@ struct RuntimeShared {
     setting_entries: HashMap<RuntimeSettingId, RuntimeSettingEntry>,
     settings_revision: u64,
     change_log: Vec<RuntimeSettingChange>,
+    apply_notifications_revision: u64,
+    apply_notifications: Vec<RuntimeApplyNotification>,
+    last_apply_report: Option<RuntimeApplyReport>,
     shader_compile_errors: HashMap<PathBuf, String>,
     asset_states: HashMap<PathBuf, AssetState>,
 }
@@ -773,6 +808,9 @@ impl RuntimeShared {
             setting_entries: default_setting_entries(&settings),
             settings_revision: 0,
             change_log: Vec::new(),
+            apply_notifications_revision: 0,
+            apply_notifications: Vec::new(),
+            last_apply_report: None,
             shader_compile_errors: HashMap::new(),
             asset_states: HashMap::new(),
         };
@@ -1056,6 +1094,21 @@ impl RuntimeShared {
             setting: id,
             path: entry.descriptor.apply_path,
         }
+    }
+
+    fn record_apply_report(&mut self, report: RuntimeApplyReport) {
+        for result in &report.changes {
+            self.apply_notifications_revision += 1;
+            self.apply_notifications.push(RuntimeApplyNotification {
+                revision: self.apply_notifications_revision,
+                result: result.clone(),
+            });
+        }
+        if self.apply_notifications.len() > 256 {
+            let excess = self.apply_notifications.len() - 256;
+            self.apply_notifications.drain(0..excess);
+        }
+        self.last_apply_report = Some(report);
     }
 }
 
@@ -1470,6 +1523,13 @@ pub struct RuntimeApplyReport {
     pub changes: Vec<RuntimeChangeResult>,
 }
 
+/// Pollable notification for one runtime apply outcome.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeApplyNotification {
+    pub revision: u64,
+    pub result: RuntimeChangeResult,
+}
+
 /// Outcome for an individual runtime-setting request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeChangeResult {
@@ -1565,6 +1625,7 @@ impl<'a> RuntimeSettingsTransaction<'a> {
             };
             report.changes.push(result);
         }
+        shared.record_apply_report(report.clone());
         Ok(report)
     }
 }

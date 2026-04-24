@@ -16,6 +16,9 @@ mod bind_group;
 mod bloom_pass;
 mod compute_program;
 mod device_manager;
+mod debug_draw_2d;
+mod debug_overlay;
+mod debug_view_picker;
 mod frontend_graph;
 mod gpu_procedural_texture;
 mod graph_frame;
@@ -25,6 +28,7 @@ mod mesh;
 mod mesh_program;
 mod mip_pyramid;
 mod pipeline_layout;
+mod plot2d;
 mod procedural_texture;
 mod quad_batch;
 mod motion_vector_debug;
@@ -57,6 +61,12 @@ pub use bloom_pass::{
 };
 pub use compute_program::ComputeProgram;
 pub use device_manager::{AdapterEntry, DeviceManager};
+pub use debug_draw_2d::{DebugDraw2d, DebugDrawStyle};
+pub use debug_overlay::{
+    DebugHitRegion, DebugOverlay, DebugOverlayAntialiasing, DebugOverlayConfig,
+    DebugOverlayRenderer, DebugOverlayTransform,
+};
+pub use debug_view_picker::DebugViewPicker;
 pub use gpu_procedural_texture::GpuProceduralTexture;
 pub use graph_frame::{FullscreenPassBuilder, GraphFrame, ImageNode};
 pub use hdr_pipeline::{HdrMode, HdrPipelineDesc, HdrPreference, ToneMappingOp};
@@ -67,18 +77,20 @@ pub use input::{
 pub use mesh::{Mesh, Vertex2d, Vertex3d};
 pub use mesh_program::{MeshProgram, MeshProgramDesc, MeshVertexKind};
 pub use mip_pyramid::MipPyramid;
+pub use plot2d::{Plot2d, PlotBar, PlotInspection, PlotRange, PlotScale, PlotTheme, PlotView};
 pub use procedural_texture::{
     CpuProceduralTexture2d, ProceduralTextureRecipe, ProceduralTextureUpdatePolicy,
 };
 pub use quad_batch::QuadBatch;
 pub use runtime::{
     AppLayer, AppRuntime, AppRuntimeFrame, AssetDiagnostic, AssetState, DebugImageRegistry,
-    DefaultSceneTargetConfig, RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult,
-    RuntimeController, RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimePassTiming,
-    RuntimeSettingChange, RuntimeSettingDescriptor, RuntimeSettingEntry, RuntimeSettingId,
-    RuntimeSettingKey, RuntimeSettingOption, RuntimeSettingSource, RuntimeSettingSupport,
-    RuntimeSettingValue, RuntimeSettingsSnapshot, RuntimeSettingsTransaction, RuntimeTimingSummary,
-    SceneRenderContext, ShaderCompileError, UiContext, WindowMode,
+    DefaultSceneTargetConfig, RuntimeApplyNotification, RuntimeApplyPath, RuntimeApplyReport,
+    RuntimeChangeResult, RuntimeController, RuntimeDiagnostics, RuntimeGraphDiagnostics,
+    RuntimePassTiming, RuntimeSettingChange, RuntimeSettingDescriptor, RuntimeSettingEntry,
+    RuntimeSettingId, RuntimeSettingKey, RuntimeSettingOption, RuntimeSettingSource,
+    RuntimeSettingSupport, RuntimeSettingValue, RuntimeSettingsSnapshot,
+    RuntimeSettingsTransaction, RuntimeTimingSummary, SceneRenderContext, ShaderCompileError,
+    UiContext, WindowMode,
 };
 pub use screenshot::ScreenshotCapture;
 pub use shader_watcher::ShaderWatcher;

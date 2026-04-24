@@ -226,9 +226,9 @@ If work starts immediately, do these in order before jumping ahead:
   - [ ] migrate live resources across devices/backends when needed
 - [ ] Add a transaction-style runtime reconfiguration path so multiple setting changes can be applied coherently in one step
 - [ ] Add explicit notifications for:
-  - [ ] setting accepted as requested
+  - [x] setting accepted as requested
   - [ ] setting clamped or degraded
-  - [ ] setting rejected with reason
+  - [x] setting rejected with reason
 - [x] Prove one app-defined runtime setting can trigger immediate asset swaps through the shared controller path
 
 ### Window transparency and compositor effects
@@ -263,41 +263,41 @@ If work starts immediately, do these in order before jumping ahead:
 
 ### Debug draw and inspection
 
-- [ ] Add immediate-style 2D drawing helpers for:
-  - [ ] lines
-  - [ ] polylines
-  - [ ] rectangles
-  - [ ] circles
-  - [ ] points / markers
-  - [ ] filled shapes
-- [ ] Support layering those primitives with text in the same frame
-- [ ] Expose sane defaults for antialiasing, thickness, color, transforms, and hit testing
-- [ ] Add a built-in debug view picker for motion vectors, bloom chain, AA history, and other named graph images
+- [x] Add immediate-style 2D drawing helpers for:
+  - [x] lines
+  - [x] polylines
+  - [x] rectangles
+  - [x] circles
+  - [x] points / markers
+  - [x] filled shapes
+- [x] Support layering those primitives with text in the same frame
+- [x] Expose sane defaults for antialiasing, thickness, color, transforms, and hit testing
+- [x] Add a built-in debug view picker for motion vectors, bloom chain, AA history, and other named graph images
 
 ### Data visualization first mile
 
-- [ ] Add a lightweight plotting layer for:
-  - [ ] axes
-  - [ ] linear/log scales
-  - [ ] gridlines
-  - [ ] line series
-  - [ ] scatter series
-  - [ ] bar series
-  - [ ] legends
-  - [ ] value tooltips / nearest-point inspection
-- [ ] Add pan/zoom helpers for 2D data views
-- [ ] Add a simple palette/theme model for quick visualization work
-- [ ] Add a “load data, plot it, inspect it” sample with minimal code
+- [x] Add a lightweight plotting layer for:
+  - [x] axes
+  - [x] linear/log scales
+  - [x] gridlines
+  - [x] line series
+  - [x] scatter series
+  - [x] bar series
+  - [x] legends
+  - [x] value tooltips / nearest-point inspection
+- [x] Add pan/zoom helpers for 2D data views
+- [x] Add a simple palette/theme model for quick visualization work
+- [x] Add a “load data, plot it, inspect it” sample with minimal code
 
 ### Shader playground usability
 
-- [ ] Add a shader-playground app shell with:
-  - [ ] standard time/frame/resolution uniforms
-  - [ ] quick texture binding helpers
-  - [ ] pause / step / scrub controls
-  - [ ] built-in debug overlays
-  - [ ] one-click debug image switching
-- [ ] Make the default playground path use the same runtime shell as normal apps
+- [x] Add a shader-playground app shell with:
+  - [x] standard time/frame/resolution uniforms
+  - [x] quick texture binding helpers
+  - [x] pause / step / scrub controls
+  - [x] built-in debug overlays
+  - [x] one-click debug image switching
+- [x] Make the default playground path use the same runtime shell as normal apps
 
 ---
 

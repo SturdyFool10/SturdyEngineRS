@@ -2,13 +2,13 @@ use std::time::Instant;
 
 use sturdy_engine::{
     AntiAliasingConfig, AntiAliasingDial, AntiAliasingPass, BloomConfig, BloomPass,
-    CpuProceduralTexture2d, Engine, EngineApp, Extent3d, Format, GpuProceduralTexture,
-    HdrPipelineDesc, HdrPreference, ImageDesc, ImageDimension, ImageUsage, MotionVectorLayer,
-    MotionVectorSpace, ProceduralTextureRecipe, ProceduralTextureUpdatePolicy,
-    Result as EngineResult, RuntimeController, RuntimeMotionVectorDesc, RuntimePostProcessDesc,
-    RuntimeSettingDescriptor, RuntimeSettingId, RuntimeSettingKey, RuntimeSettingOption,
-    ShaderProgram, ShaderWatcher, ShellFrame, Surface, SurfaceColorSpace, SurfaceImage,
-    TextOverlay, ToneMappingOp, WindowConfig, push_constants,
+    CpuProceduralTexture2d, DebugOverlay, DebugOverlayRenderer, DebugViewPicker, Engine,
+    EngineApp, Extent3d, Format, GpuProceduralTexture, HdrPipelineDesc, HdrPreference, ImageDesc,
+    ImageDimension, ImageUsage, MotionVectorLayer, MotionVectorSpace, ProceduralTextureRecipe,
+    ProceduralTextureUpdatePolicy, Result as EngineResult, RuntimeController,
+    RuntimeMotionVectorDesc, RuntimePostProcessDesc, RuntimeSettingDescriptor, RuntimeSettingId,
+    RuntimeSettingKey, RuntimeSettingOption, ShaderProgram, ShaderWatcher, ShellFrame, Surface,
+    SurfaceColorSpace, SurfaceImage, ToneMappingOp, WindowConfig, push_constants,
 };
 
 #[push_constants]
@@ -276,7 +276,8 @@ struct Testbed {
     aa: AntiAliasingConfig,
     color_lut: GpuProceduralTexture,
     procedural_mask: CpuProceduralTexture2d,
-    text_overlay: TextOverlay,
+    debug_overlay: DebugOverlayRenderer,
+    debug_view_picker: DebugViewPicker,
     runtime_controller: Option<RuntimeController>,
     texture_resolution: TextureResolutionTier,
     started_at: Instant,
@@ -398,7 +399,8 @@ impl EngineApp for Testbed {
             aa: AntiAliasingConfig::default(),
             color_lut,
             procedural_mask,
-            text_overlay: TextOverlay::new(engine)?,
+            debug_overlay: DebugOverlayRenderer::new(engine)?,
+            debug_view_picker: DebugViewPicker::new(engine)?,
             runtime_controller: None,
             texture_resolution: TextureResolutionTier::Medium,
             started_at: Instant::now(),
@@ -516,6 +518,7 @@ impl EngineApp for Testbed {
             self.bloom_enabled,
             self.bloom_only,
         );
+        let _ = self.debug_view_picker.present_selected(shell_frame, &swapchain)?;
         if runtime_controller
             .bool_setting(RuntimeSettingKey::OverlayVisibility)
             .unwrap_or(true)
@@ -549,8 +552,14 @@ impl EngineApp for Testbed {
                     .unwrap_or_else(|| "None".to_string()),
                 self.texture_resolution.label(),
             ));
+            overlay_lines.push(format!(
+                "debug view: {}",
+                self.debug_view_picker
+                    .selected_name(&runtime_controller)
+                    .unwrap_or_else(|| "Off".to_string())
+            ));
             overlay_lines.push(
-                "keys: [/]=tonemap .=aa R/U reset B/b bloom H hdr V motion O overlay X transparency G effect 1/2/3 tex"
+                "keys: [/]=tonemap .=aa R/U reset B/b bloom H hdr V motion O overlay X transparency G effect N/M debug 1/2/3 tex"
                     .to_string(),
             );
             // Show any active shader compile errors (cleared automatically on successful hot reload).
@@ -680,6 +689,26 @@ impl EngineApp for Testbed {
             }
         } else if key == "G" || key == "g" {
             self.cycle_window_background_effect()?;
+        } else if key == "N" || key == "n" {
+            if let Some(controller) = runtime_controller.as_mut() {
+                let selection = self
+                    .debug_view_picker
+                    .cycle_next(controller, &self.current_debug_image_names())?;
+                eprintln!(
+                    "debug view: {}",
+                    selection.unwrap_or_else(|| "Off".to_string())
+                );
+            }
+        } else if key == "M" || key == "m" {
+            if let Some(controller) = runtime_controller.as_mut() {
+                let selection = self
+                    .debug_view_picker
+                    .cycle_previous(controller, &self.current_debug_image_names())?;
+                eprintln!(
+                    "debug view: {}",
+                    selection.unwrap_or_else(|| "Off".to_string())
+                );
+            }
         } else if key == "1" {
             self.set_texture_resolution_setting(TextureResolutionTier::Low)?;
         } else if key == "2" {
@@ -807,6 +836,7 @@ impl Testbed {
                 },
             ]),
         )?;
+        self.debug_view_picker.register(controller)?;
         Ok(())
     }
 
@@ -911,6 +941,13 @@ impl Testbed {
         Ok(())
     }
 
+    fn current_debug_image_names(&self) -> Vec<String> {
+        self.runtime_controller
+            .as_ref()
+            .map(|controller| controller.diagnostics().debug_images)
+            .unwrap_or_default()
+    }
+
     fn set_texture_resolution_setting(&mut self, tier: TextureResolutionTier) -> EngineResult<()> {
         if let Some(controller) = self.runtime_controller.as_mut() {
             controller
@@ -1008,8 +1045,9 @@ impl Testbed {
             ))
             .collect::<Vec<_>>()
             .join("\n");
-        self.text_overlay
-            .draw_screen_text(frame, target, width, height, hud_text, 18.0, 18.0)
+        let mut overlay = DebugOverlay::new();
+        overlay.add_screen_text(hud_text, 18.0, 18.0);
+        self.debug_overlay.draw(frame, target, width, height, &overlay)
     }
 
     fn actual_msaa_samples(&self) -> u8 {
