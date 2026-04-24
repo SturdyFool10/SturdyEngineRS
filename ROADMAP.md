@@ -124,7 +124,7 @@ checkbox updates.
 - [x] `P0.6` Add a named debug image registry owned by the runtime instead of the testbed
 - [x] `P0.7` Add a runtime diagnostics data model for backend, adapter, HDR, present mode, AA, bloom state, and graph timings
 - [x] `P0.8` Surface the diagnostics model through a basic first-party overlay hook, even if presentation is still minimal
-- [ ] `P0.9` Internalize motion-vector generation and debug display registration as runtime features rather than testbed-only plumbing
+- [x] `P0.9` Internalize motion-vector generation and debug display registration as runtime features rather than testbed-only plumbing
 - [x] `P0.9a` Define the runtime motion-vector contract around camera-local motion suitable for TAA and motion blur
 - [x] `P0.9b` Add first-party support for camera-locked/screen-locked overlay passes that bypass scene motion blur and temporal accumulation
 - [x] `P0.9c` Add a motion-vector validation/debug mode that makes incorrect object or camera motion obvious in-engine
@@ -146,14 +146,14 @@ checkbox updates.
 - [x] `P0.25` Implement the first macOS material/vibrancy integration through the same abstraction
 - [x] `P0.26` Implement the first Linux background-effect adapter with graceful fallback behavior
 - [x] `P0.27` Make transparency/background effects runtime-toggleable without restart through the runtime settings controller
-- [ ] `P0.28` Add Slang shader hot reload with clear in-app compile error reporting
-- [ ] `P0.29` Add first-pass asset hot reload for common asset types used by the testbed
-- [ ] `P0.30` Add stable missing/stale-asset diagnostics surfaced in the runtime overlay or logs
-- [ ] `P0.31` Add screenshot/export helpers to the first-party runtime shell
-- [ ] `P0.32` Add image inspection for named graph resources using the runtime-owned debug image registry
-- [ ] `P0.33` Add a first-pass frame-graph inspection UI or textual inspection surface
-- [ ] `P0.34` Add GPU timing and per-pass timing summaries to runtime diagnostics
-- [ ] `P0.35` Convert one existing sample/testbed path to the first-party runtime shell and remove the equivalent app-side boilerplate
+- [x] `P0.28` Add Slang shader hot reload with clear in-app compile error reporting
+- [x] `P0.29` Add first-pass asset hot reload for common asset types used by the testbed
+- [x] `P0.30` Add stable missing/stale-asset diagnostics surfaced in the runtime overlay or logs
+- [x] `P0.31` Add screenshot/export helpers to the first-party runtime shell
+- [x] `P0.32` Add image inspection for named graph resources using the runtime-owned debug image registry
+- [x] `P0.33` Add a first-pass frame-graph inspection UI or textual inspection surface
+- [x] `P0.34` Add GPU timing and per-pass timing summaries to runtime diagnostics
+- [x] `P0.35` Convert one existing sample/testbed path to the first-party runtime shell and remove the equivalent app-side boilerplate
 
 ### Chunking rules
 

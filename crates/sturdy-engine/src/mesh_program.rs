@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::Mutex};
+use std::{collections::HashMap, path::{Path, PathBuf}, sync::Mutex};
 
 use sturdy_engine_core as core;
 
@@ -42,6 +42,8 @@ pub struct MeshProgram {
     pub(crate) vertex_kind: MeshVertexKind,
     pub(crate) alpha_blend: bool,
     pub(crate) reflection: ShaderReflection,
+    fragment_path: Option<PathBuf>,
+    vertex_path: Option<PathBuf>,
 }
 
 impl MeshProgram {
@@ -115,6 +117,14 @@ impl MeshProgram {
             MeshVertexKind::V2d => DEFAULT_VERTEX_2D,
             MeshVertexKind::V3d => DEFAULT_VERTEX_3D,
         };
+        let vertex_path = desc.vertex.as_ref().and_then(|v| match &v.source {
+            ShaderSource::File(p) => Some(p.clone()),
+            _ => None,
+        });
+        let fragment_path = match &desc.fragment.source {
+            ShaderSource::File(p) => Some(p.clone()),
+            _ => None,
+        };
         let vertex_desc = desc.vertex.unwrap_or_else(|| ShaderDesc {
             source: ShaderSource::Inline(default_vertex_src.to_owned()),
             entry_point: "main".to_owned(),
@@ -133,11 +143,65 @@ impl MeshProgram {
             vertex_kind: desc.vertex_kind,
             alpha_blend: desc.alpha_blend,
             reflection,
+            fragment_path,
+            vertex_path,
         })
     }
 
     pub fn reflection(&self) -> &ShaderReflection {
         &self.reflection
+    }
+
+    /// Return the fragment shader source path if loaded from a file.
+    pub fn fragment_path(&self) -> Option<&Path> {
+        self.fragment_path.as_deref()
+    }
+
+    /// Return the vertex shader source path if loaded from a file (None for the built-in default).
+    pub fn vertex_path(&self) -> Option<&Path> {
+        self.vertex_path.as_deref()
+    }
+
+    /// Recompile the fragment shader from its original source file and rebuild all cached pipelines.
+    ///
+    /// Returns `Ok(true)` on success, `Ok(false)` when there is no file path to reload from,
+    /// and `Err` on compile failure. The previous pipeline remains active on failure.
+    pub fn reload_fragment(&mut self) -> Result<bool> {
+        let path = match &self.fragment_path {
+            Some(p) => p.clone(),
+            None => return Ok(false),
+        };
+        let fragment = self.engine.create_shader(ShaderDesc {
+            source: ShaderSource::File(path),
+            entry_point: "main".to_owned(),
+            stage: ShaderStage::Fragment,
+        })?;
+        let reflection = self.engine.shader_reflection(&fragment)?;
+        let pipeline_layout = self.engine.create_pipeline_layout(reflection.layout.clone())?;
+        self.fragment = fragment;
+        self.reflection = reflection;
+        self.pipeline_layout = pipeline_layout;
+        self.pipelines.lock().expect("mesh program pipeline mutex poisoned").clear();
+        Ok(true)
+    }
+
+    /// Recompile the vertex shader from its original source file and rebuild all cached pipelines.
+    ///
+    /// Returns `Ok(true)` on success, `Ok(false)` when there is no file path to reload from,
+    /// and `Err` on compile failure.
+    pub fn reload_vertex(&mut self) -> Result<bool> {
+        let path = match &self.vertex_path {
+            Some(p) => p.clone(),
+            None => return Ok(false),
+        };
+        let vertex = self.engine.create_shader(ShaderDesc {
+            source: ShaderSource::File(path),
+            entry_point: "main".to_owned(),
+            stage: ShaderStage::Vertex,
+        })?;
+        self.vertex = vertex;
+        self.pipelines.lock().expect("mesh program pipeline mutex poisoned").clear();
+        Ok(true)
     }
 
     pub(crate) fn pipeline_handle(

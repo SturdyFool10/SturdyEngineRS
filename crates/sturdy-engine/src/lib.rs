@@ -27,8 +27,11 @@ mod mip_pyramid;
 mod pipeline_layout;
 mod procedural_texture;
 mod quad_batch;
+mod motion_vector_debug;
 mod runtime;
 mod sampler_catalog;
+mod screenshot;
+mod shader_watcher;
 #[cfg(test)]
 mod tests;
 mod text_draw;
@@ -44,10 +47,10 @@ pub use antialiasing::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use application::{
-    EngineApp, MotionVectorLayer, MotionVectorSpace, RuntimeMotionDebugDesc,
-    RuntimeMotionVectorDesc, RuntimePostProcessDesc, RuntimePostProcessOutput, ShellFrame,
-    WindowConfig, run,
+    EngineApp, MotionVectorLayer, MotionVectorSpace, RuntimeMotionVectorDesc,
+    RuntimePostProcessDesc, RuntimePostProcessOutput, ShellFrame, WindowConfig, run,
 };
+pub use motion_vector_debug::MotionVectorDebugPass;
 pub use bloom_pass::{
     BloomCompositeConstants, BloomConfig, BloomPass, BrightPassConstants, DownsampleConstants,
     UpsampleConstants,
@@ -69,13 +72,16 @@ pub use procedural_texture::{
 };
 pub use quad_batch::QuadBatch;
 pub use runtime::{
-    AppLayer, AppRuntime, AppRuntimeFrame, DebugImageRegistry, DefaultSceneTargetConfig,
-    RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult, RuntimeController,
-    RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimePassTiming, RuntimeSettingChange,
-    RuntimeSettingDescriptor, RuntimeSettingEntry, RuntimeSettingId, RuntimeSettingKey,
-    RuntimeSettingOption, RuntimeSettingSource, RuntimeSettingSupport, RuntimeSettingValue, RuntimeSettingsSnapshot,
-    RuntimeSettingsTransaction, RuntimeTimingSummary, SceneRenderContext, UiContext, WindowMode,
+    AppLayer, AppRuntime, AppRuntimeFrame, AssetDiagnostic, AssetState, DebugImageRegistry,
+    DefaultSceneTargetConfig, RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult,
+    RuntimeController, RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimePassTiming,
+    RuntimeSettingChange, RuntimeSettingDescriptor, RuntimeSettingEntry, RuntimeSettingId,
+    RuntimeSettingKey, RuntimeSettingOption, RuntimeSettingSource, RuntimeSettingSupport,
+    RuntimeSettingValue, RuntimeSettingsSnapshot, RuntimeSettingsTransaction, RuntimeTimingSummary,
+    SceneRenderContext, ShaderCompileError, UiContext, WindowMode,
 };
+pub use screenshot::ScreenshotCapture;
+pub use shader_watcher::ShaderWatcher;
 pub use sampler_catalog::SamplerPreset;
 pub use text_draw::{
     TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput, TextPlacement, TextRenderer,

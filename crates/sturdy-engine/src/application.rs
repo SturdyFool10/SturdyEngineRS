@@ -55,12 +55,12 @@ use sturdy_engine_core::SurfaceSize;
 use crate::{
     AntiAliasingMode, AntiAliasingPass, AppRuntime, BloomConfig, BloomPass,
     DebugImageRegistry, DefaultSceneTargetConfig, DiagnosticLevel, Engine, GraphImage, KeyInput,
-    KeyModifiers, Result as EngineResult, RuntimeController, RuntimeDiagnostics,
-    RuntimeGraphDiagnostics, RuntimeSettingChange, RuntimeSettingId, RuntimeSettingKey,
-    ShaderProgram, Surface, SurfaceHdrPreference, SurfaceImage, SurfacePresentMode,
-    SurfaceRecreateDesc, SurfaceTransparency, WindowAppearance, WindowAppearancePreset,
-    WindowBackdrop, WindowCornerStyle, WindowMaterialKind, WindowMode, WindowTransparencyDesc,
-    apply_native_window_appearance_for_window,
+    KeyModifiers, MotionVectorDebugPass, Result as EngineResult, RuntimeController,
+    RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimeSettingChange, RuntimeSettingId,
+    RuntimeSettingKey, ShaderProgram, Surface, SurfaceHdrPreference, SurfaceImage,
+    SurfacePresentMode, SurfaceRecreateDesc, SurfaceTransparency, WindowAppearance,
+    WindowAppearancePreset, WindowBackdrop, WindowCornerStyle, WindowMaterialKind, WindowMode,
+    WindowTransparencyDesc, apply_native_window_appearance_for_window,
 };
 
 #[cfg(target_os = "windows")]
@@ -312,12 +312,7 @@ pub struct ShellFrame<'a> {
     default_scene_target: DefaultSceneTargetConfig,
     debug_images: DebugImageRegistry,
     controller: RuntimeController,
-}
-
-pub struct RuntimeMotionDebugDesc<'a> {
-    pub motion_vectors: RuntimeMotionVectorDesc<'a>,
-    pub target: &'a GraphImage,
-    pub program: &'a ShaderProgram,
+    motion_debug_pass: &'a MotionVectorDebugPass,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -350,7 +345,6 @@ pub struct RuntimePostProcessDesc<'a, T: bytemuck::Pod> {
     pub swapchain: &'a GraphImage,
     pub tonemap_program: &'a ShaderProgram,
     pub tonemap_constants: &'a T,
-    pub motion_debug: Option<RuntimeMotionDebugDesc<'a>>,
 }
 
 pub struct RuntimePostProcessOutput {
@@ -365,6 +359,7 @@ impl<'a> ShellFrame<'a> {
         default_scene_target: DefaultSceneTargetConfig,
         debug_images: DebugImageRegistry,
         controller: RuntimeController,
+        motion_debug_pass: &'a MotionVectorDebugPass,
     ) -> Self {
         Self {
             inner,
@@ -372,6 +367,7 @@ impl<'a> ShellFrame<'a> {
             default_scene_target,
             debug_images,
             controller,
+            motion_debug_pass,
         }
     }
 
@@ -575,11 +571,14 @@ impl<'a> ShellFrame<'a> {
     }
 
     /// Run the default HDR post chain from scene color through tonemap.
+    ///
+    /// When the `MotionDebugView` runtime setting is enabled and `motion_vectors`
+    /// are supplied, the runtime-owned debug visualization pass runs automatically —
+    /// no external program or target image needed.
     pub fn run_default_post_process<T: bytemuck::Pod>(
         &self,
         desc: RuntimePostProcessDesc<'_, T>,
     ) -> EngineResult<RuntimePostProcessOutput> {
-        let show_motion_debug = desc.motion_debug.is_some();
         let hdr_composite = if let (Some(bloom_pass), Some(bloom_config)) =
             (desc.bloom_pass, desc.bloom_config)
         {
@@ -602,20 +601,33 @@ impl<'a> ShellFrame<'a> {
             desc.aa_mode,
         )?;
 
-        let final_input = if let Some(motion_debug) = desc.motion_debug {
-            self.register_debug_image("motion_source", motion_debug.motion_vectors.image);
-            self.inner
-                .set_sampler("motion_sampler", crate::SamplerPreset::Linear);
-            motion_debug.target.execute_shader_auto(motion_debug.program)?;
-            self.register_debug_image("motion_debug_view", motion_debug.target);
-            motion_debug.target.clone()
+        let show_motion_debug = self
+            .controller
+            .bool_setting(RuntimeSettingKey::MotionDebugView)
+            .unwrap_or(false);
+
+        let final_input = if show_motion_debug {
+            if let Some(mv_desc) = desc.motion_vectors {
+                let ext = desc.swapchain.desc().extent;
+                let debug_target = self.motion_debug_pass.execute(
+                    &self.inner,
+                    mv_desc.image,
+                    ext.width,
+                    ext.height,
+                )?;
+                self.register_debug_image("motion_source", mv_desc.image);
+                self.register_debug_image("motion_debug_view", &debug_target);
+                self.register_debug_image("hdr_composite", &debug_target);
+                debug_target
+            } else {
+                self.register_debug_image("hdr_composite", &anti_aliased);
+                anti_aliased.clone()
+            }
         } else {
             self.register_debug_image("hdr_composite", &anti_aliased);
             anti_aliased.clone()
         };
-        if show_motion_debug {
-            self.register_debug_image("hdr_composite", &final_input);
-        }
+
         desc.swapchain.execute_shader_with_constants_auto(
             desc.tonemap_program,
             desc.tonemap_constants,

@@ -5,9 +5,9 @@ use sturdy_engine::{
     CpuProceduralTexture2d, Engine, EngineApp, Extent3d, Format, GpuProceduralTexture,
     HdrPipelineDesc, HdrPreference, ImageDesc, ImageDimension, ImageUsage, MotionVectorLayer,
     MotionVectorSpace, ProceduralTextureRecipe, ProceduralTextureUpdatePolicy,
-    Result as EngineResult, RuntimeController, RuntimeMotionDebugDesc, RuntimeMotionVectorDesc,
-    RuntimePostProcessDesc, RuntimeSettingDescriptor, RuntimeSettingId, RuntimeSettingKey,
-    RuntimeSettingOption, ShaderProgram, ShellFrame, Surface, SurfaceColorSpace, SurfaceImage,
+    Result as EngineResult, RuntimeController, RuntimeMotionVectorDesc, RuntimePostProcessDesc,
+    RuntimeSettingDescriptor, RuntimeSettingId, RuntimeSettingKey, RuntimeSettingOption,
+    ShaderProgram, ShaderWatcher, ShellFrame, Surface, SurfaceColorSpace, SurfaceImage,
     TextOverlay, ToneMappingOp, WindowConfig, push_constants,
 };
 
@@ -262,7 +262,6 @@ struct Testbed {
     engine: Engine,
     scene_program: ShaderProgram,
     motion_program: ShaderProgram,
-    motion_debug_program: ShaderProgram,
     tonemap_program: ShaderProgram,
     bloom_pass: BloomPass,
     aa_pass: AntiAliasingPass,
@@ -281,6 +280,7 @@ struct Testbed {
     runtime_controller: Option<RuntimeController>,
     texture_resolution: TextureResolutionTier,
     started_at: Instant,
+    shader_watcher: ShaderWatcher,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -365,12 +365,22 @@ impl EngineApp for Testbed {
             },
         )?;
 
+        let scene_program = engine.load_shader(shader_path("shader_graph_fragment.slang"))?;
+        let motion_program = engine.load_shader(shader_path("motion_vectors.slang"))?;
+        let tonemap_program = engine.load_shader(shader_path("tonemap.slang"))?;
+
+        let mut shader_watcher = ShaderWatcher::new();
+        for program in [&scene_program, &motion_program, &tonemap_program] {
+            if let Some(path) = program.source_path() {
+                shader_watcher.watch(path);
+            }
+        }
+
         Ok(Self {
             engine: engine.clone(),
-            scene_program: engine.load_shader(shader_path("shader_graph_fragment.slang"))?,
-            motion_program: engine.load_shader(shader_path("motion_vectors.slang"))?,
-            motion_debug_program: engine.load_shader(shader_path("motion_vector_debug.slang"))?,
-            tonemap_program: engine.load_shader(shader_path("tonemap.slang"))?,
+            scene_program,
+            motion_program,
+            tonemap_program,
             bloom_pass: BloomPass::new(engine)?,
             aa_pass: AntiAliasingPass::new(engine)?,
             bloom_config: BloomConfig::default(),
@@ -392,6 +402,7 @@ impl EngineApp for Testbed {
             runtime_controller: None,
             texture_resolution: TextureResolutionTier::Medium,
             started_at: Instant::now(),
+            shader_watcher,
         })
     }
 
@@ -406,6 +417,36 @@ impl EngineApp for Testbed {
             self.register_runtime_settings(&runtime_controller)?;
             self.seed_runtime_settings(&runtime_controller)?;
             self.runtime_controller = Some(runtime_controller.clone());
+        }
+
+        // Poll for shader file changes and hot-reload any that have changed.
+        let changed_paths = self.shader_watcher.poll_changed();
+        for path in &changed_paths {
+            let result = if path == self.scene_program.source_path().unwrap_or(path.as_path()) {
+                self.scene_program.reload()
+            } else if path == self.motion_program.source_path().unwrap_or(path.as_path()) {
+                self.motion_program.reload()
+            } else if path == self.tonemap_program.source_path().unwrap_or(path.as_path()) {
+                self.tonemap_program.reload()
+            } else {
+                Ok(false)
+            };
+            match result {
+                Ok(true) => {
+                    runtime_controller.clear_shader_compile_error(path);
+                    eprintln!("hot reload: reloaded {}", path.display());
+                }
+                Err(e) => {
+                    runtime_controller
+                        .report_shader_compile_error(path, format!("{}", e));
+                    eprintln!(
+                        "hot reload: compile error in {}: {}",
+                        path.display(),
+                        e
+                    );
+                }
+                _ => {}
+            }
         }
 
         let elapsed = self.started_at.elapsed().as_secs_f32();
@@ -448,11 +489,6 @@ impl EngineApp for Testbed {
             },
         )?;
 
-        let motion_debug = if self.show_motion_vectors {
-            Some(self.motion_debug_image(frame, ext.width, ext.height)?)
-        } else {
-            None
-        };
         let tonemap_constants = self.tonemap_settings.params(
             self.tone_mapping,
             self.hdr_output,
@@ -473,15 +509,6 @@ impl EngineApp for Testbed {
             swapchain: &swapchain,
             tonemap_program: &self.tonemap_program,
             tonemap_constants: &tonemap_constants,
-            motion_debug: motion_debug.as_ref().map(|target| RuntimeMotionDebugDesc {
-                motion_vectors: RuntimeMotionVectorDesc {
-                    image: &motion_vectors,
-                    space: MotionVectorSpace::CameraLocal,
-                    layer: MotionVectorLayer::World,
-                },
-                target,
-                program: &self.motion_debug_program,
-            }),
         })?;
         shell_frame.publish_runtime_diagnostics(
             self.aa.mode.label(),
@@ -526,6 +553,14 @@ impl EngineApp for Testbed {
                 "keys: [/]=tonemap .=aa R/U reset B/b bloom H hdr V motion O overlay X transparency G effect 1/2/3 tex"
                     .to_string(),
             );
+            // Show any active shader compile errors (cleared automatically on successful hot reload).
+            for err in runtime_controller.diagnostics().shader_compile_errors {
+                overlay_lines.push(format!(
+                    "[shader error] {}: {}",
+                    err.path.file_name().unwrap_or(err.path.as_os_str()).to_string_lossy(),
+                    err.message.lines().next().unwrap_or("compile failed"),
+                ));
+            }
             shell_frame.set_runtime_overlay_lines(overlay_lines);
         }
 
@@ -991,27 +1026,8 @@ impl Testbed {
         width: u32,
         height: u32,
     ) -> EngineResult<sturdy_engine::GraphImage> {
-        self.motion_image(frame, "motion_vectors", width, height)
-    }
-
-    fn motion_debug_image(
-        &self,
-        frame: &sturdy_engine::RenderFrame,
-        width: u32,
-        height: u32,
-    ) -> EngineResult<sturdy_engine::GraphImage> {
-        self.motion_image(frame, "motion_vector_debug", width, height)
-    }
-
-    fn motion_image(
-        &self,
-        frame: &sturdy_engine::RenderFrame,
-        name: &str,
-        width: u32,
-        height: u32,
-    ) -> EngineResult<sturdy_engine::GraphImage> {
         frame.image(
-            name,
+            "motion_vectors",
             ImageDesc {
                 dimension: ImageDimension::D2,
                 extent: Extent3d {

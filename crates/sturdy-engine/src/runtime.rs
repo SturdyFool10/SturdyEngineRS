@@ -8,14 +8,16 @@
 use std::{
     collections::HashMap,
     fmt,
+    path::PathBuf,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use crate::{
-    current_window_appearance_caps, BackendKind, Engine, Error, Format, GraphImage,
-    PlatformCapabilityState, RenderFrame, Result, Surface, SurfaceCapabilities,
-    SurfaceColorSpace, SurfaceImage, SurfacePresentMode, SurfaceSize, WindowCornerStyle,
-    WindowMaterialKind,
+    current_window_appearance_caps, BackendKind, Engine, Error, Format, GraphImage, GraphReport,
+    MotionVectorDebugPass, PlatformCapabilityState, RenderFrame, Result, Surface,
+    SurfaceCapabilities, SurfaceColorSpace, SurfaceImage, SurfacePresentMode, SurfaceSize,
+    WindowCornerStyle, WindowMaterialKind,
 };
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -36,14 +38,20 @@ pub struct AppRuntime {
     controller: RuntimeController,
     default_scene_target: DefaultSceneTargetConfig,
     debug_images: DebugImageRegistry,
+    motion_debug_pass: MotionVectorDebugPass,
+    frame_start: Option<Instant>,
 }
 
 impl AppRuntime {
     /// Create a runtime shell from an engine and surface.
     pub fn new(engine: Engine, surface: Surface) -> Self {
+        let motion_debug_pass = MotionVectorDebugPass::new(&engine)
+            .expect("failed to compile motion vector debug shader");
         let runtime = Self {
             default_scene_target: DefaultSceneTargetConfig::new(&engine),
             debug_images: DebugImageRegistry::default(),
+            motion_debug_pass,
+            frame_start: None,
             controller: RuntimeController::new(RuntimeSettingsSnapshot {
                 backend: engine.backend_kind(),
                 adapter_name: engine.adapter_name(),
@@ -131,6 +139,7 @@ impl AppRuntime {
         self.refresh_controller_state();
         self.debug_images.clear();
         self.controller.clear_overlay_lines();
+        self.frame_start = Some(Instant::now());
         let surface_image = self.surface.acquire_image()?;
         let render_frame = self.engine.begin_render_frame_for(&surface_image)?;
         Ok(AppRuntimeFrame {
@@ -202,6 +211,18 @@ impl<'a> AppRuntimeFrame<'a> {
             .resolve(&self.render_frame, scene_target, resolved_name)
     }
 
+    /// Look up a named debug image that was registered via [`DebugImageRegistry::register`].
+    ///
+    /// Returns `None` if the name was not registered in the current frame.
+    /// Use the returned [`GraphImage`] with [`ScreenshotCapture::record_readback`] during
+    /// frame recording, then call `flush()` + `wait()` before reading or saving pixels.
+    pub fn find_debug_image(&self, name: &str) -> Option<GraphImage> {
+        if !self.runtime.debug_images.names().iter().any(|n| n == name) {
+            return None;
+        }
+        self.render_frame.find_image_by_name(name)
+    }
+
     /// Create a shell-frame wrapper for compatibility with the existing app shell.
     pub(crate) fn shell_frame(&self) -> crate::application::ShellFrame<'_> {
         crate::application::ShellFrame::new(
@@ -210,14 +231,25 @@ impl<'a> AppRuntimeFrame<'a> {
             self.default_scene_target().clone(),
             self.debug_images().clone(),
             self.runtime.controller.clone(),
+            &self.runtime.motion_debug_pass,
         )
     }
 
     /// Flush, wait, and present through the runtime-owned surface.
+    ///
+    /// Records CPU-measured frame time into `RuntimeDiagnostics.timings` after presenting.
     pub fn finish_and_present(&mut self) -> Result<()> {
         self.render_frame.flush()?;
         self.render_frame.wait()?;
-        self.runtime.surface.present()
+        self.runtime.surface.present()?;
+        if let Some(start) = self.runtime.frame_start.take() {
+            let elapsed_ms = start.elapsed().as_secs_f32() * 1000.0;
+            self.runtime.controller.update_diagnostics(|d| {
+                d.timings.available = true;
+                d.timings.cpu_frame_time_ms = Some(elapsed_ms);
+            });
+        }
+        Ok(())
     }
 }
 
@@ -390,12 +422,155 @@ impl RuntimeController {
     }
 
     /// Return the current runtime diagnostics snapshot.
+    ///
+    /// The returned snapshot includes any active shader compile errors and asset
+    /// diagnostics reported via `report_shader_compile_error` / `report_asset_state`.
     pub fn diagnostics(&self) -> RuntimeDiagnostics {
+        let shared = self.shared.lock().expect("runtime controller poisoned");
+        let mut diag = shared.diagnostics.clone();
+        diag.shader_compile_errors = shared
+            .shader_compile_errors
+            .iter()
+            .map(|(path, msg)| ShaderCompileError {
+                path: path.clone(),
+                message: msg.clone(),
+            })
+            .collect();
+        diag.shader_compile_errors
+            .sort_by(|a, b| a.path.cmp(&b.path));
+        diag.asset_diagnostics = shared
+            .asset_states
+            .iter()
+            .filter(|(_, state)| !state.is_ok())
+            .map(|(path, state)| AssetDiagnostic {
+                path: path.clone(),
+                state: state.clone(),
+            })
+            .collect();
+        diag.asset_diagnostics.sort_by(|a, b| a.path.cmp(&b.path));
+        diag
+    }
+
+    /// Report a shader compile error so it appears in `RuntimeDiagnostics`.
+    ///
+    /// Calling this with the same path replaces the previous error for that file.
+    pub fn report_shader_compile_error(
+        &self,
+        path: impl Into<PathBuf>,
+        message: impl Into<String>,
+    ) {
         self.shared
             .lock()
             .expect("runtime controller poisoned")
-            .diagnostics
-            .clone()
+            .shader_compile_errors
+            .insert(path.into(), message.into());
+    }
+
+    /// Clear a previously-reported shader compile error after a successful reload.
+    pub fn clear_shader_compile_error(&self, path: impl Into<PathBuf>) {
+        self.shared
+            .lock()
+            .expect("runtime controller poisoned")
+            .shader_compile_errors
+            .remove(&path.into());
+    }
+
+    /// Clear all shader compile errors.
+    pub fn clear_all_shader_compile_errors(&self) {
+        self.shared
+            .lock()
+            .expect("runtime controller poisoned")
+            .shader_compile_errors
+            .clear();
+    }
+
+    /// Report or update the health state for a monitored asset path.
+    ///
+    /// `AssetState::Ok` entries are tracked internally but excluded from
+    /// `diagnostics().asset_diagnostics` so only problems are surfaced.
+    pub fn report_asset_state(&self, path: impl Into<PathBuf>, state: AssetState) {
+        self.shared
+            .lock()
+            .expect("runtime controller poisoned")
+            .asset_states
+            .insert(path.into(), state);
+    }
+
+    /// Check whether a file path exists and report `Missing` or `Ok` accordingly.
+    ///
+    /// Call this on startup for every file asset your app depends on to get
+    /// immediate feedback when a required file is absent.
+    pub fn check_asset_path(&self, path: impl Into<PathBuf>) {
+        let path = path.into();
+        let state = if path.exists() {
+            AssetState::Ok
+        } else {
+            AssetState::Missing
+        };
+        self.report_asset_state(path, state);
+    }
+
+    /// Check every path in `paths` and report their state.
+    pub fn check_asset_paths<'a>(&self, paths: impl IntoIterator<Item = &'a std::path::Path>) {
+        for path in paths {
+            self.check_asset_path(path);
+        }
+    }
+
+    /// Remove the tracked state for an asset path (stops monitoring it).
+    pub fn unregister_asset_path(&self, path: impl Into<PathBuf>) {
+        self.shared
+            .lock()
+            .expect("runtime controller poisoned")
+            .asset_states
+            .remove(&path.into());
+    }
+
+    /// Format a `GraphReport` as a multi-line human-readable string for debugging.
+    ///
+    /// Each pass is listed with its read and write image names. Use this with
+    /// the text overlay or log output to inspect the current frame's render graph
+    /// without launching an external tool.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let report = render_frame.describe();
+    /// let text = controller.format_graph_report(&report);
+    /// println!("{text}");
+    /// ```
+    pub fn format_graph_report(report: &GraphReport) -> String {
+        let mut out = String::new();
+        out.push_str(&format!(
+            "Frame graph: {} passes, {} images\n",
+            report.passes.len(),
+            report.images.len()
+        ));
+        for (i, pass) in report.passes.iter().enumerate() {
+            out.push_str(&format!("  [{i:02}] {:?} \"{}\"\n", pass.kind, pass.name));
+            if !pass.reads.is_empty() {
+                out.push_str(&format!("       reads:  {}\n", pass.reads.join(", ")));
+            }
+            if !pass.writes.is_empty() {
+                out.push_str(&format!("       writes: {}\n", pass.writes.join(", ")));
+            }
+        }
+        if !report.images.is_empty() {
+            out.push_str("Images:\n");
+            for img in &report.images {
+                out.push_str(&format!(
+                    "  {} {}x{}x{} {:?}  (w={}, r={})\n",
+                    img.name,
+                    img.extent.width,
+                    img.extent.height,
+                    img.extent.depth,
+                    img.format,
+                    img.write_count,
+                    img.read_count
+                ));
+            }
+        }
+        out
     }
 
     /// Return the current overlay text lines.
@@ -485,6 +660,44 @@ impl Default for RuntimeSettingsSnapshot {
     }
 }
 
+/// A shader compile error reported to the runtime for in-app display.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShaderCompileError {
+    /// The source file that failed to compile.
+    pub path: PathBuf,
+    /// The compiler diagnostic message.
+    pub message: String,
+}
+
+/// The observed health of a monitored asset path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AssetState {
+    /// The file exists and was loaded or verified successfully.
+    Ok,
+    /// The file does not exist on disk.
+    Missing,
+    /// The file exists but loading or reloading it failed.
+    Stale(String),
+}
+
+impl AssetState {
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok)
+    }
+    pub fn is_problem(&self) -> bool {
+        !self.is_ok()
+    }
+}
+
+/// Asset health report for one monitored path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetDiagnostic {
+    /// The asset file path that was registered for monitoring.
+    pub path: PathBuf,
+    /// Current health of that asset.
+    pub state: AssetState,
+}
+
 /// Snapshot of runtime diagnostics made visible to applications.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RuntimeDiagnostics {
@@ -504,6 +717,10 @@ pub struct RuntimeDiagnostics {
     pub debug_images: Vec<String>,
     pub graph: RuntimeGraphDiagnostics,
     pub timings: RuntimeTimingSummary,
+    /// Active shader compile errors reported via `RuntimeController::report_shader_compile_error`.
+    pub shader_compile_errors: Vec<ShaderCompileError>,
+    /// Asset paths that are missing or stale, surfaced via `RuntimeController::report_asset_state`.
+    pub asset_diagnostics: Vec<AssetDiagnostic>,
 }
 
 /// Summary information about the currently recorded render graph.
@@ -515,10 +732,16 @@ pub struct RuntimeGraphDiagnostics {
     pub error_count: usize,
 }
 
-/// Placeholder timing model for runtime diagnostics.
+/// Frame timing summary surfaced through runtime diagnostics.
+///
+/// `cpu_frame_time_ms` is populated automatically by `AppRuntimeFrame::finish_and_present`.
+/// `gpu_frame_time_ms` and `pass_timings` require backend timer-query support (future work).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RuntimeTimingSummary {
     pub available: bool,
+    /// CPU-measured time from `acquire_frame` to `finish_and_present` in milliseconds.
+    pub cpu_frame_time_ms: Option<f32>,
+    /// GPU-measured whole-frame time (requires timer query backend support).
     pub gpu_frame_time_ms: Option<f32>,
     pub pass_timings: Vec<RuntimePassTiming>,
 }
@@ -537,6 +760,8 @@ struct RuntimeShared {
     setting_entries: HashMap<RuntimeSettingId, RuntimeSettingEntry>,
     settings_revision: u64,
     change_log: Vec<RuntimeSettingChange>,
+    shader_compile_errors: HashMap<PathBuf, String>,
+    asset_states: HashMap<PathBuf, AssetState>,
 }
 
 impl RuntimeShared {
@@ -548,6 +773,8 @@ impl RuntimeShared {
             setting_entries: default_setting_entries(&settings),
             settings_revision: 0,
             change_log: Vec::new(),
+            shader_compile_errors: HashMap::new(),
+            asset_states: HashMap::new(),
         };
         shared.sync_engine_snapshot(&settings);
         shared.sync_engine_capabilities(None, None);

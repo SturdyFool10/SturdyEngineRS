@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, sync::Mutex};
+use std::{cell::RefCell, collections::HashMap, path::{Path, PathBuf}, rc::Rc, sync::Mutex};
 
 use sturdy_engine_core as core;
 
@@ -206,6 +206,7 @@ pub struct ShaderProgram {
     fullscreen_triangle: Buffer,
     reflection: ShaderReflection,
     stage: ShaderStage,
+    source_path: Option<PathBuf>,
 }
 
 impl ShaderProgram {
@@ -260,9 +261,9 @@ impl ShaderProgram {
                 Error::Unknown(format!("invalid SPIR-V in {}: {e}", path.display()))
             })?)
         } else {
-            ShaderSource::File(path)
+            ShaderSource::File(path.clone())
         };
-        Self::new(
+        let mut program = Self::new(
             engine,
             ShaderProgramDesc {
                 vertex: None,
@@ -272,7 +273,11 @@ impl ShaderProgram {
                     stage: ShaderStage::Fragment,
                 },
             },
-        )
+        )?;
+        if !path.extension().map_or(false, |e| e == "spv") {
+            program.source_path = Some(path);
+        }
+        Ok(program)
     }
 
     /// Create a passthrough shader that samples `source` and writes it unchanged.
@@ -299,9 +304,9 @@ impl ShaderProgram {
                 Error::Unknown(format!("invalid SPIR-V in {}: {e}", path.display()))
             })?)
         } else {
-            ShaderSource::File(path)
+            ShaderSource::File(path.clone())
         };
-        Self::new(
+        let mut program = Self::new(
             engine,
             ShaderProgramDesc {
                 vertex: None,
@@ -311,7 +316,11 @@ impl ShaderProgram {
                     stage: ShaderStage::Compute,
                 },
             },
-        )
+        )?;
+        if !path.extension().map_or(false, |e| e == "spv") {
+            program.source_path = Some(path);
+        }
+        Ok(program)
     }
 
     pub fn new(engine: &Engine, desc: ShaderProgramDesc) -> Result<Self> {
@@ -330,11 +339,43 @@ impl ShaderProgram {
             fullscreen_triangle,
             reflection,
             stage: fragment_stage,
+            source_path: None,
         })
     }
 
     pub fn reflection(&self) -> &ShaderReflection {
         &self.reflection
+    }
+
+    /// Return the source file path if this program was loaded from a file.
+    pub fn source_path(&self) -> Option<&Path> {
+        self.source_path.as_deref()
+    }
+
+    /// Recompile from the original source file and rebuild all cached pipelines.
+    ///
+    /// Returns `Ok(true)` on success, `Ok(false)` when there is no file path, and
+    /// `Err` on compile failure. The previous pipeline remains active on failure.
+    pub fn reload(&mut self) -> Result<bool> {
+        let path = match &self.source_path {
+            Some(p) => p.clone(),
+            None => return Ok(false),
+        };
+        let fragment = self.engine.create_shader(ShaderDesc {
+            source: ShaderSource::File(path),
+            entry_point: "main".to_owned(),
+            stage: self.stage,
+        })?;
+        let reflection = self.engine.shader_reflection(&fragment)?;
+        let pipeline_layout = self.engine.create_pipeline_layout(reflection.layout.clone())?;
+        self.fragment = fragment;
+        self.reflection = reflection;
+        self.pipeline_layout = pipeline_layout;
+        self.pipelines
+            .lock()
+            .expect("shader program pipeline mutex poisoned")
+            .clear();
+        Ok(true)
     }
 
     /// Returns the shader stage for this program (Vertex, Fragment, or Compute).
@@ -680,6 +721,23 @@ impl RenderFrame {
             .borrow_mut()
             .ordering_constraints
             .push((before.handle(), after.handle()));
+    }
+
+    /// Look up a named graph image registered in this frame.
+    ///
+    /// Returns `None` if no image with that name exists in the current frame.
+    /// Use this together with [`ScreenshotCapture`] to read back a specific named
+    /// image after the frame has been flushed and waited on.
+    pub fn find_image_by_name(&self, name: &str) -> Option<GraphImage> {
+        let inner = self.inner.borrow();
+        let rec = *inner.images_by_name.get(name)?;
+        drop(inner);
+        Some(GraphImage {
+            frame: self.inner.clone(),
+            name: name.to_owned(),
+            handle: rec.handle,
+            desc: rec.desc,
+        })
     }
 
     /// Return a snapshot of every pass and image recorded in this frame so far.
