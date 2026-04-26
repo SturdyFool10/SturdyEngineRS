@@ -48,6 +48,10 @@ impl Rect {
         self.origin.y + self.size.height
     }
 
+    pub fn center(self) -> Vec2 {
+        self.origin + self.size.to_vec2() * 0.5
+    }
+
     pub fn contains(self, point: Vec2) -> bool {
         point.x >= self.origin.x
             && point.x <= self.right()
@@ -213,10 +217,186 @@ impl UiShape {
             self
         }
     }
+
+    pub fn contains_point(self, rect: Rect, point: Vec2) -> bool {
+        if !rect.contains(point) {
+            return false;
+        }
+
+        match self {
+            Self::Rect => true,
+            Self::RoundedRect { radii } => {
+                contains_rounded_rect(rect, point, scale_radii_to_rect(rect, radii), 2.0)
+            }
+            Self::IndependentCorners {
+                top_left,
+                top_right,
+                bottom_right,
+                bottom_left,
+            } => contains_independent_corners(
+                rect,
+                point,
+                scale_corner_specs_to_rect(rect, top_left, top_right, bottom_right, bottom_left),
+            ),
+            Self::Squircle { radius, exponent } => {
+                let radius = radius.max(0.0);
+                let radii = scale_radii_to_rect(rect, radii_all(radius));
+                contains_rounded_rect(rect, point, radii, exponent.max(0.001))
+            }
+            Self::Capsule => {
+                let radius = rect.size.width.min(rect.size.height) * 0.5;
+                contains_rounded_rect(rect, point, radii_all(radius), 2.0)
+            }
+            Self::Circle => {
+                let radius = rect.size.width.min(rect.size.height) * 0.5;
+                let delta = point - rect.center();
+                delta.length_squared() <= radius * radius
+            }
+            Self::Ellipse => {
+                let rx = rect.size.width * 0.5;
+                let ry = rect.size.height * 0.5;
+                if rx <= 0.0 || ry <= 0.0 {
+                    return true;
+                }
+                let delta = point - rect.center();
+                let x = delta.x / rx;
+                let y = delta.y / ry;
+                x * x + y * y <= 1.0
+            }
+        }
+    }
 }
 
 pub fn radii_all(radius: f32) -> Vec4 {
     Vec4::splat(radius)
+}
+
+fn contains_rounded_rect(rect: Rect, point: Vec2, radii: Vec4, exponent: f32) -> bool {
+    let local = point - rect.origin;
+    let width = rect.size.width.max(0.0);
+    let height = rect.size.height.max(0.0);
+    let exponent = exponent.max(0.001);
+
+    let corners = [
+        (radii.x, Vec2::new(radii.x, radii.x), local),
+        (
+            radii.y,
+            Vec2::new(width - radii.y, radii.y),
+            Vec2::new(width - local.x, local.y),
+        ),
+        (
+            radii.z,
+            Vec2::new(width - radii.z, height - radii.z),
+            Vec2::new(width - local.x, height - local.y),
+        ),
+        (
+            radii.w,
+            Vec2::new(radii.w, height - radii.w),
+            Vec2::new(local.x, height - local.y),
+        ),
+    ];
+
+    for (radius, center, corner_local) in corners {
+        if radius <= 0.0 || corner_local.x >= radius || corner_local.y >= radius {
+            continue;
+        }
+
+        let delta = (local - center).abs() / radius;
+        return delta.x.powf(exponent) + delta.y.powf(exponent) <= 1.0;
+    }
+
+    true
+}
+
+fn contains_independent_corners(rect: Rect, point: Vec2, corners: [CornerSpec; 4]) -> bool {
+    let local = point - rect.origin;
+    let width = rect.size.width.max(0.0);
+    let height = rect.size.height.max(0.0);
+    let corner_distances = [
+        Vec2::new(local.x, local.y),
+        Vec2::new(width - local.x, local.y),
+        Vec2::new(width - local.x, height - local.y),
+        Vec2::new(local.x, height - local.y),
+    ];
+
+    for (corner, distance) in corners.into_iter().zip(corner_distances) {
+        let radius = corner.radius.max(0.0);
+        if radius <= 0.0 || distance.x >= radius || distance.y >= radius {
+            continue;
+        }
+
+        return contains_corner_shape(corner, distance);
+    }
+
+    true
+}
+
+fn contains_corner_shape(corner: CornerSpec, distance: Vec2) -> bool {
+    let radius = corner.radius.max(0.0);
+    match corner.shape {
+        CornerShape::Round => {
+            distance.length_squared() >= radius * radius || {
+                let delta = Vec2::splat(radius) - distance;
+                delta.length_squared() <= radius * radius
+            }
+        }
+        CornerShape::Bevel | CornerShape::Chamfer => distance.x + distance.y >= radius,
+        CornerShape::Notch => false,
+        CornerShape::Scoop => distance.length_squared() >= radius * radius,
+    }
+}
+
+fn scale_radii_to_rect(rect: Rect, radii: Vec4) -> Vec4 {
+    let radii = radii.max(Vec4::ZERO);
+    let width = rect.size.width.max(0.0);
+    let height = rect.size.height.max(0.0);
+    let scale = [
+        edge_scale(width, radii.x + radii.y),
+        edge_scale(height, radii.y + radii.z),
+        edge_scale(width, radii.z + radii.w),
+        edge_scale(height, radii.w + radii.x),
+    ]
+    .into_iter()
+    .fold(1.0_f32, f32::min);
+
+    radii * scale
+}
+
+fn scale_corner_specs_to_rect(
+    rect: Rect,
+    top_left: CornerSpec,
+    top_right: CornerSpec,
+    bottom_right: CornerSpec,
+    bottom_left: CornerSpec,
+) -> [CornerSpec; 4] {
+    let mut corners = [top_left, top_right, bottom_right, bottom_left];
+    for corner in &mut corners {
+        corner.radius = corner.radius.max(0.0);
+    }
+
+    let width = rect.size.width.max(0.0);
+    let height = rect.size.height.max(0.0);
+    let scale = [
+        edge_scale(width, corners[0].radius + corners[1].radius),
+        edge_scale(height, corners[1].radius + corners[2].radius),
+        edge_scale(width, corners[2].radius + corners[3].radius),
+        edge_scale(height, corners[3].radius + corners[0].radius),
+    ]
+    .into_iter()
+    .fold(1.0_f32, f32::min);
+
+    for corner in &mut corners {
+        corner.radius *= scale;
+    }
+    corners
+}
+
+fn edge_scale(edge: f32, radius_sum: f32) -> f32 {
+    if radius_sum <= 0.0 || radius_sum <= edge {
+        1.0
+    } else {
+        edge / radius_sum
+    }
 }
 
 #[cfg(test)]
@@ -240,5 +420,39 @@ mod tests {
         let shape = UiShape::squircle(12.0, 4.0).with_corner_radius_fallback(radii_all(8.0));
 
         assert_eq!(shape, UiShape::squircle(12.0, 4.0));
+    }
+
+    #[test]
+    fn rounded_rect_hit_testing_excludes_rounded_corners() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 40.0);
+        let shape = UiShape::rounded_rect(radii_all(20.0));
+
+        assert!(!shape.contains_point(rect, Vec2::new(1.0, 1.0)));
+        assert!(shape.contains_point(rect, Vec2::new(20.0, 20.0)));
+        assert!(shape.contains_point(rect, Vec2::new(50.0, 1.0)));
+    }
+
+    #[test]
+    fn independent_corner_shapes_affect_hit_testing() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 40.0);
+        let shape = UiShape::independent_corners(
+            CornerSpec::with_shape(20.0, CornerShape::Bevel),
+            CornerSpec::round(0.0),
+            CornerSpec::round(0.0),
+            CornerSpec::round(0.0),
+        );
+
+        assert!(!shape.contains_point(rect, Vec2::new(4.0, 4.0)));
+        assert!(shape.contains_point(rect, Vec2::new(16.0, 8.0)));
+    }
+
+    #[test]
+    fn circle_and_ellipse_hit_testing_use_actual_coverage() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 40.0);
+
+        assert!(!UiShape::Circle.contains_point(rect, Vec2::new(1.0, 1.0)));
+        assert!(UiShape::Circle.contains_point(rect, Vec2::new(50.0, 20.0)));
+        assert!(!UiShape::Ellipse.contains_point(rect, Vec2::new(1.0, 1.0)));
+        assert!(UiShape::Ellipse.contains_point(rect, Vec2::new(50.0, 1.0)));
     }
 }

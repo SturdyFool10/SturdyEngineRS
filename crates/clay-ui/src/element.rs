@@ -1,8 +1,9 @@
 use glam::Vec4;
 
 use crate::{
-    Edges, ElementId, Gradient, ShaderRef, Size, TextStyle, UiColor,
+    Edges, ElementId, Gradient, ShaderRef, ShaderSlot, Size, TextStyle, UiColor,
     geometry::{UiShape, radii_all},
+    shader::UiShaderSlotBinding,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -15,6 +16,7 @@ pub struct ElementStyle {
     pub outline_width: Edges,
     pub corner_radius: Vec4,
     pub shape: UiShape,
+    pub shader_slots: Vec<UiShaderSlotBinding>,
     pub padding: Edges,
     pub transparent_to_input: bool,
 }
@@ -30,6 +32,7 @@ impl Default for ElementStyle {
             outline_width: Edges::ZERO,
             corner_radius: radii_all(0.0),
             shape: UiShape::Rect,
+            shader_slots: Vec::new(),
             padding: Edges::ZERO,
             transparent_to_input: false,
         }
@@ -39,6 +42,17 @@ impl Default for ElementStyle {
 impl ElementStyle {
     pub fn resolved_shape(&self) -> UiShape {
         self.shape.with_corner_radius_fallback(self.corner_radius)
+    }
+
+    pub fn shader_slot(&self, slot: ShaderSlot) -> Option<&UiShaderSlotBinding> {
+        self.shader_slots
+            .iter()
+            .find(|binding| binding.slot == slot)
+    }
+
+    pub fn with_shader_slot(mut self, binding: UiShaderSlotBinding) -> Self {
+        self.shader_slots.push(binding);
+        self
     }
 }
 

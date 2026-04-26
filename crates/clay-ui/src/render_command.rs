@@ -1,6 +1,6 @@
 use crate::{
-    Edges, Element, ElementId, ElementKind, Gradient, LayoutTree, Rect, ShaderRef, TextStyle,
-    UiColor, UiLayer, UiShape,
+    Edges, Element, ElementId, ElementKind, Gradient, LayoutTree, Rect, ShaderRef, ShaderSlot,
+    TextStyle, UiColor, UiLayer, UiShaderSlotBinding, UiShape,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -19,6 +19,7 @@ pub enum RenderCommandKind {
 pub struct RectangleRenderData {
     pub color: UiColor,
     pub shader: ShaderRef,
+    pub effect: Option<UiShaderSlotBinding>,
     pub gradient: Option<Gradient>,
     pub corner_radius: glam::Vec4,
     pub shape: UiShape,
@@ -28,6 +29,7 @@ pub struct RectangleRenderData {
 pub struct BorderRenderData {
     pub color: UiColor,
     pub shader: ShaderRef,
+    pub effect: Option<UiShaderSlotBinding>,
     pub width: Edges,
     pub corner_radius: glam::Vec4,
     pub shape: UiShape,
@@ -51,6 +53,7 @@ pub struct ImageRenderData {
     pub image_key: String,
     pub tint: UiColor,
     pub shader: ShaderRef,
+    pub effect: Option<UiShaderSlotBinding>,
     pub corner_radius: glam::Vec4,
     pub shape: UiShape,
 }
@@ -59,6 +62,7 @@ pub struct ImageRenderData {
 pub struct ClipRenderData {
     pub horizontal: bool,
     pub vertical: bool,
+    pub shape: UiShape,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +70,7 @@ pub struct CustomRenderData {
     pub key: String,
     pub color: UiColor,
     pub shader: ShaderRef,
+    pub effect: Option<UiShaderSlotBinding>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -113,6 +118,7 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
         return;
     };
     let rect = node.rect;
+    let shape = node.shape;
     let layer = node.layer;
     let z_index = node.z_index;
 
@@ -126,6 +132,7 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
             data: RenderData::Clip(ClipRenderData {
                 horizontal: element.layout.clip_x,
                 vertical: element.layout.clip_y,
+                shape,
             }),
         });
     }
@@ -140,9 +147,10 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
             data: RenderData::Rectangle(RectangleRenderData {
                 color: element.style.background,
                 shader: element.style.background_shader,
+                effect: element.style.shader_slot(ShaderSlot::Background).cloned(),
                 gradient: element.style.background_gradient.clone(),
                 corner_radius: element.style.corner_radius,
-                shape: element.style.resolved_shape(),
+                shape,
             }),
         });
     }
@@ -171,8 +179,9 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
                 image_key: image.image_key.clone(),
                 tint: image.tint,
                 shader: image.shader,
+                effect: element.style.shader_slot(ShaderSlot::Image).cloned(),
                 corner_radius: element.style.corner_radius,
-                shape: element.style.resolved_shape(),
+                shape,
             }),
         }),
         ElementKind::Custom(key) => list.commands.push(RenderCommand {
@@ -185,6 +194,7 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
                 key: key.clone(),
                 color: element.style.background,
                 shader: element.style.background_shader,
+                effect: element.style.shader_slot(ShaderSlot::Custom).cloned(),
             }),
         }),
     }
@@ -204,9 +214,14 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
             data: RenderData::Border(BorderRenderData {
                 color: element.style.outline,
                 shader: element.style.outline_shader,
+                effect: element
+                    .style
+                    .shader_slot(ShaderSlot::Border)
+                    .or_else(|| element.style.shader_slot(ShaderSlot::Outline))
+                    .cloned(),
                 width: element.style.outline_width,
                 corner_radius: element.style.corner_radius,
-                shape: element.style.resolved_shape(),
+                shape,
             }),
         });
     }
@@ -242,6 +257,7 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
             data: RenderData::Clip(ClipRenderData {
                 horizontal: element.layout.clip_x,
                 vertical: element.layout.clip_y,
+                shape,
             }),
         });
     }
@@ -250,7 +266,11 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ElementStyle, LayoutCache, LayoutInput, LayoutSizing, Size, UiLayer, UiShape};
+    use crate::{
+        ElementStyle, LayoutCache, LayoutInput, LayoutSizing, Size, UiLayer, UiShaderUniform,
+        UiShaderUniformValue, UiShape,
+    };
+    use sturdy_engine_core::{PipelineHandle, ShaderHandle};
 
     #[test]
     fn render_commands_sort_by_layer_before_z_index() {
@@ -331,5 +351,77 @@ mod tests {
             .unwrap();
 
         assert_eq!(shape, UiShape::squircle(12.0, 4.0));
+    }
+
+    #[test]
+    fn clip_commands_carry_resolved_shape() {
+        let id = ElementId::new("clipped-squircle");
+        let mut element = Element::new(id);
+        element.layout.width = LayoutSizing::Fixed(100.0);
+        element.layout.height = LayoutSizing::Fixed(40.0);
+        element.layout.clip_x = true;
+        element.layout.clip_y = true;
+        element.style.shape = UiShape::squircle(14.0, 4.0);
+        let layout = LayoutTree::compute(
+            &element,
+            Size::new(100.0, 40.0),
+            &mut LayoutCache::default(),
+        )
+        .unwrap();
+        let commands = RenderCommandList::from_element_tree(&element, &layout);
+
+        let clip_shapes = commands
+            .commands
+            .iter()
+            .filter_map(|command| match &command.data {
+                RenderData::Clip(data) => Some(data.shape),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            clip_shapes,
+            vec![UiShape::squircle(14.0, 4.0), UiShape::squircle(14.0, 4.0)]
+        );
+    }
+
+    #[test]
+    fn render_commands_carry_element_shader_slot_uniforms() {
+        let id = ElementId::new("shader-slot");
+        let shader = ShaderRef::custom(ShaderHandle(10), PipelineHandle(20));
+        let mut element = Element::new(id);
+        element.layout.width = LayoutSizing::Fixed(100.0);
+        element.layout.height = LayoutSizing::Fixed(40.0);
+        element.style = ElementStyle {
+            background: UiColor::WHITE,
+            shader_slots: vec![
+                UiShaderSlotBinding::new(ShaderSlot::Background, shader).with_uniform(
+                    UiShaderUniform::new("intensity", UiShaderUniformValue::Float(0.75)),
+                ),
+            ],
+            ..ElementStyle::default()
+        };
+        let layout = LayoutTree::compute(
+            &element,
+            Size::new(100.0, 40.0),
+            &mut LayoutCache::default(),
+        )
+        .unwrap();
+        let commands = RenderCommandList::from_element_tree(&element, &layout);
+
+        let effect = commands
+            .commands
+            .iter()
+            .find_map(|command| match &command.data {
+                RenderData::Rectangle(data) => data.effect.as_ref(),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(effect.shader, shader);
+        assert_eq!(
+            effect.uniform("intensity").map(|uniform| &uniform.value),
+            Some(&UiShaderUniformValue::Float(0.75))
+        );
     }
 }

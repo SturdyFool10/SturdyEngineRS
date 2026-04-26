@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use glam::Vec2;
 
-use crate::{Axis, Edges, Element, ElementId, ElementKind, Rect, Size, TextStyle, TextWrap};
+use crate::{
+    Axis, Edges, Element, ElementId, ElementKind, Rect, Size, TextStyle, TextWrap, UiShape,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LayoutDirection {
@@ -100,6 +102,7 @@ pub struct LayoutOutput {
     pub id: ElementId,
     pub rect: Rect,
     pub content_size: Size,
+    pub shape: UiShape,
     pub layer: UiLayer,
     pub z_index: i16,
     pub clip: bool,
@@ -256,6 +259,7 @@ fn layout_element(
         id: element.id.clone(),
         rect,
         content_size,
+        shape: element.style.resolved_shape(),
         layer: element.layout.layer,
         z_index: element.layout.z_index,
         clip: element.layout.clip_x || element.layout.clip_y,
@@ -555,6 +559,27 @@ mod tests {
 
         assert_eq!(calls, 1);
         assert_eq!(measured_widths, vec![None]);
+    }
+
+    #[test]
+    fn layout_preserves_resolved_shape() {
+        let id = ElementId::new("shaped");
+        let mut element = Element::new(id.clone());
+        element.layout.width = LayoutSizing::Fixed(100.0);
+        element.layout.height = LayoutSizing::Fixed(40.0);
+        element.style.corner_radius = crate::radii_all(12.0);
+
+        let layout = LayoutTree::compute(
+            &element,
+            Size::new(100.0, 40.0),
+            &mut LayoutCache::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            layout.by_id(&id).unwrap().shape,
+            UiShape::rounded_rect(crate::radii_all(12.0))
+        );
     }
 
     #[test]

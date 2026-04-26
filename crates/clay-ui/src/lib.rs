@@ -45,14 +45,19 @@ pub use layout::{
 };
 pub use render_command::{
     BorderRenderData, ClipRenderData, CustomRenderData, ImageRenderData, RectangleRenderData,
-    RenderCommand, RenderCommandKind, RenderCommandList, TextPass, TextRenderData,
+    RenderCommand, RenderCommandKind, RenderCommandList, RenderData, TextPass, TextRenderData,
 };
 pub use render_graph::{RenderGraphTarget, UiGraphPassBuilder};
-pub use shader::{ShaderBinding, ShaderKind, ShaderRef, ShaderSlot};
+pub use shader::{
+    ShaderBinding, ShaderKind, ShaderRef, ShaderSlot, UiShaderResource, UiShaderResourceRef,
+    UiShaderSlotBinding, UiShaderUniform, UiShaderUniformValue,
+};
 pub use text::{FontFeatures, InvalidOpenTypeTag, TextAlign, TextOutline, TextStyle, TextWrap};
 pub use tree::{ElementBuilder, UiTree};
 pub use virtualization::{VirtualItem, VirtualListConfig, VirtualListLayout};
 pub use widgets::{
-    DragBarAxis, WidgetPalette, button, drag_bar, radio, scroll_container,
-    scroll_container_with_direction, toggle, virtual_list,
+    DragBarAxis, ScrollbarMetrics, SegmentSpec, WidgetPalette, button, checkbox, drag_bar,
+    progress_bar, radio, scroll_container, scroll_container_with_direction,
+    scroll_container_with_scrollbars, scroll_container_with_scrollbars_and_direction, scrollbar,
+    segmented_control, slider, toggle, virtual_list,
 };

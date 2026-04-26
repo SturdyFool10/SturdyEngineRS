@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use glam::Vec2;
 
-use crate::{ElementId, LayoutTree, UiLayer};
+use crate::{ElementId, LayoutTree, UiLayer, UiShape};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PointerButton {
@@ -90,14 +90,14 @@ impl ScrollConfig {
         self
     }
 
-    fn max_offset(self) -> Vec2 {
+    pub fn max_offset(self) -> Vec2 {
         Vec2::new(
             (self.content.x - self.viewport.x).max(0.0),
             (self.content.y - self.viewport.y).max(0.0),
         )
     }
 
-    fn filter_delta(self, delta: Vec2) -> Vec2 {
+    pub fn filter_delta(self, delta: Vec2) -> Vec2 {
         match self.axis {
             ScrollAxis::Vertical => Vec2::new(0.0, delta.y),
             ScrollAxis::Horizontal => Vec2::new(delta.x, 0.0),
@@ -105,7 +105,7 @@ impl ScrollConfig {
         }
     }
 
-    fn clamp_offset(self, offset: Vec2) -> Vec2 {
+    pub fn clamp_offset(self, offset: Vec2) -> Vec2 {
         let max = self.max_offset();
         Vec2::new(offset.x.clamp(0.0, max.x), offset.y.clamp(0.0, max.y))
     }
@@ -127,6 +127,7 @@ pub enum InputEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hit {
     pub id: ElementId,
+    pub shape: UiShape,
     pub layer: UiLayer,
     pub z_index: i16,
 }
@@ -318,10 +319,11 @@ impl InputSimulator {
     pub fn hit_test(&self, tree: &LayoutTree, point: Vec2) -> Option<Hit> {
         tree.nodes
             .iter()
-            .filter(|node| node.rect.contains(point))
+            .filter(|node| node.shape.contains_point(node.rect, point))
             .max_by_key(|node| (node.layer, node.z_index))
             .map(|node| Hit {
                 id: node.id.clone(),
+                shape: node.shape,
                 layer: node.layer,
                 z_index: node.z_index,
             })
@@ -330,11 +332,12 @@ impl InputSimulator {
     pub fn hit_test_interactive(&self, tree: &LayoutTree, point: Vec2) -> Option<Hit> {
         tree.nodes
             .iter()
-            .filter(|node| node.rect.contains(point))
+            .filter(|node| node.shape.contains_point(node.rect, point))
             .filter(|node| !self.widget_config(&node.id).disabled)
             .max_by_key(|node| (node.layer, node.z_index))
             .map(|node| Hit {
                 id: node.id.clone(),
+                shape: node.shape,
                 layer: node.layer,
                 z_index: node.z_index,
             })
@@ -571,6 +574,7 @@ mod tests {
                     id: base_id,
                     rect,
                     content_size: rect.size,
+                    shape: UiShape::Rect,
                     layer: UiLayer::Content,
                     z_index: 100,
                     clip: false,
@@ -579,6 +583,7 @@ mod tests {
                     id: overlay_id.clone(),
                     rect,
                     content_size: rect.size,
+                    shape: UiShape::Rect,
                     layer: UiLayer::Overlay,
                     z_index: 0,
                     clip: false,
@@ -590,5 +595,20 @@ mod tests {
         let hit = input.hit_test_interactive(&layout, Vec2::new(10.0, 10.0));
 
         assert_eq!(hit.map(|hit| hit.id.hash), Some(overlay_id.hash));
+    }
+
+    #[test]
+    fn hit_testing_uses_resolved_shape_coverage() {
+        let shaped_id = ElementId::new("rounded-button");
+        let mut element = test_element(shaped_id.clone());
+        element.style.corner_radius = crate::radii_all(20.0);
+        let layout = layout_for(&element);
+        let input = InputSimulator::default();
+
+        let corner_hit = input.hit_test_interactive(&layout, Vec2::new(1.0, 1.0));
+        let body_hit = input.hit_test_interactive(&layout, Vec2::new(50.0, 20.0));
+
+        assert!(corner_hit.is_none());
+        assert_eq!(body_hit.map(|hit| hit.id.hash), Some(shaped_id.hash));
     }
 }

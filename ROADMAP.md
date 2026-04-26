@@ -426,16 +426,16 @@ Prompt-sized UI/control execution order:
 17. [ ] `P2.U17` Add validation scenes for all standard widgets, nested scrolling, modals, shape clipping, shader styles, virtualized controls, render-graph backdrops, and resize/scale-factor behavior
 
 - [ ] Add a standard widget layer for:
-  - [x] first-pass button, radio, toggle, and drag-bar builders on the shared `WidgetState` contract
+  - [x] first-pass button, radio, toggle, checkbox, segmented-control, slider, progress-bar, and drag-bar builders on the shared `WidgetState` contract
   - [ ] labels
   - [ ] buttons and icon buttons
-  - [ ] segmented buttons
+  - [x] segmented buttons
   - [ ] radio buttons / radio groups
   - [ ] toggle groups
-  - [ ] checkboxes / toggles
-  - [ ] sliders
+  - [x] checkboxes / toggles
+  - [x] sliders
   - [ ] drag bars / splitters / resizers
-  - [ ] progress bars / meters
+  - [x] progress bars / meters
   - [ ] dropdowns / selects / comboboxes
   - [ ] single-line text inputs
   - [ ] multiline text inputs
@@ -458,18 +458,19 @@ Prompt-sized UI/control execution order:
   - [ ] color pickers
 - [ ] Keep widgets composable with shader-driven visuals instead of forcing a theme-only path
 - [ ] Treat every widget as a shape-aware object for:
-  - [ ] rendering
-  - [ ] clipping children
-  - [ ] hit testing
+  - [x] rendering
+  - [x] first-pass clipping metadata for children
+  - [x] hit testing
   - [ ] focus rings
   - [ ] scroll regions
   - [ ] shadows / outlines / glow
   - [ ] accessibility bounds
 - [ ] Add shape primitives and corner controls suitable for high-end UI work:
-  - [ ] independent corner radii
-  - [ ] independent corner shape families such as round, bevel, notch, scoop, and chamfer
-  - [ ] squircle / superellipse shapes with tunable exponent
-  - [ ] capsule and pill helpers
+  - [x] independent corner radii
+  - [x] independent corner shape families such as round, bevel, notch, scoop, and chamfer
+  - [x] squircle / superellipse shapes with tunable exponent
+  - [x] capsule and pill helpers
+  - [x] circle and ellipse helpers
   - [ ] per-corner smoothing and antialiasing controls
   - [ ] shape composition for cutouts, holes, masks, and decorative corners
 - [ ] Add polished built-in border presets:
@@ -479,11 +480,11 @@ Prompt-sized UI/control execution order:
   - [ ] dashed, dotted, double, gradient, textured, image, and shader-driven borders
   - [ ] optional shadow, glow, bloom extraction, and animated border parameters
 - [ ] Add widget APIs for shader/effect customization that feel familiar to web developers:
-  - [ ] background, border, outline, text fill, shadow, mask, filter, and backdrop slots
+  - [x] first-pass slot enum for background, border/outline, text fill/outline, image, mask, shadow, backdrop, overlay, and custom slots
   - [ ] per-state style rules for hover, active, focus, disabled, invalid, selected, checked, and open
-  - [ ] bindable shader parameters, textures, gradients, color spaces, and transitions
-  - [ ] element-slot shader targeting so apps can attach a fragment shader to one element's background, border, mask, text fill, or overlay without replacing the whole widget
-  - [ ] strongly typed custom uniforms, additional app-provided uniforms layered onto engine-provided UI uniforms, textures, samplers, storage buffers, and render-graph resource inputs for creative element-level shaders
+  - [x] first-pass bindable shader parameters, textures, graph image names, buffers, gradients, and color values
+  - [x] first-pass element-slot shader targeting for background, border/outline, image, and custom render commands
+  - [x] strongly typed custom uniforms and additional app-provided uniforms/resources carried alongside built-in UI command data
   - [ ] offscreen effect routes for bloom, blur, drop shadow, glow, and custom passes
 - [ ] Add full text styling controls at the widget layer:
   - [ ] font family fallback lists, exact font handles, synthetic fallback policy, and missing-glyph diagnostics
@@ -501,7 +502,8 @@ Prompt-sized UI/control execution order:
   - [x] first-pass clipped scroll container builder with vertical, horizontal, and both-axis offsets
   - [x] vertical, horizontal, and both-axis scrolling
   - [ ] wheel, touchpad, keyboard, drag-scroll, and programmatic scroll input
-  - [ ] scrollbars, overlay scrollbars, and custom scrollbar styling
+  - [x] first-pass scrollbar metrics and composable visual scrollbar builders
+  - [ ] overlay scrollbars and custom scrollbar styling
   - [ ] scroll snapping, momentum hooks, sticky children, and anchor preservation
   - [ ] virtualized child measurement for large lists and editor buffers
 - [ ] Add Clay-level scroll physics/momentum and external scroll offset query parity
@@ -516,6 +518,7 @@ Prompt-sized UI/control execution order:
 - [ ] Add parent clipping that can clip children by:
   - [ ] rect
   - [ ] rounded rect
+  - [x] first-pass resolved shape metadata on clip commands
   - [ ] arbitrary path / mask where backend support exists
   - [ ] scroll viewport
   - [ ] shader-generated alpha mask where explicitly requested
@@ -552,30 +555,31 @@ Prompt-sized UI/control execution order:
   - [x] rounded rectangle with independent radii
   - [x] per-corner independent shape families and properties
   - [x] squircle / superellipse
-  - [ ] capsule / pill
-  - [ ] circle / ellipse
+  - [x] capsule / pill
+  - [x] circle / ellipse
+  - [x] resolved shape coverage helpers used by input hit testing
+  - [x] clip commands carry resolved shape for future mask/scissor backends
   - [ ] arbitrary path / mask
   - [ ] shader-produced coverage mask
 - [ ] Make UI antialiasing analytic and shape-aware for fills, borders, outlines, masks, and clips
 - [ ] Add GPU gradient shader implementation and parameter packing contract used by engine pipelines
 - [ ] Add text outline rendering path in engine shader side
 - [ ] Add a UI material/effect model with slots for:
-  - [ ] fill/background
-  - [ ] border/outline
+  - [x] first-pass fill/background shader slot metadata
+  - [x] first-pass border/outline shader slot metadata
   - [ ] text fill/outline/shadow/glow
   - [ ] inner shadow
   - [ ] drop shadow
-  - [ ] mask/clip
-  - [ ] backdrop blur/filter
+  - [x] first-pass mask/clip and backdrop slot declarations
   - [ ] bloom/glow extraction
   - [ ] custom Slang pass hooks
 - [ ] Add element-scoped shader overrides:
-  - [ ] select a concrete element by ID, class/style handle, widget part, state, or render slot
+  - [x] select a concrete element by ID and render slot through `ElementStyle` slot bindings
   - [ ] run a custom fragment shader over that slot's exact shape coverage and clip region
-  - [ ] pass additional user uniforms alongside built-in UI uniforms such as element rect, local UV, shape data, clip data, state, time, and DPI scale
+  - [x] carry additional user uniforms alongside built-in UI command data such as element rect, shape, clip, layer, and z order
   - [ ] validate merged built-in/user uniform layouts with stable reflection and clear diagnostics
-  - [ ] bind app textures, graph images, samplers, and small parameter buffers without manual render-pass setup
-  - [ ] preserve normal UI hit testing, layout, accessibility, batching diagnostics, and fallback rendering when the shader fails
+  - [x] declare app textures, graph image names, samplers, and small parameter buffers on the element slot descriptor
+  - [x] preserve normal UI hit testing, layout, batching diagnostics, and fallback shader selection metadata
 - [ ] Allow per-slot effect routing so a widget can, for example, send only its border to bloom while keeping the fill in the normal UI pass
 - [ ] Allow UI shaders to sample render-graph resources through explicit declarations:
   - [ ] previous scene color
