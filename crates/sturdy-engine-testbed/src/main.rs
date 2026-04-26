@@ -2,8 +2,8 @@ use std::time::Instant;
 
 use sturdy_engine::{
     AntiAliasingConfig, AntiAliasingDial, AntiAliasingPass, BloomConfig, BloomPass,
-    CpuProceduralTexture2d, DebugOverlay, DebugOverlayRenderer, DebugViewPicker, Engine,
-    EngineApp, Extent3d, Format, GpuProceduralTexture, HdrPipelineDesc, HdrPreference, ImageDesc,
+    CpuProceduralTexture2d, DebugOverlay, DebugOverlayRenderer, DebugViewPicker, Engine, EngineApp,
+    Extent3d, Format, GpuProceduralTexture, HdrPipelineDesc, HdrPreference, ImageDesc,
     ImageDimension, ImageUsage, MotionVectorLayer, MotionVectorSpace, ProceduralTextureRecipe,
     ProceduralTextureUpdatePolicy, Result as EngineResult, RuntimeController,
     RuntimeMotionVectorDesc, RuntimePostProcessDesc, RuntimeSettingDescriptor, RuntimeSettingId,
@@ -439,13 +439,8 @@ impl EngineApp for Testbed {
                     eprintln!("hot reload: reloaded {}", path.display());
                 }
                 Err(e) => {
-                    runtime_controller
-                        .report_shader_compile_error(path, format!("{}", e));
-                    eprintln!(
-                        "hot reload: compile error in {}: {}",
-                        path.display(),
-                        e
-                    );
+                    runtime_controller.report_shader_compile_error(path, format!("{}", e));
+                    eprintln!("hot reload: compile error in {}: {}", path.display(), e);
                 }
                 _ => {}
             }
@@ -518,7 +513,9 @@ impl EngineApp for Testbed {
             self.bloom_enabled,
             self.bloom_only,
         );
-        let _ = self.debug_view_picker.present_selected(shell_frame, &swapchain)?;
+        let _ = self
+            .debug_view_picker
+            .present_selected(shell_frame, &swapchain)?;
         if runtime_controller
             .bool_setting(RuntimeSettingKey::OverlayVisibility)
             .unwrap_or(true)
@@ -566,7 +563,10 @@ impl EngineApp for Testbed {
             for err in runtime_controller.diagnostics().shader_compile_errors {
                 overlay_lines.push(format!(
                     "[shader error] {}: {}",
-                    err.path.file_name().unwrap_or(err.path.as_os_str()).to_string_lossy(),
+                    err.path
+                        .file_name()
+                        .unwrap_or(err.path.as_os_str())
+                        .to_string_lossy(),
                     err.message.lines().next().unwrap_or("compile failed"),
                 ));
             }
@@ -658,7 +658,10 @@ impl EngineApp for Testbed {
             if let Some(controller) = runtime_controller.as_mut() {
                 controller
                     .transact()
-                    .set_engine_value(RuntimeSettingKey::AntiAliasingMode, aa_mode_setting_name(next.mode))
+                    .set_engine_value(
+                        RuntimeSettingKey::AntiAliasingMode,
+                        aa_mode_setting_name(next.mode),
+                    )
                     .apply()?;
             }
             eprintln!("aa mode: {}", next.mode.label());
@@ -685,7 +688,10 @@ impl EngineApp for Testbed {
                     .transact()
                     .set_engine_value(RuntimeSettingKey::SurfaceTransparency, enabled)
                     .apply()?;
-                eprintln!("surface transparency: {}", if enabled { "on" } else { "off" });
+                eprintln!(
+                    "surface transparency: {}",
+                    if enabled { "on" } else { "off" }
+                );
             }
         } else if key == "G" || key == "g" {
             self.cycle_window_background_effect()?;
@@ -865,7 +871,10 @@ impl Testbed {
                 self.current_aa_dial_value() as f64,
             )
             .set_engine_value(RuntimeSettingKey::OverlayVisibility, true)
-            .set_app_value("testbed.texture_resolution", self.texture_resolution.label())
+            .set_app_value(
+                "testbed.texture_resolution",
+                self.texture_resolution.label(),
+            )
             .apply()?;
         Ok(())
     }
@@ -993,8 +1002,7 @@ impl Testbed {
 
     fn preview_tonemap_dial(&self, direction: f32) -> f32 {
         let dial = self.selected_tonemap_dial;
-        (self.tonemap_settings.get(dial) + dial.step() * direction)
-            .clamp(dial.min(), dial.max())
+        (self.tonemap_settings.get(dial) + dial.step() * direction).clamp(dial.min(), dial.max())
     }
 
     fn apply_tonemap_dial_value(&mut self, value: f32) {
@@ -1047,7 +1055,8 @@ impl Testbed {
             .join("\n");
         let mut overlay = DebugOverlay::new();
         overlay.add_screen_text(hud_text, 18.0, 18.0);
-        self.debug_overlay.draw(frame, target, width, height, &overlay)
+        self.debug_overlay
+            .draw(frame, target, width, height, &overlay)
     }
 
     fn actual_msaa_samples(&self) -> u8 {
@@ -1084,7 +1093,6 @@ impl Testbed {
             },
         )
     }
-
 }
 
 fn next_tone_mapping(op: ToneMappingOp) -> ToneMappingOp {
@@ -1149,9 +1157,11 @@ fn parse_aa_mode_setting(
 ) -> Option<sturdy_engine::AntiAliasingMode> {
     match value {
         "Off" | "off" => Some(sturdy_engine::AntiAliasingMode::Off),
-        "MSAA" => Some(sturdy_engine::AntiAliasingMode::Msaa(sturdy_engine::MsaaSettings {
-            samples: current_msaa_samples.max(1),
-        })),
+        "MSAA" => Some(sturdy_engine::AntiAliasingMode::Msaa(
+            sturdy_engine::MsaaSettings {
+                samples: current_msaa_samples.max(1),
+            },
+        )),
         "FXAA" => Some(sturdy_engine::AntiAliasingMode::Fxaa(Default::default())),
         "TAA" => Some(sturdy_engine::AntiAliasingMode::Taa(Default::default())),
         "FXAA+TAA" => Some(sturdy_engine::AntiAliasingMode::FxaaTaa {
@@ -1167,7 +1177,10 @@ fn aa_dial_value(mode: sturdy_engine::AntiAliasingMode, dial: AntiAliasingDial) 
         (sturdy_engine::AntiAliasingMode::Msaa(settings), AntiAliasingDial::MsaaSamples) => {
             settings.samples as f32
         }
-        (sturdy_engine::AntiAliasingMode::Fxaa(settings), AntiAliasingDial::FxaaSubpixelQuality)
+        (
+            sturdy_engine::AntiAliasingMode::Fxaa(settings),
+            AntiAliasingDial::FxaaSubpixelQuality,
+        )
         | (
             sturdy_engine::AntiAliasingMode::FxaaTaa { fxaa: settings, .. },
             AntiAliasingDial::FxaaSubpixelQuality,
@@ -1177,7 +1190,10 @@ fn aa_dial_value(mode: sturdy_engine::AntiAliasingMode, dial: AntiAliasingDial) 
             sturdy_engine::AntiAliasingMode::FxaaTaa { fxaa: settings, .. },
             AntiAliasingDial::FxaaEdgeThreshold,
         ) => settings.edge_threshold,
-        (sturdy_engine::AntiAliasingMode::Fxaa(settings), AntiAliasingDial::FxaaEdgeThresholdMin)
+        (
+            sturdy_engine::AntiAliasingMode::Fxaa(settings),
+            AntiAliasingDial::FxaaEdgeThresholdMin,
+        )
         | (
             sturdy_engine::AntiAliasingMode::FxaaTaa { fxaa: settings, .. },
             AntiAliasingDial::FxaaEdgeThresholdMin,
@@ -1201,11 +1217,7 @@ fn aa_dial_value(mode: sturdy_engine::AntiAliasingMode, dial: AntiAliasingDial) 
     }
 }
 
-fn apply_aa_value(
-    config: &mut AntiAliasingConfig,
-    value: f32,
-    max_msaa_samples: u8,
-) {
+fn apply_aa_value(config: &mut AntiAliasingConfig, value: f32, max_msaa_samples: u8) {
     match (&mut config.mode, config.selected_dial) {
         (sturdy_engine::AntiAliasingMode::Msaa(settings), AntiAliasingDial::MsaaSamples) => {
             let rounded = value.round().clamp(1.0, max_msaa_samples.max(1) as f32);
@@ -1221,7 +1233,10 @@ fn apply_aa_value(
                 .unwrap_or(1.0)
                 .min(max_msaa_samples.max(1) as f32) as u8;
         }
-        (sturdy_engine::AntiAliasingMode::Fxaa(settings), AntiAliasingDial::FxaaSubpixelQuality)
+        (
+            sturdy_engine::AntiAliasingMode::Fxaa(settings),
+            AntiAliasingDial::FxaaSubpixelQuality,
+        )
         | (
             sturdy_engine::AntiAliasingMode::FxaaTaa { fxaa: settings, .. },
             AntiAliasingDial::FxaaSubpixelQuality,
@@ -1231,7 +1246,10 @@ fn apply_aa_value(
             sturdy_engine::AntiAliasingMode::FxaaTaa { fxaa: settings, .. },
             AntiAliasingDial::FxaaEdgeThreshold,
         ) => settings.edge_threshold = value.clamp(0.0, 1.0),
-        (sturdy_engine::AntiAliasingMode::Fxaa(settings), AntiAliasingDial::FxaaEdgeThresholdMin)
+        (
+            sturdy_engine::AntiAliasingMode::Fxaa(settings),
+            AntiAliasingDial::FxaaEdgeThresholdMin,
+        )
         | (
             sturdy_engine::AntiAliasingMode::FxaaTaa { fxaa: settings, .. },
             AntiAliasingDial::FxaaEdgeThresholdMin,

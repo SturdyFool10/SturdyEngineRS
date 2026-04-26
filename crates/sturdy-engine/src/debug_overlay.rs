@@ -1,7 +1,7 @@
 use crate::{
-    DebugDraw2d, DebugDrawStyle, Engine, GraphImage, MeshProgram, MeshProgramDesc, MeshVertexKind,
-    RenderFrame, Result, ShaderDesc, ShaderSource, ShaderStage, TextDrawDesc, TextOverlay,
-    TextPlacement, TextTypography,
+    DebugDraw2d, DebugDrawStyle, Engine, GraphImage, Mesh, MeshProgram, MeshProgramDesc,
+    MeshVertexKind, QuadBatch, RenderFrame, Result, ShaderDesc, ShaderSource, ShaderStage,
+    StageMask, TextDrawDesc, TextOverlay, TextPlacement, TextTypography,
 };
 
 const SOLID_COLOR_FRAGMENT: &str = r#"
@@ -15,6 +15,67 @@ float4 main(FSInput input) : SV_TARGET {
     return input.color;
 }
 "#;
+
+const UI_SHAPE_FRAGMENT: &str = r#"
+struct FSInput {
+    float4 position : SV_POSITION;
+    float2 uv : TEXCOORD0;
+    float4 color : COLOR0;
+};
+
+struct UiShapeConstants {
+    float4 sizeRadiusBorder;
+    float4 fillColor;
+    float4 borderColor;
+};
+
+float roundedBoxSdf(float2 p, float2 halfSize, float radius) {
+    float2 q = abs(p) - max(halfSize - radius, float2(0.0, 0.0));
+    return length(max(q, float2(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+float4 main(FSInput input, uniform UiShapeConstants push) : SV_TARGET {
+    float2 size = max(push.sizeRadiusBorder.xy, float2(1.0, 1.0));
+    float radius = clamp(push.sizeRadiusBorder.z, 0.0, min(size.x, size.y) * 0.5);
+    float border = max(push.sizeRadiusBorder.w, 0.0);
+    float2 p = input.uv - size * 0.5;
+    float sd = roundedBoxSdf(p, size * 0.5, radius);
+    float aa = max(fwidth(sd), 0.75);
+    float outer = 1.0 - smoothstep(-aa, aa, sd);
+
+    if (border > 0.0 && push.borderColor.a > 0.0) {
+        float fillCoverage = outer * (1.0 - smoothstep(-border - aa, -border + aa, sd));
+        float borderCoverage = max(outer - fillCoverage, 0.0);
+        float fillAlpha = push.fillColor.a * fillCoverage;
+        float borderAlpha = push.borderColor.a * borderCoverage;
+        float alpha = fillAlpha + borderAlpha;
+        float3 rgb = alpha > 0.0
+            ? (push.fillColor.rgb * fillAlpha + push.borderColor.rgb * borderAlpha) / alpha
+            : float3(0.0, 0.0, 0.0);
+        return float4(rgb, alpha);
+    }
+
+    return float4(push.fillColor.rgb, push.fillColor.a * outer);
+}
+"#;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct UiShapeConstants {
+    size_radius_border: [f32; 4],
+    fill_color: [f32; 4],
+    border_color: [f32; 4],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct UiShape {
+    origin: [f32; 2],
+    size: [f32; 2],
+    radius: f32,
+    border_width: f32,
+    fill_color: [f32; 4],
+    border_color: [f32; 4],
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DebugOverlayAntialiasing {
@@ -64,6 +125,7 @@ pub struct DebugHitRegion {
 /// Immediate overlay content that can mix debug primitives and text in one frame.
 pub struct DebugOverlay {
     shapes: DebugDraw2d,
+    ui_shapes: Vec<UiShape>,
     text: Vec<TextDrawDesc>,
     config: DebugOverlayConfig,
     hit_regions: Vec<DebugHitRegion>,
@@ -74,6 +136,7 @@ impl Default for DebugOverlay {
         let config = DebugOverlayConfig::default();
         Self {
             shapes: DebugDraw2d::with_style(config.style),
+            ui_shapes: Vec::new(),
             text: Vec::new(),
             config,
             hit_regions: Vec::new(),
@@ -87,11 +150,12 @@ impl DebugOverlay {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.shapes.is_empty() && self.text.is_empty()
+        self.shapes.is_empty() && self.ui_shapes.is_empty() && self.text.is_empty()
     }
 
     pub fn clear(&mut self) {
         self.shapes.clear();
+        self.ui_shapes.clear();
         self.text.clear();
         self.hit_regions.clear();
     }
@@ -152,12 +216,7 @@ impl DebugOverlay {
         self
     }
 
-    pub fn add_screen_text(
-        &mut self,
-        text: impl Into<String>,
-        x: f32,
-        y: f32,
-    ) -> &mut Self {
+    pub fn add_screen_text(&mut self, text: impl Into<String>, x: f32, y: f32) -> &mut Self {
         let [x, y] = self.transform_screen_point([x, y]);
         self.text.push(
             TextDrawDesc::new(text.into())
@@ -174,7 +233,13 @@ impl DebugOverlay {
         self
     }
 
-    pub fn line_screen(&mut self, width: u32, height: u32, from: [f32; 2], to: [f32; 2]) -> &mut Self {
+    pub fn line_screen(
+        &mut self,
+        width: u32,
+        height: u32,
+        from: [f32; 2],
+        to: [f32; 2],
+    ) -> &mut Self {
         let from = screen_to_ndc(width, height, self.transform_screen_point(from));
         let to = screen_to_ndc(width, height, self.transform_screen_point(to));
         self.shapes.line(from, to);
@@ -206,42 +271,11 @@ impl DebugOverlay {
         thickness_pixels: f32,
         color: [f32; 4],
     ) -> &mut Self {
+        let _ = (width, height);
         let [origin, size] = self.transform_screen_rect(origin, size);
-        let radius = radius_pixels.min(size[0] * 0.5).min(size[1] * 0.5).max(0.0);
-        let left = origin[0];
-        let top = origin[1];
-
-        if self.config.antialiasing == DebugOverlayAntialiasing::Default {
-            let outer = [color[0], color[1], color[2], color[3] * 0.22];
-            let inner = [color[0], color[1], color[2], color[3] * 0.16];
-            self.draw_rounded_rectangle_outline_screen(
-                width,
-                height,
-                [left, top],
-                [size[0], size[1]],
-                radius + 1.0,
-                thickness_pixels + 2.0,
-                outer,
-            );
-            self.draw_rounded_rectangle_outline_screen(
-                width,
-                height,
-                [left, top],
-                [size[0], size[1]],
-                (radius - 0.5).max(0.0),
-                (thickness_pixels - 1.0).max(1.0),
-                inner,
-            );
-        }
-        self.draw_rounded_rectangle_outline_screen(
-            width,
-            height,
-            [left, top],
-            [size[0], size[1]],
-            radius,
-            thickness_pixels,
-            color,
-        );
+        let radius = self.transform_screen_scalar(radius_pixels);
+        let thickness = self.transform_screen_scalar(thickness_pixels);
+        self.push_ui_shape(origin, size, radius, thickness, [0.0, 0.0, 0.0, 0.0], color);
         self
     }
 
@@ -253,11 +287,25 @@ impl DebugOverlay {
         size: [f32; 2],
         color: [f32; 4],
     ) -> &mut Self {
+        let _ = (width, height);
         let [origin, size] = self.transform_screen_rect(origin, size);
-        let min = screen_to_ndc(width, height, origin);
-        let max = screen_to_ndc(width, height, [origin[0] + size[0], origin[1] + size[1]]);
-        self.shapes
-            .filled_rect_with_color(min, [max[0] - min[0], max[1] - min[1]], color);
+        self.push_ui_shape(origin, size, 0.0, 0.0, color, [0.0, 0.0, 0.0, 0.0]);
+        self
+    }
+
+    pub fn filled_rounded_rect_screen(
+        &mut self,
+        width: u32,
+        height: u32,
+        origin: [f32; 2],
+        size: [f32; 2],
+        radius_pixels: f32,
+        color: [f32; 4],
+    ) -> &mut Self {
+        let _ = (width, height);
+        let [origin, size] = self.transform_screen_rect(origin, size);
+        let radius = self.transform_screen_scalar(radius_pixels);
+        self.push_ui_shape(origin, size, radius, 0.0, color, [0.0, 0.0, 0.0, 0.0]);
         self
     }
 
@@ -269,9 +317,7 @@ impl DebugOverlay {
         radius_pixels: f32,
     ) -> &mut Self {
         let center = screen_to_ndc(width, height, self.transform_screen_point(center));
-        let scale = (self.config.transform.scale[0].abs() + self.config.transform.scale[1].abs())
-            * 0.5;
-        let radius = radius_pixels * scale * 2.0 / width.max(1) as f32;
+        let radius = self.transform_screen_scalar(radius_pixels) * 2.0 / width.max(1) as f32;
         self.shapes.circle(center, radius);
         self
     }
@@ -284,13 +330,11 @@ impl DebugOverlay {
         size_pixels: f32,
     ) -> &mut Self {
         let mut style = self.shapes.style();
-        style.point_size =
-            size_pixels * self.config.transform.scale[0].abs() * 2.0 / width.max(1) as f32;
-        self.shapes
-            .cross_marker_with_style(
-                screen_to_ndc(width, height, self.transform_screen_point(center)),
-                style,
-            );
+        style.point_size = self.transform_screen_scalar(size_pixels) * 2.0 / width.max(1) as f32;
+        self.shapes.cross_marker_with_style(
+            screen_to_ndc(width, height, self.transform_screen_point(center)),
+            style,
+        );
         self
     }
 
@@ -298,108 +342,37 @@ impl DebugOverlay {
         &self.text
     }
 
-    fn line_screen_with_style(
+    fn push_ui_shape(
         &mut self,
-        width: u32,
-        height: u32,
-        from: [f32; 2],
-        to: [f32; 2],
-        style: DebugDrawStyle,
-    ) {
-        let from = screen_to_ndc(width, height, from);
-        let to = screen_to_ndc(width, height, to);
-        self.shapes.line_with_style(from, to, style);
-    }
-
-    fn draw_rounded_rectangle_outline_screen(
-        &mut self,
-        width: u32,
-        height: u32,
         origin: [f32; 2],
         size: [f32; 2],
         radius: f32,
-        thickness_pixels: f32,
-        color: [f32; 4],
+        border_width: f32,
+        fill_color: [f32; 4],
+        border_color: [f32; 4],
     ) {
-        let left = origin[0];
-        let top = origin[1];
-        let right = origin[0] + size[0];
-        let bottom = origin[1] + size[1];
-        let style = self.stroke_style_for_screen_pixels(width, thickness_pixels, color);
-
-        self.line_screen_with_style(
-            width,
-            height,
-            [left + radius, top],
-            [right - radius, top],
-            style,
-        );
-        self.line_screen_with_style(
-            width,
-            height,
-            [right, top + radius],
-            [right, bottom - radius],
-            style,
-        );
-        self.line_screen_with_style(
-            width,
-            height,
-            [right - radius, bottom],
-            [left + radius, bottom],
-            style,
-        );
-        self.line_screen_with_style(
-            width,
-            height,
-            [left, bottom - radius],
-            [left, top + radius],
-            style,
-        );
-
-        self.arc_screen(width, height, [left + radius, top + radius], radius, 180.0, 270.0, style);
-        self.arc_screen(width, height, [right - radius, top + radius], radius, 270.0, 360.0, style);
-        self.arc_screen(width, height, [right - radius, bottom - radius], radius, 0.0, 90.0, style);
-        self.arc_screen(width, height, [left + radius, bottom - radius], radius, 90.0, 180.0, style);
-    }
-
-    fn arc_screen(
-        &mut self,
-        width: u32,
-        height: u32,
-        center: [f32; 2],
-        radius: f32,
-        start_deg: f32,
-        end_deg: f32,
-        style: DebugDrawStyle,
-    ) {
-        let segments = 6usize;
-        let mut points = Vec::with_capacity(segments + 1);
-        for index in 0..=segments {
-            let t = index as f32 / segments as f32;
-            let angle = (start_deg + (end_deg - start_deg) * t).to_radians();
-            points.push([
-                center[0] + radius * angle.cos(),
-                center[1] + radius * angle.sin(),
-            ]);
+        if fill_color[3] <= 0.0 && border_color[3] <= 0.0 {
+            return;
         }
-        let points = points
-            .into_iter()
-            .map(|point| screen_to_ndc(width, height, point))
-            .collect::<Vec<_>>();
-        self.shapes.polyline_with_style(&points, style);
-    }
 
-    fn stroke_style_for_screen_pixels(
-        &self,
-        width: u32,
-        thickness_pixels: f32,
-        color: [f32; 4],
-    ) -> DebugDrawStyle {
-        let mut style = self.shapes.style();
-        style.color = color;
-        style.thickness =
-            thickness_pixels * self.config.transform.scale[0].abs() * 2.0 / width.max(1) as f32;
-        style
+        let left = origin[0].min(origin[0] + size[0]);
+        let right = origin[0].max(origin[0] + size[0]);
+        let top = origin[1].min(origin[1] + size[1]);
+        let bottom = origin[1].max(origin[1] + size[1]);
+        let size = [right - left, bottom - top];
+        if size[0] <= f32::EPSILON || size[1] <= f32::EPSILON {
+            return;
+        }
+
+        let half_min = size[0].min(size[1]) * 0.5;
+        self.ui_shapes.push(UiShape {
+            origin: [left, top],
+            size,
+            radius: radius.clamp(0.0, half_min),
+            border_width: border_width.max(0.0).min(half_min),
+            fill_color,
+            border_color,
+        });
     }
 
     fn transform_screen_point(&self, point: [f32; 2]) -> [f32; 2] {
@@ -407,6 +380,12 @@ impl DebugOverlay {
             point[0] * self.config.transform.scale[0] + self.config.transform.translation[0],
             point[1] * self.config.transform.scale[1] + self.config.transform.translation[1],
         ]
+    }
+
+    fn transform_screen_scalar(&self, value: f32) -> f32 {
+        let scale =
+            (self.config.transform.scale[0].abs() + self.config.transform.scale[1].abs()) * 0.5;
+        value * scale
     }
 
     fn transform_screen_rect(&self, origin: [f32; 2], size: [f32; 2]) -> [[f32; 2]; 2] {
@@ -424,6 +403,7 @@ impl DebugOverlay {
 pub struct DebugOverlayRenderer {
     text_overlay: TextOverlay,
     shape_program: MeshProgram,
+    ui_shape_program: MeshProgram,
 }
 
 impl DebugOverlayRenderer {
@@ -443,6 +423,19 @@ impl DebugOverlayRenderer {
                     alpha_blend: true,
                 },
             )?,
+            ui_shape_program: MeshProgram::new(
+                engine,
+                MeshProgramDesc {
+                    fragment: ShaderDesc {
+                        source: ShaderSource::Inline(UI_SHAPE_FRAGMENT.to_string()),
+                        entry_point: "main".to_string(),
+                        stage: ShaderStage::Fragment,
+                    },
+                    vertex: None,
+                    vertex_kind: MeshVertexKind::V2d,
+                    alpha_blend: true,
+                },
+            )?,
         })
     }
 
@@ -454,6 +447,25 @@ impl DebugOverlayRenderer {
         height: u32,
         overlay: &DebugOverlay,
     ) -> Result<()> {
+        for shape in &overlay.ui_shapes {
+            let mesh = ui_shape_mesh(&self.ui_shape_program.engine, width, height, shape)?;
+            let constants = UiShapeConstants {
+                size_radius_border: [
+                    shape.size[0],
+                    shape.size[1],
+                    shape.radius,
+                    shape.border_width,
+                ],
+                fill_color: shape.fill_color,
+                border_color: shape.border_color,
+            };
+            target.draw_mesh_with_push_constants(
+                &mesh,
+                &self.ui_shape_program,
+                StageMask::FRAGMENT,
+                bytemuck::bytes_of(&constants),
+            )?;
+        }
         if !overlay.shapes.is_empty() {
             let mesh = overlay.shapes.build(&self.shape_program.engine)?;
             target.draw_mesh(&mesh, &self.shape_program)?;
@@ -471,6 +483,34 @@ fn screen_to_ndc(width: u32, height: u32, point: [f32; 2]) -> [f32; 2] {
         point[0] / width.max(1) as f32 * 2.0 - 1.0,
         1.0 - point[1] / height.max(1) as f32 * 2.0,
     ]
+}
+
+fn ui_shape_mesh(engine: &Engine, width: u32, height: u32, shape: &UiShape) -> Result<Mesh> {
+    let aa_padding = 2.0;
+    let origin = [shape.origin[0] - aa_padding, shape.origin[1] - aa_padding];
+    let size = [
+        shape.size[0] + aa_padding * 2.0,
+        shape.size[1] + aa_padding * 2.0,
+    ];
+    let ndc_origin = screen_to_ndc(width, height, origin);
+    let ndc_size = [
+        size[0] / width.max(1) as f32 * 2.0,
+        -size[1] / height.max(1) as f32 * 2.0,
+    ];
+
+    let mut batch = QuadBatch::new();
+    batch.push(
+        ndc_origin,
+        ndc_size,
+        [
+            -aa_padding,
+            -aa_padding,
+            shape.size[0] + aa_padding,
+            shape.size[1] + aa_padding,
+        ],
+        [1.0, 1.0, 1.0, 1.0],
+    );
+    batch.build(engine)
 }
 
 #[cfg(test)]
@@ -497,7 +537,7 @@ mod tests {
 
         assert!(!overlay.is_empty());
         assert_eq!(overlay.text_descs().len(), 1);
-        assert!(!overlay.shapes().is_empty());
+        assert_eq!(overlay.ui_shapes.len(), 1);
     }
 
     #[test]
@@ -513,10 +553,15 @@ mod tests {
         overlay.rectangle_screen(800, 600, [0.0, 0.0], [50.0, 20.0]);
 
         assert_eq!(
-            overlay.hit_test_screen([32.0, 38.0]).map(|region| region.tag.as_str()),
+            overlay
+                .hit_test_screen([32.0, 38.0])
+                .map(|region| region.tag.as_str()),
             Some("panel")
         );
-        assert_eq!(overlay.config().antialiasing, DebugOverlayAntialiasing::Disabled);
+        assert_eq!(
+            overlay.config().antialiasing,
+            DebugOverlayAntialiasing::Disabled
+        );
         assert!(!overlay.shapes().is_empty());
     }
 
@@ -533,6 +578,7 @@ mod tests {
             [1.0, 1.0, 1.0, 1.0],
         );
 
-        assert!(!overlay.shapes().is_empty());
+        assert_eq!(overlay.ui_shapes.len(), 1);
+        assert_eq!(overlay.ui_shapes[0].border_width, 3.0);
     }
 }

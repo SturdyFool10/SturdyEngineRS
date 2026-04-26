@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use glam::Vec2;
 
-use crate::{Axis, Edges, Element, ElementId, ElementKind, Rect, Size};
+use crate::{Axis, Edges, Element, ElementId, ElementKind, Rect, Size, TextStyle, TextWrap};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LayoutDirection {
@@ -100,26 +100,54 @@ pub enum LayoutError {
 
 #[derive(Default)]
 pub struct LayoutCache {
-    text: HashMap<(u64, u32, u32), Size>,
+    text: HashMap<u64, Size>,
+    text_stats: LayoutTextCacheStats,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LayoutTextCacheStats {
+    pub hits: usize,
+    pub misses: usize,
 }
 
 impl LayoutCache {
     pub fn clear_text(&mut self) {
         self.text.clear();
+        self.text_stats = LayoutTextCacheStats::default();
     }
 
-    fn cached_text_size(&mut self, id: u64, text: &str, font_size: f32, max_width: f32) -> Size {
-        let key = (id, text.len() as u32, font_size.to_bits());
+    pub fn text_stats(&self) -> LayoutTextCacheStats {
+        self.text_stats
+    }
+
+    pub fn reset_text_stats(&mut self) {
+        self.text_stats = LayoutTextCacheStats::default();
+    }
+
+    fn cached_measured_text_size<F>(
+        &mut self,
+        id: &ElementId,
+        text: &str,
+        style: &TextStyle,
+        max_width: f32,
+        text_measurer: &mut F,
+    ) -> Size
+    where
+        F: FnMut(&ElementId, &str, &TextStyle, Option<f32>) -> Size,
+    {
+        let width = if style.wrap == TextWrap::Words {
+            max_width.is_finite().then_some(max_width.max(1.0))
+        } else {
+            None
+        };
+        let key = style.cache_fingerprint(text, width, 1.0) ^ id.hash;
         if let Some(size) = self.text.get(&key) {
+            self.text_stats.hits += 1;
             return *size;
         }
-        let width = if max_width.is_finite() {
-            max_width.min(text.chars().count() as f32 * font_size * 0.55)
-        } else {
-            text.chars().count() as f32 * font_size * 0.55
-        };
-        let line_height = font_size * 1.35;
-        let size = Size::new(width, line_height);
+
+        self.text_stats.misses += 1;
+        let size = text_measurer(id, text, style, width);
         self.text.insert(key, size);
         size
     }
@@ -136,12 +164,32 @@ impl LayoutTree {
         viewport: Size,
         cache: &mut LayoutCache,
     ) -> Result<Self, LayoutError> {
+        let mut fallback_measurer =
+            |_id: &ElementId, text: &str, style: &TextStyle, width: Option<f32>| {
+                let estimated_width = text.chars().count() as f32 * style.font_size * 0.55;
+                let width =
+                    width.map_or(estimated_width, |max_width| max_width.min(estimated_width));
+                estimated_text_size(text, style, width)
+            };
+        Self::compute_with_text_measurer(root, viewport, cache, &mut fallback_measurer)
+    }
+
+    pub fn compute_with_text_measurer<F>(
+        root: &Element,
+        viewport: Size,
+        cache: &mut LayoutCache,
+        text_measurer: &mut F,
+    ) -> Result<Self, LayoutError>
+    where
+        F: FnMut(&ElementId, &str, &TextStyle, Option<f32>) -> Size,
+    {
         let mut tree = Self { nodes: Vec::new() };
         let mut seen = std::collections::HashSet::new();
         layout_element(
             root,
             Rect::new(0.0, 0.0, viewport.width, viewport.height),
             cache,
+            text_measurer,
             &mut tree,
             &mut seen,
         )?;
@@ -157,6 +205,7 @@ fn layout_element(
     element: &Element,
     containing: Rect,
     cache: &mut LayoutCache,
+    text_measurer: &mut impl FnMut(&ElementId, &str, &TextStyle, Option<f32>) -> Size,
     tree: &mut LayoutTree,
     seen: &mut std::collections::HashSet<u64>,
 ) -> Result<Size, LayoutError> {
@@ -168,17 +217,21 @@ fn layout_element(
     validate_sizing(element.layout.height)?;
 
     let available = containing.inset(element.style.padding);
-    let child_sizes = measure_children(element, available.size, cache, tree, seen)?;
+    let child_sizes = measure_children(element, available.size, cache, text_measurer, tree, seen)?;
     let content_size = stack_size(element.layout.direction, element.layout.gap, &child_sizes);
+    let padded_content_size = Size::new(
+        content_size.width + element.style.padding.horizontal(),
+        content_size.height + element.style.padding.vertical(),
+    );
     let own_size = Size::new(
         resolve_axis(
             element.layout.width,
-            content_size.width,
+            padded_content_size.width,
             containing.size.width,
         ),
         resolve_axis(
             element.layout.height,
-            content_size.height,
+            padded_content_size.height,
             containing.size.height,
         ),
     );
@@ -206,15 +259,17 @@ fn measure_children(
     element: &Element,
     available: Size,
     cache: &mut LayoutCache,
+    text_measurer: &mut impl FnMut(&ElementId, &str, &TextStyle, Option<f32>) -> Size,
     tree: &mut LayoutTree,
     seen: &mut std::collections::HashSet<u64>,
 ) -> Result<Vec<Size>, LayoutError> {
     if let ElementKind::Text(text) = &element.kind {
-        return Ok(vec![cache.cached_text_size(
-            element.id.hash,
+        return Ok(vec![cache.cached_measured_text_size(
+            &element.id,
             &text.text,
-            text.style.font_size,
+            &text.style,
             available.width,
+            text_measurer,
         )]);
     }
     if let ElementKind::Image(image) = &element.kind {
@@ -227,7 +282,14 @@ fn measure_children(
             origin: Vec2::ZERO,
             size: available,
         };
-        sizes.push(layout_element(child, child_containing, cache, tree, seen)?);
+        sizes.push(layout_element(
+            child,
+            child_containing,
+            cache,
+            text_measurer,
+            tree,
+            seen,
+        )?);
     }
     Ok(sizes)
 }
@@ -320,10 +382,207 @@ fn validate_sizing(sizing: LayoutSizing) -> Result<(), LayoutError> {
     Ok(())
 }
 
+fn estimated_text_size(_text: &str, style: &TextStyle, width: f32) -> Size {
+    Size::new(width, style.line_height.max(style.font_size))
+}
+
 fn axis_for_direction(direction: LayoutDirection) -> Axis {
     match direction {
         LayoutDirection::LeftToRight => Axis::Horizontal,
         LayoutDirection::TopToBottom => Axis::Vertical,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_layout_uses_provided_measurer() {
+        let id = ElementId::new("measured-text");
+        let mut element = Element::text(
+            id.clone(),
+            "this long text should receive a constrained measurement width",
+            TextStyle::default(),
+        );
+        element.layout.width = LayoutSizing::Fit {
+            min: 0.0,
+            max: f32::INFINITY,
+        };
+        element.layout.height = LayoutSizing::Fit {
+            min: 0.0,
+            max: f32::INFINITY,
+        };
+
+        let mut cache = LayoutCache::default();
+        let mut calls = 0usize;
+        let mut measurer = |_id: &ElementId, text: &str, _style: &TextStyle, width: Option<f32>| {
+            calls += 1;
+            assert!(text.starts_with("this long text"));
+            assert_eq!(width, Some(320.0));
+            Size::new(123.0, 45.0)
+        };
+
+        let layout = LayoutTree::compute_with_text_measurer(
+            &element,
+            Size::new(320.0, 200.0),
+            &mut cache,
+            &mut measurer,
+        )
+        .unwrap();
+
+        assert_eq!(calls, 1);
+        assert_eq!(layout.by_id(&id).unwrap().rect.size, Size::new(123.0, 45.0));
+        assert_eq!(
+            cache.text_stats(),
+            LayoutTextCacheStats { hits: 0, misses: 1 }
+        );
+    }
+
+    #[test]
+    fn text_layout_measurement_is_cached() {
+        let element = Element::text(ElementId::new("cached-text"), "hello", TextStyle::default());
+        let mut cache = LayoutCache::default();
+        let mut calls = 0usize;
+        let mut measurer =
+            |_id: &ElementId, _text: &str, _style: &TextStyle, _width: Option<f32>| {
+                calls += 1;
+                Size::new(80.0, 20.0)
+            };
+
+        LayoutTree::compute_with_text_measurer(
+            &element,
+            Size::new(320.0, 200.0),
+            &mut cache,
+            &mut measurer,
+        )
+        .unwrap();
+        cache.reset_text_stats();
+        LayoutTree::compute_with_text_measurer(
+            &element,
+            Size::new(320.0, 200.0),
+            &mut cache,
+            &mut measurer,
+        )
+        .unwrap();
+
+        assert_eq!(calls, 1);
+        assert_eq!(
+            cache.text_stats(),
+            LayoutTextCacheStats { hits: 1, misses: 0 }
+        );
+    }
+
+    #[test]
+    fn wrapped_text_uses_exact_width_for_correct_reservation() {
+        let element = Element::text(
+            ElementId::new("resize-text"),
+            "this long text should be width-dependent when narrow",
+            TextStyle::default(),
+        );
+        let mut cache = LayoutCache::default();
+        let mut calls = 0usize;
+        let mut measured_widths = Vec::new();
+        let mut measurer =
+            |_id: &ElementId, _text: &str, _style: &TextStyle, width: Option<f32>| {
+                calls += 1;
+                measured_widths.push(width);
+                Size::new(80.0, 20.0)
+            };
+
+        LayoutTree::compute_with_text_measurer(
+            &element,
+            Size::new(335.0, 200.0),
+            &mut cache,
+            &mut measurer,
+        )
+        .unwrap();
+        LayoutTree::compute_with_text_measurer(
+            &element,
+            Size::new(330.0, 200.0),
+            &mut cache,
+            &mut measurer,
+        )
+        .unwrap();
+
+        assert_eq!(calls, 2);
+        assert_eq!(measured_widths, vec![Some(335.0), Some(330.0)]);
+    }
+
+    #[test]
+    fn nowrap_labels_ignore_width_for_resize_cache_stability() {
+        let mut style = TextStyle::default();
+        style.wrap = TextWrap::None;
+        let element = Element::text(ElementId::new("wide-label"), "hello", style);
+        let mut cache = LayoutCache::default();
+        let mut calls = 0usize;
+        let mut measured_widths = Vec::new();
+        let mut measurer =
+            |_id: &ElementId, _text: &str, _style: &TextStyle, width: Option<f32>| {
+                calls += 1;
+                measured_widths.push(width);
+                Size::new(80.0, 20.0)
+            };
+
+        LayoutTree::compute_with_text_measurer(
+            &element,
+            Size::new(640.0, 200.0),
+            &mut cache,
+            &mut measurer,
+        )
+        .unwrap();
+        LayoutTree::compute_with_text_measurer(
+            &element,
+            Size::new(420.0, 200.0),
+            &mut cache,
+            &mut measurer,
+        )
+        .unwrap();
+
+        assert_eq!(calls, 1);
+        assert_eq!(measured_widths, vec![None]);
+    }
+
+    #[test]
+    fn fit_container_reserves_child_text_plus_padding() {
+        let child_id = ElementId::new("badge-text");
+        let mut badge = Element::new(ElementId::new("badge"));
+        badge.style.padding = Edges::symmetric(12.0, 8.0);
+        badge.layout.width = LayoutSizing::Fit {
+            min: 0.0,
+            max: f32::INFINITY,
+        };
+        badge.layout.height = LayoutSizing::Fit {
+            min: 0.0,
+            max: f32::INFINITY,
+        };
+        badge.children.push(Element::text(
+            child_id.clone(),
+            "Input Ready",
+            TextStyle::default(),
+        ));
+        let mut cache = LayoutCache::default();
+        let mut measurer =
+            |_id: &ElementId, _text: &str, _style: &TextStyle, _width: Option<f32>| {
+                Size::new(78.0, 18.0)
+            };
+
+        let layout = LayoutTree::compute_with_text_measurer(
+            &badge,
+            Size::new(320.0, 200.0),
+            &mut cache,
+            &mut measurer,
+        )
+        .unwrap();
+
+        assert_eq!(
+            layout.by_id(&badge.id).unwrap().rect.size,
+            Size::new(102.0, 34.0)
+        );
+        assert_eq!(
+            layout.by_id(&child_id).unwrap().rect.origin,
+            Vec2::new(12.0, 8.0)
+        );
     }
 }
 

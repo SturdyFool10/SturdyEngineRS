@@ -7,6 +7,8 @@ mod rich_text_span;
 mod rich_text_style;
 #[path = "advanced_text/text_atlas_page_data.rs"]
 mod text_atlas_page_data;
+#[path = "advanced_text/text_atlas_content_mode.rs"]
+mod text_atlas_content_mode;
 #[path = "advanced_text/text_atlas_page_snapshot.rs"]
 mod text_atlas_page_snapshot;
 #[path = "advanced_text/text_atlas_quad.rs"]
@@ -97,6 +99,7 @@ mod vector_text_shape;
 pub use self::rich_text_span::RichTextSpan;
 pub use self::rich_text_style::RichTextStyle;
 pub use self::text_atlas_page_data::TextAtlasPageData;
+pub use self::text_atlas_content_mode::TextAtlasContentMode;
 pub use self::text_atlas_page_snapshot::TextAtlasPageSnapshot;
 pub use self::text_atlas_quad::TextAtlasQuad;
 pub use self::text_atlas_sampling::TextAtlasSampling;

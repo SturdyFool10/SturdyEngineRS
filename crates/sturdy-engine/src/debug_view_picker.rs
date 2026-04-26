@@ -124,7 +124,11 @@ impl DebugViewPicker {
         let next = entries[next_index].clone();
         self.set_selected_name(
             controller,
-            if next == OFF_VALUE { None } else { Some(next.as_str()) },
+            if next == OFF_VALUE {
+                None
+            } else {
+                Some(next.as_str())
+            },
         )?;
         Ok((next != OFF_VALUE).then_some(next))
     }

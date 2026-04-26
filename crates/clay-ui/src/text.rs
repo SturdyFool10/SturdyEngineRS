@@ -160,7 +160,7 @@ impl TextStyle {
                 (rgba[2].clamp(0.0, 1.0) * 255.0) as u8,
                 (rgba[3].clamp(0.0, 1.0) * 255.0) as u8,
             ),
-            wrap: self.wrap != TextWrap::None,
+            wrap: self.wrap == TextWrap::Words,
             monospace: false,
             weight: 400,
             italic: false,

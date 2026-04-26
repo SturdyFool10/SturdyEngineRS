@@ -1,11 +1,10 @@
 use std::{path::PathBuf, time::Instant};
 
 use sturdy_engine::{
-    AntiAliasingMode, AntiAliasingPass, CpuProceduralTexture2d, DebugOverlay,
-    DebugOverlayRenderer, DebugViewPicker, Engine, EngineApp, HdrPipelineDesc, HdrPreference,
-    ProceduralTextureRecipe, ProceduralTextureUpdatePolicy, Result, RuntimeController,
-    RuntimePostProcessDesc, ShaderProgram, ShellFrame, Surface, SurfaceImage, WindowConfig,
-    push_constants,
+    AntiAliasingMode, AntiAliasingPass, CpuProceduralTexture2d, DebugOverlay, DebugOverlayRenderer,
+    DebugViewPicker, Engine, EngineApp, HdrPipelineDesc, HdrPreference, ProceduralTextureRecipe,
+    ProceduralTextureUpdatePolicy, Result, RuntimeController, RuntimePostProcessDesc,
+    ShaderProgram, ShellFrame, Surface, SurfaceImage, WindowConfig, push_constants,
 };
 
 #[push_constants]
@@ -114,7 +113,8 @@ impl EngineApp for ShaderPlayground {
         let ext = surface_image.desc().extent;
         let swapchain = frame.inner().swapchain_image(surface_image)?;
         let scene_target = frame.default_hdr_scene_target("playground_scene", 1)?;
-        let scene_color = frame.resolve_default_hdr_scene_target(&scene_target, "playground_scene")?;
+        let scene_color =
+            frame.resolve_default_hdr_scene_target(&scene_target, "playground_scene")?;
         let render_frame = frame.inner();
 
         self.procedural_mask.prepare(render_frame)?;
@@ -194,10 +194,14 @@ impl EngineApp for ShaderPlayground {
             24.0,
             106.0,
         );
-        frame.run_camera_locked_pass("playground_overlay", &swapchain, |render_frame, target| {
-            self.overlay
-                .draw(render_frame, target, ext.width, ext.height, &overlay)
-        })?;
+        frame.run_camera_locked_pass(
+            "playground_overlay",
+            &swapchain,
+            |render_frame, target| {
+                self.overlay
+                    .draw(render_frame, target, ext.width, ext.height, &overlay)
+            },
+        )?;
 
         render_frame.present_image(&swapchain)?;
         self.frame_index = self.frame_index.saturating_add(1);

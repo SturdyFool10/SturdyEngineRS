@@ -5,9 +5,8 @@ use std::{cell::RefCell, collections::HashMap};
 use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSColor, NSView, NSVisualEffectBlendingMode,
-    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow,
-    NSWindowOrderingMode,
+    NSAutoresizingMaskOptions, NSColor, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+    NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowOrderingMode,
 };
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
@@ -127,9 +126,8 @@ fn sync_effect_view(host_view: &NSView, content_view: &NSView, appearance: Windo
 
         let effect = views.entry(key).or_insert_with(|| {
             let frame = content_view.bounds();
-            let effect = unsafe {
-                NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(), frame)
-            };
+            let effect =
+                unsafe { NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(), frame) };
             unsafe {
                 effect.setAutoresizingMask(
                     NSAutoresizingMaskOptions::NSViewWidthSizable

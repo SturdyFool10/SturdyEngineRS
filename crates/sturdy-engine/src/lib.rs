@@ -15,10 +15,10 @@ mod application;
 mod bind_group;
 mod bloom_pass;
 mod compute_program;
-mod device_manager;
 mod debug_draw_2d;
 mod debug_overlay;
 mod debug_view_picker;
+mod device_manager;
 mod frontend_graph;
 mod gpu_procedural_texture;
 mod graph_frame;
@@ -27,11 +27,11 @@ mod input;
 mod mesh;
 mod mesh_program;
 mod mip_pyramid;
+mod motion_vector_debug;
 mod pipeline_layout;
 mod plot2d;
 mod procedural_texture;
 mod quad_batch;
-mod motion_vector_debug;
 mod runtime;
 mod sampler_catalog;
 mod screenshot;
@@ -54,19 +54,18 @@ pub use application::{
     EngineApp, MotionVectorLayer, MotionVectorSpace, RuntimeMotionVectorDesc,
     RuntimePostProcessDesc, RuntimePostProcessOutput, ShellFrame, WindowConfig, run,
 };
-pub use motion_vector_debug::MotionVectorDebugPass;
 pub use bloom_pass::{
     BloomCompositeConstants, BloomConfig, BloomPass, BrightPassConstants, DownsampleConstants,
     UpsampleConstants,
 };
 pub use compute_program::ComputeProgram;
-pub use device_manager::{AdapterEntry, DeviceManager};
 pub use debug_draw_2d::{DebugDraw2d, DebugDrawStyle};
 pub use debug_overlay::{
     DebugHitRegion, DebugOverlay, DebugOverlayAntialiasing, DebugOverlayConfig,
     DebugOverlayRenderer, DebugOverlayTransform,
 };
 pub use debug_view_picker::DebugViewPicker;
+pub use device_manager::{AdapterEntry, DeviceManager};
 pub use gpu_procedural_texture::GpuProceduralTexture;
 pub use graph_frame::{FullscreenPassBuilder, GraphFrame, ImageNode};
 pub use hdr_pipeline::{HdrMode, HdrPipelineDesc, HdrPreference, ToneMappingOp};
@@ -77,6 +76,7 @@ pub use input::{
 pub use mesh::{Mesh, Vertex2d, Vertex3d};
 pub use mesh_program::{MeshProgram, MeshProgramDesc, MeshVertexKind};
 pub use mip_pyramid::MipPyramid;
+pub use motion_vector_debug::MotionVectorDebugPass;
 pub use plot2d::{Plot2d, PlotBar, PlotInspection, PlotRange, PlotScale, PlotTheme, PlotView};
 pub use procedural_texture::{
     CpuProceduralTexture2d, ProceduralTextureRecipe, ProceduralTextureUpdatePolicy,
@@ -92,12 +92,12 @@ pub use runtime::{
     RuntimeSettingsTransaction, RuntimeTimingSummary, SceneRenderContext, ShaderCompileError,
     UiContext, WindowMode,
 };
+pub use sampler_catalog::SamplerPreset;
 pub use screenshot::ScreenshotCapture;
 pub use shader_watcher::ShaderWatcher;
-pub use sampler_catalog::SamplerPreset;
 pub use text_draw::{
-    TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput, TextPlacement, TextRenderer,
-    TextScene, TextSceneQuad, TextTypography,
+    TextAtlasContentMode, TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput,
+    TextPlacement, TextRenderer, TextScene, TextSceneQuad, TextTypography,
 };
 pub use text_engine::{
     PreparedTextDraw, PreparedTextQuad, TextEngine, TextEngineFrame, TextUiRenderer,
@@ -132,11 +132,10 @@ pub use sturdy_engine_core::{
     Result, RgState, SamplerDesc, ShaderDesc, ShaderSource, ShaderStage, ShaderTarget,
     SlangCompileDesc, StageMask, SubresourceRange, SurfaceCapabilities, SurfaceColorSpace,
     SurfaceEvent, SurfaceFormatInfo, SurfaceHdrCaps, SurfaceHdrPreference, SurfaceInfo,
-    SurfacePresentMode, SurfaceRecreateDesc, UpdateRate,
-    VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout, VertexFormat, VertexInputRate,
-    VulkanExternalBuffer, VulkanExternalImage, VulkanRawCapabilities, compile_slang,
-    compile_slang_to_file, compile_slang_to_spirv, native_handle_capabilities_for_backend,
-    spirv_words_from_bytes,
+    SurfacePresentMode, SurfaceRecreateDesc, UpdateRate, VertexAttributeDesc, VertexBufferBinding,
+    VertexBufferLayout, VertexFormat, VertexInputRate, VulkanExternalBuffer, VulkanExternalImage,
+    VulkanRawCapabilities, compile_slang, compile_slang_to_file, compile_slang_to_spirv,
+    native_handle_capabilities_for_backend, spirv_words_from_bytes,
 };
 pub use sturdy_engine_core::{
     DeviceDesc, ImageHandle, SamplerHandle, SubmissionHandle, SurfaceHandle, SurfaceSize,
@@ -145,9 +144,9 @@ pub use sturdy_engine_macros::push_constants;
 pub use sturdy_engine_platform as platform;
 pub use sturdy_engine_platform::{
     NativeWindowAppearanceError, PlatformCapabilityState, PlatformKind, SurfaceTransparency,
-    WindowAppearance, WindowAppearanceCaps, WindowAppearancePreset, WindowBackdrop,
-    WindowBlurDesc, WindowCornerStyle, WindowEffectQuality, WindowEffectRegion,
-    WindowMaterialKind, WindowMaterialSupport, WindowShadowMode, WindowTransparencyDesc,
+    WindowAppearance, WindowAppearanceCaps, WindowAppearancePreset, WindowBackdrop, WindowBlurDesc,
+    WindowCornerStyle, WindowEffectQuality, WindowEffectRegion, WindowMaterialKind,
+    WindowMaterialSupport, WindowShadowMode, WindowTransparencyDesc,
     apply_native_window_appearance, apply_native_window_appearance_for_window, current_platform,
     current_window_appearance_caps,
 };

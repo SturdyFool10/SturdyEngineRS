@@ -308,7 +308,96 @@ core behavior that makes people stay on the engine path instead of bypassing it.
 
 ### Text, input, and editing
 
-- [ ] Replace placeholder text-size estimation in layout cache with true `textui`/font-system measurement for layout-time wrapping parity
+Prompt-sized text execution order:
+
+1. [x] `P2.T1` Write the text rendering contract and default policy for alpha mask, SDF/MSDF, vector fallback, snapping, blending, and failure behavior
+2. [x] `P2.T2` Replace first-party `UiContext` layout-time text estimation with the same shaping/measurement path used for rendering
+3. [ ] `P2.T3` Add text quality validation scenes and screenshot/golden coverage for scale factors, HDR/SDR, fallback fonts, and animated UI
+4. [ ] `P2.T4` Add text performance instrumentation and budgets for shaping, caching, atlas uploads, draw calls, and memory use
+5. [ ] `P2.T5` Upgrade glyph atlas lifetime, dirty uploads, eviction, tiling, and backend-limit handling for real UI workloads
+6. [ ] `P2.T6` Integrate engine-side text shaders for alpha mask, SDF/MSDF, outlines, shadows, and linear-light blending
+7. [ ] `P2.T7` Expose app-facing rich text controls after measurement, rendering, and atlas behavior are stable
+8. [ ] `P2.T8` Build editable text, IME, selection, clipboard, focus, and keyboard navigation on top of the shared text model
+
+Prompt-sized text follow-up chunks:
+
+- [ ] `P2.T3a` Add a deterministic text validation harness that can render `ui_demo` text scenes at fixed sizes and scale factors without manual window resizing
+- [ ] `P2.T3b` Add screenshot/golden coverage for small alpha-mask UI labels, dense tables, code-like text, and large SDF display text over dark and light UI backgrounds
+- [ ] `P2.T3c` Add resize, scrolling, clipping, and fractional-position scenes that specifically catch stale clip extents, shimmer, and thickness changes
+- [ ] `P2.T3d` Add fallback-script scenes for Latin, CJK, emoji, combining marks, Arabic/Hebrew bidi text, ligatures, and missing-glyph diagnostics
+- [ ] `P2.T4a` Add `textui` prepared-scene cache hit/miss counters keyed separately from layout measurement caches
+- [ ] `P2.T4b` Add per-frame text timings for shaping, glyph rasterization, atlas snapshotting, tiling, upload recording, and mesh construction
+- [ ] `P2.T4c` Add text memory counters for font data, shaped layouts, prepared scenes, atlas pages, cached snapshots, and GPU atlas images
+- [ ] `P2.T4d` Add resize-specific text telemetry so cache churn is visible as stable-label hits, wrapped-label remeasurements, atlas uploads, and evictions
+- [ ] `P2.T5a` Add stable atlas page handles with frame-delayed destruction so UI text texture identity survives normal window resize and layout churn
+- [ ] `P2.T5b` Add dirty-rectangle atlas upload plumbing and fall back to whole-page upload only when the backend or tiling path requires it
+- [ ] `P2.T5c` Add atlas occupancy and eviction policy tests for scrolling lists, dense tables, and mixed fallback fonts
+- [ ] `P2.T5d` Add backend-limit tests for page sizing, tiling, texture count, sampler selection, and degradation diagnostics
+- [ ] `P2.T6a` Split alpha-mask text sampling from SDF/MSDF sampling so exact 1:1 UI text can use the sharpest sampler path
+- [ ] `P2.T6b` Validate SDF/MSDF field range, outline, shadow, glow, and opacity behavior against screenshot cases before using MSDF for screen-space UI text by default
+- [ ] `P2.T6c` Implement explicit linear-light text blending policy for SDR, HDR, tonemapped, and transparent UI targets
+- [ ] `P2.T7a` Define a shared rich-text run model used by measurement, painting, hit testing, accessibility labels, and future editing
+- [ ] `P2.T7b` Expose per-span typography, color, OpenType features, underline, strikethrough, background highlight, outline, shadow, glow, alignment, truncation, and wrapping modes
+- [ ] `P2.T8a` Build the first single-line editable field using the shared shaped-run model, with cursor movement, selection, focus, clipboard, and keyboard navigation
+- [ ] `P2.T8b` Add multiline editing, scrolling, grapheme-aware selection, bidi cursor movement, IME composition, and platform clipboard integration
+
+- [x] Replace placeholder text-size estimation in first-party `UiContext` layout with true `textui` measurement for layout-time wrapping parity
+  - [x] add `clay-ui` unit coverage for measured text layout and layout text cache hit/miss behavior
+  - [x] bin wrapped text layout and scene cache widths so small window resizes do not invalidate unchanged text
+  - [x] ignore available width in text cache keys when a label is estimated to fit naturally, so normal UI labels survive resize churn
+- [x] Define the production text rendering contract for UI and engine overlays in [docs/text_rendering_contract.md](docs/text_rendering_contract.md):
+  - [x] crisp anti-aliased output at 1x, high-DPI, fractional scale, HDR, and SDR
+  - [x] predictable pixel snapping that avoids double-blurring already-antialiased glyphs
+  - [x] linear-light blending policy for text over HDR/SDR render targets
+  - [x] explicit fallback behavior when a font, glyph, feature, or raster mode is unavailable
+- [x] Choose and document the default glyph rendering policy:
+  - [x] alpha masks for small body text where hinting and exact stem placement matter most
+  - [x] SDF/MSDF for scalable display text, transforms, outlines, shadows, and animated UI
+  - [x] vector/path fallback for export, path text, diagnostics, and future high-scale use
+  - [x] per-run override hooks for apps that need exact control
+- [ ] Build text quality validation scenes:
+  - [x] add first-pass `ui_demo` text quality panel covering small labels, dense rows, display text, fallback scripts, and bidi samples
+  - [x] surface previous-frame text layout cache hit/miss counters in `ui_demo`
+  - [ ] small UI labels, dense tables, code-like text, and large display text
+  - [ ] high-contrast, low-contrast, transparent, HDR, and post-tonemapped backgrounds
+  - [ ] subpixel positions, scrolling, transforms, clipping, and animated opacity
+  - [ ] resize growth/shrink cases that prove text clip extents update with the application viewport
+  - [ ] pixel-alignment cases that prove stems do not look thicker, thinner, or smaller as labels move
+  - [ ] Latin, CJK, emoji, combining marks, bidirectional text, ligatures, and fallback fonts
+- [ ] Add golden-image or screenshot-diff tests for representative text cases across scale factors and output formats
+- [ ] Add text performance budgets and instrumentation:
+  - [x] expose first-pass per-frame/per-tree text scene, glyph quad, atlas page, and atlas byte counters
+  - [x] expose first-pass layout text cache hit/miss counters
+  - [x] cache immutable `textui` atlas page snapshots until glyph pixels change
+  - [x] pass engine atlas pages and untiled atlas frames as shared immutable byte slices instead of cloning full page pixels
+  - [ ] shape/layout cache hit rate for the full `textui` prepared layout and GPU scene caches
+  - [ ] glyph atlas page count, occupancy, uploads, and evictions
+  - [ ] CPU shaping/layout time
+  - [x] expose first-pass UI text command and batch counters
+  - [ ] GPU draw calls, sampled pages, and overdraw
+  - [ ] memory use for font data, layouts, atlases, and prepared scenes
+- [ ] Implement robust glyph atlas management for UI workloads:
+  - [x] avoid per-frame full-page copies in the untiled engine atlas path
+  - [ ] persistent pages with stable lifetime and frame-delayed destruction
+  - [ ] dirty-region uploads instead of whole-page uploads where supported
+  - [ ] eviction policy that avoids visible thrash during scrolling and language fallback
+  - [ ] backend-limit-aware page sizing, tiling, and sampler selection
+- [ ] Make text layout correct before rendering:
+  - [ ] shared measurement path for layout, wrapping, hit testing, clipping, and painting
+  - [ ] consistent font fallback between measurement and rendering
+  - [ ] Unicode line breaking, grapheme-aware cursor movement, and bidirectional paragraph handling
+  - [x] snap 2D engine text placement to whole screen pixels to avoid fractional-origin thickness changes
+  - [x] clip tiled text atlas quads in atlas UV/page space instead of screen space so resized windows do not hide text beyond the atlas tile extent
+  - [x] keep large screen-space UI text on the SDF path until MSDF screen rendering is validated
+  - [x] remove frame-varying text layout cache IDs and per-frame pixel hashing from the text atlas tiling hot path
+  - [x] upload text atlas RGBA8 bytes directly instead of rebuilding a temporary texture buffer with a per-pixel closure
+  - [ ] make application/UI clipping explicit in text draw commands instead of relying only on CPU-side clipped layout bounds
+  - [ ] deterministic rounding so layout does not shimmer while scrolling or animating
+- [ ] Expose rich text styling needed for real UI:
+  - [ ] per-span font family, weight, style, stretch, size, color, features, and variation axes
+  - [ ] underline, strikethrough, background highlight, outline, shadow, and glow effects
+  - [ ] truncation, ellipsis, wrapping modes, alignment, line height, and letter/word spacing
+  - [ ] inline icons/images and baseline-aligned widgets
 - [ ] Add editable text fields with cursor, selection, and clipboard support
 - [ ] Add IME composition support for desktop text entry
 - [ ] Add focus management and keyboard navigation parity

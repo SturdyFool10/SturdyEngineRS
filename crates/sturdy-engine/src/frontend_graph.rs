@@ -1,4 +1,10 @@
-use std::{cell::RefCell, collections::HashMap, path::{Path, PathBuf}, rc::Rc, sync::Mutex};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::Mutex,
+};
 
 use sturdy_engine_core as core;
 
@@ -367,7 +373,9 @@ impl ShaderProgram {
             stage: self.stage,
         })?;
         let reflection = self.engine.shader_reflection(&fragment)?;
-        let pipeline_layout = self.engine.create_pipeline_layout(reflection.layout.clone())?;
+        let pipeline_layout = self
+            .engine
+            .create_pipeline_layout(reflection.layout.clone())?;
         self.fragment = fragment;
         self.reflection = reflection;
         self.pipeline_layout = pipeline_layout;
@@ -676,6 +684,38 @@ impl RenderFrame {
             inner
                 .frame
                 .upload_pixels_to_image(format!("update-{name}"), image, &pixels)?;
+        }
+        self.import_image(name, image)
+    }
+
+    /// Upload contiguous RGBA8 pixel bytes into an existing image and register
+    /// it as a named frame image.
+    pub fn update_texture_2d_pixels(
+        &self,
+        name: impl Into<String>,
+        image: &crate::Image,
+        pixels: &[u8],
+    ) -> Result<GraphImage> {
+        let desc = image.desc();
+        let expected_len = desc
+            .extent
+            .width
+            .saturating_mul(desc.extent.height)
+            .saturating_mul(4) as usize;
+        if pixels.len() != expected_len {
+            return Err(crate::Error::InvalidInput(format!(
+                "texture upload expected {expected_len} RGBA8 bytes for {}x{}, got {}",
+                desc.extent.width,
+                desc.extent.height,
+                pixels.len()
+            )));
+        }
+        let name = name.into();
+        {
+            let mut inner = self.inner.borrow_mut();
+            inner
+                .frame
+                .upload_pixels_to_image(format!("update-{name}"), image, pixels)?;
         }
         self.import_image(name, image)
     }

@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{
-    ElementId, FontDiscovery, GpuWorkQueue, InputEvent, InputSimulator, LayoutCache, LayoutTree,
-    OffscreenTarget, RenderCommandList, Size, UiTree,
+    ElementId, FontDiscovery, GpuWorkQueue, InputEvent, InputSimulator, LayoutCache,
+    LayoutTextCacheStats, LayoutTree, OffscreenTarget, RenderCommandKind, RenderCommandList, Size,
+    TextStyle, TextWrap, UiTree,
 };
 use sturdy_engine_core::{Format, ImageDesc, ImageRole, ImageUsage, Limits};
 
@@ -20,6 +21,7 @@ pub struct UiFrameOutput {
     pub text_scenes: HashMap<TextSceneKey, Arc<textui::TextGpuScene>>,
     pub text_surface_plans: HashMap<TextSceneKey, crate::UiSurfacePlan>,
     pub text_tile_image_descs: HashMap<TextSceneKey, Vec<ImageDesc>>,
+    pub text_stats: UiTextFrameStats,
 }
 
 #[derive(Clone, Debug)]
@@ -30,6 +32,48 @@ pub struct UiTreeFrameOutput {
     pub text_scenes: HashMap<TextSceneKey, Arc<textui::TextGpuScene>>,
     pub text_surface_plans: HashMap<TextSceneKey, crate::UiSurfacePlan>,
     pub text_tile_image_descs: HashMap<TextSceneKey, Vec<ImageDesc>>,
+    pub text_stats: UiTextFrameStats,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct UiTextFrameStats {
+    pub scene_count: usize,
+    pub glyph_quad_count: usize,
+    pub atlas_page_count: usize,
+    pub atlas_bytes: usize,
+    pub text_command_count: usize,
+    pub batch_count: usize,
+    pub layout_cache_hits: usize,
+    pub layout_cache_misses: usize,
+}
+
+impl UiTextFrameStats {
+    pub fn add_scene(&mut self, scene: &textui::TextGpuScene) {
+        self.scene_count += 1;
+        self.glyph_quad_count += scene.quads.len();
+        self.atlas_page_count += scene.atlas_pages.len();
+        self.atlas_bytes += scene
+            .atlas_pages
+            .iter()
+            .map(|page| page.rgba8.len())
+            .sum::<usize>();
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.scene_count += other.scene_count;
+        self.glyph_quad_count += other.glyph_quad_count;
+        self.atlas_page_count += other.atlas_page_count;
+        self.atlas_bytes += other.atlas_bytes;
+        self.text_command_count += other.text_command_count;
+        self.batch_count += other.batch_count;
+        self.layout_cache_hits += other.layout_cache_hits;
+        self.layout_cache_misses += other.layout_cache_misses;
+    }
+
+    pub fn add_layout_cache_stats(&mut self, stats: LayoutTextCacheStats) {
+        self.layout_cache_hits += stats.hits;
+        self.layout_cache_misses += stats.misses;
+    }
 }
 
 pub struct UiTreeInstance {
@@ -154,12 +198,32 @@ impl UiContext {
         limits: Option<&Limits>,
     ) -> UiFrameOutput {
         let mut output = UiFrameOutput::default();
+        let text_ui = &mut self.text;
+        let font_discovery = &self.font_discovery;
+        let cached_text_scenes = &mut self.cached_text_scenes;
         for tree in self.trees.values_mut() {
+            tree.layout_cache.reset_text_stats();
             let mut layout = LayoutTree::default();
             let mut commands = RenderCommandList::default();
             for root in &tree.tree.roots {
-                if let Ok(root_layout) = LayoutTree::compute(root, viewport, &mut tree.layout_cache)
-                {
+                let mut text_measurer =
+                    |id: &ElementId, text: &str, style: &TextStyle, width: Option<f32>| {
+                        measure_text_for_layout(
+                            text_ui,
+                            font_discovery,
+                            id,
+                            text,
+                            style,
+                            width,
+                            text_scale.max(0.001),
+                        )
+                    };
+                if let Ok(root_layout) = LayoutTree::compute_with_text_measurer(
+                    root,
+                    viewport,
+                    &mut tree.layout_cache,
+                    &mut text_measurer,
+                ) {
                     layout.nodes.extend(root_layout.nodes);
                     let mut root_commands = RenderCommandList::from_element_tree(root, &layout);
                     commands.commands.append(&mut root_commands.commands);
@@ -171,6 +235,14 @@ impl UiContext {
             let mut queue = GpuWorkQueue::new(tree.name.clone(), tree.target.clone());
             queue.commands = commands.commands;
             queue.rebuild_batches();
+            let mut tree_text_stats = UiTextFrameStats::default();
+            tree_text_stats.add_layout_cache_stats(tree.layout_cache.text_stats());
+            tree_text_stats.text_command_count = queue
+                .commands
+                .iter()
+                .filter(|command| command.kind == RenderCommandKind::Text)
+                .count();
+            tree_text_stats.batch_count = queue.batches.len();
             let (target_width, target_height) = tree.target.surface_extent(
                 frame_info.max_texture_side_px as u32,
                 frame_info.max_texture_side_px as u32,
@@ -205,18 +277,20 @@ impl UiContext {
             gather_text_scenes(
                 &tree.name,
                 &queue,
-                &mut self.text,
-                &self.font_discovery,
-                &mut self.cached_text_scenes,
+                text_ui,
+                font_discovery,
+                cached_text_scenes,
                 viewport,
                 text_scale,
                 &mut output.text_scenes,
                 &mut tree_text_scenes,
                 &mut tree_text_surface_plans,
                 &mut tree_text_tile_image_descs,
+                &mut tree_text_stats,
                 limits,
                 frame_info.frame_number,
             );
+            output.text_stats.merge(tree_text_stats);
             output.trees.insert(
                 tree.name.clone(),
                 UiTreeFrameOutput {
@@ -226,11 +300,34 @@ impl UiContext {
                     text_scenes: tree_text_scenes,
                     text_surface_plans: tree_text_surface_plans,
                     text_tile_image_descs: tree_text_tile_image_descs,
+                    text_stats: tree_text_stats,
                 },
             );
         }
         output
     }
+}
+
+fn measure_text_for_layout(
+    text_ui: &mut textui::TextUi,
+    font_discovery: &FontDiscovery,
+    _id: &ElementId,
+    text: &str,
+    style: &TextStyle,
+    width: Option<f32>,
+    text_scale: f32,
+) -> Size {
+    let resolved_style = style.resolved_with_fonts(font_discovery);
+    let size = text_ui.measure_label_size_at_scale(
+        text,
+        &resolved_style.to_textui_options(),
+        width,
+        text_scale,
+    );
+    Size::new(
+        size[0].ceil().max(1.0),
+        size[1].ceil().max(resolved_style.line_height),
+    )
 }
 
 fn gather_text_scenes(
@@ -245,13 +342,18 @@ fn gather_text_scenes(
     tree_out: &mut HashMap<TextSceneKey, Arc<textui::TextGpuScene>>,
     tree_surface_plans: &mut HashMap<TextSceneKey, crate::UiSurfacePlan>,
     tree_tile_image_descs: &mut HashMap<TextSceneKey, Vec<ImageDesc>>,
+    tree_text_stats: &mut UiTextFrameStats,
     limits: Option<&Limits>,
     frame_number: u64,
 ) {
     for command in &queue.commands {
         if let crate::render_command::RenderData::Text(text) = &command.data {
-            let width = Some(command.rect.size.width.min(viewport.width));
             let resolved_style = text.style.resolved_with_fonts(font_discovery);
+            let width = if resolved_style.wrap == TextWrap::Words {
+                Some(command.rect.size.width.min(viewport.width).max(1.0))
+            } else {
+                None
+            };
             let cache_key =
                 resolved_style.cache_fingerprint(&text.text, width, text_scale.max(0.001));
             let scene = if let Some(scene) = cache.get(&cache_key) {
@@ -312,6 +414,7 @@ fn gather_text_scenes(
                 ),
             );
             out.insert(key.clone(), Arc::clone(&scene));
+            tree_text_stats.add_scene(&scene);
             tree_out.insert(key, scene);
         }
     }

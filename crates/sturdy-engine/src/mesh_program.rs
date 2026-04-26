@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::Mutex};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use sturdy_engine_core as core;
 
@@ -177,11 +181,16 @@ impl MeshProgram {
             stage: ShaderStage::Fragment,
         })?;
         let reflection = self.engine.shader_reflection(&fragment)?;
-        let pipeline_layout = self.engine.create_pipeline_layout(reflection.layout.clone())?;
+        let pipeline_layout = self
+            .engine
+            .create_pipeline_layout(reflection.layout.clone())?;
         self.fragment = fragment;
         self.reflection = reflection;
         self.pipeline_layout = pipeline_layout;
-        self.pipelines.lock().expect("mesh program pipeline mutex poisoned").clear();
+        self.pipelines
+            .lock()
+            .expect("mesh program pipeline mutex poisoned")
+            .clear();
         Ok(true)
     }
 
@@ -200,7 +209,10 @@ impl MeshProgram {
             stage: ShaderStage::Vertex,
         })?;
         self.vertex = vertex;
-        self.pipelines.lock().expect("mesh program pipeline mutex poisoned").clear();
+        self.pipelines
+            .lock()
+            .expect("mesh program pipeline mutex poisoned")
+            .clear();
         Ok(true)
     }
 

@@ -1,4 +1,8 @@
-use std::{collections::HashMap, ptr::NonNull, sync::{Mutex, OnceLock}};
+use std::{
+    collections::HashMap,
+    ptr::NonNull,
+    sync::{Mutex, OnceLock},
+};
 
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use wayland_client::{
@@ -97,9 +101,9 @@ pub fn apply_native_window_appearance(
     let width = width.max(1) as i32;
     let height = height.max(1) as i32;
 
-    let mut states = wayland_states()
-        .lock()
-        .map_err(|_| NativeWindowAppearanceError::ApplyFailed("wayland blur state lock poisoned".into()))?;
+    let mut states = wayland_states().lock().map_err(|_| {
+        NativeWindowAppearanceError::ApplyFailed("wayland blur state lock poisoned".into())
+    })?;
     let state = if let Some(state) = states.get_mut(&surface_key) {
         state
     } else {
@@ -107,14 +111,19 @@ pub fn apply_native_window_appearance(
             surface_key,
             create_wayland_state(display.display, window.surface)?,
         );
-        states.get_mut(&surface_key).expect("inserted state disappeared")
+        states
+            .get_mut(&surface_key)
+            .expect("inserted state disappeared")
     };
 
-    let region = state.compositor.create_region(&new_queue_handle(&state.connection), ());
+    let region = state
+        .compositor
+        .create_region(&new_queue_handle(&state.connection), ());
     region.add(0, 0, width, height);
     state.effect.set_blur_region(Some(&region));
     state.surface.commit();
-    state.connection
+    state
+        .connection
         .flush()
         .map_err(|err| NativeWindowAppearanceError::ApplyFailed(err.to_string()))?;
     region.destroy();
@@ -122,16 +131,17 @@ pub fn apply_native_window_appearance(
 }
 
 fn disable_wayland_blur(surface_key: usize) -> Result<(), NativeWindowAppearanceError> {
-    let mut states = wayland_states()
-        .lock()
-        .map_err(|_| NativeWindowAppearanceError::ApplyFailed("wayland blur state lock poisoned".into()))?;
+    let mut states = wayland_states().lock().map_err(|_| {
+        NativeWindowAppearanceError::ApplyFailed("wayland blur state lock poisoned".into())
+    })?;
     let Some(state) = states.remove(&surface_key) else {
         return Ok(());
     };
     state.effect.set_blur_region(None);
     state.effect.destroy();
     state.surface.commit();
-    state.connection
+    state
+        .connection
         .flush()
         .map_err(|err| NativeWindowAppearanceError::ApplyFailed(err.to_string()))?;
     Ok(())
@@ -141,9 +151,8 @@ fn create_wayland_state(
     display: NonNull<std::ffi::c_void>,
     surface: NonNull<std::ffi::c_void>,
 ) -> Result<WaylandBackdropState, NativeWindowAppearanceError> {
-    let backend = unsafe {
-        wayland_client::backend::Backend::from_foreign_display(display.as_ptr().cast())
-    };
+    let backend =
+        unsafe { wayland_client::backend::Backend::from_foreign_display(display.as_ptr().cast()) };
     let connection = Connection::from_backend(backend);
     let (globals, mut queue) = registry_queue_init::<WaylandDispatchState>(&connection)
         .map_err(|err| NativeWindowAppearanceError::ApplyFailed(err.to_string()))?;
@@ -152,10 +161,16 @@ fn create_wayland_state(
         .bind::<wl_compositor::WlCompositor, _, _>(&qh, 1..=6, ())
         .map_err(|err| NativeWindowAppearanceError::ApplyFailed(err.to_string()))?;
     let manager = globals
-        .bind::<ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1, _, _>(&qh, 1..=1, ())
-        .map_err(|err| NativeWindowAppearanceError::ApplyFailed(format!(
-            "Wayland compositor does not expose ext-background-effect-v1: {err}",
-        )))?;
+        .bind::<ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1, _, _>(
+            &qh,
+            1..=1,
+            (),
+        )
+        .map_err(|err| {
+            NativeWindowAppearanceError::ApplyFailed(format!(
+                "Wayland compositor does not expose ext-background-effect-v1: {err}",
+            ))
+        })?;
 
     let surface_id = unsafe {
         wayland_client::backend::ObjectId::from_ptr(
@@ -164,8 +179,9 @@ fn create_wayland_state(
         )
     }
     .map_err(|_| NativeWindowAppearanceError::ApplyFailed("invalid foreign wl_surface".into()))?;
-    let surface = wl_surface::WlSurface::from_id(&connection, surface_id)
-        .map_err(|_| NativeWindowAppearanceError::ApplyFailed("failed to wrap foreign wl_surface".into()))?;
+    let surface = wl_surface::WlSurface::from_id(&connection, surface_id).map_err(|_| {
+        NativeWindowAppearanceError::ApplyFailed("failed to wrap foreign wl_surface".into())
+    })?;
     let effect = manager.get_background_effect(&surface, &qh, ());
     queue
         .roundtrip(&mut WaylandDispatchState)
@@ -180,5 +196,7 @@ fn create_wayland_state(
 }
 
 fn new_queue_handle(connection: &Connection) -> QueueHandle<WaylandDispatchState> {
-    connection.new_event_queue::<WaylandDispatchState>().handle()
+    connection
+        .new_event_queue::<WaylandDispatchState>()
+        .handle()
 }

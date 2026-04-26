@@ -183,7 +183,10 @@ fn to_rgba8(raw: &[u8], format: Format, width: u32, height: u32) -> Result<Vec<u
 
 fn write_png(path: &Path, width: u32, height: u32, rgba8: &[u8]) -> Result<()> {
     let file = std::fs::File::create(path).map_err(|e| {
-        crate::Error::Unknown(format!("screenshot: failed to create {}: {e}", path.display()))
+        crate::Error::Unknown(format!(
+            "screenshot: failed to create {}: {e}",
+            path.display()
+        ))
     })?;
     let mut encoder = png::Encoder::new(file, width, height);
     encoder.set_color(png::ColorType::Rgba);

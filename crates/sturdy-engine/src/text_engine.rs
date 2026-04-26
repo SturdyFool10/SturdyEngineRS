@@ -1,7 +1,8 @@
 use crate::{
-    Engine, TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput, TextPlacement,
-    TextRenderer, TextScene, TextSceneQuad, TiledTextEngineFrame,
+    Engine, TextAtlasContentMode, TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput,
+    TextPlacement, TextRenderer, TextScene, TextSceneQuad, TiledTextEngineFrame,
 };
+use std::sync::Arc;
 
 /// Prepared text for one frame.
 ///
@@ -142,15 +143,34 @@ impl<R: TextRenderer> TextEngine<R> {
 /// This is a headless bridge: `textui` shapes with cosmic-text, rasterizes glyphs
 /// into CPU atlas pages, and SturdyEngine owns all eventual GPU upload/draw work.
 pub struct TextUiRenderer {
-    inner: textui::TextUi,
+    alpha_inner: textui::TextUi,
+    sdf_inner: textui::TextUi,
+    msdf_inner: textui::TextUi,
     frame_number: u64,
     max_texture_side_px: usize,
 }
 
 impl TextUiRenderer {
     pub fn new(max_texture_side_px: usize) -> Self {
+        let mut alpha_inner = textui::TextUi::new();
+        let mut alpha_config = alpha_inner.graphics_config();
+        alpha_config.rasterization.glyph_raster_mode = textui::TextGlyphRasterMode::AlphaMask;
+        alpha_inner.set_graphics_config(alpha_config);
+
+        let mut sdf_inner = textui::TextUi::new();
+        let mut sdf_config = sdf_inner.graphics_config();
+        sdf_config.rasterization.glyph_raster_mode = textui::TextGlyphRasterMode::Sdf;
+        sdf_inner.set_graphics_config(sdf_config);
+
+        let mut msdf_inner = textui::TextUi::new();
+        let mut msdf_config = msdf_inner.graphics_config();
+        msdf_config.rasterization.glyph_raster_mode = textui::TextGlyphRasterMode::Msdf;
+        msdf_inner.set_graphics_config(msdf_config);
+
         Self {
-            inner: textui::TextUi::new(),
+            alpha_inner,
+            sdf_inner,
+            msdf_inner,
             frame_number: 0,
             max_texture_side_px: max_texture_side_px.max(1),
         }
@@ -161,11 +181,27 @@ impl TextUiRenderer {
     }
 
     pub fn inner(&self) -> &textui::TextUi {
-        &self.inner
+        &self.msdf_inner
     }
 
     pub fn inner_mut(&mut self) -> &mut textui::TextUi {
-        &mut self.inner
+        &mut self.msdf_inner
+    }
+
+    pub fn alpha_inner(&self) -> &textui::TextUi {
+        &self.alpha_inner
+    }
+
+    pub fn alpha_inner_mut(&mut self) -> &mut textui::TextUi {
+        &mut self.alpha_inner
+    }
+
+    pub fn sdf_inner(&self) -> &textui::TextUi {
+        &self.sdf_inner
+    }
+
+    pub fn sdf_inner_mut(&mut self) -> &mut textui::TextUi {
+        &mut self.sdf_inner
     }
 
     pub fn set_max_texture_side_px(&mut self, max_texture_side_px: usize) {
@@ -173,7 +209,9 @@ impl TextUiRenderer {
     }
 
     pub fn register_font_data(&mut self, bytes: Vec<u8>) {
-        self.inner.register_font_data(bytes);
+        self.alpha_inner.register_font_data(bytes.clone());
+        self.sdf_inner.register_font_data(bytes.clone());
+        self.msdf_inner.register_font_data(bytes);
     }
 }
 
@@ -191,10 +229,10 @@ impl TextRenderer for TextUiRenderer {
         target_height: u32,
     ) -> TextLayoutOutput {
         self.frame_number = self.frame_number.saturating_add(1);
-        self.inner.begin_frame_info(textui::TextFrameInfo::new(
-            self.frame_number,
-            self.max_texture_side_px,
-        ));
+        let frame_info = textui::TextFrameInfo::new(self.frame_number, self.max_texture_side_px);
+        self.alpha_inner.begin_frame_info(frame_info);
+        self.sdf_inner.begin_frame_info(frame_info);
+        self.msdf_inner.begin_frame_info(frame_info);
 
         let mut scene = TextScene::default();
         scene.bounds_min = [f32::INFINITY, f32::INFINITY];
@@ -203,15 +241,27 @@ impl TextRenderer for TextUiRenderer {
         for (source_index, desc) in descs.iter().enumerate() {
             let options = textui_options_from_desc(desc);
             let width = desc.max_width.or(Some(target_width as f32));
-            let text_scene = self.inner.prepare_label_gpu_scene_at_scale(
-                ("sturdy_text", source_index, self.frame_number),
+            let page_index_base = scene
+                .atlas_pages
+                .iter()
+                .map(|page| page.page_index)
+                .max()
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            let renderer = match text_raster_path(desc) {
+                TextRasterPath::AlphaMask => &mut self.alpha_inner,
+                TextRasterPath::Sdf => &mut self.sdf_inner,
+                TextRasterPath::Msdf => &mut self.msdf_inner,
+            };
+            let text_scene = renderer.prepare_label_gpu_scene_at_scale(
+                ("sturdy_text", source_index),
                 &desc.text,
                 &options,
                 width,
                 1.0,
             );
 
-            merge_textui_scene(source_index, &text_scene, &mut scene);
+            merge_textui_scene(source_index, &text_scene, page_index_base, &mut scene);
         }
 
         if scene.quads.is_empty() {
@@ -287,20 +337,27 @@ fn float_channel_to_u8(value: f32) -> u8 {
 fn merge_textui_scene(
     source_index: usize,
     text_scene: &textui::TextGpuScene,
+    page_index_base: u32,
     scene: &mut TextScene,
 ) {
     for page in &text_scene.atlas_pages {
+        let page_index = page.page_index as u32 + page_index_base;
         if !scene
             .atlas_pages
             .iter()
-            .any(|existing| existing.page_index == page.page_index as u32)
+            .any(|existing| existing.page_index == page_index)
         {
             scene.atlas_pages.push(TextAtlasPage {
-                page_index: page.page_index as u32,
+                page_index,
                 width: page.size_px[0] as u32,
                 height: page.size_px[1] as u32,
                 content_hash: page.content_hash,
-                pixels: page.rgba8.to_vec(),
+                content_mode: match page.content_mode {
+                    textui::TextAtlasContentMode::AlphaMask => TextAtlasContentMode::AlphaMask,
+                    textui::TextAtlasContentMode::Sdf => TextAtlasContentMode::Sdf,
+                    textui::TextAtlasContentMode::Msdf => TextAtlasContentMode::Msdf,
+                },
+                pixels: Arc::clone(&page.rgba8),
             });
         }
     }
@@ -323,11 +380,39 @@ fn merge_textui_scene(
             source_index,
             positions,
             uvs: quad.uvs,
-            atlas_page: quad.atlas_page_index as u32,
+            atlas_page: quad.atlas_page_index as u32 + page_index_base,
             color,
         });
     }
     scene.fingerprint ^= text_scene.fingerprint;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextRasterPath {
+    AlphaMask,
+    Sdf,
+    Msdf,
+}
+
+fn text_raster_path(desc: &TextDrawDesc) -> TextRasterPath {
+    if matches!(desc.placement, TextPlacement::World3d { .. }) {
+        return TextRasterPath::Msdf;
+    }
+
+    if should_use_screen_sdf(desc) {
+        TextRasterPath::Sdf
+    } else {
+        TextRasterPath::AlphaMask
+    }
+}
+
+fn should_use_screen_sdf(desc: &TextDrawDesc) -> bool {
+    desc.typography.font_size > 28.0
+}
+
+#[cfg(test)]
+fn should_use_msdf(desc: &TextDrawDesc) -> bool {
+    text_raster_path(desc) == TextRasterPath::Msdf
 }
 
 fn flip_textui_quad_y(positions: [[f32; 2]; 4], source_bounds_max_y: f32) -> [[f32; 2]; 4] {
@@ -371,7 +456,11 @@ fn prepare_legacy_quad(quad: &TextGlyphQuad) -> PreparedTextQuad {
 
 fn prepare_scene_quad(quad: &TextSceneQuad, placement: &TextPlacement) -> PreparedTextQuad {
     let positions = match placement {
-        TextPlacement::Screen2d { x, y } => quad.positions.map(|p| [p[0] + *x, p[1] + *y, 0.0]),
+        TextPlacement::Screen2d { x, y } => {
+            let x = snap_screen_text_position(*x);
+            let y = snap_screen_text_position(*y);
+            quad.positions.map(|p| [p[0] + x, p[1] + y, 0.0])
+        }
         TextPlacement::World3d {
             transform,
             pixels_per_world_unit,
@@ -387,6 +476,14 @@ fn prepare_scene_quad(quad: &TextSceneQuad, placement: &TextPlacement) -> Prepar
         uvs: quad.uvs,
         atlas_page: quad.atlas_page,
         color: quad.color,
+    }
+}
+
+fn snap_screen_text_position(value: f32) -> f32 {
+    if value.is_finite() {
+        value.round()
+    } else {
+        value
     }
 }
 
@@ -455,5 +552,62 @@ mod tests {
         assert_eq!(frame.draws.len(), 1);
         assert_eq!(frame.draws[0].quads[0].positions[0], [2.0, 3.0, 4.0]);
         assert_eq!(frame.draws[0].quads[0].positions[2], [3.0, 4.0, 4.0]);
+    }
+
+    #[test]
+    fn snaps_screen_space_text_placement_to_pixels() {
+        let mut renderer = StaticRenderer::default();
+        renderer.output = Some(TextLayoutOutput {
+            scene: TextScene {
+                quads: vec![TextSceneQuad {
+                    source_index: 0,
+                    positions: [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
+                    uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                    atlas_page: 0,
+                    color: [1.0, 1.0, 1.0, 1.0],
+                }],
+                ..TextScene::default()
+            },
+            ..TextLayoutOutput::default()
+        });
+        let desc =
+            TextDrawDesc::new("snap").placement(TextPlacement::Screen2d { x: 10.49, y: 20.51 });
+        let mut engine = TextEngine::new(renderer);
+
+        let frame = engine.prepare_frame(&[desc], 800, 600);
+
+        assert_eq!(frame.draws[0].quads[0].positions[0], [10.0, 21.0, 0.0]);
+        assert_eq!(frame.draws[0].quads[0].positions[2], [20.0, 31.0, 0.0]);
+    }
+
+    #[test]
+    fn large_screen_text_does_not_use_msdf_until_ui_path_is_validated() {
+        let desc = TextDrawDesc::new("large").font_size(48.0);
+
+        assert!(!should_use_msdf(&desc));
+        assert_eq!(text_raster_path(&desc), TextRasterPath::Sdf);
+    }
+
+    #[test]
+    fn small_screen_text_uses_alpha_masks_for_stable_pixel_alignment() {
+        let desc = TextDrawDesc::new("small").font_size(14.0);
+
+        assert_eq!(text_raster_path(&desc), TextRasterPath::AlphaMask);
+    }
+
+    #[test]
+    fn world_text_uses_msdf_for_scalable_transforms() {
+        let desc = TextDrawDesc::new("world").world_3d(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            16.0,
+            false,
+        );
+
+        assert_eq!(text_raster_path(&desc), TextRasterPath::Msdf);
     }
 }

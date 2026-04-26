@@ -2,19 +2,19 @@ use crate::{
     NativeWindowAppearanceError, PlatformCapabilityState, PlatformKind, WindowAppearance,
     WindowAppearanceCaps, WindowEffectQuality, WindowMaterialKind, WindowMaterialSupport,
 };
-use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 #[cfg(target_os = "windows")]
 use crate::{WindowBackdrop, WindowCornerStyle, WindowShadowMode};
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
     Foundation::{FALSE, HWND, TRUE},
     Graphics::Dwm::{
-        DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE, DWMWA_NCRENDERING_POLICY,
-        DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_HOSTBACKDROPBRUSH, DWMWA_WINDOW_CORNER_PREFERENCE,
-        DWMWA_WINDOW_CORNER_PREFERENCE_ROUND, DWMWA_WINDOW_CORNER_PREFERENCE_ROUNDSMALL,
-        DWMWA_WINDOW_CORNER_PREFERENCE_DEFAULT, DWMWA_WINDOW_CORNER_PREFERENCE_DONOTROUND,
-        DWMNCRP_DISABLED, DWMNCRP_ENABLED, DWMSBT_AUTO, DWMSBT_MAINWINDOW,
-        DWMSBT_NONE, DWMSBT_TABBEDWINDOW, DWMSBT_TRANSIENTWINDOW, DwmExtendFrameIntoClientArea,
+        DWM_SYSTEMBACKDROP_TYPE, DWM_WINDOW_CORNER_PREFERENCE, DWMNCRP_DISABLED, DWMNCRP_ENABLED,
+        DWMSBT_AUTO, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TABBEDWINDOW, DWMSBT_TRANSIENTWINDOW,
+        DWMWA_NCRENDERING_POLICY, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_HOSTBACKDROPBRUSH,
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWA_WINDOW_CORNER_PREFERENCE_DEFAULT,
+        DWMWA_WINDOW_CORNER_PREFERENCE_DONOTROUND, DWMWA_WINDOW_CORNER_PREFERENCE_ROUND,
+        DWMWA_WINDOW_CORNER_PREFERENCE_ROUNDSMALL, DwmExtendFrameIntoClientArea,
         DwmSetWindowAttribute, MARGINS,
     },
 };
@@ -161,7 +161,10 @@ unsafe fn set_corner_style(
     hwnd: HWND,
     appearance: WindowAppearance,
 ) -> Result<(), NativeWindowAppearanceError> {
-    let preference = match appearance.corner_style.unwrap_or(WindowCornerStyle::Default) {
+    let preference = match appearance
+        .corner_style
+        .unwrap_or(WindowCornerStyle::Default)
+    {
         WindowCornerStyle::Default => DWMWA_WINDOW_CORNER_PREFERENCE_DEFAULT,
         WindowCornerStyle::Rounded => {
             if matches!(appearance.backdrop, WindowBackdrop::Material(_)) {

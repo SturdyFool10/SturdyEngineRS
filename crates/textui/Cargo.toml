@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 cosmic-text.workspace = true
+swash = "0.2"

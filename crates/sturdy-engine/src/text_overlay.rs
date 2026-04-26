@@ -1,11 +1,11 @@
 use crate::{
     Engine, Extent3d, Format, GraphImage, Image, ImageDesc, ImageDimension, ImageUsage, Mesh,
     MeshProgram, MeshProgramDesc, MeshVertexKind, QuadBatch, RenderFrame, Result, ShaderDesc,
-    ShaderSource, ShaderStage, TextDrawDesc, TextEngine, TextPlacement, TextTypography,
-    TextUiRenderer, TiledTextAtlasPage,
+    ShaderSource, ShaderStage, TextAtlasContentMode, TextDrawDesc, TextEngine, TextPlacement,
+    TextTypography, TextUiRenderer, TiledTextAtlasPage,
 };
 
-const TEXT_OVERLAY_FRAGMENT: &str = r#"
+const TEXT_OVERLAY_ALPHA_FRAGMENT: &str = r#"
 Texture2D<float4> text_atlas;
 SamplerState text_atlas_sampler;
 
@@ -17,7 +17,49 @@ struct FSInput {
 
 float4 main(FSInput input) : SV_TARGET {
     float4 sample = text_atlas.SampleLevel(text_atlas_sampler, input.uv, 0.0);
-    return float4(input.color.rgb, input.color.a * sample.a);
+    return sample * input.color;
+}
+"#;
+
+const TEXT_OVERLAY_SDF_FRAGMENT: &str = r#"
+Texture2D<float4> text_atlas;
+SamplerState text_atlas_sampler;
+
+struct FSInput {
+    float4 position : SV_POSITION;
+    float2 uv : TEXCOORD0;
+    float4 color : COLOR0;
+};
+
+float4 main(FSInput input) : SV_TARGET {
+    float4 sample = text_atlas.SampleLevel(text_atlas_sampler, input.uv, 0.0);
+    float distance = sample.r;
+    float width = max(fwidth(distance), 1.0 / 255.0);
+    float alpha = smoothstep(0.5 - width, 0.5 + width, distance);
+    return float4(input.color.rgb, input.color.a * alpha);
+}
+"#;
+
+const TEXT_OVERLAY_MSDF_FRAGMENT: &str = r#"
+Texture2D<float4> text_atlas;
+SamplerState text_atlas_sampler;
+
+struct FSInput {
+    float4 position : SV_POSITION;
+    float2 uv : TEXCOORD0;
+    float4 color : COLOR0;
+};
+
+float median3(float a, float b, float c) {
+    return max(min(a, b), min(max(a, b), c));
+}
+
+float4 main(FSInput input) : SV_TARGET {
+    float4 sample = text_atlas.SampleLevel(text_atlas_sampler, input.uv, 0.0);
+    float distance = median3(sample.r, sample.g, sample.b);
+    float width = max(fwidth(distance), 1.0 / 255.0);
+    float alpha = smoothstep(0.5 - width, 0.5 + width, distance);
+    return float4(input.color.rgb, input.color.a * alpha);
 }
 "#;
 
@@ -25,8 +67,13 @@ float4 main(FSInput input) : SV_TARGET {
 pub struct TextOverlay {
     engine: Engine,
     text_engine: TextEngine<TextUiRenderer>,
-    program: MeshProgram,
+    alpha_program: MeshProgram,
+    sdf_program: MeshProgram,
+    msdf_program: MeshProgram,
     atlas_images: Vec<Image>,
+    /// Tracks the last-uploaded content hash per atlas image slot to avoid
+    /// re-uploading unchanged pages every frame.
+    atlas_image_hashes: Vec<u64>,
     meshes: Vec<Mesh>,
     mesh_pages: Vec<u32>,
 }
@@ -36,29 +83,30 @@ impl TextOverlay {
         Ok(Self {
             engine: engine.clone(),
             text_engine: TextEngine::new(TextUiRenderer::with_engine(engine)),
-            program: MeshProgram::new(
-                engine,
-                MeshProgramDesc {
-                    fragment: ShaderDesc {
-                        source: ShaderSource::Inline(TEXT_OVERLAY_FRAGMENT.to_string()),
-                        entry_point: "main".to_string(),
-                        stage: ShaderStage::Fragment,
-                    },
-                    vertex: None,
-                    vertex_kind: MeshVertexKind::V2d,
-                    alpha_blend: true,
-                },
-            )?,
+            alpha_program: text_program(engine, TEXT_OVERLAY_ALPHA_FRAGMENT)?,
+            sdf_program: text_program(engine, TEXT_OVERLAY_SDF_FRAGMENT)?,
+            msdf_program: text_program(engine, TEXT_OVERLAY_MSDF_FRAGMENT)?,
             atlas_images: Vec::new(),
+            atlas_image_hashes: Vec::new(),
             meshes: Vec::new(),
             mesh_pages: Vec::new(),
         })
     }
 
-    pub fn draw(&mut self, frame: &RenderFrame, target: &GraphImage, width: u32, height: u32, descs: &[TextDrawDesc]) -> Result<()> {
-        let tiled_text_frame = self
-            .text_engine
-            .prepare_tiled_frame_with_engine_limits(&self.engine, descs, width, height);
+    pub fn draw(
+        &mut self,
+        frame: &RenderFrame,
+        target: &GraphImage,
+        width: u32,
+        height: u32,
+        descs: &[TextDrawDesc],
+    ) -> Result<()> {
+        let tiled_text_frame = self.text_engine.prepare_tiled_frame_with_engine_limits(
+            &self.engine,
+            descs,
+            width,
+            height,
+        );
         if tiled_text_frame.draws.is_empty() || tiled_text_frame.atlas_pages.is_empty() {
             return Ok(());
         }
@@ -112,20 +160,24 @@ impl TextOverlay {
             let Some(image) = self.atlas_images.get(page.page_index as usize) else {
                 continue;
             };
-            let pixels = page.pixels.clone();
-            let page_width = page.size_px[0];
-            frame.update_texture_2d("text_atlas", image, move |x, y| {
-                let index = ((y * page_width + x) * 4) as usize;
-                [
-                    pixels[index],
-                    pixels[index + 1],
-                    pixels[index + 2],
-                    pixels[index + 3],
-                ]
-            })?;
+            let cached_hash = self
+                .atlas_image_hashes
+                .get(page.page_index as usize)
+                .copied()
+                .unwrap_or(!0);
+            if cached_hash != page.content_hash {
+                frame.update_texture_2d_pixels("text_atlas", image, &page.pixels)?;
+                while self.atlas_image_hashes.len() <= page.page_index as usize {
+                    self.atlas_image_hashes.push(!0);
+                }
+                self.atlas_image_hashes[page.page_index as usize] = page.content_hash;
+            } else {
+                // Content unchanged: register the image name without re-uploading.
+                frame.import_image("text_atlas", image)?;
+            }
             frame.set_sampler("text_atlas_sampler", crate::SamplerPreset::Linear);
             if let Some(mesh) = self.meshes.get(mesh_index) {
-                target.draw_mesh(mesh, &self.program)?;
+                target.draw_mesh(mesh, self.program_for_content_mode(page.content_mode))?;
             }
         }
 
@@ -171,8 +223,10 @@ impl TextOverlay {
             }
             while self.atlas_images.len() <= index {
                 self.atlas_images.push(self.create_atlas_image(1, 1)?);
+                self.atlas_image_hashes.push(!0);
             }
             self.atlas_images[index] = self.create_atlas_image(page.size_px[0], page.size_px[1])?;
+            self.atlas_image_hashes[index] = !0;
         }
         Ok(())
     }
@@ -197,4 +251,28 @@ impl TextOverlay {
         let _ = image.set_debug_name("text-overlay-atlas");
         Ok(image)
     }
+
+    fn program_for_content_mode(&self, mode: TextAtlasContentMode) -> &MeshProgram {
+        match mode {
+            TextAtlasContentMode::AlphaMask => &self.alpha_program,
+            TextAtlasContentMode::Sdf => &self.sdf_program,
+            TextAtlasContentMode::Msdf => &self.msdf_program,
+        }
+    }
+}
+
+fn text_program(engine: &Engine, fragment: &str) -> Result<MeshProgram> {
+    MeshProgram::new(
+        engine,
+        MeshProgramDesc {
+            fragment: ShaderDesc {
+                source: ShaderSource::Inline(fragment.to_string()),
+                entry_point: "main".to_string(),
+                stage: ShaderStage::Fragment,
+            },
+            vertex: None,
+            vertex_kind: MeshVertexKind::V2d,
+            alpha_blend: true,
+        },
+    )
 }

@@ -14,10 +14,10 @@ use std::{
 };
 
 use crate::{
-    current_window_appearance_caps, BackendKind, Engine, Error, Format, GraphImage, GraphReport,
-    MotionVectorDebugPass, PlatformCapabilityState, RenderFrame, Result, Surface,
-    SurfaceCapabilities, SurfaceColorSpace, SurfaceImage, SurfacePresentMode, SurfaceSize,
-    WindowCornerStyle, WindowMaterialKind,
+    BackendKind, Engine, Error, Format, GraphImage, GraphReport, MotionVectorDebugPass,
+    PlatformCapabilityState, RenderFrame, Result, Surface, SurfaceCapabilities, SurfaceColorSpace,
+    SurfaceImage, SurfacePresentMode, SurfaceSize, WindowCornerStyle, WindowMaterialKind,
+    current_window_appearance_caps,
 };
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -123,7 +123,8 @@ impl AppRuntime {
             surface_size: surface_info.size,
             ..self.controller.settings()
         });
-        self.controller.sync_engine_capabilities(hdr_caps, surface_caps);
+        self.controller
+            .sync_engine_capabilities(hdr_caps, surface_caps);
         self.controller.update_diagnostics(|diagnostics| {
             diagnostics.backend = self.engine.backend_kind();
             diagnostics.adapter_name = self.engine.adapter_name();
@@ -194,11 +195,8 @@ impl<'a> AppRuntimeFrame<'a> {
         name: impl Into<String>,
         requested_msaa_samples: u8,
     ) -> Result<GraphImage> {
-        self.default_scene_target().create(
-            &self.render_frame,
-            name,
-            requested_msaa_samples,
-        )
+        self.default_scene_target()
+            .create(&self.render_frame, name, requested_msaa_samples)
     }
 
     /// Resolve the default HDR scene target to the single-sample scene color used downstream.
@@ -378,7 +376,10 @@ impl RuntimeController {
     }
 
     /// Return support/capability information for one runtime setting.
-    pub fn setting_support(&self, id: impl Into<RuntimeSettingId>) -> Option<RuntimeSettingSupport> {
+    pub fn setting_support(
+        &self,
+        id: impl Into<RuntimeSettingId>,
+    ) -> Option<RuntimeSettingSupport> {
         self.shared
             .lock()
             .expect("runtime controller poisoned")
@@ -678,9 +679,15 @@ impl Default for RuntimeSettingsSnapshot {
             adapter_name: None,
             hdr_enabled: false,
             present_mode: None,
-            surface_size: SurfaceSize { width: 1, height: 1 },
+            surface_size: SurfaceSize {
+                width: 1,
+                height: 1,
+            },
             window_title: "Sturdy Engine".to_string(),
-            window_size: SurfaceSize { width: 1, height: 1 },
+            window_size: SurfaceSize {
+                width: 1,
+                height: 1,
+            },
             window_position: None,
             window_mode: WindowMode::Windowed,
             window_decorations: true,
@@ -907,7 +914,9 @@ impl RuntimeShared {
             .setting_entries
             .get_mut(&RuntimeSettingId::from(RuntimeSettingKey::HdrMode))
         {
-            let hdr_available = hdr_caps.map(|caps| caps.hdr10 || caps.sc_rgb).unwrap_or(false);
+            let hdr_available = hdr_caps
+                .map(|caps| caps.hdr10 || caps.sc_rgb)
+                .unwrap_or(false);
             entry.descriptor.options = bool_options(if hdr_available {
                 &[false, true]
             } else {
@@ -931,9 +940,13 @@ impl RuntimeShared {
                     value: RuntimeSettingValue::Text("Auto".to_string()),
                     label: "Auto".to_string(),
                 }];
-                options.extend(surface_caps.present_modes.iter().map(|mode| RuntimeSettingOption {
-                    value: RuntimeSettingValue::Text(surface_present_mode_name(*mode).to_string()),
-                    label: format!("{mode:?}"),
+                options.extend(surface_caps.present_modes.iter().map(|mode| {
+                    RuntimeSettingOption {
+                        value: RuntimeSettingValue::Text(
+                            surface_present_mode_name(*mode).to_string(),
+                        ),
+                        label: format!("{mode:?}"),
+                    }
                 }));
                 entry.descriptor.options = options;
                 entry.support = RuntimeSettingSupport::supported();
@@ -945,24 +958,25 @@ impl RuntimeShared {
         }
 
         let appearance_caps = current_window_appearance_caps();
-        if let Some(entry) = self
-            .setting_entries
-            .get_mut(&RuntimeSettingId::from(RuntimeSettingKey::SurfaceTransparency))
-        {
+        if let Some(entry) = self.setting_entries.get_mut(&RuntimeSettingId::from(
+            RuntimeSettingKey::SurfaceTransparency,
+        )) {
             entry.support = capability_state_to_support(
                 appearance_caps.transparency,
                 "runtime surface transparency changes are unavailable on this platform",
             );
         }
-        if let Some(entry) = self
-            .setting_entries
-            .get_mut(&RuntimeSettingId::from(RuntimeSettingKey::WindowBackgroundEffect))
-        {
+        if let Some(entry) = self.setting_entries.get_mut(&RuntimeSettingId::from(
+            RuntimeSettingKey::WindowBackgroundEffect,
+        )) {
             let mut options = vec![RuntimeSettingOption {
                 value: RuntimeSettingValue::Text("None".to_string()),
                 label: "None".to_string(),
             }];
-            if appearance_caps.transparency.is_some_and(is_capability_supported) {
+            if appearance_caps
+                .transparency
+                .is_some_and(is_capability_supported)
+            {
                 options.push(RuntimeSettingOption {
                     value: RuntimeSettingValue::Text("Transparent".to_string()),
                     label: "Transparent".to_string(),
@@ -976,14 +990,15 @@ impl RuntimeShared {
             }
             for material in &appearance_caps.materials {
                 options.push(RuntimeSettingOption {
-                    value: RuntimeSettingValue::Text(window_material_setting_name(material.kind).to_string()),
+                    value: RuntimeSettingValue::Text(
+                        window_material_setting_name(material.kind).to_string(),
+                    ),
                     label: window_material_setting_name(material.kind).to_string(),
                 });
             }
             entry.descriptor.options = options;
-            let has_effects =
-                appearance_caps.blur.is_some_and(is_capability_supported)
-                    || !appearance_caps.materials.is_empty();
+            let has_effects = appearance_caps.blur.is_some_and(is_capability_supported)
+                || !appearance_caps.materials.is_empty();
             entry.support = if has_effects {
                 RuntimeSettingSupport::supported()
             } else {
@@ -992,10 +1007,9 @@ impl RuntimeShared {
                 )
             };
         }
-        if let Some(entry) = self
-            .setting_entries
-            .get_mut(&RuntimeSettingId::from(RuntimeSettingKey::WindowCornerStyle))
-        {
+        if let Some(entry) = self.setting_entries.get_mut(&RuntimeSettingId::from(
+            RuntimeSettingKey::WindowCornerStyle,
+        )) {
             entry.support = if matches!(crate::current_platform(), crate::PlatformKind::Windows) {
                 RuntimeSettingSupport::supported()
             } else {
@@ -1024,7 +1038,10 @@ impl RuntimeShared {
     }
 
     fn set_unsupported(&mut self, setting: RuntimeSettingKey, reason: &str) {
-        if let Some(entry) = self.setting_entries.get_mut(&RuntimeSettingId::from(setting)) {
+        if let Some(entry) = self
+            .setting_entries
+            .get_mut(&RuntimeSettingId::from(setting))
+        {
             entry.support = RuntimeSettingSupport::unsupported(reason.to_string());
         }
     }
@@ -1120,7 +1137,10 @@ pub struct DebugImageRegistry {
 
 impl DebugImageRegistry {
     pub fn clear(&self) {
-        self.names.lock().expect("debug image registry poisoned").clear();
+        self.names
+            .lock()
+            .expect("debug image registry poisoned")
+            .clear();
     }
 
     pub fn register(&self, image: &GraphImage, name: impl Into<String>) {
@@ -1287,7 +1307,8 @@ impl RuntimeSettingDescriptor {
     }
 
     fn accepts_value(&self, value: &RuntimeSettingValue) -> bool {
-        let same_kind = std::mem::discriminant(&self.default_value) == std::mem::discriminant(value);
+        let same_kind =
+            std::mem::discriminant(&self.default_value) == std::mem::discriminant(value);
         same_kind
             && (self.options.is_empty() || self.options.iter().any(|option| option.value == *value))
     }
@@ -1439,9 +1460,9 @@ impl RuntimeSettingKey {
             | Self::WindowAlwaysOnTop
             | Self::WindowCornerStyle
             | Self::WindowBackgroundEffect => RuntimeApplyPath::WindowReconfigure,
-            Self::AntiAliasingMode
-            | Self::ShaderHotReloadPolicy
-            | Self::AssetHotReloadPolicy => RuntimeApplyPath::GraphRebuild,
+            Self::AntiAliasingMode | Self::ShaderHotReloadPolicy | Self::AssetHotReloadPolicy => {
+                RuntimeApplyPath::GraphRebuild
+            }
             Self::AntiAliasingDial
             | Self::BloomEnabled
             | Self::BloomOnly

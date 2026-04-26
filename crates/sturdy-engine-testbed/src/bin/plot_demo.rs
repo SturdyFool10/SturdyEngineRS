@@ -19,7 +19,14 @@ impl EngineApp for PlotDemo {
         .title("Plot Demo");
         plot.add_line_series(
             "trend",
-            vec![[0.0, 1.0], [1.0, 2.5], [2.0, 3.5], [3.0, 5.0], [4.0, 6.2], [5.0, 7.8]],
+            vec![
+                [0.0, 1.0],
+                [1.0, 2.5],
+                [2.0, 3.5],
+                [3.0, 5.0],
+                [4.0, 6.2],
+                [5.0, 7.8],
+            ],
         );
         plot.add_scatter_series("samples", vec![[0.5, 1.4], [2.4, 4.2], [4.8, 7.1]]);
         plot.add_bar_series(

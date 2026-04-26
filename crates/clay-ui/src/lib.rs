@@ -26,7 +26,7 @@ pub use color::{
     ColorComputationMode, ColorSpaceKind, ColorSpaceSample, ColorWorkload, CpuColorTransform,
     UiColor, color_computation_mode,
 };
-pub use context::{TextSceneKey, UiContext, UiFrameOutput, UiTreeInstance};
+pub use context::{TextSceneKey, UiContext, UiFrameOutput, UiTextFrameStats, UiTreeInstance};
 pub use element::{Element, ElementKind, ElementStyle, ImageElement, TextElement};
 pub use font_discovery::{FontDiscovery, FontFaceSummary, FontSearchQuery};
 pub use geometry::{Axis, Edges, Rect, Size, radii_all};
@@ -38,7 +38,7 @@ pub use input::{
 };
 pub use layout::{
     Align, LayoutCache, LayoutDirection, LayoutError, LayoutInput, LayoutOutput, LayoutSizing,
-    LayoutTree,
+    LayoutTextCacheStats, LayoutTree,
 };
 pub use render_command::{
     BorderRenderData, ClipRenderData, CustomRenderData, ImageRenderData, RectangleRenderData,

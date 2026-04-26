@@ -320,7 +320,9 @@ impl ActionBindingRegistry {
     }
 
     pub fn pending_rebind_action(&self) -> Option<&str> {
-        self.pending_rebind.as_ref().map(|pending| pending.action.as_str())
+        self.pending_rebind
+            .as_ref()
+            .map(|pending| pending.action.as_str())
     }
 
     pub fn handle_input(&mut self, input: &KeyInput) -> Option<BindingChange> {
@@ -390,9 +392,7 @@ impl KeyInput {
 }
 
 #[cfg(feature = "app-shell")]
-pub(crate) fn key_modifiers_from_winit(
-    modifiers: winit::keyboard::ModifiersState,
-) -> KeyModifiers {
+pub(crate) fn key_modifiers_from_winit(modifiers: winit::keyboard::ModifiersState) -> KeyModifiers {
     KeyModifiers {
         ctrl: modifiers.control_key(),
         alt: modifiers.alt_key(),

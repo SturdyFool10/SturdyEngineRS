@@ -260,7 +260,13 @@ impl Plot2d {
             h: size[1].max(1.0),
         };
 
-        overlay.filled_rect_screen(width, height, [rect.x, rect.y], [rect.w, rect.h], self.theme.background);
+        overlay.filled_rect_screen(
+            width,
+            height,
+            [rect.x, rect.y],
+            [rect.w, rect.h],
+            self.theme.background,
+        );
         overlay.rectangle_screen(width, height, [rect.x, rect.y], [rect.w, rect.h]);
 
         let plot_area = PlotRect {
@@ -276,9 +282,19 @@ impl Plot2d {
         overlay.set_style(grid_style);
         for step in 1..5 {
             let x = plot_area.x + plot_area.w * step as f32 / 5.0;
-            overlay.line_screen(width, height, [x, plot_area.y], [x, plot_area.y + plot_area.h]);
+            overlay.line_screen(
+                width,
+                height,
+                [x, plot_area.y],
+                [x, plot_area.y + plot_area.h],
+            );
             let y = plot_area.y + plot_area.h * step as f32 / 5.0;
-            overlay.line_screen(width, height, [plot_area.x, y], [plot_area.x + plot_area.w, y]);
+            overlay.line_screen(
+                width,
+                height,
+                [plot_area.x, y],
+                [plot_area.x + plot_area.w, y],
+            );
         }
 
         let mut axis_style = overlay.shapes().style();
@@ -329,7 +345,8 @@ impl Plot2d {
                         let right = bar.center + bar.width * 0.5;
                         let top = bar.value;
                         let bottom = self.view.y.min.min(0.0);
-                        let Some(min_screen) = map_point(self.view, plot_area, [left, bottom]) else {
+                        let Some(min_screen) = map_point(self.view, plot_area, [left, bottom])
+                        else {
                             continue;
                         };
                         let Some(max_screen) = map_point(self.view, plot_area, [right, top]) else {
@@ -440,7 +457,10 @@ mod tests {
 
     #[test]
     fn plot_pan_and_zoom_adjust_view() {
-        let mut plot = Plot2d::new(PlotView::new(PlotRange::new(0.0, 10.0), PlotRange::new(-1.0, 1.0)));
+        let mut plot = Plot2d::new(PlotView::new(
+            PlotRange::new(0.0, 10.0),
+            PlotRange::new(-1.0, 1.0),
+        ));
         plot.pan(2.0, 0.5).zoom(2.0, 2.0, (4.0, 0.0));
 
         assert!(plot.view.x.min > 0.0);
@@ -451,7 +471,10 @@ mod tests {
 
     #[test]
     fn nearest_point_finds_closest_series_sample() {
-        let mut plot = Plot2d::new(PlotView::new(PlotRange::new(0.0, 10.0), PlotRange::new(0.0, 10.0)));
+        let mut plot = Plot2d::new(PlotView::new(
+            PlotRange::new(0.0, 10.0),
+            PlotRange::new(0.0, 10.0),
+        ));
         plot.add_line_series("line", vec![[1.0, 1.0], [5.0, 5.0], [9.0, 9.0]]);
 
         assert_eq!(plot.nearest_point([4.7, 4.8]), Some([5.0, 5.0]));
@@ -459,8 +482,11 @@ mod tests {
 
     #[test]
     fn render_populates_overlay_with_shapes_and_text() {
-        let mut plot = Plot2d::new(PlotView::new(PlotRange::new(0.0, 4.0), PlotRange::new(0.0, 4.0)))
-            .title("demo");
+        let mut plot = Plot2d::new(PlotView::new(
+            PlotRange::new(0.0, 4.0),
+            PlotRange::new(0.0, 4.0),
+        ))
+        .title("demo");
         plot.add_line_series("trend", vec![[0.0, 0.0], [2.0, 3.0], [4.0, 2.0]]);
         plot.add_scatter_series("points", vec![[1.0, 1.5], [3.0, 2.5]]);
         plot.add_bar_series(

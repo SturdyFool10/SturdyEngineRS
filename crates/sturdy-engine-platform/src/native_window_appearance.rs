@@ -47,17 +47,17 @@ pub fn apply_native_window_appearance(
 ) -> Result<(), NativeWindowAppearanceError> {
     match current_platform() {
         #[cfg(target_os = "windows")]
-        crate::PlatformKind::Windows => crate::windows::apply_native_window_appearance(
-            display, window, size, appearance,
-        ),
+        crate::PlatformKind::Windows => {
+            crate::windows::apply_native_window_appearance(display, window, size, appearance)
+        }
         #[cfg(target_os = "macos")]
-        crate::PlatformKind::Macos => crate::macos::apply_native_window_appearance(
-            display, window, size, appearance,
-        ),
+        crate::PlatformKind::Macos => {
+            crate::macos::apply_native_window_appearance(display, window, size, appearance)
+        }
         #[cfg(target_os = "linux")]
-        crate::PlatformKind::Linux => crate::linux::apply_native_window_appearance(
-            display, window, size, appearance,
-        ),
+        crate::PlatformKind::Linux => {
+            crate::linux::apply_native_window_appearance(display, window, size, appearance)
+        }
         _ => Err(NativeWindowAppearanceError::PlatformUnavailable(
             "native window appearance is not implemented on this platform",
         )),

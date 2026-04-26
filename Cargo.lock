@@ -1513,6 +1513,8 @@ name = "sturdy-engine-testbed"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "clay-ui",
+ "glam 0.29.3",
  "raw-window-handle",
  "sturdy-engine",
  "sturdy-engine-core",
@@ -1555,6 +1557,7 @@ name = "textui"
 version = "0.1.16-Alpha"
 dependencies = [
  "cosmic-text",
+ "swash",
 ]
 
 [[package]]

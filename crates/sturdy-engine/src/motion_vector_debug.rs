@@ -1,4 +1,7 @@
-use crate::{Engine, Extent3d, Format, GraphImage, ImageDesc, ImageDimension, ImageUsage, RenderFrame, Result, ShaderProgram};
+use crate::{
+    Engine, Extent3d, Format, GraphImage, ImageDesc, ImageDimension, ImageUsage, RenderFrame,
+    Result, ShaderProgram,
+};
 
 const SHADER: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

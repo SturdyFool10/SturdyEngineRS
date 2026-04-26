@@ -90,15 +90,51 @@ impl DebugDraw2d {
 
         let inv_length = length_sq.sqrt().recip();
         let half_thickness = style.thickness.max(0.0) * 0.5;
-        let nx = -dy * inv_length * half_thickness;
-        let ny = dx * inv_length * half_thickness;
+        if half_thickness <= f32::EPSILON {
+            return self;
+        }
 
+        let fringe = half_thickness.min(style.thickness.max(0.0) * 0.35);
+        let core_half_thickness = (half_thickness - fringe).max(0.0);
+        if core_half_thickness > f32::EPSILON {
+            let nx = -dy * inv_length * core_half_thickness;
+            let ny = dx * inv_length * core_half_thickness;
+            self.push_quad(
+                [from[0] + nx, from[1] + ny],
+                [to[0] + nx, to[1] + ny],
+                [to[0] - nx, to[1] - ny],
+                [from[0] - nx, from[1] - ny],
+                style.color,
+            );
+        }
+
+        let core_nx = -dy * inv_length * core_half_thickness;
+        let core_ny = dx * inv_length * core_half_thickness;
         self.push_quad(
-            [from[0] + nx, from[1] + ny],
-            [to[0] + nx, to[1] + ny],
-            [to[0] - nx, to[1] - ny],
-            [from[0] - nx, from[1] - ny],
-            style.color,
+            [
+                from[0] - dy * inv_length * half_thickness,
+                from[1] + dx * inv_length * half_thickness,
+            ],
+            [
+                to[0] - dy * inv_length * half_thickness,
+                to[1] + dx * inv_length * half_thickness,
+            ],
+            [to[0] + core_nx, to[1] + core_ny],
+            [from[0] + core_nx, from[1] + core_ny],
+            faded_color(style.color, 0.42),
+        );
+        self.push_quad(
+            [from[0] - core_nx, from[1] - core_ny],
+            [to[0] - core_nx, to[1] - core_ny],
+            [
+                to[0] + dy * inv_length * half_thickness,
+                to[1] - dx * inv_length * half_thickness,
+            ],
+            [
+                from[0] + dy * inv_length * half_thickness,
+                from[1] - dx * inv_length * half_thickness,
+            ],
+            faded_color(style.color, 0.42),
         );
         self
     }
@@ -107,11 +143,7 @@ impl DebugDraw2d {
         self.polyline_with_style(points, self.style)
     }
 
-    pub fn polyline_with_style(
-        &mut self,
-        points: &[[f32; 2]],
-        style: DebugDrawStyle,
-    ) -> &mut Self {
+    pub fn polyline_with_style(&mut self, points: &[[f32; 2]], style: DebugDrawStyle) -> &mut Self {
         for segment in points.windows(2) {
             self.line_with_style(segment[0], segment[1], style);
         }
@@ -227,17 +259,15 @@ impl DebugDraw2d {
             return self;
         }
         let base = self.vertices.len() as u32;
-        self.vertices.extend(points.iter().map(|&position| Vertex2d {
-            position,
-            uv: [0.0, 0.0],
-            color,
-        }));
+        self.vertices
+            .extend(points.iter().map(|&position| Vertex2d {
+                position,
+                uv: [0.0, 0.0],
+                color,
+            }));
         for index in 1..points.len() - 1 {
-            self.indices.extend_from_slice(&[
-                base,
-                base + index as u32,
-                base + index as u32 + 1,
-            ]);
+            self.indices
+                .extend_from_slice(&[base, base + index as u32, base + index as u32 + 1]);
         }
         self
     }
@@ -246,14 +276,7 @@ impl DebugDraw2d {
         Mesh::indexed_2d(engine, &self.vertices, &self.indices)
     }
 
-    fn push_quad(
-        &mut self,
-        a: [f32; 2],
-        b: [f32; 2],
-        c: [f32; 2],
-        d: [f32; 2],
-        color: [f32; 4],
-    ) {
+    fn push_quad(&mut self, a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2], color: [f32; 4]) {
         let base = self.vertices.len() as u32;
         self.vertices.extend_from_slice(&[
             Vertex2d {
@@ -282,17 +305,22 @@ impl DebugDraw2d {
     }
 }
 
+fn faded_color(mut color: [f32; 4], alpha_scale: f32) -> [f32; 4] {
+    color[3] *= alpha_scale;
+    color
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn line_emits_one_quad() {
+    fn line_emits_core_and_fringe_quads() {
         let mut draw = DebugDraw2d::new();
         draw.line([-0.5, 0.0], [0.5, 0.0]);
 
-        assert_eq!(draw.vertex_count(), 4);
-        assert_eq!(draw.index_count(), 6);
+        assert_eq!(draw.vertex_count(), 12);
+        assert_eq!(draw.index_count(), 18);
     }
 
     #[test]
@@ -300,8 +328,8 @@ mod tests {
         let mut draw = DebugDraw2d::new();
         draw.polyline(&[[-0.5, -0.5], [0.0, 0.0], [0.5, -0.5]]);
 
-        assert_eq!(draw.vertex_count(), 8);
-        assert_eq!(draw.index_count(), 12);
+        assert_eq!(draw.vertex_count(), 24);
+        assert_eq!(draw.index_count(), 36);
     }
 
     #[test]
@@ -311,14 +339,17 @@ mod tests {
         draw.cross_marker([0.0, 0.0]);
         draw.point([0.0, 0.0]);
 
-        assert_eq!(draw.vertex_count(), 28);
-        assert_eq!(draw.index_count(), 42);
+        assert_eq!(draw.vertex_count(), 76);
+        assert_eq!(draw.index_count(), 114);
     }
 
     #[test]
     fn filled_polygon_uses_triangle_fan() {
         let mut draw = DebugDraw2d::new();
-        draw.filled_polygon(&[[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]], [1.0, 0.0, 0.0, 1.0]);
+        draw.filled_polygon(
+            &[[-0.5, -0.5], [0.5, -0.5], [0.0, 0.5]],
+            [1.0, 0.0, 0.0, 1.0],
+        );
 
         assert_eq!(draw.vertex_count(), 3);
         assert_eq!(draw.index_count(), 3);
@@ -333,7 +364,7 @@ mod tests {
         draw.circle([0.0, 0.0], 0.5);
         draw.filled_circle([0.0, 0.0], 0.25);
 
-        assert_eq!(draw.vertex_count(), 15);
-        assert_eq!(draw.index_count(), 21);
+        assert_eq!(draw.vertex_count(), 39);
+        assert_eq!(draw.index_count(), 57);
     }
 }

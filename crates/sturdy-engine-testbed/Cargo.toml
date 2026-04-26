@@ -12,8 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 bytemuck = "1"
+clay-ui = { path = "../clay-ui" }
+glam.workspace = true
 raw-window-handle = "0.6"
 sturdy-engine = { path = "../sturdy-engine" }
+sturdy-engine-core = { path = "../sturdy-engine-core" }
 winit = "0.30"
 
 [build-dependencies]

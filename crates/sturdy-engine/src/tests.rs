@@ -323,8 +323,14 @@ fn runtime_controller_registers_app_settings_and_records_changes() {
 
     let changes = controller.setting_changes_since(starting_revision);
     assert_eq!(changes.len(), 1);
-    assert_eq!(changes[0].setting, RuntimeSettingId::app("textures.resolution"));
-    assert_eq!(changes[0].value, RuntimeSettingValue::Text("medium".to_string()));
+    assert_eq!(
+        changes[0].setting,
+        RuntimeSettingId::app("textures.resolution")
+    );
+    assert_eq!(
+        changes[0].value,
+        RuntimeSettingValue::Text("medium".to_string())
+    );
     assert_eq!(changes[0].path, RuntimeApplyPath::Immediate);
 }
 
@@ -418,7 +424,10 @@ fn runtime_controller_records_apply_notifications_for_applied_and_rejected_reque
 
 #[test]
 fn keybind_serializes_and_parses_round_trip() {
-    let binding = Keybind::new([KeyModifier::Ctrl, KeyModifier::Shift], Some("KeyK".to_string()));
+    let binding = Keybind::new(
+        [KeyModifier::Ctrl, KeyModifier::Shift],
+        Some("KeyK".to_string()),
+    );
     let serialized = binding.to_string();
 
     assert_eq!(serialized, "Ctrl+Shift+KeyK");

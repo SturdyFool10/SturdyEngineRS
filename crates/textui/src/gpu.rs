@@ -380,6 +380,11 @@ pub(super) fn cpu_page_to_page_data(
         page_index,
         size_px: page.size,
         content_hash,
+        content_mode: match page.content_mode {
+            GlyphContentMode::AlphaMask => TextAtlasContentMode::AlphaMask,
+            GlyphContentMode::Sdf => TextAtlasContentMode::Sdf,
+            GlyphContentMode::Msdf => TextAtlasContentMode::Msdf,
+        },
         rgba8: Arc::from(page.rgba8.as_slice()),
     }
 }
@@ -398,6 +403,7 @@ pub(super) fn color_image_to_page_data(page_index: usize, image: &ColorImage) ->
         page_index,
         size_px: image.size,
         content_hash: hasher.finish(),
+        content_mode: TextAtlasContentMode::AlphaMask,
         rgba8: Arc::from(rgba8_bytes),
     }
 }

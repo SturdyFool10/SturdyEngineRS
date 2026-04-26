@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 /// Typography controls for a text draw operation.
 ///
 /// The fields mirror the text shaping controls used by `textui`/cosmic-text:
@@ -200,6 +202,13 @@ impl TextDrawDesc {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TextAtlasContentMode {
+    AlphaMask,
+    Sdf,
+    Msdf,
+}
+
 /// An opaque CPU-side atlas page ready to be uploaded to the GPU.
 ///
 /// Populated by a `TextRenderer` implementation; consumed by
@@ -214,8 +223,10 @@ pub struct TextAtlasPage {
     pub height: u32,
     /// Content hash from the text backend, when available.
     pub content_hash: u64,
+    /// How the atlas texels should be decoded in the shader.
+    pub content_mode: TextAtlasContentMode,
     /// Raw RGBA8 pixel data, row-major.
-    pub pixels: Vec<u8>,
+    pub pixels: Arc<[u8]>,
 }
 
 /// A text quad in local text-space before 2D/3D placement is applied.
