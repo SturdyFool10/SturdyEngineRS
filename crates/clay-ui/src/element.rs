@@ -1,6 +1,9 @@
 use glam::Vec4;
 
-use crate::{Edges, ElementId, Gradient, ShaderRef, Size, TextStyle, UiColor, geometry::radii_all};
+use crate::{
+    Edges, ElementId, Gradient, ShaderRef, Size, TextStyle, UiColor,
+    geometry::{UiShape, radii_all},
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ElementStyle {
@@ -11,6 +14,7 @@ pub struct ElementStyle {
     pub outline_shader: ShaderRef,
     pub outline_width: Edges,
     pub corner_radius: Vec4,
+    pub shape: UiShape,
     pub padding: Edges,
     pub transparent_to_input: bool,
 }
@@ -25,9 +29,16 @@ impl Default for ElementStyle {
             outline_shader: ShaderRef::SOLID_COLOR,
             outline_width: Edges::ZERO,
             corner_radius: radii_all(0.0),
+            shape: UiShape::Rect,
             padding: Edges::ZERO,
             transparent_to_input: false,
         }
+    }
+}
+
+impl ElementStyle {
+    pub fn resolved_shape(&self) -> UiShape {
+        self.shape.with_corner_radius_fallback(self.corner_radius)
     }
 }
 

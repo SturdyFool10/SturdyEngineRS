@@ -79,7 +79,7 @@ impl<R: TextRenderer> TextEngine<R> {
                     .quads
                     .iter()
                     .filter(|quad| quad.source_index == source_index)
-                    .map(|quad| prepare_scene_quad(quad, &desc.placement))
+                    .map(|quad| prepare_scene_quad(quad, desc))
                     .collect::<Vec<_>>();
                 if quads.is_empty() {
                     continue;
@@ -454,12 +454,24 @@ fn prepare_legacy_quad(quad: &TextGlyphQuad) -> PreparedTextQuad {
     }
 }
 
-fn prepare_scene_quad(quad: &TextSceneQuad, placement: &TextPlacement) -> PreparedTextQuad {
-    let positions = match placement {
+fn prepare_scene_quad(quad: &TextSceneQuad, desc: &TextDrawDesc) -> PreparedTextQuad {
+    let positions = match &desc.placement {
         TextPlacement::Screen2d { x, y } => {
             let x = snap_screen_text_position(*x);
             let y = snap_screen_text_position(*y);
-            quad.positions.map(|p| [p[0] + x, p[1] + y, 0.0])
+            let snap_glyph_edges = text_raster_path(desc) == TextRasterPath::AlphaMask;
+            quad.positions.map(|p| {
+                let screen = [p[0] + x, p[1] + y];
+                if snap_glyph_edges {
+                    [
+                        snap_screen_text_position(screen[0]),
+                        snap_screen_text_position(screen[1]),
+                        0.0,
+                    ]
+                } else {
+                    [screen[0], screen[1], 0.0]
+                }
+            })
         }
         TextPlacement::World3d {
             transform,
@@ -578,6 +590,60 @@ mod tests {
 
         assert_eq!(frame.draws[0].quads[0].positions[0], [10.0, 21.0, 0.0]);
         assert_eq!(frame.draws[0].quads[0].positions[2], [20.0, 31.0, 0.0]);
+    }
+
+    #[test]
+    fn snaps_alpha_mask_screen_glyph_edges_to_pixels() {
+        let mut renderer = StaticRenderer::default();
+        renderer.output = Some(TextLayoutOutput {
+            scene: TextScene {
+                quads: vec![TextSceneQuad {
+                    source_index: 0,
+                    positions: [[0.25, 0.4], [9.75, 0.4], [9.75, 10.6], [0.25, 10.6]],
+                    uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                    atlas_page: 0,
+                    color: [1.0, 1.0, 1.0, 1.0],
+                }],
+                ..TextScene::default()
+            },
+            ..TextLayoutOutput::default()
+        });
+        let desc = TextDrawDesc::new("small")
+            .font_size(14.0)
+            .placement(TextPlacement::Screen2d { x: 10.2, y: 20.2 });
+        let mut engine = TextEngine::new(renderer);
+
+        let frame = engine.prepare_frame(&[desc], 800, 600);
+
+        assert_eq!(frame.draws[0].quads[0].positions[0], [10.0, 20.0, 0.0]);
+        assert_eq!(frame.draws[0].quads[0].positions[2], [20.0, 31.0, 0.0]);
+    }
+
+    #[test]
+    fn preserves_sdf_screen_glyph_subpixel_edges() {
+        let mut renderer = StaticRenderer::default();
+        renderer.output = Some(TextLayoutOutput {
+            scene: TextScene {
+                quads: vec![TextSceneQuad {
+                    source_index: 0,
+                    positions: [[0.25, 0.4], [9.75, 0.4], [9.75, 10.6], [0.25, 10.6]],
+                    uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                    atlas_page: 0,
+                    color: [1.0, 1.0, 1.0, 1.0],
+                }],
+                ..TextScene::default()
+            },
+            ..TextLayoutOutput::default()
+        });
+        let desc = TextDrawDesc::new("large")
+            .font_size(48.0)
+            .placement(TextPlacement::Screen2d { x: 10.2, y: 20.2 });
+        let mut engine = TextEngine::new(renderer);
+
+        let frame = engine.prepare_frame(&[desc], 800, 600);
+
+        assert_eq!(frame.draws[0].quads[0].positions[0], [10.25, 20.4, 0.0]);
+        assert_eq!(frame.draws[0].quads[0].positions[2], [19.75, 30.6, 0.0]);
     }
 
     #[test]

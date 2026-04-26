@@ -46,6 +46,16 @@ impl Default for LayoutSizing {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum UiLayer {
+    Background,
+    #[default]
+    Content,
+    Foreground,
+    Overlay,
+    TopLayer,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LayoutInput {
     pub width: LayoutSizing,
@@ -57,6 +67,7 @@ pub struct LayoutInput {
     pub clip_x: bool,
     pub clip_y: bool,
     pub scroll_offset: Vec2,
+    pub layer: UiLayer,
     pub z_index: i16,
 }
 
@@ -78,6 +89,7 @@ impl Default for LayoutInput {
             clip_x: false,
             clip_y: false,
             scroll_offset: Vec2::ZERO,
+            layer: UiLayer::Content,
             z_index: 0,
         }
     }
@@ -88,6 +100,7 @@ pub struct LayoutOutput {
     pub id: ElementId,
     pub rect: Rect,
     pub content_size: Size,
+    pub layer: UiLayer,
     pub z_index: i16,
     pub clip: bool,
 }
@@ -243,6 +256,7 @@ fn layout_element(
         id: element.id.clone(),
         rect,
         content_size,
+        layer: element.layout.layer,
         z_index: element.layout.z_index,
         clip: element.layout.clip_x || element.layout.clip_y,
     });
@@ -583,6 +597,19 @@ mod tests {
             layout.by_id(&child_id).unwrap().rect.origin,
             Vec2::new(12.0, 8.0)
         );
+    }
+
+    #[test]
+    fn layout_preserves_declared_layer() {
+        let mut element = Element::new(ElementId::new("modal"));
+        element.layout.layer = UiLayer::TopLayer;
+        element.layout.width = LayoutSizing::Fixed(100.0);
+        element.layout.height = LayoutSizing::Fixed(40.0);
+        let mut cache = LayoutCache::default();
+
+        let layout = LayoutTree::compute(&element, Size::new(320.0, 200.0), &mut cache).unwrap();
+
+        assert_eq!(layout.by_id(&element.id).unwrap().layer, UiLayer::TopLayer);
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::{
     Edges, Element, ElementId, ElementKind, Gradient, LayoutTree, Rect, ShaderRef, TextStyle,
-    UiColor,
+    UiColor, UiLayer, UiShape,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -21,6 +21,7 @@ pub struct RectangleRenderData {
     pub shader: ShaderRef,
     pub gradient: Option<Gradient>,
     pub corner_radius: glam::Vec4,
+    pub shape: UiShape,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -29,6 +30,7 @@ pub struct BorderRenderData {
     pub shader: ShaderRef,
     pub width: Edges,
     pub corner_radius: glam::Vec4,
+    pub shape: UiShape,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +52,7 @@ pub struct ImageRenderData {
     pub tint: UiColor,
     pub shader: ShaderRef,
     pub corner_radius: glam::Vec4,
+    pub shape: UiShape,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -80,6 +83,7 @@ pub enum RenderData {
 pub struct RenderCommand {
     pub id: ElementId,
     pub rect: Rect,
+    pub layer: UiLayer,
     pub z_index: i16,
     pub kind: RenderCommandKind,
     pub data: RenderData,
@@ -100,7 +104,7 @@ impl RenderCommandList {
 
     pub fn sort_for_rendering(&mut self) {
         self.commands
-            .sort_by_key(|command| (command.z_index, command.id.hash));
+            .sort_by_key(|command| (command.layer, command.z_index, command.id.hash));
     }
 }
 
@@ -109,12 +113,14 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
         return;
     };
     let rect = node.rect;
+    let layer = node.layer;
     let z_index = node.z_index;
 
     if element.layout.clip_x || element.layout.clip_y {
         list.commands.push(RenderCommand {
             id: element.id.clone(),
             rect,
+            layer,
             z_index,
             kind: RenderCommandKind::ScissorStart,
             data: RenderData::Clip(ClipRenderData {
@@ -128,6 +134,7 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
         list.commands.push(RenderCommand {
             id: element.id.clone(),
             rect,
+            layer,
             z_index,
             kind: RenderCommandKind::Rectangle,
             data: RenderData::Rectangle(RectangleRenderData {
@@ -135,6 +142,7 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
                 shader: element.style.background_shader,
                 gradient: element.style.background_gradient.clone(),
                 corner_radius: element.style.corner_radius,
+                shape: element.style.resolved_shape(),
             }),
         });
     }
@@ -144,6 +152,7 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
         ElementKind::Text(text) => list.commands.push(RenderCommand {
             id: element.id.clone(),
             rect,
+            layer,
             z_index,
             kind: RenderCommandKind::Text,
             data: RenderData::Text(TextRenderData {
@@ -155,6 +164,7 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
         ElementKind::Image(image) => list.commands.push(RenderCommand {
             id: element.id.clone(),
             rect,
+            layer,
             z_index,
             kind: RenderCommandKind::Image,
             data: RenderData::Image(ImageRenderData {
@@ -162,11 +172,13 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
                 tint: image.tint,
                 shader: image.shader,
                 corner_radius: element.style.corner_radius,
+                shape: element.style.resolved_shape(),
             }),
         }),
         ElementKind::Custom(key) => list.commands.push(RenderCommand {
             id: element.id.clone(),
             rect,
+            layer,
             z_index,
             kind: RenderCommandKind::Custom,
             data: RenderData::Custom(CustomRenderData {
@@ -186,6 +198,7 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
         list.commands.push(RenderCommand {
             id: element.id.clone(),
             rect,
+            layer,
             z_index,
             kind: RenderCommandKind::Border,
             data: RenderData::Border(BorderRenderData {
@@ -193,6 +206,7 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
                 shader: element.style.outline_shader,
                 width: element.style.outline_width,
                 corner_radius: element.style.corner_radius,
+                shape: element.style.resolved_shape(),
             }),
         });
     }
@@ -207,6 +221,7 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
         list.commands.push(RenderCommand {
             id: element.id.clone(),
             rect,
+            layer,
             z_index,
             kind: RenderCommandKind::Text,
             data: RenderData::Text(TextRenderData {
@@ -221,6 +236,7 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
         list.commands.push(RenderCommand {
             id: element.id.clone(),
             rect,
+            layer,
             z_index,
             kind: RenderCommandKind::ScissorEnd,
             data: RenderData::Clip(ClipRenderData {
@@ -228,5 +244,92 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
                 vertical: element.layout.clip_y,
             }),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ElementStyle, LayoutCache, LayoutInput, LayoutSizing, Size, UiLayer, UiShape};
+
+    #[test]
+    fn render_commands_sort_by_layer_before_z_index() {
+        let overlay_id = ElementId::new("overlay");
+        let base_id = ElementId::new("base");
+        let mut root = Element::new(ElementId::new("root"));
+        root.layout.width = LayoutSizing::Fixed(100.0);
+        root.layout.height = LayoutSizing::Fixed(40.0);
+
+        let mut overlay = Element::new(overlay_id.clone());
+        overlay.layout = LayoutInput {
+            width: LayoutSizing::Fixed(100.0),
+            height: LayoutSizing::Fixed(40.0),
+            layer: UiLayer::Overlay,
+            z_index: 0,
+            ..LayoutInput::default()
+        };
+        overlay.style = ElementStyle {
+            background: UiColor::WHITE,
+            ..ElementStyle::default()
+        };
+
+        let mut base = Element::new(base_id.clone());
+        base.layout = LayoutInput {
+            width: LayoutSizing::Fixed(100.0),
+            height: LayoutSizing::Fixed(40.0),
+            layer: UiLayer::Content,
+            z_index: 100,
+            ..LayoutInput::default()
+        };
+        base.style = ElementStyle {
+            background: UiColor::WHITE,
+            ..ElementStyle::default()
+        };
+
+        root.children.push(overlay);
+        root.children.push(base);
+        let layout =
+            LayoutTree::compute(&root, Size::new(100.0, 40.0), &mut LayoutCache::default())
+                .unwrap();
+        let commands = RenderCommandList::from_element_tree(&root, &layout);
+        let rectangles = commands
+            .commands
+            .iter()
+            .filter(|command| command.kind == RenderCommandKind::Rectangle)
+            .map(|command| command.id.hash)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rectangles, vec![base_id.hash, overlay_id.hash]);
+    }
+
+    #[test]
+    fn render_commands_carry_resolved_shape() {
+        let id = ElementId::new("squircle");
+        let mut element = Element::new(id.clone());
+        element.layout.width = LayoutSizing::Fixed(100.0);
+        element.layout.height = LayoutSizing::Fixed(40.0);
+        element.style = ElementStyle {
+            background: UiColor::WHITE,
+            shape: UiShape::squircle(12.0, 4.0),
+            ..ElementStyle::default()
+        };
+        let layout = LayoutTree::compute(
+            &element,
+            Size::new(100.0, 40.0),
+            &mut LayoutCache::default(),
+        )
+        .unwrap();
+        let commands = RenderCommandList::from_element_tree(&element, &layout);
+
+        let shape = commands
+            .commands
+            .iter()
+            .find_map(|command| match &command.data {
+                RenderData::Rectangle(data) => Some(data.shape),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(shape, UiShape::squircle(12.0, 4.0));
     }
 }

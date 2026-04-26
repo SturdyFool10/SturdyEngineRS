@@ -1,7 +1,7 @@
 use clay_ui::{
     Edges, Element, ElementBuilder, ElementId, ElementKind, ElementStyle, LayoutCache,
     LayoutDirection, LayoutInput, LayoutSizing, LayoutTextCacheStats, LayoutTree, Size, TextStyle,
-    UiColor, UiTree, radii_all,
+    TextWrap, UiColor, UiTree, radii_all,
 };
 use glam::Vec2;
 use sturdy_engine::{
@@ -487,7 +487,7 @@ fn status_badges(parent: &ElementId) -> clay_ui::Element {
                     },
                     ..LayoutInput::default()
                 })
-                .child(text_element(&badge_id, "text", *label, 14.0, *fg))
+                .child(text_element_nowrap(&badge_id, "text", *label, 14.0, *fg))
                 .build(),
         );
     }
@@ -720,6 +720,20 @@ fn text_element(
     ElementBuilder::text(ElementId::local(label, 0, parent), text, style).build()
 }
 
+fn text_element_nowrap(
+    parent: &ElementId,
+    label: &str,
+    text: impl Into<String>,
+    size: f32,
+    color: [u8; 4],
+) -> clay_ui::Element {
+    let mut element = text_element(parent, label, text, size, color);
+    if let ElementKind::Text(text) = &mut element.kind {
+        text.style.wrap = TextWrap::None;
+    }
+    element
+}
+
 fn panel_style(background: [u8; 4], outline: [u8; 4], radius: f32, padding: Edges) -> ElementStyle {
     ElementStyle {
         background: rgba(background),
@@ -786,16 +800,19 @@ fn append_element(
             let typography = TextTypography::default()
                 .font_size(text.style.font_size)
                 .line_height(text.style.line_height);
-            overlay.add_text(
-                TextDrawDesc::new(text.text.clone())
-                    .placement(TextPlacement::Screen2d {
-                        x: rect.origin.x,
-                        y: rect.origin.y,
-                    })
-                    .typography(typography)
-                    .color(text.style.color.to_f32_array())
-                    .max_width(rect.size.width.max(1.0)),
-            );
+            let desc = TextDrawDesc::new(text.text.clone())
+                .placement(TextPlacement::Screen2d {
+                    x: rect.origin.x,
+                    y: rect.origin.y,
+                })
+                .typography(typography)
+                .color(text.style.color.to_f32_array());
+            let desc = if text.style.wrap == TextWrap::Words {
+                desc.max_width(rect.size.width.max(1.0))
+            } else {
+                desc
+            };
+            overlay.add_text(desc);
         }
 
         for child in &element.children {

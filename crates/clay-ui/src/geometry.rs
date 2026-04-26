@@ -1,4 +1,4 @@
-use glam::Vec2;
+use glam::{Vec2, Vec4};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Size {
@@ -116,6 +116,129 @@ pub enum Axis {
     Vertical,
 }
 
-pub fn radii_all(radius: f32) -> glam::Vec4 {
-    glam::Vec4::splat(radius)
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CornerShape {
+    Round,
+    Bevel,
+    Chamfer,
+    Notch,
+    Scoop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CornerSpec {
+    pub radius: f32,
+    pub shape: CornerShape,
+    pub smoothing: f32,
+}
+
+impl CornerSpec {
+    pub const fn round(radius: f32) -> Self {
+        Self {
+            radius,
+            shape: CornerShape::Round,
+            smoothing: 1.0,
+        }
+    }
+
+    pub const fn with_shape(radius: f32, shape: CornerShape) -> Self {
+        Self {
+            radius,
+            shape,
+            smoothing: 1.0,
+        }
+    }
+}
+
+impl Default for CornerSpec {
+    fn default() -> Self {
+        Self::round(0.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UiShape {
+    Rect,
+    RoundedRect {
+        radii: Vec4,
+    },
+    IndependentCorners {
+        top_left: CornerSpec,
+        top_right: CornerSpec,
+        bottom_right: CornerSpec,
+        bottom_left: CornerSpec,
+    },
+    Squircle {
+        radius: f32,
+        exponent: f32,
+    },
+    Capsule,
+    Circle,
+    Ellipse,
+}
+
+impl Default for UiShape {
+    fn default() -> Self {
+        Self::Rect
+    }
+}
+
+impl UiShape {
+    pub const fn rounded_rect(radii: Vec4) -> Self {
+        Self::RoundedRect { radii }
+    }
+
+    pub const fn squircle(radius: f32, exponent: f32) -> Self {
+        Self::Squircle { radius, exponent }
+    }
+
+    pub const fn independent_corners(
+        top_left: CornerSpec,
+        top_right: CornerSpec,
+        bottom_right: CornerSpec,
+        bottom_left: CornerSpec,
+    ) -> Self {
+        Self::IndependentCorners {
+            top_left,
+            top_right,
+            bottom_right,
+            bottom_left,
+        }
+    }
+
+    pub fn with_corner_radius_fallback(self, radii: Vec4) -> Self {
+        if matches!(self, Self::Rect) && radii.max_element() > 0.0 {
+            Self::RoundedRect { radii }
+        } else {
+            self
+        }
+    }
+}
+
+pub fn radii_all(radius: f32) -> Vec4 {
+    Vec4::splat(radius)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rect_shape_uses_legacy_corner_radius_as_fallback() {
+        let shape = UiShape::Rect.with_corner_radius_fallback(radii_all(8.0));
+
+        assert_eq!(
+            shape,
+            UiShape::RoundedRect {
+                radii: radii_all(8.0)
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_shape_ignores_legacy_corner_radius_fallback() {
+        let shape = UiShape::squircle(12.0, 4.0).with_corner_radius_fallback(radii_all(8.0));
+
+        assert_eq!(shape, UiShape::squircle(12.0, 4.0));
+    }
 }

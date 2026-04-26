@@ -405,23 +405,137 @@ Prompt-sized text follow-up chunks:
 
 ### Widget layer
 
+Prompt-sized UI/control execution order:
+
+1. [x] `P2.U1` Define the shared widget state/event model for focus, hover, press, capture, disabled/read-only states, validation, and accessibility labels
+2. [ ] `P2.U2` Add shape-aware scroll containers with parent clipping, scrollbars, wheel/touchpad input, keyboard scroll, inertial/momentum hooks, and external scroll offset control
+3. [ ] `P2.U3` Add first-party buttons, icon buttons, segmented buttons, radio groups, checkboxes, toggles, sliders, drag bars, splitters, resizers, and stateful style variants on top of the shared widget model
+4. [ ] `P2.U4` Add dropdown/select/combobox widgets with popup anchoring, keyboard navigation, typeahead, disabled items, separators, and virtualized long-option lists
+5. [ ] `P2.U5` Add single-line text inputs with caret, selection, clipboard, validation state, placeholder, password/secret display mode, and IME composition hooks
+6. [ ] `P2.U6` Add multiline text inputs with wrapping, scrolling, selection, clipboard, IME, undo/redo, soft tabs, line navigation, and shape-aware clipping
+7. [ ] `P2.U7` Add stylable multiline text editing rich enough for code editors: per-range styling, syntax/highlight spans, gutters, line numbers, diagnostics, inline widgets, minimap hooks, code folding hooks, and performant viewport virtualization
+8. [ ] `P2.U8` Add modal, dialog, popover, tooltip, context-menu, and command-palette primitives using a top-layer/portal model with focus trapping and backdrop/input blocking rules
+9. [ ] `P2.U9` Add date, time, and date-time selector widgets with typed entry, picker popovers, min/max, locale/time-zone formatting hooks, and keyboard-only operation
+10. [ ] `P2.U10` Add a CSS-style `mosaic` layout primitive for dense visual tiling: named tiles, span/fit/fill modes, intrinsic aspect ratios, responsive breakpoints, stable placement, and predictable hit/clip regions
+11. [ ] `P2.U11` Add first-class UI layering and stacking contexts so apps can declare what renders behind/in front of what without relying on tree order hacks
+12. [ ] `P2.U12` Add shader/effect style slots for backgrounds, borders, masks, text fills, outlines, shadows, glows, backdrop filters, and per-state transitions, with Slang parameter binding and render-graph pass integration
+13. [ ] `P2.U13` Add shape-aware rendering, clipping, hit testing, focus rings, shadows, and effect regions so rounded rects, independent corner shapes, squircles, paths, and masks behave consistently across input and paint
+14. [ ] `P2.U14` Add fancy default border options: per-side/per-corner styling, inner/outer/center strokes, dashed/dotted/double strokes, gradient borders, image/shader borders, glow/bloom borders, and polished focus/error/selection presets
+15. [ ] `P2.U15` Add virtualized variants for large widgets so lists, grids, tables, trees, logs, inspectors, dropdowns, mosaics, and code editors avoid drawing offscreen elements while preserving measurement, keyboard navigation, selection, and scroll responsiveness
+16. [ ] `P2.U16` Add render-graph-aware backdrop/effect shaders so UI surfaces can sample named scene images, blur/grade/dim the game behind a pause menu tile, and route effects through explicit graph resources
+17. [ ] `P2.U17` Add validation scenes for all standard widgets, nested scrolling, modals, shape clipping, shader styles, virtualized controls, render-graph backdrops, and resize/scale-factor behavior
+
 - [ ] Add a standard widget layer for:
+  - [x] first-pass button, radio, toggle, and drag-bar builders on the shared `WidgetState` contract
   - [ ] labels
-  - [ ] buttons
+  - [ ] buttons and icon buttons
+  - [ ] segmented buttons
+  - [ ] radio buttons / radio groups
+  - [ ] toggle groups
   - [ ] checkboxes / toggles
   - [ ] sliders
-  - [ ] text inputs
+  - [ ] drag bars / splitters / resizers
+  - [ ] progress bars / meters
+  - [ ] dropdowns / selects / comboboxes
+  - [ ] single-line text inputs
+  - [ ] multiline text inputs
+  - [ ] stylable multiline/code-editor text inputs
+  - [ ] time selectors
+  - [ ] date selectors
+  - [ ] date-time selectors
+  - [ ] modals / dialogs
+  - [ ] popovers / tooltips / context menus
+  - [ ] menu bars / command bars / toolbars
+  - [ ] tabs
+  - [ ] accordions / disclosure panels
+  - [ ] breadcrumbs
+  - [ ] search boxes
   - [ ] lists
   - [ ] tables
+  - [ ] grids
   - [ ] trees / inspectors
+  - [ ] property editors
+  - [ ] color pickers
 - [ ] Keep widgets composable with shader-driven visuals instead of forcing a theme-only path
+- [ ] Treat every widget as a shape-aware object for:
+  - [ ] rendering
+  - [ ] clipping children
+  - [ ] hit testing
+  - [ ] focus rings
+  - [ ] scroll regions
+  - [ ] shadows / outlines / glow
+  - [ ] accessibility bounds
+- [ ] Add shape primitives and corner controls suitable for high-end UI work:
+  - [ ] independent corner radii
+  - [ ] independent corner shape families such as round, bevel, notch, scoop, and chamfer
+  - [ ] squircle / superellipse shapes with tunable exponent
+  - [ ] capsule and pill helpers
+  - [ ] per-corner smoothing and antialiasing controls
+  - [ ] shape composition for cutouts, holes, masks, and decorative corners
+- [ ] Add polished built-in border presets:
+  - [ ] subtle hairline, focus ring, inset, raised, etched, glass, neon, warning/error, and selected states
+  - [ ] per-side and per-corner color/width/style
+  - [ ] inside, centered, and outside stroke placement
+  - [ ] dashed, dotted, double, gradient, textured, image, and shader-driven borders
+  - [ ] optional shadow, glow, bloom extraction, and animated border parameters
+- [ ] Add widget APIs for shader/effect customization that feel familiar to web developers:
+  - [ ] background, border, outline, text fill, shadow, mask, filter, and backdrop slots
+  - [ ] per-state style rules for hover, active, focus, disabled, invalid, selected, checked, and open
+  - [ ] bindable shader parameters, textures, gradients, color spaces, and transitions
+  - [ ] element-slot shader targeting so apps can attach a fragment shader to one element's background, border, mask, text fill, or overlay without replacing the whole widget
+  - [ ] strongly typed custom uniforms, additional app-provided uniforms layered onto engine-provided UI uniforms, textures, samplers, storage buffers, and render-graph resource inputs for creative element-level shaders
+  - [ ] offscreen effect routes for bloom, blur, drop shadow, glow, and custom passes
+- [ ] Add full text styling controls at the widget layer:
+  - [ ] font family fallback lists, exact font handles, synthetic fallback policy, and missing-glyph diagnostics
+  - [ ] size, line height, weight, stretch, slant/italic, variation axes, and optical sizing
+  - [ ] OpenType features, kerning, ligatures, numeric styles, stylistic sets, and language/script tags
+  - [ ] color, gradients, opacity, outline, shadow, glow, background spans, and selection styling
+  - [ ] wrapping, truncation, ellipsis, alignment, baseline, letter spacing, word spacing, and tab stops
 - [ ] Add first-party inspector/panel patterns for graphics tools and game tools
 
 ### Layout and interaction behavior
 
 - [ ] Implement arena/reuse strategy equivalent to Clay’s low-allocation hot path
+- [ ] Add shape-aware scrollable containers:
+  - [x] persistent clamped scroll state with targeted and hit-tested scroll events
+  - [x] first-pass clipped scroll container builder with vertical, horizontal, and both-axis offsets
+  - [x] vertical, horizontal, and both-axis scrolling
+  - [ ] wheel, touchpad, keyboard, drag-scroll, and programmatic scroll input
+  - [ ] scrollbars, overlay scrollbars, and custom scrollbar styling
+  - [ ] scroll snapping, momentum hooks, sticky children, and anchor preservation
+  - [ ] virtualized child measurement for large lists and editor buffers
 - [ ] Add Clay-level scroll physics/momentum and external scroll offset query parity
 - [ ] Add floating/attach-point semantics parity (`attach_to_parent`, `attach_to_id`, clip inheritance, pointer passthrough modes)
+- [ ] Add a UI top-layer and portal system for modals, dropdowns, popovers, tooltips, context menus, and drag previews
+- [ ] Add explicit stacking contexts and layer slots:
+  - [x] first-pass `UiLayer` model carried through layout, hit testing, and render command ordering
+  - [ ] background/content/foreground/overlay/top-layer slots
+  - [ ] app-declared z ordering independent of tree insertion order
+  - [x] hit-test ordering that matches visual stacking across first-pass layer slots
+  - [ ] event capture, pointer passthrough, modal blocking, and focus trapping
+- [ ] Add parent clipping that can clip children by:
+  - [ ] rect
+  - [ ] rounded rect
+  - [ ] arbitrary path / mask where backend support exists
+  - [ ] scroll viewport
+  - [ ] shader-generated alpha mask where explicitly requested
+- [ ] Add a CSS-style `mosaic` layout function:
+  - [ ] stable dense packing of heterogenous tiles
+  - [ ] named tile areas and declarative spans
+  - [ ] fixed, intrinsic, aspect-ratio, fit-content, and fill modes
+  - [ ] responsive breakpoint rules
+  - [ ] deterministic keyboard/hit-test traversal order
+- [ ] Add virtualized versions of every potentially large primitive:
+  - [x] first-pass fixed-size virtual list range/spacer helper
+  - [ ] virtual list
+  - [ ] virtual grid
+  - [ ] virtual table
+  - [ ] virtual tree / inspector
+  - [ ] virtual dropdown menu
+  - [ ] virtual log viewer
+  - [ ] virtual mosaic
+  - [ ] virtual rich/code editor
+  - [ ] shared item measurement, cache invalidation, scroll anchoring, selection retention, and focus retention
 - [ ] Implement child-between-border emission parity and exact border raster semantics
 - [ ] Add virtualized scrolling / large-list support
 - [ ] Add robust app-facing event/state plumbing so users do not need large glue layers
@@ -430,8 +544,56 @@ Prompt-sized text follow-up chunks:
 
 - [ ] Add full render-graph resource binding generation (bind groups, push constants, per-pass parameter buffers) instead of pass skeletons
 - [ ] Integrate real shader pipelines for all UI slots in engine runtime
+- [ ] Define the UI shape contract shared by rendering, input, clipping, and effects:
+  - [ ] rectangle
+  - [ ] rounded rectangle with independent radii
+  - [x] first-pass `UiShape` model carried through element style and render commands
+  - [x] rectangle
+  - [x] rounded rectangle with independent radii
+  - [x] per-corner independent shape families and properties
+  - [x] squircle / superellipse
+  - [ ] capsule / pill
+  - [ ] circle / ellipse
+  - [ ] arbitrary path / mask
+  - [ ] shader-produced coverage mask
+- [ ] Make UI antialiasing analytic and shape-aware for fills, borders, outlines, masks, and clips
 - [ ] Add GPU gradient shader implementation and parameter packing contract used by engine pipelines
 - [ ] Add text outline rendering path in engine shader side
+- [ ] Add a UI material/effect model with slots for:
+  - [ ] fill/background
+  - [ ] border/outline
+  - [ ] text fill/outline/shadow/glow
+  - [ ] inner shadow
+  - [ ] drop shadow
+  - [ ] mask/clip
+  - [ ] backdrop blur/filter
+  - [ ] bloom/glow extraction
+  - [ ] custom Slang pass hooks
+- [ ] Add element-scoped shader overrides:
+  - [ ] select a concrete element by ID, class/style handle, widget part, state, or render slot
+  - [ ] run a custom fragment shader over that slot's exact shape coverage and clip region
+  - [ ] pass additional user uniforms alongside built-in UI uniforms such as element rect, local UV, shape data, clip data, state, time, and DPI scale
+  - [ ] validate merged built-in/user uniform layouts with stable reflection and clear diagnostics
+  - [ ] bind app textures, graph images, samplers, and small parameter buffers without manual render-pass setup
+  - [ ] preserve normal UI hit testing, layout, accessibility, batching diagnostics, and fallback rendering when the shader fails
+- [ ] Allow per-slot effect routing so a widget can, for example, send only its border to bloom while keeping the fill in the normal UI pass
+- [ ] Allow UI shaders to sample render-graph resources through explicit declarations:
+  - [ ] previous scene color
+  - [ ] HDR scene color
+  - [ ] depth
+  - [ ] normals / material IDs where available
+  - [ ] named debug images
+  - [ ] app-provided textures and buffers
+- [ ] Add backdrop-filter style UI effects that operate on graph images behind the widget:
+  - [ ] blur
+  - [ ] dim / tint
+  - [ ] saturation / contrast / brightness
+  - [ ] pixelation
+  - [ ] refraction / glass distortion
+  - [ ] depth-aware blur where depth is available
+- [ ] Add a pause-menu/backdrop sample where a UI tile blurs and tints the live game image beneath it without manual app-side graph wiring
+- [ ] Add offscreen UI compositing for effects that require extra passes without forcing every widget into a texture
+- [ ] Add render-graph diagnostics for UI pass count, offscreen allocations, clip mask cost, shader slot usage, overdraw, and batched/unbatched draws
 - [ ] Add offscreen-to-world UI sample path in `sturdy-engine` scene layer
 - [ ] Add UI search/indexing layer on top of font discovery for later UI-wide queries
 - [ ] Add examples for dashboards, inspectors, and multi-panel tools
