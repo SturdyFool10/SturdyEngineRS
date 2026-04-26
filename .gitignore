@@ -33,3 +33,6 @@ Thumbs.db
 .env.*
 
 # benchmarking artifacts
+flamegraph.svg
+perf.data
+perf.data.*
