@@ -415,8 +415,10 @@ Prompt-sized UI/control execution order:
 6. [ ] `P2.U6` Add multiline text inputs with wrapping, scrolling, selection, clipboard, IME, undo/redo, soft tabs, line navigation, and shape-aware clipping
 7. [ ] `P2.U7` Add stylable multiline text editing rich enough for code editors: per-range styling, syntax/highlight spans, gutters, line numbers, diagnostics, inline widgets, minimap hooks, code folding hooks, and performant viewport virtualization
 8. [ ] `P2.U8` Add modal, dialog, popover, tooltip, context-menu, and command-palette primitives using a top-layer/portal model with focus trapping and backdrop/input blocking rules
+   - [x] First-pass `TopLayer` portal host and modal backdrop builders
+   - [x] First-pass focus-scope stack with modal background blocking, focus trapping, and restore-focus handoff
 9. [ ] `P2.U9` Add date, time, and date-time selector widgets with typed entry, picker popovers, min/max, locale/time-zone formatting hooks, and keyboard-only operation
-10. [ ] `P2.U10` Add a CSS-style `mosaic` layout primitive for dense visual tiling: named tiles, span/fit/fill modes, intrinsic aspect ratios, responsive breakpoints, stable placement, and predictable hit/clip regions
+10. [x] `P2.U10` Add a CSS-style `mosaic` layout primitive for dense visual tiling: named tiles, span/fit/fill modes, intrinsic aspect ratios, responsive breakpoints, stable placement, and predictable hit/clip regions
 11. [ ] `P2.U11` Add first-class UI layering and stacking contexts so apps can declare what renders behind/in front of what without relying on tree order hacks
 12. [ ] `P2.U12` Add shader/effect style slots for backgrounds, borders, masks, text fills, outlines, shadows, glows, backdrop filters, and per-state transitions, with Slang parameter binding and render-graph pass integration
 13. [ ] `P2.U13` Add shape-aware rendering, clipping, hit testing, focus rings, shadows, and effect regions so rounded rects, independent corner shapes, squircles, paths, and masks behave consistently across input and paint
@@ -444,6 +446,7 @@ Prompt-sized UI/control execution order:
   - [ ] date selectors
   - [ ] date-time selectors
   - [ ] modals / dialogs
+  - [x] first-pass modal layer and transparent portal-host primitives
   - [ ] popovers / tooltips / context menus
   - [ ] menu bars / command bars / toolbars
   - [ ] tabs
@@ -502,19 +505,32 @@ Prompt-sized UI/control execution order:
   - [x] first-pass clipped scroll container builder with vertical, horizontal, and both-axis offsets
   - [x] vertical, horizontal, and both-axis scrolling
   - [ ] wheel, touchpad, keyboard, drag-scroll, and programmatic scroll input
+  - [x] first-pass programmatic scroll commands for scroll-by, scroll-to, page, start, and end movement
   - [x] first-pass scrollbar metrics and composable visual scrollbar builders
   - [ ] overlay scrollbars and custom scrollbar styling
   - [ ] scroll snapping, momentum hooks, sticky children, and anchor preservation
   - [ ] virtualized child measurement for large lists and editor buffers
 - [ ] Add Clay-level scroll physics/momentum and external scroll offset query parity
 - [ ] Add floating/attach-point semantics parity (`attach_to_parent`, `attach_to_id`, clip inheritance, pointer passthrough modes)
+  - [x] first-pass absolute child positioning in `LayoutInput`
+  - [x] descendant subtree translation when a positioned parent moves
+  - [x] first-pass anchored floating rect placement from an anchor rect, side, alignment, offset, and viewport margin
+  - [x] first-pass viewport collision handling with flip, clamp, and flip-then-clamp policies
+  - [ ] direct `attach_to_id` resolution from a computed `LayoutTree`
 - [ ] Add a UI top-layer and portal system for modals, dropdowns, popovers, tooltips, context menus, and drag previews
+  - [x] first-pass transparent portal host builder for top-layer content
+  - [x] first-pass modal backdrop layer builder that clips to the viewport and captures input
+  - [x] first-pass focus scope stack for modal blocking, focus trapping, and restore-focus behavior
+  - [x] first-pass anchored popover/menu placement and collision avoidance helper
+  - [x] first-pass dismiss signaling for outside pointer presses and cancel events
+  - [ ] full dismiss policies for escape key mapping, focus loss, parent close, nested scopes, and delayed pointer capture
 - [ ] Add explicit stacking contexts and layer slots:
   - [x] first-pass `UiLayer` model carried through layout, hit testing, and render command ordering
-  - [ ] background/content/foreground/overlay/top-layer slots
+  - [x] background/content/foreground/overlay/top-layer slots
   - [ ] app-declared z ordering independent of tree insertion order
   - [x] hit-test ordering that matches visual stacking across first-pass layer slots
-  - [ ] event capture, pointer passthrough, modal blocking, and focus trapping
+  - [x] first-pass pointer passthrough, modal blocking, and focus trapping
+  - [ ] full event capture, nested modal policies, and keyboard navigation loops
 - [ ] Add parent clipping that can clip children by:
   - [ ] rect
   - [ ] rounded rect
@@ -523,20 +539,22 @@ Prompt-sized UI/control execution order:
   - [ ] scroll viewport
   - [ ] shader-generated alpha mask where explicitly requested
 - [ ] Add a CSS-style `mosaic` layout function:
-  - [ ] stable dense packing of heterogenous tiles
-  - [ ] named tile areas and declarative spans
-  - [ ] fixed, intrinsic, aspect-ratio, fit-content, and fill modes
-  - [ ] responsive breakpoint rules
-  - [ ] deterministic keyboard/hit-test traversal order
+  - [x] first-pass stable dense packing of heterogenous tiles
+  - [x] first-pass named tile areas, declarative spans, and explicit tile placement with collision diagnostics
+  - [x] first-pass fixed cells, aspect-ratio fit, and span/fill/fit modes
+  - [x] first-pass responsive breakpoint rules for column counts
+  - [x] first-pass deterministic hit-test traversal and viewport filtering
+  - [x] first-pass element builder that emits mosaic tiles as absolute-positioned children
+  - [x] first-pass virtualized viewport builder that preserves full content size
 - [ ] Add virtualized versions of every potentially large primitive:
   - [x] first-pass fixed-size virtual list range/spacer helper
-  - [ ] virtual list
-  - [ ] virtual grid
-  - [ ] virtual table
-  - [ ] virtual tree / inspector
-  - [ ] virtual dropdown menu
-  - [ ] virtual log viewer
-  - [ ] virtual mosaic
+  - [x] first-pass virtual list builder
+  - [x] first-pass fixed-size virtual grid range/spacer helper and builder
+  - [x] first-pass fixed-size virtual table range/spacer helper and builder
+  - [x] first-pass fixed-height virtual tree / inspector range/spacer helper and builder
+  - [x] virtual dropdown menu
+  - [x] virtual log viewer
+  - [x] virtual mosaic
   - [ ] virtual rich/code editor
   - [ ] shared item measurement, cache invalidation, scroll anchoring, selection retention, and focus retention
 - [ ] Implement child-between-border emission parity and exact border raster semantics
@@ -546,6 +564,13 @@ Prompt-sized UI/control execution order:
 ### UI rendering completeness
 
 - [ ] Add full render-graph resource binding generation (bind groups, push constants, per-pass parameter buffers) instead of pass skeletons
+  - [x] first-pass graph read planning for UI shader slot image, named-image, and buffer resources
+  - [ ] bind group creation and reflected binding layout merge for UI shader slots
+  - [x] first-pass app uniform push-constant byte packing with stable named offsets
+  - [x] first-pass graph pass push-constant attachment for single-command UI shader-slot batches
+  - [x] first-pass multi-command app-uniform parameter batch byte packing with per-command offsets
+  - [ ] GPU buffer allocation/upload and binding for per-pass parameter buffers
+  - [ ] built-in UI uniform parameter packing for rect, UV, shape, clip, state, time, and DPI scale
 - [ ] Integrate real shader pipelines for all UI slots in engine runtime
 - [ ] Define the UI shape contract shared by rendering, input, clipping, and effects:
   - [ ] rectangle
@@ -562,6 +587,11 @@ Prompt-sized UI/control execution order:
   - [ ] arbitrary path / mask
   - [ ] shader-produced coverage mask
 - [ ] Make UI antialiasing analytic and shape-aware for fills, borders, outlines, masks, and clips
+- [ ] Add first-party SVG and raster image primitives:
+  - [x] first-pass `resvg` backed SVG parse/raster asset primitive
+  - [x] exposed SVG/vector AA dials for native AA, supersampling, downsample filter, target scale, pixel snapping, and max render size
+  - [x] first-pass encoded raster image decode into RGBA8 UI assets
+  - [x] image element/widget metadata for fit mode, sampler policy, tint, and edge AA
 - [ ] Add GPU gradient shader implementation and parameter packing contract used by engine pipelines
 - [ ] Add text outline rendering path in engine shader side
 - [ ] Add a UI material/effect model with slots for:
@@ -586,8 +616,8 @@ Prompt-sized UI/control execution order:
   - [ ] HDR scene color
   - [ ] depth
   - [ ] normals / material IDs where available
-  - [ ] named debug images
-  - [ ] app-provided textures and buffers
+  - [x] first-pass named graph/debug image declarations resolved into graph reads
+  - [x] first-pass app-provided textures and buffers declared as graph reads
 - [ ] Add backdrop-filter style UI effects that operate on graph images behind the widget:
   - [ ] blur
   - [ ] dim / tint

@@ -9,3 +9,5 @@ glam.workspace = true
 sturdy-engine-core = { path = "../sturdy-engine-core" }
 textui = { path = "../textui" }
 fontdb = { version = "0.23.0", default-features = false, features = ["fs", "memmap"] }
+image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+resvg = "0.47.0"

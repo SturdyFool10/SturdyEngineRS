@@ -1,6 +1,6 @@
 use crate::{
     Edges, Element, ElementId, ElementKind, Gradient, LayoutTree, Rect, ShaderRef, ShaderSlot,
-    TextStyle, UiColor, UiLayer, UiShaderSlotBinding, UiShape,
+    TextStyle, UiColor, UiImageOptions, UiLayer, UiShaderSlotBinding, UiShape,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -54,6 +54,7 @@ pub struct ImageRenderData {
     pub tint: UiColor,
     pub shader: ShaderRef,
     pub effect: Option<UiShaderSlotBinding>,
+    pub options: UiImageOptions,
     pub corner_radius: glam::Vec4,
     pub shape: UiShape,
 }
@@ -180,6 +181,7 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
                 tint: image.tint,
                 shader: image.shader,
                 effect: element.style.shader_slot(ShaderSlot::Image).cloned(),
+                options: image.options,
                 corner_radius: element.style.corner_radius,
                 shape,
             }),
@@ -267,8 +269,8 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
 mod tests {
     use super::*;
     use crate::{
-        ElementStyle, LayoutCache, LayoutInput, LayoutSizing, Size, UiLayer, UiShaderUniform,
-        UiShaderUniformValue, UiShape,
+        ElementStyle, LayoutCache, LayoutInput, LayoutSizing, Size, UiAntialiasing, UiImageFit,
+        UiImageOptions, UiImageSampling, UiLayer, UiShaderUniform, UiShaderUniformValue, UiShape,
     };
     use sturdy_engine_core::{PipelineHandle, ShaderHandle};
 
@@ -422,6 +424,42 @@ mod tests {
         assert_eq!(
             effect.uniform("intensity").map(|uniform| &uniform.value),
             Some(&UiShaderUniformValue::Float(0.75))
+        );
+    }
+
+    #[test]
+    fn image_commands_carry_sampling_fit_and_edge_aa() {
+        let id = ElementId::new("image");
+        let mut element = Element::image(id, "icon");
+        element.layout.width = LayoutSizing::Fixed(32.0);
+        element.layout.height = LayoutSizing::Fixed(32.0);
+        if let ElementKind::Image(image) = &mut element.kind {
+            image.options = UiImageOptions::default()
+                .fit(UiImageFit::Cover)
+                .sampling(UiImageSampling::Nearest)
+                .edge_antialiasing(UiAntialiasing::supersampled(4));
+        }
+        let layout =
+            LayoutTree::compute(&element, Size::new(32.0, 32.0), &mut LayoutCache::default())
+                .unwrap();
+        let commands = RenderCommandList::from_element_tree(&element, &layout);
+
+        let data = commands
+            .commands
+            .iter()
+            .find_map(|command| match &command.data {
+                RenderData::Image(data) => Some(data),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(data.image_key, "icon");
+        assert_eq!(data.tint, UiColor::WHITE);
+        assert_eq!(data.options.fit, UiImageFit::Cover);
+        assert_eq!(data.options.sampling, UiImageSampling::Nearest);
+        assert_eq!(
+            data.options.edge_antialiasing,
+            UiAntialiasing::supersampled(4)
         );
     }
 }

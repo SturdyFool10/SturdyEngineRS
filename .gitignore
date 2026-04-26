@@ -1,8 +1,9 @@
 # Rust build artifacts
 /target/
 
-# Claude AI session data and memory
+# AI session data and memory
 .claude/
+.codex
 
 # cbindgen-generated C header
 include/sturdy_engine.h

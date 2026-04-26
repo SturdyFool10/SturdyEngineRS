@@ -1,7 +1,7 @@
 use glam::Vec4;
 
 use crate::{
-    Edges, ElementId, Gradient, ShaderRef, ShaderSlot, Size, TextStyle, UiColor,
+    Edges, ElementId, Gradient, ShaderRef, ShaderSlot, Size, TextStyle, UiColor, UiImageOptions,
     geometry::{UiShape, radii_all},
     shader::UiShaderSlotBinding,
 };
@@ -77,6 +77,7 @@ pub struct ImageElement {
     pub natural_size: Option<Size>,
     pub tint: UiColor,
     pub shader: ShaderRef,
+    pub options: UiImageOptions,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -126,8 +127,9 @@ impl Element {
         element.kind = ElementKind::Image(ImageElement {
             image_key: image_key.into(),
             natural_size: None,
-            tint: UiColor::TRANSPARENT,
+            tint: UiColor::WHITE,
             shader: ShaderRef::SOLID_COLOR,
+            options: UiImageOptions::default(),
         });
         element
     }
