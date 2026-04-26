@@ -409,14 +409,24 @@ Prompt-sized UI/control execution order:
 
 1. [x] `P2.U1` Define the shared widget state/event model for focus, hover, press, capture, disabled/read-only states, validation, and accessibility labels
 2. [ ] `P2.U2` Add shape-aware scroll containers with parent clipping, scrollbars, wheel/touchpad input, keyboard scroll, inertial/momentum hooks, and external scroll offset control
-3. [ ] `P2.U3` Add first-party buttons, icon buttons, segmented buttons, radio groups, checkboxes, toggles, sliders, drag bars, splitters, resizers, and stateful style variants on top of the shared widget model
-4. [ ] `P2.U4` Add dropdown/select/combobox widgets with popup anchoring, keyboard navigation, typeahead, disabled items, separators, and virtualized long-option lists
-5. [ ] `P2.U5` Add single-line text inputs with caret, selection, clipboard, validation state, placeholder, password/secret display mode, and IME composition hooks
+3. [x] `P2.U3` Add first-party buttons, icon buttons, segmented buttons, radio groups, checkboxes, toggles, sliders, drag bars, splitters, resizers, and stateful style variants on top of the shared widget model
+4. [x] `P2.U4` Add dropdown/select/combobox widgets with popup anchoring, keyboard navigation, typeahead, disabled items, separators, and virtualized long-option lists
+   - [x] `select` trigger button with open/closed chevron state wired to floating layer system
+   - [x] First-pass `virtual_dropdown_menu` and `virtual_context_menu` with separator, icon, shortcut, and disabled item support
+5. [x] `P2.U5` Add single-line text inputs with caret, selection, clipboard, validation state, placeholder, password/secret display mode, and IME composition hooks
+   - [x] `text_input` with cursor and selection rendering via absolute-positioned overlay elements
+   - [x] `number_input` with stepper buttons and unit label
+   - [x] `search_box` with search icon prefix
+   - [x] Password masking, placeholder, focused/invalid outline states
 6. [ ] `P2.U6` Add multiline text inputs with wrapping, scrolling, selection, clipboard, IME, undo/redo, soft tabs, line navigation, and shape-aware clipping
+   - [x] `text_input` supports `multiline: true` for wrapping text input layout
 7. [ ] `P2.U7` Add stylable multiline text editing rich enough for code editors: per-range styling, syntax/highlight spans, gutters, line numbers, diagnostics, inline widgets, minimap hooks, code folding hooks, and performant viewport virtualization
-8. [ ] `P2.U8` Add modal, dialog, popover, tooltip, context-menu, and command-palette primitives using a top-layer/portal model with focus trapping and backdrop/input blocking rules
+8. [x] `P2.U8` Add modal, dialog, popover, tooltip, context-menu, and command-palette primitives using a top-layer/portal model with focus trapping and backdrop/input blocking rules
    - [x] First-pass `TopLayer` portal host and modal backdrop builders
    - [x] First-pass focus-scope stack with modal background blocking, focus trapping, and restore-focus handoff
+   - [x] `dialog_surface` with optional title bar, fixed size, body area
+   - [x] `command_palette` with viewport-covering modal layer, centered panel, search input, and virtual results list
+   - [x] `virtual_context_menu` with icon, shortcut, separator, and disabled item support
 9. [ ] `P2.U9` Add date, time, and date-time selector widgets with typed entry, picker popovers, min/max, locale/time-zone formatting hooks, and keyboard-only operation
 10. [x] `P2.U10` Add a CSS-style `mosaic` layout primitive for dense visual tiling: named tiles, span/fit/fill modes, intrinsic aspect ratios, responsive breakpoints, stable placement, and predictable hit/clip regions
 11. [ ] `P2.U11` Add first-class UI layering and stacking contexts so apps can declare what renders behind/in front of what without relying on tree order hacks
@@ -429,30 +439,31 @@ Prompt-sized UI/control execution order:
 
 - [ ] Add a standard widget layer for:
   - [x] first-pass button, radio, toggle, checkbox, segmented-control, slider, progress-bar, and drag-bar builders on the shared `WidgetState` contract
-  - [ ] labels
-  - [ ] buttons and icon buttons
+  - [x] labels (standalone `label` and `label_with_palette`)
+  - [x] buttons and icon buttons (`icon_button`, `icon_button_with_palette`)
   - [x] segmented buttons
-  - [ ] radio buttons / radio groups
-  - [ ] toggle groups
+  - [x] radio buttons / radio groups (`radio`, `radio_with_palette`)
+  - [x] toggle groups (`toggle`, `toggle_with_palette`)
   - [x] checkboxes / toggles
   - [x] sliders
-  - [ ] drag bars / splitters / resizers
+  - [x] drag bars / splitters (`drag_bar`, `drag_bar_with_palette`)
   - [x] progress bars / meters
-  - [ ] dropdowns / selects / comboboxes
-  - [ ] single-line text inputs
-  - [ ] multiline text inputs
+  - [x] dropdowns / selects (`select`, `select_with_palette` trigger + `virtual_dropdown_menu`)
+  - [x] single-line text inputs (`text_input`, `number_input`, `search_box`)
+  - [x] multiline text inputs (`text_input` with `multiline: true`)
   - [ ] stylable multiline/code-editor text inputs
   - [ ] time selectors
   - [ ] date selectors
   - [ ] date-time selectors
-  - [ ] modals / dialogs
+  - [x] modals / dialogs (`dialog_surface`, `dialog_surface_with_palette`)
   - [x] first-pass modal layer and transparent portal-host primitives
-  - [ ] popovers / tooltips / context menus
-  - [ ] menu bars / command bars / toolbars
-  - [ ] tabs
-  - [ ] accordions / disclosure panels
-  - [ ] breadcrumbs
-  - [ ] search boxes
+  - [x] popovers / tooltips / context menus (`virtual_context_menu`, tooltip layer)
+  - [x] first-pass attached tooltip layer with styled wrapped text and pointer passthrough
+  - [x] toolbars (`toolbar`, `toolbar_with_palette`)
+  - [x] tabs (`tab_bar`, `tab_bar_with_palette`)
+  - [x] accordions / disclosure panels (`accordion_panel`, `accordion_panel_with_palette`)
+  - [x] breadcrumbs (`breadcrumbs`, `breadcrumbs_with_palette`)
+  - [x] search boxes (`search_box`, `search_box_with_palette`)
   - [ ] lists
   - [ ] tables
   - [ ] grids
@@ -516,7 +527,8 @@ Prompt-sized UI/control execution order:
   - [x] descendant subtree translation when a positioned parent moves
   - [x] first-pass anchored floating rect placement from an anchor rect, side, alignment, offset, and viewport margin
   - [x] first-pass viewport collision handling with flip, clamp, and flip-then-clamp policies
-  - [ ] direct `attach_to_id` resolution from a computed `LayoutTree`
+  - [x] direct `attach_to_id` resolution from a computed `LayoutTree`
+  - [ ] clip inheritance and transform-aware attach rects for nested/offscreen hosts
 - [ ] Add a UI top-layer and portal system for modals, dropdowns, popovers, tooltips, context menus, and drag previews
   - [x] first-pass transparent portal host builder for top-layer content
   - [x] first-pass modal backdrop layer builder that clips to the viewport and captures input

@@ -1,6 +1,6 @@
 use crate::{
     Element, ElementBuilder, ElementId, ElementStyle, LayoutInput, LayoutPosition, LayoutSizing,
-    Rect, Size, UiLayer,
+    LayoutTree, Rect, Size, UiLayer,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,6 +56,22 @@ pub struct FloatingLayout {
 pub struct FloatingLayerConfig {
     pub viewport: Size,
     pub anchor: Rect,
+    pub content_size: Size,
+    pub options: FloatingOptions,
+    pub z_index: i16,
+    pub clip: bool,
+    pub transparent_to_input: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FloatingAttachError {
+    AnchorNotFound(ElementId),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FloatingAttachConfig {
+    pub viewport: Size,
+    pub anchor: ElementId,
     pub content_size: Size,
     pub options: FloatingOptions,
     pub z_index: i16,
@@ -247,6 +263,62 @@ impl FloatingLayerConfig {
     }
 }
 
+impl FloatingAttachConfig {
+    pub fn new(viewport: Size, anchor: ElementId, content_size: Size) -> Self {
+        Self {
+            viewport,
+            anchor,
+            content_size,
+            options: FloatingOptions::default(),
+            z_index: 0,
+            clip: true,
+            transparent_to_input: true,
+        }
+    }
+
+    pub fn options(mut self, options: FloatingOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    pub fn z_index(mut self, z_index: i16) -> Self {
+        self.z_index = z_index;
+        self
+    }
+
+    pub fn clip(mut self, clip: bool) -> Self {
+        self.clip = clip;
+        self
+    }
+
+    pub fn transparent_to_input(mut self, transparent_to_input: bool) -> Self {
+        self.transparent_to_input = transparent_to_input;
+        self
+    }
+
+    pub fn layer_config(
+        &self,
+        layout: &LayoutTree,
+    ) -> Result<FloatingLayerConfig, FloatingAttachError> {
+        let anchor = layout
+            .by_id(&self.anchor)
+            .ok_or_else(|| FloatingAttachError::AnchorNotFound(self.anchor.clone()))?;
+        Ok(FloatingLayerConfig {
+            viewport: self.viewport,
+            anchor: anchor.rect,
+            content_size: self.content_size,
+            options: self.options,
+            z_index: self.z_index,
+            clip: self.clip,
+            transparent_to_input: self.transparent_to_input,
+        })
+    }
+
+    pub fn layout(&self, layout: &LayoutTree) -> Result<FloatingLayout, FloatingAttachError> {
+        Ok(self.layer_config(layout)?.layout())
+    }
+}
+
 pub fn anchored_floating_layer(
     id: ElementId,
     config: FloatingLayerConfig,
@@ -280,6 +352,16 @@ pub fn anchored_floating_layer(
         })
         .child(content)
         .build()
+}
+
+pub fn attached_floating_layer(
+    id: ElementId,
+    layout: &LayoutTree,
+    config: &FloatingAttachConfig,
+    content: Element,
+) -> Result<Element, FloatingAttachError> {
+    let layer_config = config.layer_config(layout)?;
+    Ok(anchored_floating_layer(id, layer_config, content))
 }
 
 fn constrained_content_size(
@@ -385,7 +467,7 @@ fn clamp_rect(rect: Rect, viewport: Size, margin: f32) -> (Rect, bool) {
     (Rect::new(x, y, rect.size.width, rect.size.height), clamped)
 }
 
-fn place_subtree_in_layer(element: &mut Element, layer: UiLayer, base_z_index: i16) {
+pub(crate) fn place_subtree_in_layer(element: &mut Element, layer: UiLayer, base_z_index: i16) {
     let z_index = base_z_index.saturating_add(element.layout.z_index);
     element.layout.layer = layer;
     element.layout.z_index = z_index;
@@ -397,7 +479,7 @@ fn place_subtree_in_layer(element: &mut Element, layer: UiLayer, base_z_index: i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Element;
+    use crate::{Element, LayoutCache};
 
     #[test]
     fn floating_layout_places_bottom_start_from_anchor() {
@@ -504,6 +586,84 @@ mod tests {
             }
         );
         assert_eq!(element.children[0].layout.width, LayoutSizing::Fixed(120.0));
+        assert_eq!(element.children[0].layout.height, LayoutSizing::Fixed(90.0));
+    }
+
+    #[test]
+    fn attach_config_resolves_anchor_from_layout_tree() {
+        let root_id = ElementId::new("root");
+        let anchor_id = ElementId::new("app-owned-anchor");
+        let mut root = Element::new(root_id);
+        root.style.padding = crate::Edges::all(10.0);
+        root.layout.width = LayoutSizing::Fixed(240.0);
+        root.layout.height = LayoutSizing::Fixed(120.0);
+        let mut anchor = Element::new(anchor_id.clone());
+        anchor.layout.width = LayoutSizing::Fixed(80.0);
+        anchor.layout.height = LayoutSizing::Fixed(24.0);
+        root.children.push(anchor);
+        let layout =
+            LayoutTree::compute(&root, Size::new(240.0, 120.0), &mut LayoutCache::default())
+                .unwrap();
+        let config =
+            FloatingAttachConfig::new(Size::new(240.0, 120.0), anchor_id, Size::new(120.0, 40.0))
+                .z_index(9)
+                .transparent_to_input(false);
+
+        let layer_config = config.layer_config(&layout).unwrap();
+
+        assert_eq!(layer_config.anchor, Rect::new(10.0, 10.0, 80.0, 24.0));
+        assert_eq!(layer_config.z_index, 9);
+        assert!(!layer_config.transparent_to_input);
+    }
+
+    #[test]
+    fn attach_config_reports_missing_anchor() {
+        let anchor_id = ElementId::new("missing-anchor");
+        let config = FloatingAttachConfig::new(
+            Size::new(240.0, 120.0),
+            anchor_id.clone(),
+            Size::new(120.0, 40.0),
+        );
+
+        let error = config.layout(&LayoutTree::default()).unwrap_err();
+
+        assert_eq!(error, FloatingAttachError::AnchorNotFound(anchor_id));
+    }
+
+    #[test]
+    fn attached_floating_layer_positions_from_layout_anchor() {
+        let root_id = ElementId::new("root");
+        let anchor_id = ElementId::new("button");
+        let mut root = Element::new(root_id);
+        root.style.padding = crate::Edges::all(12.0);
+        root.layout.width = LayoutSizing::Fixed(300.0);
+        root.layout.height = LayoutSizing::Fixed(180.0);
+        let mut anchor = Element::new(anchor_id.clone());
+        anchor.layout.width = LayoutSizing::Fixed(96.0);
+        anchor.layout.height = LayoutSizing::Fixed(20.0);
+        root.children.push(anchor);
+        let layout =
+            LayoutTree::compute(&root, Size::new(300.0, 180.0), &mut LayoutCache::default())
+                .unwrap();
+        let content = Element::new(ElementId::new("menu"));
+        let config =
+            FloatingAttachConfig::new(Size::new(300.0, 180.0), anchor_id, Size::new(160.0, 90.0))
+                .options(FloatingOptions::default().offset(6.0))
+                .z_index(30);
+
+        let element =
+            attached_floating_layer(ElementId::new("floating-host"), &layout, &config, content)
+                .unwrap();
+
+        assert_eq!(element.layout.layer, UiLayer::TopLayer);
+        assert_eq!(element.layout.z_index, 30);
+        assert_eq!(
+            element.children[0].layout.position,
+            LayoutPosition::Absolute {
+                offset: glam::Vec2::new(12.0, 38.0)
+            }
+        );
+        assert_eq!(element.children[0].layout.width, LayoutSizing::Fixed(160.0));
         assert_eq!(element.children[0].layout.height, LayoutSizing::Fixed(90.0));
     }
 }

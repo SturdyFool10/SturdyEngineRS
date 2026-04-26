@@ -1,8 +1,10 @@
 use crate::{
-    Axis, CornerSpec, Edges, Element, ElementBuilder, ElementId, ElementStyle, LayoutDirection,
-    LayoutInput, LayoutPosition, LayoutSizing, MosaicLayout, Rect, ScrollAxis, ScrollConfig, Size,
-    TextStyle, TextWrap, UiColor, UiImageOptions, UiLayer, UiShape, VirtualGridLayout,
-    VirtualListLayout, VirtualTableLayout, VirtualTreeLayout, WidgetState, radii_all,
+    Axis, CornerSpec, Edges, Element, ElementBuilder, ElementId, ElementStyle, FloatingAlign,
+    FloatingAttachConfig, FloatingAttachError, FloatingOptions, FloatingPlacement, LayoutDirection,
+    LayoutInput, LayoutPosition, LayoutSizing, LayoutTree, MosaicLayout, Rect, ScrollAxis,
+    ScrollConfig, Size, TextAlign, TextStyle, TextWrap, UiColor, UiImageOptions, UiLayer, UiShape,
+    VirtualGridLayout, VirtualListLayout, VirtualTableLayout, VirtualTreeLayout, WidgetState,
+    attached_floating_layer, floating::place_subtree_in_layer, radii_all,
 };
 use glam::Vec2;
 
@@ -121,6 +123,42 @@ pub struct ModalLayerConfig {
     pub clip: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct TooltipConfig {
+    pub viewport: Size,
+    pub anchor: ElementId,
+    pub size: Size,
+    pub options: FloatingOptions,
+    pub z_index: i16,
+    pub clip: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandPaletteItemSpec {
+    pub id: ElementId,
+    pub label: String,
+    pub description: Option<String>,
+    pub shortcut: Option<String>,
+    pub group: Option<String>,
+    pub selected: bool,
+    pub disabled: bool,
+    pub state: WidgetState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CommandPaletteConfig {
+    pub viewport: Size,
+    pub width: f32,
+    pub row_height: f32,
+    pub max_list_height: f32,
+    pub scroll_offset: f32,
+    pub z_index: i16,
+    pub backdrop: UiColor,
+    pub title: Option<String>,
+    pub placeholder: String,
+    pub empty_text: String,
+}
+
 impl ScrollbarMetrics {
     pub fn new(
         axis: Axis,
@@ -233,6 +271,149 @@ impl ModalLayerConfig {
     }
 }
 
+impl TooltipConfig {
+    pub fn new(viewport: Size, anchor: ElementId, size: Size) -> Self {
+        Self {
+            viewport,
+            anchor,
+            size,
+            options: FloatingOptions::default()
+                .placement(FloatingPlacement::top(FloatingAlign::Center))
+                .offset(8.0)
+                .viewport_margin(8.0),
+            z_index: 30,
+            clip: true,
+        }
+    }
+
+    pub fn options(mut self, options: FloatingOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    pub fn z_index(mut self, z_index: i16) -> Self {
+        self.z_index = z_index;
+        self
+    }
+
+    pub fn clip(mut self, clip: bool) -> Self {
+        self.clip = clip;
+        self
+    }
+}
+
+impl CommandPaletteItemSpec {
+    pub fn new(id: ElementId, label: impl Into<String>) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            description: None,
+            shortcut: None,
+            group: None,
+            selected: false,
+            disabled: false,
+            state: WidgetState::default(),
+        }
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn shortcut(mut self, shortcut: impl Into<String>) -> Self {
+        self.shortcut = Some(shortcut.into());
+        self
+    }
+
+    pub fn group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
+        self
+    }
+
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    pub fn state(mut self, state: WidgetState) -> Self {
+        self.state = state;
+        self
+    }
+}
+
+impl CommandPaletteConfig {
+    pub fn new(viewport: Size) -> Self {
+        Self {
+            viewport,
+            width: 560.0,
+            row_height: 52.0,
+            max_list_height: 360.0,
+            scroll_offset: 0.0,
+            z_index: 60,
+            backdrop: UiColor::from_rgba8(0, 0, 0, 140),
+            title: Some("Command Palette".into()),
+            placeholder: "Search commands".into(),
+            empty_text: "No matching commands".into(),
+        }
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.width = width.max(0.0);
+        self
+    }
+
+    pub fn row_height(mut self, row_height: f32) -> Self {
+        self.row_height = row_height.max(1.0);
+        self
+    }
+
+    pub fn max_list_height(mut self, max_list_height: f32) -> Self {
+        self.max_list_height = max_list_height.max(0.0);
+        self
+    }
+
+    pub fn scroll_offset(mut self, scroll_offset: f32) -> Self {
+        self.scroll_offset = scroll_offset.max(0.0);
+        self
+    }
+
+    pub fn z_index(mut self, z_index: i16) -> Self {
+        self.z_index = z_index;
+        self
+    }
+
+    pub fn backdrop(mut self, backdrop: UiColor) -> Self {
+        self.backdrop = backdrop;
+        self
+    }
+
+    pub fn title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    pub fn no_title(mut self) -> Self {
+        self.title = None;
+        self
+    }
+
+    pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = placeholder.into();
+        self
+    }
+
+    pub fn empty_text(mut self, empty_text: impl Into<String>) -> Self {
+        self.empty_text = empty_text.into();
+        self
+    }
+}
+
 impl SegmentSpec {
     pub fn new(id: ElementId, label: impl Into<String>) -> Self {
         Self {
@@ -336,6 +517,287 @@ impl LogEntrySpec {
         self
     }
 }
+
+// ── New spec types ────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextInputSpec {
+    pub value: String,
+    pub placeholder: String,
+    /// Pixel X offset of the text cursor within the content area (after padding).
+    /// `None` suppresses cursor rendering even when focused.
+    pub cursor_x: Option<f32>,
+    /// Pixel (start_x, end_x) of the selection highlight within the content area.
+    pub selection: Option<(f32, f32)>,
+    pub password: bool,
+    pub multiline: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NumberInputSpec {
+    /// Pre-formatted display value.
+    pub value: String,
+    pub placeholder: String,
+    pub unit: Option<String>,
+    pub cursor_x: Option<f32>,
+    pub selection: Option<(f32, f32)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabSpec {
+    pub id: ElementId,
+    pub label: String,
+    pub selected: bool,
+    pub state: WidgetState,
+    pub icon_key: Option<String>,
+    pub icon_size: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BreadcrumbSpec {
+    pub id: ElementId,
+    pub label: String,
+    pub is_current: bool,
+    pub state: WidgetState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccordionPanelConfig {
+    pub id: ElementId,
+    pub title: String,
+    pub is_open: bool,
+    pub state: WidgetState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BadgeVariant {
+    Default,
+    Success,
+    Warning,
+    Error,
+    Info,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContextMenuItemSpec {
+    pub id: ElementId,
+    pub label: String,
+    pub shortcut: Option<String>,
+    pub icon_key: Option<String>,
+    pub disabled: bool,
+    pub separator_before: bool,
+    pub state: WidgetState,
+}
+
+impl TextInputSpec {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            placeholder: String::new(),
+            cursor_x: None,
+            selection: None,
+            password: false,
+            multiline: false,
+        }
+    }
+
+    pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = placeholder.into();
+        self
+    }
+
+    pub fn cursor_x(mut self, cursor_x: f32) -> Self {
+        self.cursor_x = Some(cursor_x);
+        self
+    }
+
+    pub fn selection(mut self, start_x: f32, end_x: f32) -> Self {
+        self.selection = Some((start_x, end_x));
+        self
+    }
+
+    pub fn password(mut self, password: bool) -> Self {
+        self.password = password;
+        self
+    }
+
+    pub fn multiline(mut self, multiline: bool) -> Self {
+        self.multiline = multiline;
+        self
+    }
+}
+
+impl NumberInputSpec {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            placeholder: String::new(),
+            unit: None,
+            cursor_x: None,
+            selection: None,
+        }
+    }
+
+    pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = placeholder.into();
+        self
+    }
+
+    pub fn unit(mut self, unit: impl Into<String>) -> Self {
+        self.unit = Some(unit.into());
+        self
+    }
+
+    pub fn cursor_x(mut self, cursor_x: f32) -> Self {
+        self.cursor_x = Some(cursor_x);
+        self
+    }
+
+    pub fn selection(mut self, start_x: f32, end_x: f32) -> Self {
+        self.selection = Some((start_x, end_x));
+        self
+    }
+}
+
+impl TabSpec {
+    pub fn new(id: ElementId, label: impl Into<String>) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            selected: false,
+            state: WidgetState::default(),
+            icon_key: None,
+            icon_size: 16.0,
+        }
+    }
+
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    pub fn state(mut self, state: WidgetState) -> Self {
+        self.state = state;
+        self
+    }
+
+    pub fn icon(mut self, icon_key: impl Into<String>) -> Self {
+        self.icon_key = Some(icon_key.into());
+        self
+    }
+
+    pub fn icon_size(mut self, icon_size: f32) -> Self {
+        self.icon_size = icon_size;
+        self
+    }
+}
+
+impl BreadcrumbSpec {
+    pub fn new(id: ElementId, label: impl Into<String>) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            is_current: false,
+            state: WidgetState::default(),
+        }
+    }
+
+    pub fn current(mut self, is_current: bool) -> Self {
+        self.is_current = is_current;
+        self
+    }
+
+    pub fn state(mut self, state: WidgetState) -> Self {
+        self.state = state;
+        self
+    }
+}
+
+impl AccordionPanelConfig {
+    pub fn new(id: ElementId, title: impl Into<String>) -> Self {
+        Self {
+            id,
+            title: title.into(),
+            is_open: false,
+            state: WidgetState::default(),
+        }
+    }
+
+    pub fn open(mut self, is_open: bool) -> Self {
+        self.is_open = is_open;
+        self
+    }
+
+    pub fn state(mut self, state: WidgetState) -> Self {
+        self.state = state;
+        self
+    }
+}
+
+impl BadgeVariant {
+    pub fn colors(self, palette: &WidgetPalette) -> (UiColor, UiColor) {
+        match self {
+            Self::Default => (palette.surface_hovered, palette.text),
+            Self::Success => (
+                UiColor::from_rgba8(20, 83, 45, 230),
+                UiColor::from_rgba8(134, 239, 172, 255),
+            ),
+            Self::Warning => (
+                UiColor::from_rgba8(92, 63, 8, 230),
+                UiColor::from_rgba8(253, 224, 71, 255),
+            ),
+            Self::Error => (
+                UiColor::from_rgba8(127, 29, 29, 230),
+                UiColor::from_rgba8(252, 165, 165, 255),
+            ),
+            Self::Info => (
+                UiColor::from_rgba8(12, 74, 110, 230),
+                UiColor::from_rgba8(125, 211, 252, 255),
+            ),
+        }
+    }
+}
+
+impl ContextMenuItemSpec {
+    pub fn new(id: ElementId, label: impl Into<String>) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            shortcut: None,
+            icon_key: None,
+            disabled: false,
+            separator_before: false,
+            state: WidgetState::default(),
+        }
+    }
+
+    pub fn shortcut(mut self, shortcut: impl Into<String>) -> Self {
+        self.shortcut = Some(shortcut.into());
+        self
+    }
+
+    pub fn icon(mut self, icon_key: impl Into<String>) -> Self {
+        self.icon_key = Some(icon_key.into());
+        self
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    pub fn separator_before(mut self, separator_before: bool) -> Self {
+        self.separator_before = separator_before;
+        self
+    }
+
+    pub fn state(mut self, state: WidgetState) -> Self {
+        self.state = state;
+        self
+    }
+}
+
+// ── Widget builders ────────────────────────────────────────────────────────────
 
 pub fn button(id: ElementId, label: impl Into<String>, state: &WidgetState) -> Element {
     button_with_palette(id, label, state, &WidgetPalette::default())
@@ -918,6 +1380,88 @@ pub fn modal_layer(
         builder = builder.child(child);
     }
     builder.build()
+}
+
+pub fn tooltip_layer(
+    id: ElementId,
+    layout: &LayoutTree,
+    config: TooltipConfig,
+    text: impl Into<String>,
+) -> Result<Element, FloatingAttachError> {
+    tooltip_layer_with_palette(id, layout, config, text, &WidgetPalette::default())
+}
+
+pub fn tooltip_layer_with_palette(
+    id: ElementId,
+    layout: &LayoutTree,
+    config: TooltipConfig,
+    text: impl Into<String>,
+    palette: &WidgetPalette,
+) -> Result<Element, FloatingAttachError> {
+    let surface = tooltip_surface(
+        ElementId::local("surface", 0, &id),
+        text,
+        config.size,
+        palette,
+    );
+    let attach_config = FloatingAttachConfig::new(config.viewport, config.anchor, config.size)
+        .options(config.options)
+        .z_index(config.z_index)
+        .clip(config.clip)
+        .transparent_to_input(true);
+
+    attached_floating_layer(id, layout, &attach_config, surface)
+}
+
+pub fn tooltip_surface(
+    id: ElementId,
+    text: impl Into<String>,
+    size: Size,
+    palette: &WidgetPalette,
+) -> Element {
+    let padding = Edges::symmetric(8.0, 5.0);
+    let label_id = ElementId::local("label", 0, &id);
+    let mut label = ElementBuilder::text(
+        label_id,
+        text,
+        TextStyle {
+            font_size: 12.0,
+            line_height: 16.0,
+            color: palette.text,
+            wrap: TextWrap::Words,
+            ..TextStyle::default()
+        },
+    )
+    .layout(LayoutInput {
+        width: LayoutSizing::Fixed((size.width - padding.horizontal()).max(0.0)),
+        height: LayoutSizing::Fit {
+            min: 0.0,
+            max: (size.height - padding.vertical()).max(0.0),
+        },
+        ..LayoutInput::default()
+    })
+    .build();
+    label.style.transparent_to_input = true;
+
+    ElementBuilder::container(id)
+        .style(ElementStyle {
+            background: palette.surface.with_alpha(0.96),
+            outline: palette.outline,
+            outline_width: Edges::all(1.0),
+            corner_radius: radii_all(6.0),
+            padding,
+            transparent_to_input: true,
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Fixed(size.width.max(0.0)),
+            height: LayoutSizing::Fixed(size.height.max(0.0)),
+            clip_x: true,
+            clip_y: true,
+            ..LayoutInput::default()
+        })
+        .child(label)
+        .build()
 }
 
 pub fn scrollbar(id: ElementId, metrics: ScrollbarMetrics, state: &WidgetState) -> Element {
@@ -1801,6 +2345,1643 @@ fn mosaic_content_from_tile_rects(
     builder.build()
 }
 
+// ── New public widgets ─────────────────────────────────────────────────────────
+
+pub fn label(id: ElementId, text: impl Into<String>, state: &WidgetState) -> Element {
+    label_with_palette(id, text, state, &WidgetPalette::default())
+}
+
+pub fn label_with_palette(
+    id: ElementId,
+    text: impl Into<String>,
+    state: &WidgetState,
+    palette: &WidgetPalette,
+) -> Element {
+    compact_text(id, text, text_color(state, palette, false), 14.0, 18.0)
+}
+
+pub fn divider(id: ElementId, axis: Axis) -> Element {
+    let (width, height) = match axis {
+        Axis::Horizontal => (
+            LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            LayoutSizing::Fixed(1.0),
+        ),
+        Axis::Vertical => (
+            LayoutSizing::Fixed(1.0),
+            LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+        ),
+    };
+    ElementBuilder::container(id)
+        .style(ElementStyle {
+            background: UiColor::from_rgba8(148, 163, 184, 40),
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width,
+            height,
+            ..LayoutInput::default()
+        })
+        .build()
+}
+
+pub fn badge(id: ElementId, text: impl Into<String>, variant: BadgeVariant) -> Element {
+    badge_with_palette(id, text, variant, &WidgetPalette::default())
+}
+
+pub fn badge_with_palette(
+    id: ElementId,
+    text: impl Into<String>,
+    variant: BadgeVariant,
+    palette: &WidgetPalette,
+) -> Element {
+    let (bg, fg) = variant.colors(palette);
+    let label_id = ElementId::local("label", 0, &id);
+    ElementBuilder::container(id)
+        .style(ElementStyle {
+            background: bg,
+            corner_radius: radii_all(999.0),
+            padding: Edges::symmetric(6.0, 2.0),
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            ..LayoutInput::default()
+        })
+        .child(compact_text(label_id, text, fg, 11.0, 14.0))
+        .build()
+}
+
+pub fn empty_state(
+    id: ElementId,
+    title: impl Into<String>,
+    description: Option<impl Into<String>>,
+    width: f32,
+    height: f32,
+) -> Element {
+    empty_state_with_palette(
+        id,
+        title,
+        description,
+        width,
+        height,
+        &WidgetPalette::default(),
+    )
+}
+
+pub fn empty_state_with_palette(
+    id: ElementId,
+    title: impl Into<String>,
+    description: Option<impl Into<String>>,
+    width: f32,
+    height: f32,
+    palette: &WidgetPalette,
+) -> Element {
+    let title_id = ElementId::local("title", 0, &id);
+    let desc_id = ElementId::local("description", 0, &id);
+    let title_el = ElementBuilder::text(
+        title_id,
+        title,
+        TextStyle {
+            font_size: 16.0,
+            line_height: 22.0,
+            color: palette.text,
+            align: TextAlign::Center,
+            wrap: TextWrap::Words,
+            ..TextStyle::default()
+        },
+    )
+    .layout(LayoutInput {
+        width: LayoutSizing::Fixed((width - 32.0).max(0.0)),
+        height: LayoutSizing::Fit {
+            min: 0.0,
+            max: f32::INFINITY,
+        },
+        ..LayoutInput::default()
+    })
+    .build();
+
+    let mut builder = ElementBuilder::container(id)
+        .style(ElementStyle {
+            transparent_to_input: true,
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Fixed(width.max(0.0)),
+            height: LayoutSizing::Fixed(height.max(0.0)),
+            direction: LayoutDirection::TopToBottom,
+            align_x: crate::Align::Center,
+            align_y: crate::Align::Center,
+            gap: 8.0,
+            ..LayoutInput::default()
+        })
+        .child(title_el);
+
+    if let Some(desc) = description {
+        let desc_el = ElementBuilder::text(
+            desc_id,
+            desc,
+            TextStyle {
+                font_size: 13.0,
+                line_height: 18.0,
+                color: palette.muted_text,
+                align: TextAlign::Center,
+                wrap: TextWrap::Words,
+                ..TextStyle::default()
+            },
+        )
+        .layout(LayoutInput {
+            width: LayoutSizing::Fixed((width - 48.0).max(0.0)),
+            height: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            ..LayoutInput::default()
+        })
+        .build();
+        builder = builder.child(desc_el);
+    }
+
+    builder.build()
+}
+
+pub fn tab_bar(id: ElementId, tabs: impl IntoIterator<Item = TabSpec>) -> Element {
+    tab_bar_with_palette(id, tabs, &WidgetPalette::default())
+}
+
+pub fn tab_bar_with_palette(
+    id: ElementId,
+    tabs: impl IntoIterator<Item = TabSpec>,
+    palette: &WidgetPalette,
+) -> Element {
+    let mut builder = ElementBuilder::container(id).layout(LayoutInput {
+        width: LayoutSizing::Grow {
+            min: 0.0,
+            max: f32::INFINITY,
+        },
+        height: LayoutSizing::Fit {
+            min: 0.0,
+            max: f32::INFINITY,
+        },
+        direction: LayoutDirection::LeftToRight,
+        ..LayoutInput::default()
+    });
+
+    for tab in tabs {
+        let tab_id = tab.id.clone();
+        let mut tab_style = ElementStyle {
+            background: if tab.state.pressed || tab.state.captured {
+                palette.surface_pressed
+            } else if tab.state.hovered {
+                palette.surface_hovered
+            } else {
+                UiColor::TRANSPARENT
+            },
+            outline: if tab.selected {
+                palette.accent
+            } else if tab.state.focused {
+                palette.outline_focus
+            } else {
+                UiColor::TRANSPARENT
+            },
+            outline_width: Edges {
+                bottom: 2.0,
+                ..Edges::ZERO
+            },
+            padding: Edges::symmetric(12.0, 8.0),
+            ..ElementStyle::default()
+        };
+        if tab.state.disabled {
+            tab_style.background = UiColor::TRANSPARENT;
+        }
+
+        let label_color = if tab.state.disabled {
+            palette.muted_text
+        } else if tab.selected {
+            palette.accent
+        } else {
+            palette.text
+        };
+
+        let mut tab_builder = ElementBuilder::container(tab_id.clone())
+            .style(tab_style)
+            .layout(LayoutInput {
+                width: LayoutSizing::Fit {
+                    min: 0.0,
+                    max: f32::INFINITY,
+                },
+                height: LayoutSizing::Fit {
+                    min: 0.0,
+                    max: f32::INFINITY,
+                },
+                direction: LayoutDirection::LeftToRight,
+                align_y: crate::Align::Center,
+                gap: 6.0,
+                ..LayoutInput::default()
+            });
+
+        if let Some(icon_key) = &tab.icon_key {
+            tab_builder = tab_builder.child(icon_element(
+                ElementId::local("icon", 0, &tab_id),
+                icon_key,
+                tab.icon_size,
+            ));
+        }
+
+        tab_builder = tab_builder.child(compact_text(
+            ElementId::local("label", 0, &tab_id),
+            tab.label,
+            label_color,
+            14.0,
+            18.0,
+        ));
+
+        builder = builder.child(tab_builder.build());
+    }
+
+    builder.build()
+}
+
+pub fn breadcrumbs(id: ElementId, items: impl IntoIterator<Item = BreadcrumbSpec>) -> Element {
+    breadcrumbs_with_palette(id, items, &WidgetPalette::default())
+}
+
+pub fn breadcrumbs_with_palette(
+    id: ElementId,
+    items: impl IntoIterator<Item = BreadcrumbSpec>,
+    palette: &WidgetPalette,
+) -> Element {
+    let items: Vec<BreadcrumbSpec> = items.into_iter().collect();
+    let count = items.len();
+    let mut builder = ElementBuilder::container(id).layout(LayoutInput {
+        width: LayoutSizing::Fit {
+            min: 0.0,
+            max: f32::INFINITY,
+        },
+        height: LayoutSizing::Fit {
+            min: 0.0,
+            max: f32::INFINITY,
+        },
+        direction: LayoutDirection::LeftToRight,
+        align_y: crate::Align::Center,
+        gap: 4.0,
+        ..LayoutInput::default()
+    });
+
+    for (index, item) in items.into_iter().enumerate() {
+        let item_id = item.id.clone();
+        let color = if item.is_current {
+            palette.text
+        } else if item.state.hovered {
+            palette.accent
+        } else {
+            palette.muted_text
+        };
+        builder = builder.child(compact_text(item_id.clone(), item.label, color, 13.0, 16.0));
+
+        if index + 1 < count {
+            let sep_id = ElementId::local("sep", 0, &item_id);
+            builder =
+                builder.child(compact_text(sep_id, "›", palette.muted_text, 13.0, 16.0));
+        }
+    }
+
+    builder.build()
+}
+
+pub fn text_input(
+    id: ElementId,
+    spec: &TextInputSpec,
+    state: &WidgetState,
+) -> Element {
+    text_input_with_palette(id, spec, state, &WidgetPalette::default())
+}
+
+pub fn text_input_with_palette(
+    id: ElementId,
+    spec: &TextInputSpec,
+    state: &WidgetState,
+    palette: &WidgetPalette,
+) -> Element {
+    let padding = Edges::symmetric(10.0, 6.0);
+    let field_height = 32.0;
+    let content_height = field_height - padding.vertical();
+    let field_style = input_field_container_style(state, palette);
+
+    let display_value: String = if spec.password && !spec.value.is_empty() {
+        "•".repeat(spec.value.chars().count())
+    } else {
+        spec.value.clone()
+    };
+    let show_placeholder = display_value.is_empty();
+
+    let text_color_val = if show_placeholder {
+        palette.muted_text
+    } else {
+        palette.text
+    };
+    let display_text = if show_placeholder {
+        spec.placeholder.clone()
+    } else {
+        display_value
+    };
+
+    let text_id = ElementId::local("text", 0, &id);
+    let text_el = ElementBuilder::text(
+        text_id,
+        display_text,
+        TextStyle {
+            font_size: 14.0,
+            line_height: content_height,
+            color: text_color_val,
+            wrap: if spec.multiline {
+                TextWrap::Words
+            } else {
+                TextWrap::None
+            },
+            ..TextStyle::default()
+        },
+    )
+    .layout(LayoutInput {
+        width: LayoutSizing::Grow {
+            min: 0.0,
+            max: f32::INFINITY,
+        },
+        height: LayoutSizing::Fixed(content_height),
+        ..LayoutInput::default()
+    })
+    .build();
+
+    let mut inner = ElementBuilder::container(ElementId::local("inner", 0, &id))
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fixed(content_height),
+            direction: LayoutDirection::LeftToRight,
+            ..LayoutInput::default()
+        });
+
+    if let Some((sel_start, sel_end)) = spec.selection {
+        let sel_start = sel_start.max(0.0);
+        let sel_end = sel_end.max(sel_start);
+        if sel_end > sel_start {
+            inner = inner.child(selection_element(
+                ElementId::local("selection", 0, &id),
+                sel_start,
+                sel_end - sel_start,
+                content_height,
+                palette.accent.with_alpha(0.35),
+            ));
+        }
+    }
+
+    if state.focused {
+        if let Some(cx) = spec.cursor_x {
+            inner = inner.child(cursor_element(
+                ElementId::local("cursor", 0, &id),
+                cx,
+                content_height,
+                palette.accent,
+            ));
+        }
+    }
+
+    inner = inner.child(text_el);
+
+    let height = if spec.multiline {
+        LayoutSizing::Fit {
+            min: field_height,
+            max: f32::INFINITY,
+        }
+    } else {
+        LayoutSizing::Fixed(field_height)
+    };
+
+    ElementBuilder::container(id)
+        .style(field_style)
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 64.0,
+                max: f32::INFINITY,
+            },
+            height,
+            direction: LayoutDirection::LeftToRight,
+            align_y: crate::Align::Center,
+            clip_x: true,
+            clip_y: spec.multiline,
+            ..LayoutInput::default()
+        })
+        .child(inner.build())
+        .build()
+}
+
+pub fn number_input(
+    id: ElementId,
+    spec: &NumberInputSpec,
+    state: &WidgetState,
+) -> Element {
+    number_input_with_palette(id, spec, state, &WidgetPalette::default())
+}
+
+pub fn number_input_with_palette(
+    id: ElementId,
+    spec: &NumberInputSpec,
+    state: &WidgetState,
+    palette: &WidgetPalette,
+) -> Element {
+    let padding = Edges::symmetric(10.0, 6.0);
+    let field_height = 32.0;
+    let content_height = field_height - padding.vertical();
+    let field_style = input_field_container_style(state, palette);
+
+    let show_placeholder = spec.value.is_empty();
+    let display_text = if show_placeholder {
+        spec.placeholder.clone()
+    } else {
+        spec.value.clone()
+    };
+    let text_color_val = if show_placeholder {
+        palette.muted_text
+    } else {
+        palette.text
+    };
+
+    let text_id = ElementId::local("text", 0, &id);
+    let mut text_el = compact_text(text_id, display_text, text_color_val, 14.0, content_height);
+    text_el.layout.width = LayoutSizing::Grow {
+        min: 0.0,
+        max: f32::INFINITY,
+    };
+    text_el.layout.height = LayoutSizing::Fixed(content_height);
+
+    let mut inner = ElementBuilder::container(ElementId::local("inner", 0, &id)).layout(
+        LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fixed(content_height),
+            direction: LayoutDirection::LeftToRight,
+            align_y: crate::Align::Center,
+            gap: 4.0,
+            ..LayoutInput::default()
+        },
+    );
+
+    if let Some((sel_start, sel_end)) = spec.selection {
+        let sel_start = sel_start.max(0.0);
+        let sel_end = sel_end.max(sel_start);
+        if sel_end > sel_start {
+            inner = inner.child(selection_element(
+                ElementId::local("selection", 0, &id),
+                sel_start,
+                sel_end - sel_start,
+                content_height,
+                palette.accent.with_alpha(0.35),
+            ));
+        }
+    }
+
+    if state.focused {
+        if let Some(cx) = spec.cursor_x {
+            inner = inner.child(cursor_element(
+                ElementId::local("cursor", 0, &id),
+                cx,
+                content_height,
+                palette.accent,
+            ));
+        }
+    }
+
+    inner = inner.child(text_el);
+
+    if let Some(unit) = &spec.unit {
+        let unit_id = ElementId::local("unit", 0, &id);
+        inner = inner.child(compact_text(unit_id, unit, palette.muted_text, 12.0, content_height));
+    }
+
+    let stepper_id = ElementId::local("stepper", 0, &id);
+    let up_id = ElementId::local("up", 0, &stepper_id);
+    let down_id = ElementId::local("down", 0, &stepper_id);
+    let stepper = ElementBuilder::container(stepper_id)
+        .layout(LayoutInput {
+            width: LayoutSizing::Fixed(20.0),
+            height: LayoutSizing::Fixed(content_height),
+            direction: LayoutDirection::TopToBottom,
+            ..LayoutInput::default()
+        })
+        .child(
+            ElementBuilder::container(up_id)
+                .style(ElementStyle {
+                    background: palette.surface_hovered,
+                    corner_radius: radii_all(3.0),
+                    ..ElementStyle::default()
+                })
+                .layout(LayoutInput {
+                    width: LayoutSizing::Fixed(18.0),
+                    height: LayoutSizing::Fixed(content_height * 0.5 - 1.0),
+                    align_x: crate::Align::Center,
+                    align_y: crate::Align::Center,
+                    ..LayoutInput::default()
+                })
+                .child(compact_text(
+                    ElementId::local("arrow", 0, &id),
+                    "▲",
+                    palette.muted_text,
+                    8.0,
+                    10.0,
+                ))
+                .build(),
+        )
+        .child(
+            ElementBuilder::container(down_id)
+                .style(ElementStyle {
+                    background: palette.surface_hovered,
+                    corner_radius: radii_all(3.0),
+                    ..ElementStyle::default()
+                })
+                .layout(LayoutInput {
+                    width: LayoutSizing::Fixed(18.0),
+                    height: LayoutSizing::Fixed(content_height * 0.5 - 1.0),
+                    align_x: crate::Align::Center,
+                    align_y: crate::Align::Center,
+                    ..LayoutInput::default()
+                })
+                .child(compact_text(
+                    ElementId::local("arrow", 1, &id),
+                    "▼",
+                    palette.muted_text,
+                    8.0,
+                    10.0,
+                ))
+                .build(),
+        )
+        .build();
+
+    ElementBuilder::container(id)
+        .style(field_style)
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 64.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fixed(field_height),
+            direction: LayoutDirection::LeftToRight,
+            align_y: crate::Align::Center,
+            clip_x: true,
+            ..LayoutInput::default()
+        })
+        .child(inner.build())
+        .child(stepper)
+        .build()
+}
+
+pub fn search_box(id: ElementId, spec: &TextInputSpec, state: &WidgetState) -> Element {
+    search_box_with_palette(id, spec, state, &WidgetPalette::default())
+}
+
+pub fn search_box_with_palette(
+    id: ElementId,
+    spec: &TextInputSpec,
+    state: &WidgetState,
+    palette: &WidgetPalette,
+) -> Element {
+    let padding = Edges::symmetric(8.0, 6.0);
+    let field_height = 32.0;
+    let content_height = field_height - padding.vertical();
+    let field_style = input_field_container_style(state, palette);
+
+    let show_placeholder = spec.value.is_empty();
+    let display_text = if show_placeholder {
+        spec.placeholder.clone()
+    } else {
+        spec.value.clone()
+    };
+    let text_color_val = if show_placeholder {
+        palette.muted_text
+    } else {
+        palette.text
+    };
+
+    let search_icon_id = ElementId::local("search-icon", 0, &id);
+    let search_icon = compact_text(search_icon_id, "⌕", palette.muted_text, 14.0, content_height);
+
+    let text_id = ElementId::local("text", 0, &id);
+    let mut text_el = compact_text(text_id, display_text, text_color_val, 14.0, content_height);
+    text_el.layout.width = LayoutSizing::Grow {
+        min: 0.0,
+        max: f32::INFINITY,
+    };
+    text_el.layout.height = LayoutSizing::Fixed(content_height);
+
+    let mut inner = ElementBuilder::container(ElementId::local("inner", 0, &id)).layout(
+        LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fixed(content_height),
+            direction: LayoutDirection::LeftToRight,
+            align_y: crate::Align::Center,
+            ..LayoutInput::default()
+        },
+    );
+
+    if let Some((sel_start, sel_end)) = spec.selection {
+        let sel_start = sel_start.max(0.0);
+        let sel_end = sel_end.max(sel_start);
+        if sel_end > sel_start {
+            inner = inner.child(selection_element(
+                ElementId::local("selection", 0, &id),
+                sel_start,
+                sel_end - sel_start,
+                content_height,
+                palette.accent.with_alpha(0.35),
+            ));
+        }
+    }
+
+    if state.focused {
+        if let Some(cx) = spec.cursor_x {
+            inner = inner.child(cursor_element(
+                ElementId::local("cursor", 0, &id),
+                cx,
+                content_height,
+                palette.accent,
+            ));
+        }
+    }
+
+    inner = inner.child(text_el);
+
+    ElementBuilder::container(id)
+        .style(field_style)
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 64.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fixed(field_height),
+            direction: LayoutDirection::LeftToRight,
+            align_y: crate::Align::Center,
+            gap: 6.0,
+            clip_x: true,
+            ..LayoutInput::default()
+        })
+        .child(search_icon)
+        .child(inner.build())
+        .build()
+}
+
+pub fn select(
+    id: ElementId,
+    selected_label: impl Into<String>,
+    is_open: bool,
+    state: &WidgetState,
+) -> Element {
+    select_with_palette(id, selected_label, is_open, state, &WidgetPalette::default())
+}
+
+pub fn select_with_palette(
+    id: ElementId,
+    selected_label: impl Into<String>,
+    is_open: bool,
+    state: &WidgetState,
+    palette: &WidgetPalette,
+) -> Element {
+    let mut style = input_field_container_style(state, palette);
+    if is_open {
+        style.outline = palette.outline_focus;
+        style.outline_width = Edges::all(2.0);
+    }
+
+    let label_id = ElementId::local("label", 0, &id);
+    let chevron_id = ElementId::local("chevron", 0, &id);
+    let label_color = if state.disabled {
+        palette.muted_text
+    } else {
+        palette.text
+    };
+    let chevron_char = if is_open { "▲" } else { "▼" };
+    let mut label_el = compact_text(label_id, selected_label, label_color, 14.0, 18.0);
+    label_el.layout.width = LayoutSizing::Grow {
+        min: 0.0,
+        max: f32::INFINITY,
+    };
+
+    ElementBuilder::container(id)
+        .style(style)
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 80.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fixed(32.0),
+            direction: LayoutDirection::LeftToRight,
+            align_y: crate::Align::Center,
+            ..LayoutInput::default()
+        })
+        .child(label_el)
+        .child(compact_text(chevron_id, chevron_char, palette.muted_text, 10.0, 12.0))
+        .build()
+}
+
+pub fn icon_button(
+    id: ElementId,
+    icon_key: impl AsRef<str>,
+    icon_size: f32,
+    state: &WidgetState,
+) -> Element {
+    icon_button_with_palette(id, icon_key, icon_size, state, &WidgetPalette::default())
+}
+
+pub fn icon_button_with_palette(
+    id: ElementId,
+    icon_key: impl AsRef<str>,
+    icon_size: f32,
+    state: &WidgetState,
+    palette: &WidgetPalette,
+) -> Element {
+    let button_size = icon_size + 12.0;
+    let mut style = control_style(state, palette, false, 6.0, Edges::ZERO);
+    style.outline_width = Edges::all(if state.focused { 2.0 } else { 0.0 });
+
+    let icon_id = ElementId::local("icon", 0, &id);
+    ElementBuilder::container(id)
+        .style(style)
+        .layout(LayoutInput {
+            width: LayoutSizing::Fixed(button_size),
+            height: LayoutSizing::Fixed(button_size),
+            align_x: crate::Align::Center,
+            align_y: crate::Align::Center,
+            ..LayoutInput::default()
+        })
+        .child(icon_element(icon_id, icon_key.as_ref(), icon_size))
+        .build()
+}
+
+pub fn toolbar(
+    id: ElementId,
+    children: impl IntoIterator<Item = Element>,
+) -> Element {
+    toolbar_with_palette(id, children, &WidgetPalette::default())
+}
+
+pub fn toolbar_with_palette(
+    id: ElementId,
+    children: impl IntoIterator<Item = Element>,
+    palette: &WidgetPalette,
+) -> Element {
+    let mut builder = ElementBuilder::container(id)
+        .style(ElementStyle {
+            background: palette.surface,
+            outline: palette.outline,
+            outline_width: Edges {
+                bottom: 1.0,
+                ..Edges::ZERO
+            },
+            padding: Edges::symmetric(4.0, 4.0),
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            direction: LayoutDirection::LeftToRight,
+            align_y: crate::Align::Center,
+            gap: 2.0,
+            ..LayoutInput::default()
+        });
+
+    for child in children {
+        builder = builder.child(child);
+    }
+    builder.build()
+}
+
+pub fn accordion_panel(
+    id: ElementId,
+    config: AccordionPanelConfig,
+    content: Option<Element>,
+) -> Element {
+    accordion_panel_with_palette(id, config, content, &WidgetPalette::default())
+}
+
+pub fn accordion_panel_with_palette(
+    id: ElementId,
+    config: AccordionPanelConfig,
+    content: Option<Element>,
+    palette: &WidgetPalette,
+) -> Element {
+    let header_id = config.id.clone();
+    let chevron_char = if config.is_open { "▼" } else { "›" };
+    let mut header_style = ElementStyle {
+        background: if config.state.pressed || config.state.captured {
+            palette.surface_pressed
+        } else if config.state.hovered || config.state.focused {
+            palette.surface_hovered
+        } else {
+            palette.surface
+        },
+        outline: if config.state.focused {
+            palette.outline_focus
+        } else {
+            palette.outline
+        },
+        outline_width: Edges {
+            bottom: 1.0,
+            ..Edges::ZERO
+        },
+        padding: Edges::symmetric(12.0, 10.0),
+        ..ElementStyle::default()
+    };
+    if config.state.disabled {
+        header_style.background = palette.surface_disabled;
+    }
+
+    let label_color = if config.state.disabled {
+        palette.muted_text
+    } else {
+        palette.text
+    };
+    let mut label_el = compact_text(
+        ElementId::local("label", 0, &header_id),
+        config.title,
+        label_color,
+        14.0,
+        18.0,
+    );
+    label_el.layout.width = LayoutSizing::Grow {
+        min: 0.0,
+        max: f32::INFINITY,
+    };
+
+    let header = ElementBuilder::container(header_id)
+        .style(header_style)
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            direction: LayoutDirection::LeftToRight,
+            align_y: crate::Align::Center,
+            gap: 8.0,
+            ..LayoutInput::default()
+        })
+        .child(compact_text(
+            ElementId::local("chevron", 0, &id),
+            chevron_char,
+            palette.muted_text,
+            12.0,
+            14.0,
+        ))
+        .child(label_el)
+        .build();
+
+    let mut panel = ElementBuilder::container(id)
+        .style(ElementStyle {
+            background: palette.surface,
+            outline: palette.outline,
+            outline_width: Edges::all(1.0),
+            corner_radius: radii_all(6.0),
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            direction: LayoutDirection::TopToBottom,
+            clip_x: true,
+            ..LayoutInput::default()
+        })
+        .child(header);
+
+    if config.is_open {
+        if let Some(body) = content {
+            panel = panel.child(body);
+        }
+    }
+
+    panel.build()
+}
+
+pub fn group_box(
+    id: ElementId,
+    label_text: impl Into<String>,
+    children: impl IntoIterator<Item = Element>,
+) -> Element {
+    group_box_with_palette(id, label_text, children, &WidgetPalette::default())
+}
+
+pub fn group_box_with_palette(
+    id: ElementId,
+    label_text: impl Into<String>,
+    children: impl IntoIterator<Item = Element>,
+    palette: &WidgetPalette,
+) -> Element {
+    let header_id = ElementId::local("header", 0, &id);
+    let content_id = ElementId::local("content", 0, &id);
+
+    let header = ElementBuilder::container(header_id.clone())
+        .style(ElementStyle {
+            background: palette.surface,
+            outline: palette.outline,
+            outline_width: Edges {
+                bottom: 1.0,
+                ..Edges::ZERO
+            },
+            padding: Edges::symmetric(12.0, 8.0),
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            ..LayoutInput::default()
+        })
+        .child(compact_text(
+            ElementId::local("label", 0, &header_id),
+            label_text,
+            palette.muted_text,
+            11.0,
+            14.0,
+        ))
+        .build();
+
+    let mut content_builder = ElementBuilder::container(content_id)
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            direction: LayoutDirection::TopToBottom,
+            ..LayoutInput::default()
+        });
+
+    for child in children {
+        content_builder = content_builder.child(child);
+    }
+
+    ElementBuilder::container(id)
+        .style(ElementStyle {
+            background: palette.surface,
+            outline: palette.outline,
+            outline_width: Edges::all(1.0),
+            corner_radius: radii_all(6.0),
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            direction: LayoutDirection::TopToBottom,
+            clip_x: true,
+            ..LayoutInput::default()
+        })
+        .child(header)
+        .child(content_builder.build())
+        .build()
+}
+
+pub fn dialog_surface(
+    id: ElementId,
+    title: Option<impl Into<String>>,
+    size: Size,
+    children: impl IntoIterator<Item = Element>,
+) -> Element {
+    dialog_surface_with_palette(id, title, size, children, &WidgetPalette::default())
+}
+
+pub fn dialog_surface_with_palette(
+    id: ElementId,
+    title: Option<impl Into<String>>,
+    size: Size,
+    children: impl IntoIterator<Item = Element>,
+    palette: &WidgetPalette,
+) -> Element {
+    let body_id = ElementId::local("body", 0, &id);
+    let title_bar_id = ElementId::local("title-bar", 0, &id);
+
+    let mut builder = ElementBuilder::container(id)
+        .style(ElementStyle {
+            background: palette.surface,
+            outline: palette.outline,
+            outline_width: Edges::all(1.0),
+            corner_radius: radii_all(10.0),
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Fixed(size.width.max(0.0)),
+            height: LayoutSizing::Fixed(size.height.max(0.0)),
+            direction: LayoutDirection::TopToBottom,
+            clip_x: true,
+            clip_y: true,
+            ..LayoutInput::default()
+        });
+
+    if let Some(title_text) = title {
+        let title_bar_id = title_bar_id;
+        let title_bar = ElementBuilder::container(title_bar_id.clone())
+            .style(ElementStyle {
+                background: palette.surface,
+                outline: palette.outline,
+                outline_width: Edges {
+                    bottom: 1.0,
+                    ..Edges::ZERO
+                },
+                padding: Edges::symmetric(16.0, 12.0),
+                ..ElementStyle::default()
+            })
+            .layout(LayoutInput {
+                width: LayoutSizing::Grow {
+                    min: 0.0,
+                    max: f32::INFINITY,
+                },
+                height: LayoutSizing::Fit {
+                    min: 0.0,
+                    max: f32::INFINITY,
+                },
+                ..LayoutInput::default()
+            })
+            .child(ElementBuilder::text(
+                ElementId::local("title", 0, &title_bar_id),
+                title_text,
+                TextStyle {
+                    font_size: 15.0,
+                    line_height: 20.0,
+                    color: palette.text,
+                    wrap: TextWrap::None,
+                    ..TextStyle::default()
+                },
+            ).build())
+            .build();
+        builder = builder.child(title_bar);
+    }
+
+    let mut body_builder = ElementBuilder::container(body_id)
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            direction: LayoutDirection::TopToBottom,
+            ..LayoutInput::default()
+        });
+    for child in children {
+        body_builder = body_builder.child(child);
+    }
+
+    builder.child(body_builder.build()).build()
+}
+
+pub fn context_menu_item(
+    item: ContextMenuItemSpec,
+    row_height: f32,
+    palette: &WidgetPalette,
+) -> Element {
+    let mut state = item.state.clone();
+    state.disabled |= item.disabled;
+    let row_id = item.id.clone();
+
+    let mut style = ElementStyle {
+        background: if state.disabled {
+            UiColor::TRANSPARENT
+        } else if state.pressed || state.captured {
+            palette.surface_pressed
+        } else if state.hovered || state.focused {
+            palette.surface_hovered
+        } else {
+            UiColor::TRANSPARENT
+        },
+        outline: if state.focused {
+            palette.outline_focus
+        } else if item.separator_before {
+            palette.outline
+        } else {
+            UiColor::TRANSPARENT
+        },
+        outline_width: if state.focused {
+            Edges::all(1.0)
+        } else if item.separator_before {
+            Edges {
+                top: 1.0,
+                ..Edges::ZERO
+            }
+        } else {
+            Edges::ZERO
+        },
+        padding: Edges::symmetric(10.0, 0.0),
+        ..ElementStyle::default()
+    };
+    if state.disabled {
+        style.background = UiColor::TRANSPARENT;
+    }
+
+    let label_color = if state.disabled {
+        palette.muted_text
+    } else {
+        palette.text
+    };
+
+    let mut row = ElementBuilder::container(row_id.clone())
+        .style(style)
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fixed(row_height.max(0.0)),
+            direction: LayoutDirection::LeftToRight,
+            align_y: crate::Align::Center,
+            gap: 8.0,
+            clip_x: true,
+            ..LayoutInput::default()
+        });
+
+    if let Some(icon_key) = &item.icon_key {
+        row = row.child(icon_element(
+            ElementId::local("icon", 0, &row_id),
+            icon_key,
+            14.0,
+        ));
+    } else {
+        row = row.child(horizontal_spacer(
+            ElementId::local("icon-gap", 0, &row_id),
+            14.0,
+            row_height,
+        ));
+    }
+
+    let mut label = compact_text(
+        ElementId::local("label", 0, &row_id),
+        item.label,
+        label_color,
+        13.0,
+        16.0,
+    );
+    label.layout.width = LayoutSizing::Grow {
+        min: 0.0,
+        max: f32::INFINITY,
+    };
+    row = row.child(label);
+
+    if let Some(shortcut) = item.shortcut {
+        row = row.child(compact_text(
+            ElementId::local("shortcut", 0, &row_id),
+            shortcut,
+            palette.muted_text,
+            11.0,
+            14.0,
+        ));
+    }
+
+    row.build()
+}
+
+pub fn virtual_context_menu(
+    id: ElementId,
+    width: f32,
+    layout: &VirtualListLayout,
+    visible_items: impl IntoIterator<Item = ContextMenuItemSpec>,
+) -> Element {
+    virtual_context_menu_with_palette(
+        id,
+        width,
+        layout,
+        visible_items,
+        &WidgetPalette::default(),
+    )
+}
+
+pub fn virtual_context_menu_with_palette(
+    id: ElementId,
+    width: f32,
+    layout: &VirtualListLayout,
+    visible_items: impl IntoIterator<Item = ContextMenuItemSpec>,
+    palette: &WidgetPalette,
+) -> Element {
+    let rows = visible_items
+        .into_iter()
+        .map(|item| context_menu_item(item, layout.item_extent, palette));
+    let width_sizing = LayoutSizing::Fixed(width.max(0.0));
+    let mut menu = virtual_list(id, width_sizing, layout.viewport_extent, layout, rows);
+    menu.style = ElementStyle {
+        background: palette.surface,
+        outline: palette.outline,
+        outline_width: Edges::all(1.0),
+        corner_radius: radii_all(8.0),
+        ..ElementStyle::default()
+    };
+    menu.layout.clip_x = true;
+    menu
+}
+
+pub fn command_palette(
+    id: ElementId,
+    config: CommandPaletteConfig,
+    input_spec: &TextInputSpec,
+    input_state: &WidgetState,
+    layout: &VirtualListLayout,
+    visible_items: impl IntoIterator<Item = CommandPaletteItemSpec>,
+) -> Element {
+    command_palette_with_palette(
+        id,
+        config,
+        input_spec,
+        input_state,
+        layout,
+        visible_items,
+        &WidgetPalette::default(),
+    )
+}
+
+pub fn command_palette_with_palette(
+    id: ElementId,
+    config: CommandPaletteConfig,
+    input_spec: &TextInputSpec,
+    input_state: &WidgetState,
+    layout: &VirtualListLayout,
+    visible_items: impl IntoIterator<Item = CommandPaletteItemSpec>,
+    palette: &WidgetPalette,
+) -> Element {
+    let panel_id = ElementId::local("panel", 0, &id);
+    let input_id = ElementId::local("input", 0, &panel_id);
+    let list_id = ElementId::local("results", 0, &panel_id);
+    let header_id = ElementId::local("header", 0, &panel_id);
+
+    let input_el = text_input_with_palette(input_id, input_spec, input_state, palette);
+
+    let rows = visible_items.into_iter().map(|item| {
+        command_palette_item_row(item, layout.item_extent, palette)
+    });
+    let results_list = {
+        let mut list = virtual_list(
+            list_id,
+            LayoutSizing::Fixed(config.width.max(0.0)),
+            layout.viewport_extent.min(config.max_list_height),
+            layout,
+            rows,
+        );
+        list.style = ElementStyle {
+            background: palette.surface,
+            outline: palette.outline,
+            outline_width: Edges {
+                top: 1.0,
+                ..Edges::ZERO
+            },
+            ..ElementStyle::default()
+        };
+        list
+    };
+
+    let mut panel_builder = ElementBuilder::container(panel_id.clone())
+        .style(ElementStyle {
+            background: palette.surface,
+            outline: palette.outline,
+            outline_width: Edges::all(1.0),
+            corner_radius: radii_all(10.0),
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Fixed(config.width.max(0.0)),
+            height: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            direction: LayoutDirection::TopToBottom,
+            clip_x: true,
+            clip_y: true,
+            ..LayoutInput::default()
+        });
+
+    if let Some(title_text) = &config.title {
+        let header = ElementBuilder::container(header_id.clone())
+            .style(ElementStyle {
+                padding: Edges::symmetric(16.0, 10.0),
+                outline: palette.outline,
+                outline_width: Edges {
+                    bottom: 1.0,
+                    ..Edges::ZERO
+                },
+                ..ElementStyle::default()
+            })
+            .layout(LayoutInput {
+                width: LayoutSizing::Grow {
+                    min: 0.0,
+                    max: f32::INFINITY,
+                },
+                height: LayoutSizing::Fit {
+                    min: 0.0,
+                    max: f32::INFINITY,
+                },
+                ..LayoutInput::default()
+            })
+            .child(compact_text(
+                ElementId::local("title", 0, &header_id),
+                title_text,
+                palette.text,
+                13.0,
+                16.0,
+            ))
+            .build();
+        panel_builder = panel_builder.child(header);
+    }
+
+    panel_builder = panel_builder
+        .child(
+            ElementBuilder::container(ElementId::local("input-wrap", 0, &panel_id))
+                .style(ElementStyle {
+                    padding: Edges::all(8.0),
+                    ..ElementStyle::default()
+                })
+                .layout(LayoutInput {
+                    width: LayoutSizing::Grow {
+                        min: 0.0,
+                        max: f32::INFINITY,
+                    },
+                    height: LayoutSizing::Fit {
+                        min: 0.0,
+                        max: f32::INFINITY,
+                    },
+                    ..LayoutInput::default()
+                })
+                .child(input_el)
+                .build(),
+        )
+        .child(results_list);
+
+    let panel = panel_builder.build();
+
+    modal_layer(
+        id,
+        ModalLayerConfig::new(config.viewport).backdrop(config.backdrop).z_index(config.z_index),
+        [ElementBuilder::container(ElementId::local("centering", 0, &panel_id))
+            .style(ElementStyle {
+                transparent_to_input: true,
+                ..ElementStyle::default()
+            })
+            .layout(LayoutInput {
+                width: LayoutSizing::Fixed(config.viewport.width.max(0.0)),
+                height: LayoutSizing::Fixed(config.viewport.height.max(0.0)),
+                align_x: crate::Align::Center,
+                align_y: crate::Align::Center,
+                ..LayoutInput::default()
+            })
+            .child(panel)
+            .build()],
+    )
+}
+
+// ── New private helpers ────────────────────────────────────────────────────────
+
+fn input_field_container_style(state: &WidgetState, palette: &WidgetPalette) -> ElementStyle {
+    let background = if state.disabled {
+        palette.surface_disabled
+    } else if state.focused || state.hovered {
+        palette.surface_hovered
+    } else {
+        palette.surface
+    };
+    let outline = if state.invalid {
+        palette.outline_invalid
+    } else if state.focused {
+        palette.outline_focus
+    } else {
+        palette.outline
+    };
+    let outline_width = if state.focused {
+        Edges::all(2.0)
+    } else {
+        Edges::all(1.0)
+    };
+    ElementStyle {
+        background,
+        outline,
+        outline_width,
+        corner_radius: radii_all(6.0),
+        padding: Edges::symmetric(10.0, 6.0),
+        ..ElementStyle::default()
+    }
+}
+
+fn icon_element(id: ElementId, image_key: &str, size: f32) -> Element {
+    let size = size.max(0.0);
+    let mut element = Element::image(id, image_key);
+    if let crate::ElementKind::Image(image) = &mut element.kind {
+        image.natural_size = Some(Size::new(size, size));
+        image.options = UiImageOptions {
+            fit: crate::UiImageFit::Stretch,
+            ..UiImageOptions::default()
+        };
+    }
+    element.layout.width = LayoutSizing::Fixed(size);
+    element.layout.height = LayoutSizing::Fixed(size);
+    element.style.transparent_to_input = true;
+    element
+}
+
+fn selection_element(
+    id: ElementId,
+    x: f32,
+    width: f32,
+    height: f32,
+    color: UiColor,
+) -> Element {
+    ElementBuilder::container(id)
+        .style(ElementStyle {
+            background: color,
+            corner_radius: radii_all(2.0),
+            transparent_to_input: true,
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Fixed(width.max(0.0)),
+            height: LayoutSizing::Fixed(height.max(0.0)),
+            position: LayoutPosition::Absolute {
+                offset: glam::Vec2::new(x, 0.0),
+            },
+            ..LayoutInput::default()
+        })
+        .build()
+}
+
+fn cursor_element(id: ElementId, x: f32, height: f32, color: UiColor) -> Element {
+    ElementBuilder::container(id)
+        .style(ElementStyle {
+            background: color,
+            transparent_to_input: true,
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Fixed(2.0),
+            height: LayoutSizing::Fixed(height.max(0.0)),
+            position: LayoutPosition::Absolute {
+                offset: glam::Vec2::new(x, 0.0),
+            },
+            ..LayoutInput::default()
+        })
+        .build()
+}
+
+fn command_palette_item_row(
+    item: CommandPaletteItemSpec,
+    row_height: f32,
+    palette: &WidgetPalette,
+) -> Element {
+    let mut state = item.state.clone();
+    state.disabled |= item.disabled;
+    let row_id = item.id.clone();
+
+    let bg = if state.disabled {
+        UiColor::TRANSPARENT
+    } else if item.selected {
+        palette.surface_selected
+    } else if state.pressed || state.captured {
+        palette.surface_pressed
+    } else if state.hovered || state.focused {
+        palette.surface_hovered
+    } else {
+        UiColor::TRANSPARENT
+    };
+
+    let label_color = if state.disabled {
+        palette.muted_text
+    } else if item.selected {
+        palette.accent_text
+    } else {
+        palette.text
+    };
+    let desc_color = if state.disabled || item.selected {
+        label_color.with_alpha(180.0 / 255.0)
+    } else {
+        palette.muted_text
+    };
+
+    let outline = if state.focused {
+        palette.outline_focus
+    } else {
+        UiColor::TRANSPARENT
+    };
+
+    let mut label_el = compact_text(
+        ElementId::local("label", 0, &row_id),
+        item.label,
+        label_color,
+        14.0,
+        18.0,
+    );
+    label_el.layout.width = LayoutSizing::Grow {
+        min: 0.0,
+        max: f32::INFINITY,
+    };
+
+    let mut row_builder = ElementBuilder::container(row_id.clone())
+        .style(ElementStyle {
+            background: bg,
+            outline,
+            outline_width: if state.focused {
+                Edges::all(1.0)
+            } else {
+                Edges::ZERO
+            },
+            padding: Edges::symmetric(16.0, 0.0),
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fixed(row_height.max(0.0)),
+            direction: LayoutDirection::LeftToRight,
+            align_y: crate::Align::Center,
+            gap: 12.0,
+            clip_x: true,
+            ..LayoutInput::default()
+        })
+        .child(label_el);
+
+    if let Some(group) = item.group {
+        row_builder = row_builder.child(compact_text(
+            ElementId::local("group", 0, &row_id),
+            group,
+            desc_color,
+            11.0,
+            14.0,
+        ));
+    }
+
+    if let Some(desc) = item.description {
+        row_builder = row_builder.child(compact_text(
+            ElementId::local("desc", 0, &row_id),
+            desc,
+            desc_color,
+            12.0,
+            16.0,
+        ));
+    }
+
+    if let Some(shortcut) = item.shortcut {
+        row_builder = row_builder.child(compact_text(
+            ElementId::local("shortcut", 0, &row_id),
+            shortcut,
+            palette.muted_text,
+            11.0,
+            14.0,
+        ));
+    }
+
+    row_builder.build()
+}
+
+// ── Existing helpers ──────────────────────────────────────────────────────────
+
 fn label_element(id: ElementId, label: impl Into<String>, color: UiColor) -> Element {
     let style = TextStyle {
         font_size: 14.0,
@@ -1920,15 +4101,6 @@ fn segment_shape(index: usize, count: usize, radius: f32) -> UiShape {
         UiShape::independent_corners(square, rounded, rounded, square)
     } else {
         UiShape::Rect
-    }
-}
-
-fn place_subtree_in_layer(element: &mut Element, layer: UiLayer, base_z_index: i16) {
-    let z_index = base_z_index.saturating_add(element.layout.z_index);
-    element.layout.layer = layer;
-    element.layout.z_index = z_index;
-    for child in &mut element.children {
-        place_subtree_in_layer(child, layer, z_index);
     }
 }
 
@@ -2118,6 +4290,93 @@ mod tests {
         assert_eq!(element.children.len(), 1);
         assert_eq!(element.children[0].layout.layer, UiLayer::TopLayer);
         assert_eq!(element.children[0].layout.z_index, 21);
+    }
+
+    #[test]
+    fn tooltip_surface_wraps_text_and_passes_through_input() {
+        let id = ElementId::new("tooltip");
+        let palette = WidgetPalette::default();
+        let element = tooltip_surface(
+            id,
+            "A longer helpful hint",
+            Size::new(140.0, 44.0),
+            &palette,
+        );
+
+        assert_eq!(element.layout.width, LayoutSizing::Fixed(140.0));
+        assert_eq!(element.layout.height, LayoutSizing::Fixed(44.0));
+        assert!(element.layout.clip_x);
+        assert!(element.layout.clip_y);
+        assert!(element.style.transparent_to_input);
+        assert_eq!(element.style.background, palette.surface.with_alpha(0.96));
+
+        let ElementKind::Text(text) = &element.children[0].kind else {
+            panic!("tooltip label should be text");
+        };
+        assert_eq!(text.text, "A longer helpful hint");
+        assert_eq!(text.style.wrap, TextWrap::Words);
+        assert!(element.children[0].style.transparent_to_input);
+        assert_eq!(element.children[0].layout.width, LayoutSizing::Fixed(124.0));
+    }
+
+    #[test]
+    fn tooltip_layer_attaches_to_anchor_in_top_layer() {
+        let root_id = ElementId::new("root");
+        let anchor_id = ElementId::new("button");
+        let mut root = Element::new(root_id);
+        root.style.padding = Edges::all(10.0);
+        root.layout.width = LayoutSizing::Fixed(240.0);
+        root.layout.height = LayoutSizing::Fixed(120.0);
+        let mut anchor = Element::new(anchor_id.clone());
+        anchor.layout.width = LayoutSizing::Fixed(80.0);
+        anchor.layout.height = LayoutSizing::Fixed(20.0);
+        root.children.push(anchor);
+        let layout =
+            LayoutTree::compute(&root, Size::new(240.0, 120.0), &mut LayoutCache::default())
+                .unwrap();
+        let tooltip_id = ElementId::new("tooltip-layer");
+        let config = TooltipConfig::new(
+            Size::new(240.0, 120.0),
+            anchor_id.clone(),
+            Size::new(120.0, 36.0),
+        )
+        .options(
+            FloatingOptions::default()
+                .placement(FloatingPlacement::bottom(FloatingAlign::Center))
+                .offset(6.0),
+        )
+        .z_index(44);
+
+        let element = tooltip_layer(tooltip_id, &layout, config, "Helpful").unwrap();
+
+        assert_eq!(element.layout.layer, UiLayer::TopLayer);
+        assert_eq!(element.layout.z_index, 44);
+        assert!(element.style.transparent_to_input);
+        assert_eq!(element.children.len(), 1);
+        assert_eq!(element.children[0].layout.layer, UiLayer::TopLayer);
+        assert_eq!(element.children[0].layout.z_index, 45);
+        assert_eq!(
+            element.children[0].layout.position,
+            LayoutPosition::Absolute {
+                offset: Vec2::new(8.0, 36.0)
+            }
+        );
+    }
+
+    #[test]
+    fn tooltip_layer_reports_missing_anchor() {
+        let tooltip_id = ElementId::new("tooltip-layer");
+        let anchor_id = ElementId::new("missing-anchor");
+        let config = TooltipConfig::new(
+            Size::new(240.0, 120.0),
+            anchor_id.clone(),
+            Size::new(120.0, 36.0),
+        );
+
+        let error = tooltip_layer(tooltip_id, &LayoutTree::default(), config, "Helpful")
+            .expect_err("missing anchor should be reported");
+
+        assert_eq!(error, FloatingAttachError::AnchorNotFound(anchor_id));
     }
 
     #[test]
@@ -2594,5 +4853,342 @@ mod tests {
             element.children[1].id,
             ElementId::local("horizontal-scrollbar", 0, &element.id)
         );
+    }
+
+    // ── New widget tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn label_uses_text_color_from_state() {
+        let id = ElementId::new("lbl");
+        let mut state = WidgetState::default();
+        state.disabled = true;
+        let el = label_with_palette(id, "Hello", &state, &WidgetPalette::default());
+        let ElementKind::Text(text) = &el.kind else {
+            panic!("label should be a text element");
+        };
+        assert_eq!(text.text, "Hello");
+        assert_eq!(text.style.color, WidgetPalette::default().muted_text);
+    }
+
+    #[test]
+    fn divider_horizontal_is_1px_tall_grow_wide() {
+        let el = divider(ElementId::new("div"), Axis::Horizontal);
+        assert_eq!(el.layout.height, LayoutSizing::Fixed(1.0));
+        assert!(matches!(el.layout.width, LayoutSizing::Grow { .. }));
+    }
+
+    #[test]
+    fn divider_vertical_is_1px_wide_grow_tall() {
+        let el = divider(ElementId::new("div"), Axis::Vertical);
+        assert_eq!(el.layout.width, LayoutSizing::Fixed(1.0));
+        assert!(matches!(el.layout.height, LayoutSizing::Grow { .. }));
+    }
+
+    #[test]
+    fn badge_uses_variant_colors() {
+        let palette = WidgetPalette::default();
+        let (bg, fg) = BadgeVariant::Error.colors(&palette);
+        let el = badge_with_palette(
+            ElementId::new("badge"),
+            "Error",
+            BadgeVariant::Error,
+            &palette,
+        );
+        assert_eq!(el.style.background, bg);
+        let ElementKind::Text(text) = &el.children[0].kind else {
+            panic!("badge child should be text");
+        };
+        assert_eq!(text.style.color, fg);
+        assert_eq!(text.text, "Error");
+    }
+
+    #[test]
+    fn empty_state_with_description_has_two_text_children() {
+        let el = empty_state(
+            ElementId::new("empty"),
+            "No results",
+            Some("Try adjusting your filters"),
+            200.0,
+            120.0,
+        );
+        assert_eq!(el.children.len(), 2);
+        let ElementKind::Text(title) = &el.children[0].kind else {
+            panic!("first child should be text");
+        };
+        assert_eq!(title.text, "No results");
+        let ElementKind::Text(desc) = &el.children[1].kind else {
+            panic!("second child should be text");
+        };
+        assert_eq!(desc.text, "Try adjusting your filters");
+    }
+
+    #[test]
+    fn empty_state_without_description_has_one_text_child() {
+        let el = empty_state(
+            ElementId::new("empty"),
+            "No results",
+            None::<&str>,
+            200.0,
+            120.0,
+        );
+        assert_eq!(el.children.len(), 1);
+    }
+
+    #[test]
+    fn tab_bar_selected_tab_uses_accent_outline_at_bottom() {
+        let id = ElementId::new("tabs");
+        let tab_a = ElementId::local("a", 0, &id);
+        let tab_b = ElementId::local("b", 0, &id);
+        let el = tab_bar(
+            id,
+            [
+                TabSpec::new(tab_a, "A").selected(true),
+                TabSpec::new(tab_b, "B"),
+            ],
+        );
+        let palette = WidgetPalette::default();
+        let selected = &el.children[0];
+        let unselected = &el.children[1];
+        assert_eq!(selected.style.outline, palette.accent);
+        assert_eq!(selected.style.outline_width.bottom, 2.0);
+        assert_eq!(unselected.style.outline, UiColor::TRANSPARENT);
+    }
+
+    #[test]
+    fn tab_with_icon_has_icon_and_label_children() {
+        let id = ElementId::new("tabs");
+        let tab_a = ElementId::local("a", 0, &id);
+        let el = tab_bar(
+            id,
+            [TabSpec::new(tab_a, "Files").icon("icon-folder").icon_size(14.0)],
+        );
+        let tab = &el.children[0];
+        assert_eq!(tab.children.len(), 2);
+        let ElementKind::Image(img) = &tab.children[0].kind else {
+            panic!("first child should be image icon");
+        };
+        assert_eq!(img.image_key, "icon-folder");
+    }
+
+    #[test]
+    fn breadcrumbs_inserts_separators_between_items() {
+        let id = ElementId::new("bc");
+        let a = ElementId::local("a", 0, &id);
+        let b = ElementId::local("b", 0, &id);
+        let c = ElementId::local("c", 0, &id);
+        let el = breadcrumbs(
+            id,
+            [
+                BreadcrumbSpec::new(a, "Home"),
+                BreadcrumbSpec::new(b, "Docs"),
+                BreadcrumbSpec::new(c, "Page").current(true),
+            ],
+        );
+        // 3 items + 2 separators = 5 children
+        assert_eq!(el.children.len(), 5);
+        let ElementKind::Text(sep) = &el.children[1].kind else {
+            panic!("separator should be text");
+        };
+        assert_eq!(sep.text, "›");
+    }
+
+    #[test]
+    fn text_input_shows_placeholder_when_empty() {
+        let id = ElementId::new("field");
+        let spec = TextInputSpec::new("").placeholder("Enter name");
+        let el = text_input(id, &spec, &WidgetState::default());
+        let inner = &el.children[0];
+        // last child of inner is the text element
+        let text_child = inner.children.last().expect("should have text child");
+        let ElementKind::Text(text) = &text_child.kind else {
+            panic!("should be text");
+        };
+        assert_eq!(text.text, "Enter name");
+        assert_eq!(text.style.color, WidgetPalette::default().muted_text);
+    }
+
+    #[test]
+    fn text_input_masks_password_value() {
+        let id = ElementId::new("field");
+        let spec = TextInputSpec::new("secret").password(true);
+        let el = text_input(id, &spec, &WidgetState::default());
+        let inner = &el.children[0];
+        let text_child = inner.children.last().expect("should have text child");
+        let ElementKind::Text(text) = &text_child.kind else {
+            panic!("should be text");
+        };
+        assert_eq!(text.text, "••••••");
+    }
+
+    #[test]
+    fn text_input_focused_with_cursor_adds_cursor_element() {
+        let id = ElementId::new("field");
+        let spec = TextInputSpec::new("hello").cursor_x(42.0);
+        let mut state = WidgetState::default();
+        state.focused = true;
+        let el = text_input(id, &spec, &state);
+        let inner = &el.children[0];
+        // cursor + text = 2 children when focused
+        assert_eq!(inner.children.len(), 2);
+        let cursor = &inner.children[0];
+        assert_eq!(cursor.layout.width, LayoutSizing::Fixed(2.0));
+        assert_eq!(
+            cursor.layout.position,
+            LayoutPosition::Absolute {
+                offset: glam::Vec2::new(42.0, 0.0)
+            }
+        );
+    }
+
+    #[test]
+    fn text_input_with_selection_adds_selection_element() {
+        let id = ElementId::new("field");
+        let spec = TextInputSpec::new("hello world").selection(10.0, 55.0);
+        let el = text_input(id, &spec, &WidgetState::default());
+        let inner = &el.children[0];
+        // selection + text = 2 children (unfocused so no cursor)
+        assert_eq!(inner.children.len(), 2);
+        let sel = &inner.children[0];
+        assert_eq!(sel.layout.width, LayoutSizing::Fixed(45.0));
+        assert_eq!(
+            sel.layout.position,
+            LayoutPosition::Absolute {
+                offset: glam::Vec2::new(10.0, 0.0)
+            }
+        );
+    }
+
+    #[test]
+    fn text_input_focused_invalid_uses_invalid_outline() {
+        let id = ElementId::new("field");
+        let spec = TextInputSpec::new("bad value");
+        let mut state = WidgetState::default();
+        state.focused = true;
+        state.invalid = true;
+        let el = text_input_with_palette(id, &spec, &state, &WidgetPalette::default());
+        assert_eq!(el.style.outline, WidgetPalette::default().outline_invalid);
+    }
+
+    #[test]
+    fn select_trigger_shows_chevron_down_when_closed() {
+        let id = ElementId::new("sel");
+        let el = select(id, "Option A", false, &WidgetState::default());
+        let chevron = &el.children[1];
+        let ElementKind::Text(text) = &chevron.kind else {
+            panic!("chevron should be text");
+        };
+        assert_eq!(text.text, "▼");
+    }
+
+    #[test]
+    fn select_trigger_shows_chevron_up_when_open() {
+        let id = ElementId::new("sel");
+        let el = select(id, "Option A", true, &WidgetState::default());
+        let chevron = &el.children[1];
+        let ElementKind::Text(text) = &chevron.kind else {
+            panic!("chevron should be text");
+        };
+        assert_eq!(text.text, "▲");
+    }
+
+    #[test]
+    fn icon_button_contains_image_child() {
+        let id = ElementId::new("btn");
+        let el = icon_button(id, "icon-gear", 20.0, &WidgetState::default());
+        assert_eq!(el.children.len(), 1);
+        let ElementKind::Image(img) = &el.children[0].kind else {
+            panic!("icon_button child should be image");
+        };
+        assert_eq!(img.image_key, "icon-gear");
+        assert_eq!(img.natural_size, Some(Size::new(20.0, 20.0)));
+    }
+
+    #[test]
+    fn accordion_panel_closed_has_only_header() {
+        let id = ElementId::new("accordion");
+        let header_id = ElementId::local("section", 0, &id);
+        let config = AccordionPanelConfig::new(header_id, "Section").open(false);
+        let content = Element::new(ElementId::new("body"));
+        let el = accordion_panel(id, config, Some(content));
+        // Only the header child (content is suppressed when closed)
+        assert_eq!(el.children.len(), 1);
+    }
+
+    #[test]
+    fn accordion_panel_open_includes_content() {
+        let id = ElementId::new("accordion");
+        let header_id = ElementId::local("section", 0, &id);
+        let config = AccordionPanelConfig::new(header_id, "Section").open(true);
+        let content = Element::new(ElementId::new("body"));
+        let el = accordion_panel(id, config, Some(content));
+        assert_eq!(el.children.len(), 2);
+    }
+
+    #[test]
+    fn dialog_surface_with_title_has_title_bar_and_body() {
+        let id = ElementId::new("dialog");
+        let el = dialog_surface(id, Some("My Dialog"), Size::new(400.0, 300.0), []);
+        assert_eq!(el.children.len(), 2);
+        // First child is title bar, second is body
+        let title_bar = &el.children[0];
+        let title_child = &title_bar.children[0];
+        let ElementKind::Text(title) = &title_child.kind else {
+            panic!("title should be text");
+        };
+        assert_eq!(title.text, "My Dialog");
+    }
+
+    #[test]
+    fn dialog_surface_without_title_has_only_body() {
+        let id = ElementId::new("dialog");
+        let el = dialog_surface(id, None::<&str>, Size::new(400.0, 300.0), []);
+        assert_eq!(el.children.len(), 1);
+    }
+
+    #[test]
+    fn context_menu_item_separator_adds_top_outline() {
+        let id = ElementId::new("item");
+        let spec = ContextMenuItemSpec::new(id, "Cut").separator_before(true);
+        let palette = WidgetPalette::default();
+        let el = context_menu_item(spec, 28.0, &palette);
+        assert_eq!(el.style.outline_width.top, 1.0);
+        assert_eq!(el.style.outline_width.bottom, 0.0);
+    }
+
+    #[test]
+    fn context_menu_item_with_icon_uses_image_child() {
+        let id = ElementId::new("item");
+        let spec = ContextMenuItemSpec::new(id, "Open").icon("icon-open");
+        let el = context_menu_item(spec, 28.0, &WidgetPalette::default());
+        let ElementKind::Image(img) = &el.children[0].kind else {
+            panic!("first child should be icon image");
+        };
+        assert_eq!(img.image_key, "icon-open");
+    }
+
+    #[test]
+    fn context_menu_item_without_icon_uses_spacer_placeholder() {
+        let id = ElementId::new("item");
+        let spec = ContextMenuItemSpec::new(id, "Delete");
+        let el = context_menu_item(spec, 28.0, &WidgetPalette::default());
+        // Without icon, first child should be a container spacer (not image)
+        assert!(
+            matches!(el.children[0].kind, ElementKind::Container),
+            "should be spacer container"
+        );
+    }
+
+    #[test]
+    fn group_box_has_header_and_content() {
+        let id = ElementId::new("group");
+        let child = Element::new(ElementId::new("row1"));
+        let el = group_box(id, "Settings", [child]);
+        assert_eq!(el.children.len(), 2);
+        // Header has the label
+        let header = &el.children[0];
+        let ElementKind::Text(label_text) = &header.children[0].kind else {
+            panic!("header child should be text label");
+        };
+        assert_eq!(label_text.text, "Settings");
     }
 }

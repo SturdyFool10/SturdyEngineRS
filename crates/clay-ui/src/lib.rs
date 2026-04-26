@@ -34,8 +34,9 @@ pub use color::{
 pub use context::{TextSceneKey, UiContext, UiFrameOutput, UiTextFrameStats, UiTreeInstance};
 pub use element::{Element, ElementKind, ElementStyle, ImageElement, TextElement};
 pub use floating::{
-    FloatingAlign, FloatingCollision, FloatingLayerConfig, FloatingLayout, FloatingOptions,
-    FloatingPlacement, FloatingSide, anchored_floating_layer,
+    FloatingAlign, FloatingAttachConfig, FloatingAttachError, FloatingCollision,
+    FloatingLayerConfig, FloatingLayout, FloatingOptions, FloatingPlacement, FloatingSide,
+    anchored_floating_layer, attached_floating_layer,
 };
 pub use font_discovery::{FontDiscovery, FontFaceSummary, FontSearchQuery};
 pub use geometry::{Axis, CornerShape, CornerSpec, Edges, Rect, Size, UiShape, radii_all};
@@ -78,12 +79,22 @@ pub use virtualization::{
     VirtualTreeLayout, VirtualTreeRow,
 };
 pub use widgets::{
-    DragBarAxis, DropdownOptionSpec, LogEntrySpec, LogLevel, ModalLayerConfig, PortalHostConfig,
-    ScrollbarMetrics, SegmentSpec, WidgetPalette, button, checkbox, drag_bar, dropdown_option,
-    image, image_with_options, log_entry, modal_layer, mosaic_container, portal_host, progress_bar,
-    radio, scroll_container, scroll_container_with_direction, scroll_container_with_scrollbars,
-    scroll_container_with_scrollbars_and_direction, scrollbar, segmented_control, slider, toggle,
-    virtual_dropdown_menu, virtual_dropdown_menu_with_palette, virtual_grid, virtual_list,
-    virtual_log_viewer, virtual_log_viewer_with_palette, virtual_mosaic, virtual_table,
-    virtual_tree,
+    AccordionPanelConfig, BadgeVariant, BreadcrumbSpec, CommandPaletteConfig,
+    CommandPaletteItemSpec, ContextMenuItemSpec, DragBarAxis, DropdownOptionSpec, LogEntrySpec,
+    LogLevel, ModalLayerConfig, NumberInputSpec, PortalHostConfig, ScrollbarMetrics, SegmentSpec,
+    TabSpec, TextInputSpec, TooltipConfig, WidgetPalette, accordion_panel,
+    accordion_panel_with_palette, badge, badge_with_palette, breadcrumbs, breadcrumbs_with_palette,
+    button, checkbox, command_palette, command_palette_with_palette, context_menu_item,
+    dialog_surface, dialog_surface_with_palette, divider, drag_bar, dropdown_option, empty_state,
+    empty_state_with_palette, group_box, group_box_with_palette, icon_button,
+    icon_button_with_palette, image, image_with_options, label, label_with_palette, log_entry,
+    modal_layer, mosaic_container, number_input, number_input_with_palette, portal_host,
+    progress_bar, radio, scroll_container, scroll_container_with_direction,
+    scroll_container_with_scrollbars, scroll_container_with_scrollbars_and_direction, scrollbar,
+    search_box, search_box_with_palette, segmented_control, select, select_with_palette, slider,
+    tab_bar, tab_bar_with_palette, text_input, text_input_with_palette, toggle, toolbar,
+    toolbar_with_palette, tooltip_layer, tooltip_layer_with_palette, tooltip_surface,
+    virtual_context_menu, virtual_context_menu_with_palette, virtual_dropdown_menu,
+    virtual_dropdown_menu_with_palette, virtual_grid, virtual_list, virtual_log_viewer,
+    virtual_log_viewer_with_palette, virtual_mosaic, virtual_table, virtual_tree,
 };
