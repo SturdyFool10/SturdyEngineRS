@@ -12,7 +12,8 @@ path = "src/lib.rs"
 
 [dependencies]
 bytemuck = "1.20"
-glam = "0.30"
+clay-ui = { path = "../clay-ui" }
+glam.workspace = true
 png = "0.17"
 raw-window-handle = "0.6"
 sturdy-engine-core = { path = "../sturdy-engine-core" }

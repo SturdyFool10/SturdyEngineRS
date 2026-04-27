@@ -70,8 +70,8 @@ pub use gpu_procedural_texture::GpuProceduralTexture;
 pub use graph_frame::{FullscreenPassBuilder, GraphFrame, ImageNode};
 pub use hdr_pipeline::{HdrMode, HdrPipelineDesc, HdrPreference, ToneMappingOp};
 pub use input::{
-    ActionBindingRegistry, BindingChange, KeyInput, KeyInputState, KeyModifier, KeyModifiers,
-    KeyToken, Keybind, KeybindCapture,
+    ActionBindingRegistry, ActionMap, BindingChange, InputHub, KeyInput, KeyInputState,
+    KeyModifier, KeyModifiers, KeyToken, Keybind, KeybindCapture,
 };
 pub use mesh::{Mesh, Vertex2d, Vertex3d};
 pub use mesh_program::{MeshProgram, MeshProgramDesc, MeshVertexKind};

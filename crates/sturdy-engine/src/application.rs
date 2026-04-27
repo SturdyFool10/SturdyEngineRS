@@ -289,6 +289,45 @@ pub trait EngineApp {
         Ok(())
     }
 
+    /// Handle pointer (mouse/touch) movement.
+    /// `x` and `y` are in logical (window-space) pixels.
+    fn pointer_moved(
+        &mut self,
+        _x: f32,
+        _y: f32,
+        _surface: &mut Surface,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Handle a pointer button press or release.
+    /// `button` follows the convention 0 = primary, 1 = secondary, 2 = middle.
+    /// `x` and `y` are the cursor position at the time of the event.
+    fn pointer_button(
+        &mut self,
+        _x: f32,
+        _y: f32,
+        _button: u8,
+        _pressed: bool,
+        _surface: &mut Surface,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Handle a scroll wheel or touchpad scroll.
+    /// `delta_x` and `delta_y` are in logical pixels (positive Y = down).
+    /// `x` and `y` are the cursor position at the time of the event.
+    fn pointer_scroll(
+        &mut self,
+        _x: f32,
+        _y: f32,
+        _delta_x: f32,
+        _delta_y: f32,
+        _surface: &mut Surface,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Apply runtime setting changes before rendering.
     fn runtime_settings_changed(
         &mut self,
@@ -297,6 +336,24 @@ pub trait EngineApp {
         _surface: &mut Surface,
     ) -> Result<(), Self::Error> {
         Ok(())
+    }
+
+    /// Return a mutable reference to the app's [`InputHub`] to enable
+    /// automatic input routing from the engine shell.
+    ///
+    /// When this returns `Some`, the engine shell calls the hub's `on_*`
+    /// methods instead of the individual `key_pressed`, `pointer_moved`,
+    /// `pointer_button`, and `pointer_scroll` callbacks — those can be left
+    /// as the default no-ops.
+    ///
+    /// ```ignore
+    /// struct MyApp { hub: InputHub }
+    /// impl EngineApp for MyApp {
+    ///     fn input_hub(&mut self) -> Option<&mut InputHub> { Some(&mut self.hub) }
+    /// }
+    /// ```
+    fn input_hub(&mut self) -> Option<&mut crate::InputHub> {
+        None
     }
 }
 
@@ -786,6 +843,8 @@ where
             applied_settings_revision: 0,
             started_at: Instant::now(),
             _config: config,
+            cursor_pos: (0.0, 0.0),
+            primary_held: false,
         })
         .expect("event loop exited unexpectedly");
 }
@@ -801,6 +860,8 @@ struct ShellApp<App: EngineApp> {
     #[allow(dead_code)]
     started_at: Instant,
     _config: WindowConfig,
+    cursor_pos: (f32, f32),
+    primary_held: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -875,21 +936,79 @@ where
                 use winit::event::ElementState;
                 use winit::keyboard::Key;
                 if let Some(input) = crate::input::KeyInput::from_winit(&event, self.modifiers) {
-                    if let Err(e) = self.app_state.key_input(&input, self.runtime.surface_mut()) {
-                        eprintln!("key input handler failed: {e:?}");
-                        std::process::exit(1);
-                    }
-                }
-                if event.state == ElementState::Pressed {
-                    if let Key::Character(s) = &event.logical_key {
-                        if let Err(e) = self
-                            .app_state
-                            .key_pressed(s.as_str(), self.runtime.surface_mut())
+                    if let Some(hub) = self.app_state.input_hub() {
+                        hub.on_key_input(&input);
+                    } else {
+                        if let Err(e) =
+                            self.app_state.key_input(&input, self.runtime.surface_mut())
                         {
-                            eprintln!("key handler failed: {e:?}");
+                            eprintln!("key input handler failed: {e:?}");
                             std::process::exit(1);
                         }
+                        if event.state == ElementState::Pressed {
+                            if let Key::Character(s) = &event.logical_key {
+                                if let Err(e) = self
+                                    .app_state
+                                    .key_pressed(s.as_str(), self.runtime.surface_mut())
+                                {
+                                    eprintln!("key handler failed: {e:?}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
                     }
+                }
+            }
+            winit::event::WindowEvent::CursorMoved { position, .. } => {
+                let (x, y) = (position.x as f32, position.y as f32);
+                self.cursor_pos = (x, y);
+                if let Some(hub) = self.app_state.input_hub() {
+                    hub.on_pointer_moved(x, y);
+                } else if let Err(e) =
+                    self.app_state.pointer_moved(x, y, self.runtime.surface_mut())
+                {
+                    eprintln!("pointer_moved failed: {e:?}");
+                    std::process::exit(1);
+                }
+            }
+            winit::event::WindowEvent::MouseInput { state, button, .. } => {
+                use winit::event::{ElementState, MouseButton};
+                let btn: u8 = match button {
+                    MouseButton::Left => 0,
+                    MouseButton::Right => 1,
+                    MouseButton::Middle => 2,
+                    _ => 3,
+                };
+                let pressed = state == ElementState::Pressed;
+                if btn == 0 {
+                    self.primary_held = pressed;
+                }
+                let (x, y) = self.cursor_pos;
+                if let Some(hub) = self.app_state.input_hub() {
+                    hub.on_pointer_button(x, y, btn, pressed);
+                } else if let Err(e) =
+                    self.app_state
+                        .pointer_button(x, y, btn, pressed, self.runtime.surface_mut())
+                {
+                    eprintln!("pointer_button failed: {e:?}");
+                    std::process::exit(1);
+                }
+            }
+            winit::event::WindowEvent::MouseWheel { delta, .. } => {
+                use winit::event::MouseScrollDelta;
+                let (dx, dy) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x * 20.0, -y * 20.0),
+                    MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
+                };
+                let (x, y) = self.cursor_pos;
+                if let Some(hub) = self.app_state.input_hub() {
+                    hub.on_pointer_scroll(dx, dy);
+                } else if let Err(e) =
+                    self.app_state
+                        .pointer_scroll(x, y, dx, dy, self.runtime.surface_mut())
+                {
+                    eprintln!("pointer_scroll failed: {e:?}");
+                    std::process::exit(1);
                 }
             }
             winit::event::WindowEvent::RedrawRequested => {

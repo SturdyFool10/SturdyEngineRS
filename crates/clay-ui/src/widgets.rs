@@ -797,6 +797,214 @@ impl ContextMenuItemSpec {
     }
 }
 
+// ── Batch-2 spec types ────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListItemSpec {
+    pub id: ElementId,
+    pub label: String,
+    pub sublabel: Option<String>,
+    pub selected: bool,
+    pub state: WidgetState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SortDirection {
+    None,
+    Ascending,
+    Descending,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TableHeaderSpec {
+    pub id: ElementId,
+    pub label: String,
+    pub width: f32,
+    pub sort: SortDirection,
+    pub state: WidgetState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PropertyRowSpec {
+    pub id: ElementId,
+    pub label: String,
+    pub label_width: f32,
+    pub state: WidgetState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChipSpec {
+    pub id: ElementId,
+    pub label: String,
+    pub variant: BadgeVariant,
+    pub can_remove: bool,
+    pub remove_state: WidgetState,
+    pub state: WidgetState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NotificationSpec {
+    pub id: ElementId,
+    pub message: String,
+    pub variant: BadgeVariant,
+    pub action_label: Option<String>,
+    pub action_state: WidgetState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StatusBarSectionSpec {
+    pub id: ElementId,
+    pub label: String,
+    pub value: Option<String>,
+    pub state: WidgetState,
+}
+
+impl ListItemSpec {
+    pub fn new(id: ElementId, label: impl Into<String>) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            sublabel: None,
+            selected: false,
+            state: WidgetState::default(),
+        }
+    }
+
+    pub fn sublabel(mut self, sublabel: impl Into<String>) -> Self {
+        self.sublabel = Some(sublabel.into());
+        self
+    }
+
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    pub fn state(mut self, state: WidgetState) -> Self {
+        self.state = state;
+        self
+    }
+}
+
+impl TableHeaderSpec {
+    pub fn new(id: ElementId, label: impl Into<String>, width: f32) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            width: width.max(0.0),
+            sort: SortDirection::None,
+            state: WidgetState::default(),
+        }
+    }
+
+    pub fn sort(mut self, sort: SortDirection) -> Self {
+        self.sort = sort;
+        self
+    }
+
+    pub fn state(mut self, state: WidgetState) -> Self {
+        self.state = state;
+        self
+    }
+}
+
+impl PropertyRowSpec {
+    pub fn new(id: ElementId, label: impl Into<String>) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            label_width: 120.0,
+            state: WidgetState::default(),
+        }
+    }
+
+    pub fn label_width(mut self, width: f32) -> Self {
+        self.label_width = width.max(0.0);
+        self
+    }
+
+    pub fn state(mut self, state: WidgetState) -> Self {
+        self.state = state;
+        self
+    }
+}
+
+impl ChipSpec {
+    pub fn new(id: ElementId, label: impl Into<String>) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            variant: BadgeVariant::Default,
+            can_remove: false,
+            remove_state: WidgetState::default(),
+            state: WidgetState::default(),
+        }
+    }
+
+    pub fn variant(mut self, variant: BadgeVariant) -> Self {
+        self.variant = variant;
+        self
+    }
+
+    pub fn can_remove(mut self, can_remove: bool) -> Self {
+        self.can_remove = can_remove;
+        self
+    }
+
+    pub fn remove_state(mut self, remove_state: WidgetState) -> Self {
+        self.remove_state = remove_state;
+        self
+    }
+
+    pub fn state(mut self, state: WidgetState) -> Self {
+        self.state = state;
+        self
+    }
+}
+
+impl NotificationSpec {
+    pub fn new(id: ElementId, message: impl Into<String>, variant: BadgeVariant) -> Self {
+        Self {
+            id,
+            message: message.into(),
+            variant,
+            action_label: None,
+            action_state: WidgetState::default(),
+        }
+    }
+
+    pub fn action(mut self, label: impl Into<String>) -> Self {
+        self.action_label = Some(label.into());
+        self
+    }
+
+    pub fn action_state(mut self, action_state: WidgetState) -> Self {
+        self.action_state = action_state;
+        self
+    }
+}
+
+impl StatusBarSectionSpec {
+    pub fn new(id: ElementId, label: impl Into<String>) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            value: None,
+            state: WidgetState::default(),
+        }
+    }
+
+    pub fn value(mut self, value: impl Into<String>) -> Self {
+        self.value = Some(value.into());
+        self
+    }
+
+    pub fn state(mut self, state: WidgetState) -> Self {
+        self.state = state;
+        self
+    }
+}
+
 // ── Widget builders ────────────────────────────────────────────────────────────
 
 pub fn button(id: ElementId, label: impl Into<String>, state: &WidgetState) -> Element {
@@ -3778,7 +3986,616 @@ pub fn command_palette_with_palette(
     )
 }
 
+// ── Batch-2 widget builders ───────────────────────────────────────────────────
+
+pub fn list_item(item: ListItemSpec) -> Element {
+    list_item_with_palette(item, &WidgetPalette::default())
+}
+
+pub fn list_item_with_palette(item: ListItemSpec, palette: &WidgetPalette) -> Element {
+    let row_id = item.id.clone();
+    let style = hoverable_row_style(&item.state, palette, item.selected);
+    let label_color = if item.state.disabled {
+        palette.muted_text
+    } else if item.selected {
+        palette.accent_text
+    } else {
+        palette.text
+    };
+
+    let mut row = ElementBuilder::container(row_id.clone())
+        .style(style)
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            direction: LayoutDirection::TopToBottom,
+            gap: 2.0,
+            clip_x: true,
+            ..LayoutInput::default()
+        });
+
+    let mut label_el = compact_text(
+        ElementId::local("label", 0, &row_id),
+        item.label,
+        label_color,
+        14.0,
+        18.0,
+    );
+    label_el.layout.width = LayoutSizing::Grow {
+        min: 0.0,
+        max: f32::INFINITY,
+    };
+    row = row.child(label_el);
+
+    if let Some(sub) = item.sublabel {
+        let sub_color = if item.state.disabled || item.selected {
+            label_color.with_alpha(0.6)
+        } else {
+            palette.muted_text
+        };
+        let mut sub_el =
+            compact_text(ElementId::local("sublabel", 0, &row_id), sub, sub_color, 12.0, 16.0);
+        sub_el.layout.width = LayoutSizing::Grow {
+            min: 0.0,
+            max: f32::INFINITY,
+        };
+        row = row.child(sub_el);
+    }
+
+    row.build()
+}
+
+pub fn table_header_cell(spec: TableHeaderSpec, height: f32, palette: &WidgetPalette) -> Element {
+    let cell_id = spec.id.clone();
+    let bg = if spec.state.pressed || spec.state.captured {
+        palette.surface_pressed
+    } else if spec.state.hovered || spec.state.focused {
+        palette.surface_hovered
+    } else {
+        palette.surface
+    };
+    let label_color = if spec.state.disabled {
+        palette.muted_text
+    } else {
+        palette.text
+    };
+
+    let sort_char = match spec.sort {
+        SortDirection::None => "",
+        SortDirection::Ascending => " ▲",
+        SortDirection::Descending => " ▼",
+    };
+    let label_text = if sort_char.is_empty() {
+        spec.label
+    } else {
+        format!("{}{sort_char}", spec.label)
+    };
+
+    let mut label_el = compact_text(
+        ElementId::local("label", 0, &cell_id),
+        label_text,
+        label_color,
+        12.0,
+        16.0,
+    );
+    label_el.layout.width = LayoutSizing::Fixed(spec.width.max(0.0));
+
+    ElementBuilder::container(cell_id)
+        .style(ElementStyle {
+            background: bg,
+            outline: palette.outline,
+            outline_width: Edges {
+                bottom: 1.0,
+                right: 1.0,
+                ..Edges::ZERO
+            },
+            padding: Edges::symmetric(8.0, 0.0),
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Fixed(spec.width.max(0.0)),
+            height: LayoutSizing::Fixed(height.max(0.0)),
+            align_y: crate::Align::Center,
+            clip_x: true,
+            ..LayoutInput::default()
+        })
+        .child(label_el)
+        .build()
+}
+
+pub fn table_header_row(
+    id: ElementId,
+    height: f32,
+    specs: impl IntoIterator<Item = TableHeaderSpec>,
+) -> Element {
+    table_header_row_with_palette(id, height, specs, &WidgetPalette::default())
+}
+
+pub fn table_header_row_with_palette(
+    id: ElementId,
+    height: f32,
+    specs: impl IntoIterator<Item = TableHeaderSpec>,
+    palette: &WidgetPalette,
+) -> Element {
+    let mut builder = ElementBuilder::container(id)
+        .style(ElementStyle {
+            background: palette.surface,
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fixed(height.max(0.0)),
+            direction: LayoutDirection::LeftToRight,
+            ..LayoutInput::default()
+        });
+
+    for spec in specs {
+        builder = builder.child(table_header_cell(spec, height, palette));
+    }
+
+    builder.build()
+}
+
+pub fn property_row(
+    spec: PropertyRowSpec,
+    value: Element,
+    row_height: f32,
+) -> Element {
+    property_row_with_palette(spec, value, row_height, &WidgetPalette::default())
+}
+
+pub fn property_row_with_palette(
+    spec: PropertyRowSpec,
+    value: Element,
+    row_height: f32,
+    palette: &WidgetPalette,
+) -> Element {
+    let row_id = spec.id.clone();
+    let label_id = ElementId::local("label", 0, &row_id);
+    let style = hoverable_row_style(&spec.state, palette, false);
+    let label_color = if spec.state.disabled {
+        palette.muted_text
+    } else {
+        palette.muted_text
+    };
+
+    let mut label_el = compact_text(label_id, spec.label, label_color, 13.0, 16.0);
+    label_el.layout.width = LayoutSizing::Fixed(spec.label_width.max(0.0));
+
+    ElementBuilder::container(row_id)
+        .style(style)
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fixed(row_height.max(0.0)),
+            direction: LayoutDirection::LeftToRight,
+            align_y: crate::Align::Center,
+            gap: 8.0,
+            ..LayoutInput::default()
+        })
+        .child(label_el)
+        .child(value)
+        .build()
+}
+
+pub fn chip(spec: ChipSpec) -> Element {
+    chip_with_palette(spec, &WidgetPalette::default())
+}
+
+pub fn chip_with_palette(spec: ChipSpec, palette: &WidgetPalette) -> Element {
+    let chip_id = spec.id.clone();
+    let (bg, fg) = spec.variant.colors(palette);
+    let border = if spec.state.focused {
+        palette.outline_focus
+    } else {
+        palette.outline
+    };
+
+    let mut chip_builder = ElementBuilder::container(chip_id.clone())
+        .style(ElementStyle {
+            background: bg,
+            outline: border,
+            outline_width: Edges::all(1.0),
+            corner_radius: radii_all(999.0),
+            padding: Edges::symmetric(8.0, 3.0),
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            direction: LayoutDirection::LeftToRight,
+            align_y: crate::Align::Center,
+            gap: 4.0,
+            ..LayoutInput::default()
+        })
+        .child(compact_text(
+            ElementId::local("label", 0, &chip_id),
+            spec.label,
+            fg,
+            12.0,
+            16.0,
+        ));
+
+    if spec.can_remove {
+        let rm_bg = if spec.remove_state.pressed || spec.remove_state.captured {
+            fg.with_alpha(0.35)
+        } else if spec.remove_state.hovered {
+            fg.with_alpha(0.2)
+        } else {
+            UiColor::TRANSPARENT
+        };
+        chip_builder = chip_builder.child(
+            ElementBuilder::container(ElementId::local("remove", 0, &chip_id))
+                .style(ElementStyle {
+                    background: rm_bg,
+                    corner_radius: radii_all(999.0),
+                    ..ElementStyle::default()
+                })
+                .layout(LayoutInput {
+                    width: LayoutSizing::Fixed(14.0),
+                    height: LayoutSizing::Fixed(14.0),
+                    align_x: crate::Align::Center,
+                    align_y: crate::Align::Center,
+                    ..LayoutInput::default()
+                })
+                .child(compact_text(
+                    ElementId::local("x", 0, &chip_id),
+                    "×",
+                    fg,
+                    10.0,
+                    12.0,
+                ))
+                .build(),
+        );
+    }
+
+    chip_builder.build()
+}
+
+pub fn notification(spec: NotificationSpec) -> Element {
+    notification_with_palette(spec, &WidgetPalette::default())
+}
+
+pub fn notification_with_palette(spec: NotificationSpec, palette: &WidgetPalette) -> Element {
+    let notif_id = spec.id.clone();
+    let (bg, fg) = spec.variant.colors(palette);
+    let accent_bar_id = ElementId::local("bar", 0, &notif_id);
+    let msg_id = ElementId::local("message", 0, &notif_id);
+
+    let accent_bar = ElementBuilder::container(accent_bar_id)
+        .style(ElementStyle {
+            background: fg,
+            corner_radius: radii_all(999.0),
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Fixed(3.0),
+            height: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            ..LayoutInput::default()
+        })
+        .build();
+
+    let mut msg_el = ElementBuilder::text(
+        msg_id,
+        spec.message,
+        TextStyle {
+            font_size: 13.0,
+            line_height: 18.0,
+            color: palette.text,
+            wrap: TextWrap::Words,
+            ..TextStyle::default()
+        },
+    )
+    .layout(LayoutInput {
+        width: LayoutSizing::Grow {
+            min: 0.0,
+            max: f32::INFINITY,
+        },
+        height: LayoutSizing::Fit {
+            min: 0.0,
+            max: f32::INFINITY,
+        },
+        ..LayoutInput::default()
+    })
+    .build();
+    msg_el.style.transparent_to_input = true;
+
+    let mut row = ElementBuilder::container(notif_id.clone())
+        .style(ElementStyle {
+            background: bg.with_alpha(0.18),
+            outline: fg.with_alpha(0.35),
+            outline_width: Edges::all(1.0),
+            corner_radius: radii_all(6.0),
+            padding: Edges::symmetric(10.0, 8.0),
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            direction: LayoutDirection::LeftToRight,
+            align_y: crate::Align::Center,
+            gap: 10.0,
+            ..LayoutInput::default()
+        })
+        .child(accent_bar)
+        .child(msg_el);
+
+    if let Some(action_label) = spec.action_label {
+        row = row.child(
+            ElementBuilder::container(ElementId::local("action", 0, &notif_id))
+                .style(ElementStyle {
+                    background: if spec.action_state.pressed || spec.action_state.captured {
+                        fg.with_alpha(0.3)
+                    } else if spec.action_state.hovered {
+                        fg.with_alpha(0.15)
+                    } else {
+                        UiColor::TRANSPARENT
+                    },
+                    outline: fg.with_alpha(0.5),
+                    outline_width: Edges::all(1.0),
+                    corner_radius: radii_all(4.0),
+                    padding: Edges::symmetric(8.0, 3.0),
+                    ..ElementStyle::default()
+                })
+                .layout(LayoutInput {
+                    width: LayoutSizing::Fit {
+                        min: 0.0,
+                        max: f32::INFINITY,
+                    },
+                    height: LayoutSizing::Fit {
+                        min: 0.0,
+                        max: f32::INFINITY,
+                    },
+                    ..LayoutInput::default()
+                })
+                .child(compact_text(
+                    ElementId::local("action-label", 0, &notif_id),
+                    action_label,
+                    fg,
+                    12.0,
+                    16.0,
+                ))
+                .build(),
+        );
+    }
+
+    row.build()
+}
+
+pub fn status_bar(
+    id: ElementId,
+    sections: impl IntoIterator<Item = StatusBarSectionSpec>,
+) -> Element {
+    status_bar_with_palette(id, sections, &WidgetPalette::default())
+}
+
+pub fn status_bar_with_palette(
+    id: ElementId,
+    sections: impl IntoIterator<Item = StatusBarSectionSpec>,
+    palette: &WidgetPalette,
+) -> Element {
+    let sections: Vec<StatusBarSectionSpec> = sections.into_iter().collect();
+    let count = sections.len();
+    let mut builder = ElementBuilder::container(id.clone())
+        .style(ElementStyle {
+            background: palette.surface,
+            outline: palette.outline,
+            outline_width: Edges {
+                top: 1.0,
+                ..Edges::ZERO
+            },
+            padding: Edges::symmetric(12.0, 0.0),
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            height: LayoutSizing::Fixed(24.0),
+            direction: LayoutDirection::LeftToRight,
+            align_y: crate::Align::Center,
+            gap: 0.0,
+            ..LayoutInput::default()
+        });
+
+    for (i, section) in sections.into_iter().enumerate() {
+        let sec_id = section.id.clone();
+        let text = if let Some(val) = section.value {
+            format!("{}: {}", section.label, val)
+        } else {
+            section.label
+        };
+        let color = if section.state.hovered {
+            palette.accent
+        } else {
+            palette.muted_text
+        };
+        let mut text_el = compact_text(sec_id, text, color, 11.0, 14.0);
+        text_el.layout.width = LayoutSizing::Fit {
+            min: 0.0,
+            max: f32::INFINITY,
+        };
+        builder = builder.child(text_el);
+
+        if i + 1 < count {
+            builder = builder.child(
+                ElementBuilder::container(ElementId::local("sep", i as u32, &id))
+                    .style(ElementStyle {
+                        background: palette.outline,
+                        ..ElementStyle::default()
+                    })
+                    .layout(LayoutInput {
+                        width: LayoutSizing::Fixed(1.0),
+                        height: LayoutSizing::Fixed(14.0),
+                        position: LayoutPosition::Flow,
+                        ..LayoutInput::default()
+                    })
+                    .build(),
+            );
+            builder = builder.child(horizontal_spacer(
+                ElementId::local("gap", i as u32, &id),
+                12.0,
+                14.0,
+            ));
+        }
+    }
+
+    builder.build()
+}
+
+pub fn card(
+    id: ElementId,
+    title: Option<impl Into<String>>,
+    width: LayoutSizing,
+    height: LayoutSizing,
+    children: impl IntoIterator<Item = Element>,
+) -> Element {
+    card_with_palette(id, title, width, height, children, &WidgetPalette::default())
+}
+
+pub fn card_with_palette(
+    id: ElementId,
+    title: Option<impl Into<String>>,
+    width: LayoutSizing,
+    height: LayoutSizing,
+    children: impl IntoIterator<Item = Element>,
+    palette: &WidgetPalette,
+) -> Element {
+    let title_bar_id = ElementId::local("card-title", 0, &id);
+    let body_id = ElementId::local("card-body", 0, &id);
+
+    let mut outer = ElementBuilder::container(id)
+        .style(ElementStyle {
+            background: palette.surface,
+            outline: palette.outline,
+            outline_width: Edges::all(1.0),
+            corner_radius: radii_all(8.0),
+            ..ElementStyle::default()
+        })
+        .layout(LayoutInput {
+            width,
+            height,
+            direction: LayoutDirection::TopToBottom,
+            clip_x: true,
+            clip_y: true,
+            ..LayoutInput::default()
+        });
+
+    if let Some(title_text) = title {
+        outer = outer.child(
+            ElementBuilder::container(title_bar_id.clone())
+                .style(ElementStyle {
+                    background: palette.surface_hovered,
+                    outline: palette.outline,
+                    outline_width: Edges {
+                        bottom: 1.0,
+                        ..Edges::ZERO
+                    },
+                    padding: Edges::symmetric(12.0, 8.0),
+                    ..ElementStyle::default()
+                })
+                .layout(LayoutInput {
+                    width: LayoutSizing::Grow {
+                        min: 0.0,
+                        max: f32::INFINITY,
+                    },
+                    height: LayoutSizing::Fit {
+                        min: 0.0,
+                        max: f32::INFINITY,
+                    },
+                    ..LayoutInput::default()
+                })
+                .child(compact_text(
+                    ElementId::local("label", 0, &title_bar_id),
+                    title_text,
+                    palette.text,
+                    13.0,
+                    16.0,
+                ))
+                .build(),
+        );
+    }
+
+    let mut body = ElementBuilder::container(body_id).layout(LayoutInput {
+        width: LayoutSizing::Grow {
+            min: 0.0,
+            max: f32::INFINITY,
+        },
+        height: LayoutSizing::Grow {
+            min: 0.0,
+            max: f32::INFINITY,
+        },
+        direction: LayoutDirection::TopToBottom,
+        ..LayoutInput::default()
+    });
+    for child in children {
+        body = body.child(child);
+    }
+
+    outer.child(body.build()).build()
+}
+
 // ── New private helpers ────────────────────────────────────────────────────────
+
+fn hoverable_row_style(state: &WidgetState, palette: &WidgetPalette, selected: bool) -> ElementStyle {
+    let background = if state.disabled {
+        UiColor::TRANSPARENT
+    } else if selected {
+        palette.surface_selected
+    } else if state.pressed || state.captured {
+        palette.surface_pressed
+    } else if state.hovered || state.focused {
+        palette.surface_hovered
+    } else {
+        UiColor::TRANSPARENT
+    };
+    let outline = if state.focused {
+        palette.outline_focus
+    } else {
+        palette.outline
+    };
+    ElementStyle {
+        background,
+        outline,
+        outline_width: if state.focused {
+            Edges::all(1.0)
+        } else {
+            Edges {
+                bottom: 1.0,
+                ..Edges::ZERO
+            }
+        },
+        padding: Edges::symmetric(8.0, 6.0),
+        ..ElementStyle::default()
+    }
+}
 
 fn input_field_container_style(state: &WidgetState, palette: &WidgetPalette) -> ElementStyle {
     let background = if state.disabled {
@@ -5190,5 +6007,172 @@ mod tests {
             panic!("header child should be text label");
         };
         assert_eq!(label_text.text, "Settings");
+    }
+
+    // ── Batch-2 widget tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn list_item_selected_uses_selected_surface() {
+        let id = ElementId::new("item");
+        let spec = ListItemSpec::new(id, "Project A").selected(true);
+        let el = list_item_with_palette(spec, &WidgetPalette::default());
+        assert_eq!(el.style.background, WidgetPalette::default().surface_selected);
+    }
+
+    #[test]
+    fn list_item_with_sublabel_has_two_text_children() {
+        let id = ElementId::new("item");
+        let spec = ListItemSpec::new(id, "Main").sublabel("subtitle text");
+        let el = list_item(spec);
+        assert_eq!(el.children.len(), 2);
+        let ElementKind::Text(label) = &el.children[0].kind else {
+            panic!("first child should be text");
+        };
+        assert_eq!(label.text, "Main");
+        let ElementKind::Text(sub) = &el.children[1].kind else {
+            panic!("second child should be text");
+        };
+        assert_eq!(sub.text, "subtitle text");
+    }
+
+    #[test]
+    fn table_header_row_builds_one_cell_per_spec() {
+        let id = ElementId::new("header");
+        let a = ElementId::local("col-a", 0, &id);
+        let b = ElementId::local("col-b", 0, &id);
+        let el = table_header_row(
+            id,
+            28.0,
+            [
+                TableHeaderSpec::new(a, "Name", 160.0).sort(SortDirection::Ascending),
+                TableHeaderSpec::new(b, "Size", 80.0),
+            ],
+        );
+        assert_eq!(el.children.len(), 2);
+        assert_eq!(el.layout.height, LayoutSizing::Fixed(28.0));
+        // Sort ascending appends ▲
+        let ElementKind::Text(txt) = &el.children[0].children[0].kind else {
+            panic!("cell should contain text");
+        };
+        assert!(txt.text.contains('▲'), "ascending sort should show ▲");
+    }
+
+    #[test]
+    fn table_header_cell_descending_shows_down_arrow() {
+        let id = ElementId::new("col");
+        let spec = TableHeaderSpec::new(id, "Date", 100.0).sort(SortDirection::Descending);
+        let cell = table_header_cell(spec, 28.0, &WidgetPalette::default());
+        let ElementKind::Text(txt) = &cell.children[0].kind else {
+            panic!("cell should contain text");
+        };
+        assert!(txt.text.contains('▼'));
+    }
+
+    #[test]
+    fn property_row_has_label_and_value_children() {
+        let id = ElementId::new("prop");
+        let spec = PropertyRowSpec::new(id.clone(), "Opacity").label_width(100.0);
+        let value = Element::new(ElementId::local("value", 0, &id));
+        let el = property_row(spec, value, 32.0);
+        assert_eq!(el.children.len(), 2);
+        assert_eq!(el.layout.height, LayoutSizing::Fixed(32.0));
+        let ElementKind::Text(label) = &el.children[0].kind else {
+            panic!("first child should be text label");
+        };
+        assert_eq!(label.text, "Opacity");
+    }
+
+    #[test]
+    fn chip_without_remove_has_one_text_child() {
+        let id = ElementId::new("chip");
+        let spec = ChipSpec::new(id, "Rust").variant(BadgeVariant::Info);
+        let el = chip(spec);
+        assert_eq!(el.children.len(), 1);
+        let ElementKind::Text(label) = &el.children[0].kind else {
+            panic!("chip child should be text");
+        };
+        assert_eq!(label.text, "Rust");
+    }
+
+    #[test]
+    fn chip_with_remove_has_label_and_close_button() {
+        let id = ElementId::new("chip");
+        let spec = ChipSpec::new(id, "v1.0").can_remove(true);
+        let el = chip(spec);
+        assert_eq!(el.children.len(), 2);
+    }
+
+    #[test]
+    fn notification_accent_bar_and_message_present() {
+        let id = ElementId::new("notif");
+        let spec = NotificationSpec::new(id, "Build failed", BadgeVariant::Error);
+        let el = notification(spec);
+        // accent bar + message = 2 children
+        assert_eq!(el.children.len(), 2);
+        let msg_child = &el.children[1];
+        let ElementKind::Text(txt) = &msg_child.kind else {
+            panic!("second child should be message text");
+        };
+        assert_eq!(txt.text, "Build failed");
+    }
+
+    #[test]
+    fn notification_with_action_has_three_children() {
+        let id = ElementId::new("notif");
+        let spec = NotificationSpec::new(id, "Update available", BadgeVariant::Info)
+            .action("Install");
+        let el = notification(spec);
+        assert_eq!(el.children.len(), 3);
+    }
+
+    #[test]
+    fn status_bar_separates_sections_with_dividers() {
+        let id = ElementId::new("bar");
+        let a = ElementId::local("a", 0, &id);
+        let b = ElementId::local("b", 0, &id);
+        let c = ElementId::local("c", 0, &id);
+        let el = status_bar(
+            id,
+            [
+                StatusBarSectionSpec::new(a, "Branch").value("main"),
+                StatusBarSectionSpec::new(b, "Errors").value("0"),
+                StatusBarSectionSpec::new(c, "Ready"),
+            ],
+        );
+        // 3 sections + 2 × (divider + gap) = 3 + 4 = 7 children
+        assert_eq!(el.children.len(), 7);
+        assert_eq!(el.layout.height, LayoutSizing::Fixed(24.0));
+    }
+
+    #[test]
+    fn card_without_title_has_only_body() {
+        let id = ElementId::new("card");
+        let el = card(
+            id,
+            None::<&str>,
+            LayoutSizing::Fixed(200.0),
+            LayoutSizing::Fixed(100.0),
+            [],
+        );
+        assert_eq!(el.children.len(), 1);
+    }
+
+    #[test]
+    fn card_with_title_has_title_bar_and_body() {
+        let id = ElementId::new("card");
+        let el = card(
+            id,
+            Some("My Card"),
+            LayoutSizing::Fixed(200.0),
+            LayoutSizing::Fixed(100.0),
+            [],
+        );
+        assert_eq!(el.children.len(), 2);
+        // Title bar's first child has the label
+        let title_bar = &el.children[0];
+        let ElementKind::Text(txt) = &title_bar.children[0].kind else {
+            panic!("title bar child should be text");
+        };
+        assert_eq!(txt.text, "My Card");
     }
 }

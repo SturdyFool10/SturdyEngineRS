@@ -119,6 +119,10 @@ pub struct TextDrawDesc {
     pub color: [f32; 4],
     /// Optional maximum line width before wrapping, in pixels.
     pub max_width: Option<f32>,
+    /// Optional clip rect `[x, y, width, height]` in screen pixels.
+    /// Glyphs outside this rect are discarded; partially overlapping glyphs
+    /// are clipped with UV correction.
+    pub clip_rect: Option<[f32; 4]>,
     /// Placement for this text run.
     pub placement: TextPlacement,
     /// Advanced typography options passed through to the layout implementation.
@@ -135,6 +139,7 @@ impl Default for TextDrawDesc {
             font_size: typography.font_size,
             color: [1.0, 1.0, 1.0, 1.0],
             max_width: None,
+            clip_rect: None,
             placement: TextPlacement::default(),
             typography,
         }
@@ -169,6 +174,14 @@ impl TextDrawDesc {
 
     pub fn max_width(mut self, width: f32) -> Self {
         self.max_width = Some(width);
+        self
+    }
+
+    /// Set a screen-space clip rect `[x, y, width, height]` in pixels.
+    /// Glyphs outside this rect are discarded; partially-overlapping glyphs
+    /// are clipped with UV correction so texture sampling stays correct.
+    pub fn clip_rect(mut self, x: f32, y: f32, w: f32, h: f32) -> Self {
+        self.clip_rect = Some([x, y, w, h]);
         self
     }
 

@@ -119,6 +119,11 @@ impl Element {
     pub fn text(id: ElementId, text: impl Into<String>, style: TextStyle) -> Self {
         let mut element = Self::new(id);
         element.kind = ElementKind::Text(TextElement::new(text, style));
+        // Text is almost never the intended click/hover target — the container
+        // around it is.  Pass input through by default so buttons, tabs,
+        // checkboxes, list items, etc. register interactions correctly without
+        // requiring every widget builder to set this manually.
+        element.style.transparent_to_input = true;
         element
     }
 
@@ -131,6 +136,9 @@ impl Element {
             shader: ShaderRef::SOLID_COLOR,
             options: UiImageOptions::default(),
         });
+        // Images are decorative in most contexts; pass input through to the
+        // container unless the app explicitly makes the image interactive.
+        element.style.transparent_to_input = true;
         element
     }
 }

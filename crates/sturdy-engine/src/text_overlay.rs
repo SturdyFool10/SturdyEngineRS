@@ -115,30 +115,74 @@ impl TextOverlay {
         self.meshes.clear();
         self.mesh_pages.clear();
 
+        let fw = width.max(1) as f32;
+        let fh = height.max(1) as f32;
         for page in &tiled_text_frame.atlas_pages {
             let mut batch = QuadBatch::new();
             for draw in &tiled_text_frame.draws {
+                let clip = descs
+                    .get(draw.source_index)
+                    .and_then(|d| d.clip_rect);
                 for quad in &draw.quads {
                     if quad.atlas_page != page.page_index {
                         continue;
                     }
-                    let x0 = quad.positions[0][0];
-                    let y0 = quad.positions[0][1];
-                    let x1 = quad.positions[1][0];
-                    let y2 = quad.positions[2][1];
-                    let ndc_x = x0 / width.max(1) as f32 * 2.0 - 1.0;
-                    let ndc_y = 1.0 - y0 / height.max(1) as f32 * 2.0;
-                    let ndc_w = (x1 - x0) / width.max(1) as f32 * 2.0;
-                    let ndc_h = -(y2 - y0) / height.max(1) as f32 * 2.0;
+                    // Screen-space corners.
+                    let mut sx0 = quad.positions[0][0];
+                    let mut sy0 = quad.positions[0][1];
+                    let mut sx1 = quad.positions[1][0];
+                    let mut sy1 = quad.positions[2][1];
+                    // UV corners (top-left and bottom-right).
+                    let mut u0 = quad.uvs[0][0];
+                    let mut v0 = quad.uvs[0][1];
+                    let mut u1 = quad.uvs[2][0];
+                    let mut v1 = quad.uvs[2][1];
+
+                    if let Some([cx, cy, cw, ch]) = clip {
+                        let cl = cx;
+                        let ct = cy;
+                        let cr = cx + cw;
+                        let cb = cy + ch;
+                        // Skip fully-outside quads.
+                        if sx1 <= cl || sx0 >= cr || sy1 <= ct || sy0 >= cb {
+                            continue;
+                        }
+                        let qw = (sx1 - sx0).max(f32::EPSILON);
+                        let qh = (sy1 - sy0).max(f32::EPSILON);
+                        // Clip left.
+                        if sx0 < cl {
+                            let t = (cl - sx0) / qw;
+                            u0 += t * (u1 - u0);
+                            sx0 = cl;
+                        }
+                        // Clip right.
+                        if sx1 > cr {
+                            let t = (sx1 - cr) / qw;
+                            u1 -= t * (u1 - u0);
+                            sx1 = cr;
+                        }
+                        // Clip top.
+                        if sy0 < ct {
+                            let t = (ct - sy0) / qh;
+                            v0 += t * (v1 - v0);
+                            sy0 = ct;
+                        }
+                        // Clip bottom.
+                        if sy1 > cb {
+                            let t = (sy1 - cb) / qh;
+                            v1 -= t * (v1 - v0);
+                            sy1 = cb;
+                        }
+                    }
+
+                    let ndc_x = sx0 / fw * 2.0 - 1.0;
+                    let ndc_y = 1.0 - sy0 / fh * 2.0;
+                    let ndc_w = (sx1 - sx0) / fw * 2.0;
+                    let ndc_h = -((sy1 - sy0) / fh * 2.0);
                     batch.push(
                         [ndc_x, ndc_y],
                         [ndc_w, ndc_h],
-                        [
-                            quad.uvs[0][0],
-                            quad.uvs[2][1],
-                            quad.uvs[2][0],
-                            quad.uvs[0][1],
-                        ],
+                        [u0, v1, u1, v0],
                         quad.color,
                     );
                 }

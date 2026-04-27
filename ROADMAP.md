@@ -1,5 +1,7 @@
 # Sturdy Engine Roadmap
 
+> TODO-only cleaned version. Completed checkbox items and the duplicate roadmap copy were removed.
+
 ## Product Direction
 
 Sturdy Engine should be worth using in three modes:
@@ -110,51 +112,6 @@ considered complete:
 Until this exists, the engine still asks app authors to assemble too much of the
 runtime by hand.
 
-### Prompt-sized execution order
-
-These are intended to be small enough to finish in one focused implementation
-prompt. Each chunk should end with code, tests or validation, and roadmap
-checkbox updates.
-
-- [x] `P0.1` Define the first public `AppRuntime` surface and create the minimal type/module skeleton without changing behavior yet
-- [x] `P0.2` Move swapchain acquire/present ownership behind `AppRuntime` while keeping the existing testbed render path working
-- [x] `P0.3` Move default HDR scene target allocation/selection behind `AppRuntime`
-- [x] `P0.4` Move MSAA target allocation and resolve behind `AppRuntime`
-- [x] `P0.5` Move bloom, AA, and tonemap chain assembly behind `AppRuntime`
-- [x] `P0.6` Add a named debug image registry owned by the runtime instead of the testbed
-- [x] `P0.7` Add a runtime diagnostics data model for backend, adapter, HDR, present mode, AA, bloom state, and graph timings
-- [x] `P0.8` Surface the diagnostics model through a basic first-party overlay hook, even if presentation is still minimal
-- [x] `P0.9` Internalize motion-vector generation and debug display registration as runtime features rather than testbed-only plumbing
-- [x] `P0.9a` Define the runtime motion-vector contract around camera-local motion suitable for TAA and motion blur
-- [x] `P0.9b` Add first-party support for camera-locked/screen-locked overlay passes that bypass scene motion blur and temporal accumulation
-- [x] `P0.9c` Add a motion-vector validation/debug mode that makes incorrect object or camera motion obvious in-engine
-- [x] `P0.10` Define the first `TextOverlay` API surface that lets apps request text without touching atlas/page management
-- [x] `P0.11` Move the existing HUD text path behind `TextOverlay` while preserving current output
-- [x] `P0.12` Add a first-pass debug action/input binding registry above raw key handling
-- [x] `P0.13` Define `RuntimeSettingsSnapshot`, setting keys, and a single public settings model
-- [x] `P0.14` Classify every existing runtime-facing setting into `Immediate`, `GraphRebuild`, `SurfaceRecreate`, `WindowReconfigure`, or `DeviceMigration`
-- [x] `P0.15` Implement the first `Immediate` runtime settings path for low-risk settings like overlay visibility or post-process dials
-- [x] `P0.16` Implement the first `GraphRebuild` runtime settings path for AA mode or post-chain topology changes
-- [x] `P0.17` Implement the first `SurfaceRecreate` runtime settings path for HDR mode or present mode changes without app restart
-- [x] `P0.18` Add transaction-style runtime settings updates so multiple changes apply coherently in one call
-- [x] `P0.19` Add `RuntimeApplyReport` / per-setting apply results with exact, degraded, and rejected outcomes
-- [x] `P0.20` Expose capability queries and failure reasons for unsupported runtime-setting requests
-- [x] `P0.21` Add runtime shell support for transparent window/background configuration toggles
-- [x] `P0.22` Add transparent surface clear/present handling where the backend/platform supports it
-- [x] `P0.23` Define the engine-level window background effect/material abstraction with both presets and explicit descriptors
-- [x] `P0.24` Implement the first Windows backdrop/material integration through that abstraction
-- [x] `P0.25` Implement the first macOS material/vibrancy integration through the same abstraction
-- [x] `P0.26` Implement the first Linux background-effect adapter with graceful fallback behavior
-- [x] `P0.27` Make transparency/background effects runtime-toggleable without restart through the runtime settings controller
-- [x] `P0.28` Add Slang shader hot reload with clear in-app compile error reporting
-- [x] `P0.29` Add first-pass asset hot reload for common asset types used by the testbed
-- [x] `P0.30` Add stable missing/stale-asset diagnostics surfaced in the runtime overlay or logs
-- [x] `P0.31` Add screenshot/export helpers to the first-party runtime shell
-- [x] `P0.32` Add image inspection for named graph resources using the runtime-owned debug image registry
-- [x] `P0.33` Add a first-pass frame-graph inspection UI or textual inspection surface
-- [x] `P0.34` Add GPU timing and per-pass timing summaries to runtime diagnostics
-- [x] `P0.35` Convert one existing sample/testbed path to the first-party runtime shell and remove the equivalent app-side boilerplate
-
 ### Chunking rules
 
 If a roadmap item is still too large for one prompt, split it again until the
@@ -165,19 +122,6 @@ prompt can do all of the following in one pass:
 - [ ] keep one existing sample or testbed path working
 - [ ] verify behavior with a build, test, or sample run
 - [ ] update the relevant roadmap checkboxes
-
-### Recommended first prompt sequence
-
-If work starts immediately, do these in order before jumping ahead:
-
-1. `P0.1`
-2. `P0.2`
-3. `P0.3`
-4. `P0.4`
-5. `P0.6`
-6. `P0.7`
-7. `P0.13`
-8. `P0.14`
 
 ### Internalize current testbed boilerplate
 
@@ -216,28 +160,16 @@ If work starts immediately, do these in order before jumping ahead:
   - [ ] antialiasing mode and dials
   - [ ] post-processing toggles and dials
   - [ ] shader hot reload and asset hot reload policy
-- [x] Let applications register their own runtime settings alongside engine-owned settings
-- [x] Make setting metadata and current values queryable anywhere through a shared runtime controller
-- [x] Add a polled settings change stream so systems like asset loading can react immediately to app-defined settings such as texture resolution tiers
 - [ ] Apply runtime settings changes through the right internal path automatically:
-  - [x] patch state in place when possible
-  - [x] rebuild graph/pipelines when needed
-  - [x] recreate the surface/window when needed
   - [ ] migrate live resources across devices/backends when needed
 - [ ] Add a transaction-style runtime reconfiguration path so multiple setting changes can be applied coherently in one step
 - [ ] Add explicit notifications for:
-  - [x] setting accepted as requested
   - [ ] setting clamped or degraded
-  - [x] setting rejected with reason
-- [x] Prove one app-defined runtime setting can trigger immediate asset swaps through the shared controller path
 
 ### Window transparency and compositor effects
 
 - [ ] Add window/background transparency support in the application shell
 - [ ] Add surface alpha / transparent clear path support so rendered content can preserve transparency through presentation where the platform allows it
-- [ ] Add engine-level window background effect/material support with both:
-  - [x] easy presets
-  - [x] explicit low-level control
 - [ ] Support Windows material/effect families such as blur-behind, acrylic, mica, and tabbed/titlebar variants through one engine API
 - [ ] Support macOS vibrancy/material integration through the same engine API
 - [ ] Support Linux window background effects through a Linux platform adapter with:
@@ -259,48 +191,6 @@ If work starts immediately, do these in order before jumping ahead:
 
 ---
 
-## P1 — Immediate Utility: Debug Draw, Datavis, And Playground
-
-### Debug draw and inspection
-
-- [x] Add immediate-style 2D drawing helpers for:
-  - [x] lines
-  - [x] polylines
-  - [x] rectangles
-  - [x] circles
-  - [x] points / markers
-  - [x] filled shapes
-- [x] Support layering those primitives with text in the same frame
-- [x] Expose sane defaults for antialiasing, thickness, color, transforms, and hit testing
-- [x] Add a built-in debug view picker for motion vectors, bloom chain, AA history, and other named graph images
-
-### Data visualization first mile
-
-- [x] Add a lightweight plotting layer for:
-  - [x] axes
-  - [x] linear/log scales
-  - [x] gridlines
-  - [x] line series
-  - [x] scatter series
-  - [x] bar series
-  - [x] legends
-  - [x] value tooltips / nearest-point inspection
-- [x] Add pan/zoom helpers for 2D data views
-- [x] Add a simple palette/theme model for quick visualization work
-- [x] Add a “load data, plot it, inspect it” sample with minimal code
-
-### Shader playground usability
-
-- [x] Add a shader-playground app shell with:
-  - [x] standard time/frame/resolution uniforms
-  - [x] quick texture binding helpers
-  - [x] pause / step / scrub controls
-  - [x] built-in debug overlays
-  - [x] one-click debug image switching
-- [x] Make the default playground path use the same runtime shell as normal apps
-
----
-
 ## P2 — App UI Must Feel Complete
 
 The Clay/UI foundation is promising, but the app-facing shell is still missing
@@ -310,14 +200,12 @@ core behavior that makes people stay on the engine path instead of bypassing it.
 
 Prompt-sized text execution order:
 
-1. [x] `P2.T1` Write the text rendering contract and default policy for alpha mask, SDF/MSDF, vector fallback, snapping, blending, and failure behavior
-2. [x] `P2.T2` Replace first-party `UiContext` layout-time text estimation with the same shaping/measurement path used for rendering
-3. [ ] `P2.T3` Add text quality validation scenes and screenshot/golden coverage for scale factors, HDR/SDR, fallback fonts, and animated UI
-4. [ ] `P2.T4` Add text performance instrumentation and budgets for shaping, caching, atlas uploads, draw calls, and memory use
-5. [ ] `P2.T5` Upgrade glyph atlas lifetime, dirty uploads, eviction, tiling, and backend-limit handling for real UI workloads
-6. [ ] `P2.T6` Integrate engine-side text shaders for alpha mask, SDF/MSDF, outlines, shadows, and linear-light blending
-7. [ ] `P2.T7` Expose app-facing rich text controls after measurement, rendering, and atlas behavior are stable
-8. [ ] `P2.T8` Build editable text, IME, selection, clipboard, focus, and keyboard navigation on top of the shared text model
+- [ ] `P2.T3` Add text quality validation scenes and screenshot/golden coverage for scale factors, HDR/SDR, fallback fonts, and animated UI
+- [ ] `P2.T4` Add text performance instrumentation and budgets for shaping, caching, atlas uploads, draw calls, and memory use
+- [ ] `P2.T5` Upgrade glyph atlas lifetime, dirty uploads, eviction, tiling, and backend-limit handling for real UI workloads
+- [ ] `P2.T6` Integrate engine-side text shaders for alpha mask, SDF/MSDF, outlines, shadows, and linear-light blending
+- [ ] `P2.T7` Expose app-facing rich text controls after measurement, rendering, and atlas behavior are stable
+- [ ] `P2.T8` Build editable text, IME, selection, clipboard, focus, and keyboard navigation on top of the shared text model
 
 Prompt-sized text follow-up chunks:
 
@@ -341,23 +229,7 @@ Prompt-sized text follow-up chunks:
 - [ ] `P2.T8a` Build the first single-line editable field using the shared shaped-run model, with cursor movement, selection, focus, clipboard, and keyboard navigation
 - [ ] `P2.T8b` Add multiline editing, scrolling, grapheme-aware selection, bidi cursor movement, IME composition, and platform clipboard integration
 
-- [x] Replace placeholder text-size estimation in first-party `UiContext` layout with true `textui` measurement for layout-time wrapping parity
-  - [x] add `clay-ui` unit coverage for measured text layout and layout text cache hit/miss behavior
-  - [x] bin wrapped text layout and scene cache widths so small window resizes do not invalidate unchanged text
-  - [x] ignore available width in text cache keys when a label is estimated to fit naturally, so normal UI labels survive resize churn
-- [x] Define the production text rendering contract for UI and engine overlays in [docs/text_rendering_contract.md](docs/text_rendering_contract.md):
-  - [x] crisp anti-aliased output at 1x, high-DPI, fractional scale, HDR, and SDR
-  - [x] predictable pixel snapping that avoids double-blurring already-antialiased glyphs
-  - [x] linear-light blending policy for text over HDR/SDR render targets
-  - [x] explicit fallback behavior when a font, glyph, feature, or raster mode is unavailable
-- [x] Choose and document the default glyph rendering policy:
-  - [x] alpha masks for small body text where hinting and exact stem placement matter most
-  - [x] SDF/MSDF for scalable display text, transforms, outlines, shadows, and animated UI
-  - [x] vector/path fallback for export, path text, diagnostics, and future high-scale use
-  - [x] per-run override hooks for apps that need exact control
 - [ ] Build text quality validation scenes:
-  - [x] add first-pass `ui_demo` text quality panel covering small labels, dense rows, display text, fallback scripts, and bidi samples
-  - [x] surface previous-frame text layout cache hit/miss counters in `ui_demo`
   - [ ] small UI labels, dense tables, code-like text, and large display text
   - [ ] high-contrast, low-contrast, transparent, HDR, and post-tonemapped backgrounds
   - [ ] subpixel positions, scrolling, transforms, clipping, and animated opacity
@@ -366,18 +238,12 @@ Prompt-sized text follow-up chunks:
   - [ ] Latin, CJK, emoji, combining marks, bidirectional text, ligatures, and fallback fonts
 - [ ] Add golden-image or screenshot-diff tests for representative text cases across scale factors and output formats
 - [ ] Add text performance budgets and instrumentation:
-  - [x] expose first-pass per-frame/per-tree text scene, glyph quad, atlas page, and atlas byte counters
-  - [x] expose first-pass layout text cache hit/miss counters
-  - [x] cache immutable `textui` atlas page snapshots until glyph pixels change
-  - [x] pass engine atlas pages and untiled atlas frames as shared immutable byte slices instead of cloning full page pixels
   - [ ] shape/layout cache hit rate for the full `textui` prepared layout and GPU scene caches
   - [ ] glyph atlas page count, occupancy, uploads, and evictions
   - [ ] CPU shaping/layout time
-  - [x] expose first-pass UI text command and batch counters
   - [ ] GPU draw calls, sampled pages, and overdraw
   - [ ] memory use for font data, layouts, atlases, and prepared scenes
 - [ ] Implement robust glyph atlas management for UI workloads:
-  - [x] avoid per-frame full-page copies in the untiled engine atlas path
   - [ ] persistent pages with stable lifetime and frame-delayed destruction
   - [ ] dirty-region uploads instead of whole-page uploads where supported
   - [ ] eviction policy that avoids visible thrash during scrolling and language fallback
@@ -386,11 +252,6 @@ Prompt-sized text follow-up chunks:
   - [ ] shared measurement path for layout, wrapping, hit testing, clipping, and painting
   - [ ] consistent font fallback between measurement and rendering
   - [ ] Unicode line breaking, grapheme-aware cursor movement, and bidirectional paragraph handling
-  - [x] snap 2D engine text placement to whole screen pixels to avoid fractional-origin thickness changes
-  - [x] clip tiled text atlas quads in atlas UV/page space instead of screen space so resized windows do not hide text beyond the atlas tile extent
-  - [x] keep large screen-space UI text on the SDF path until MSDF screen rendering is validated
-  - [x] remove frame-varying text layout cache IDs and per-frame pixel hashing from the text atlas tiling hot path
-  - [x] upload text atlas RGBA8 bytes directly instead of rebuilding a temporary texture buffer with a per-pixel closure
   - [ ] make application/UI clipping explicit in text draw commands instead of relying only on CPU-side clipped layout bounds
   - [ ] deterministic rounding so layout does not shimmer while scrolling or animating
 - [ ] Expose rich text styling needed for real UI:
@@ -407,63 +268,23 @@ Prompt-sized text follow-up chunks:
 
 Prompt-sized UI/control execution order:
 
-1. [x] `P2.U1` Define the shared widget state/event model for focus, hover, press, capture, disabled/read-only states, validation, and accessibility labels
-2. [ ] `P2.U2` Add shape-aware scroll containers with parent clipping, scrollbars, wheel/touchpad input, keyboard scroll, inertial/momentum hooks, and external scroll offset control
-3. [x] `P2.U3` Add first-party buttons, icon buttons, segmented buttons, radio groups, checkboxes, toggles, sliders, drag bars, splitters, resizers, and stateful style variants on top of the shared widget model
-4. [x] `P2.U4` Add dropdown/select/combobox widgets with popup anchoring, keyboard navigation, typeahead, disabled items, separators, and virtualized long-option lists
-   - [x] `select` trigger button with open/closed chevron state wired to floating layer system
-   - [x] First-pass `virtual_dropdown_menu` and `virtual_context_menu` with separator, icon, shortcut, and disabled item support
-5. [x] `P2.U5` Add single-line text inputs with caret, selection, clipboard, validation state, placeholder, password/secret display mode, and IME composition hooks
-   - [x] `text_input` with cursor and selection rendering via absolute-positioned overlay elements
-   - [x] `number_input` with stepper buttons and unit label
-   - [x] `search_box` with search icon prefix
-   - [x] Password masking, placeholder, focused/invalid outline states
-6. [ ] `P2.U6` Add multiline text inputs with wrapping, scrolling, selection, clipboard, IME, undo/redo, soft tabs, line navigation, and shape-aware clipping
-   - [x] `text_input` supports `multiline: true` for wrapping text input layout
-7. [ ] `P2.U7` Add stylable multiline text editing rich enough for code editors: per-range styling, syntax/highlight spans, gutters, line numbers, diagnostics, inline widgets, minimap hooks, code folding hooks, and performant viewport virtualization
-8. [x] `P2.U8` Add modal, dialog, popover, tooltip, context-menu, and command-palette primitives using a top-layer/portal model with focus trapping and backdrop/input blocking rules
-   - [x] First-pass `TopLayer` portal host and modal backdrop builders
-   - [x] First-pass focus-scope stack with modal background blocking, focus trapping, and restore-focus handoff
-   - [x] `dialog_surface` with optional title bar, fixed size, body area
-   - [x] `command_palette` with viewport-covering modal layer, centered panel, search input, and virtual results list
-   - [x] `virtual_context_menu` with icon, shortcut, separator, and disabled item support
-9. [ ] `P2.U9` Add date, time, and date-time selector widgets with typed entry, picker popovers, min/max, locale/time-zone formatting hooks, and keyboard-only operation
-10. [x] `P2.U10` Add a CSS-style `mosaic` layout primitive for dense visual tiling: named tiles, span/fit/fill modes, intrinsic aspect ratios, responsive breakpoints, stable placement, and predictable hit/clip regions
-11. [ ] `P2.U11` Add first-class UI layering and stacking contexts so apps can declare what renders behind/in front of what without relying on tree order hacks
-12. [ ] `P2.U12` Add shader/effect style slots for backgrounds, borders, masks, text fills, outlines, shadows, glows, backdrop filters, and per-state transitions, with Slang parameter binding and render-graph pass integration
-13. [ ] `P2.U13` Add shape-aware rendering, clipping, hit testing, focus rings, shadows, and effect regions so rounded rects, independent corner shapes, squircles, paths, and masks behave consistently across input and paint
-14. [ ] `P2.U14` Add fancy default border options: per-side/per-corner styling, inner/outer/center strokes, dashed/dotted/double strokes, gradient borders, image/shader borders, glow/bloom borders, and polished focus/error/selection presets
-15. [ ] `P2.U15` Add virtualized variants for large widgets so lists, grids, tables, trees, logs, inspectors, dropdowns, mosaics, and code editors avoid drawing offscreen elements while preserving measurement, keyboard navigation, selection, and scroll responsiveness
-16. [ ] `P2.U16` Add render-graph-aware backdrop/effect shaders so UI surfaces can sample named scene images, blur/grade/dim the game behind a pause menu tile, and route effects through explicit graph resources
-17. [ ] `P2.U17` Add validation scenes for all standard widgets, nested scrolling, modals, shape clipping, shader styles, virtualized controls, render-graph backdrops, and resize/scale-factor behavior
+- [ ] `P2.U2` Add shape-aware scroll containers with parent clipping, scrollbars, wheel/touchpad input, keyboard scroll, inertial/momentum hooks, and external scroll offset control
+- [ ] `P2.U6` Add multiline text inputs with wrapping, scrolling, selection, clipboard, IME, undo/redo, soft tabs, line navigation, and shape-aware clipping
+- [ ] `P2.U7` Add stylable multiline text editing rich enough for code editors: per-range styling, syntax/highlight spans, gutters, line numbers, diagnostics, inline widgets, minimap hooks, code folding hooks, and performant viewport virtualization
+- [ ] `P2.U9` Add date, time, and date-time selector widgets with typed entry, picker popovers, min/max, locale/time-zone formatting hooks, and keyboard-only operation
+- [ ] `P2.U11` Add first-class UI layering and stacking contexts so apps can declare what renders behind/in front of what without relying on tree order hacks
+- [ ] `P2.U12` Add shader/effect style slots for backgrounds, borders, masks, text fills, outlines, shadows, glows, backdrop filters, and per-state transitions, with Slang parameter binding and render-graph pass integration
+- [ ] `P2.U13` Add shape-aware rendering, clipping, hit testing, focus rings, shadows, and effect regions so rounded rects, independent corner shapes, squircles, paths, and masks behave consistently across input and paint
+- [ ] `P2.U14` Add fancy default border options: per-side/per-corner styling, inner/outer/center strokes, dashed/dotted/double strokes, gradient borders, image/shader borders, glow/bloom borders, and polished focus/error/selection presets
+- [ ] `P2.U15` Add virtualized variants for large widgets so lists, grids, tables, trees, logs, inspectors, dropdowns, mosaics, and code editors avoid drawing offscreen elements while preserving measurement, keyboard navigation, selection, and scroll responsiveness
+- [ ] `P2.U16` Add render-graph-aware backdrop/effect shaders so UI surfaces can sample named scene images, blur/grade/dim the game behind a pause menu tile, and route effects through explicit graph resources
+- [ ] `P2.U17` Add validation scenes for all standard widgets, nested scrolling, modals, shape clipping, shader styles, virtualized controls, render-graph backdrops, and resize/scale-factor behavior
 
 - [ ] Add a standard widget layer for:
-  - [x] first-pass button, radio, toggle, checkbox, segmented-control, slider, progress-bar, and drag-bar builders on the shared `WidgetState` contract
-  - [x] labels (standalone `label` and `label_with_palette`)
-  - [x] buttons and icon buttons (`icon_button`, `icon_button_with_palette`)
-  - [x] segmented buttons
-  - [x] radio buttons / radio groups (`radio`, `radio_with_palette`)
-  - [x] toggle groups (`toggle`, `toggle_with_palette`)
-  - [x] checkboxes / toggles
-  - [x] sliders
-  - [x] drag bars / splitters (`drag_bar`, `drag_bar_with_palette`)
-  - [x] progress bars / meters
-  - [x] dropdowns / selects (`select`, `select_with_palette` trigger + `virtual_dropdown_menu`)
-  - [x] single-line text inputs (`text_input`, `number_input`, `search_box`)
-  - [x] multiline text inputs (`text_input` with `multiline: true`)
   - [ ] stylable multiline/code-editor text inputs
   - [ ] time selectors
   - [ ] date selectors
   - [ ] date-time selectors
-  - [x] modals / dialogs (`dialog_surface`, `dialog_surface_with_palette`)
-  - [x] first-pass modal layer and transparent portal-host primitives
-  - [x] popovers / tooltips / context menus (`virtual_context_menu`, tooltip layer)
-  - [x] first-pass attached tooltip layer with styled wrapped text and pointer passthrough
-  - [x] toolbars (`toolbar`, `toolbar_with_palette`)
-  - [x] tabs (`tab_bar`, `tab_bar_with_palette`)
-  - [x] accordions / disclosure panels (`accordion_panel`, `accordion_panel_with_palette`)
-  - [x] breadcrumbs (`breadcrumbs`, `breadcrumbs_with_palette`)
-  - [x] search boxes (`search_box`, `search_box_with_palette`)
   - [ ] lists
   - [ ] tables
   - [ ] grids
@@ -472,19 +293,11 @@ Prompt-sized UI/control execution order:
   - [ ] color pickers
 - [ ] Keep widgets composable with shader-driven visuals instead of forcing a theme-only path
 - [ ] Treat every widget as a shape-aware object for:
-  - [x] rendering
-  - [x] first-pass clipping metadata for children
-  - [x] hit testing
   - [ ] focus rings
   - [ ] scroll regions
   - [ ] shadows / outlines / glow
   - [ ] accessibility bounds
 - [ ] Add shape primitives and corner controls suitable for high-end UI work:
-  - [x] independent corner radii
-  - [x] independent corner shape families such as round, bevel, notch, scoop, and chamfer
-  - [x] squircle / superellipse shapes with tunable exponent
-  - [x] capsule and pill helpers
-  - [x] circle and ellipse helpers
   - [ ] per-corner smoothing and antialiasing controls
   - [ ] shape composition for cutouts, holes, masks, and decorative corners
 - [ ] Add polished built-in border presets:
@@ -494,11 +307,7 @@ Prompt-sized UI/control execution order:
   - [ ] dashed, dotted, double, gradient, textured, image, and shader-driven borders
   - [ ] optional shadow, glow, bloom extraction, and animated border parameters
 - [ ] Add widget APIs for shader/effect customization that feel familiar to web developers:
-  - [x] first-pass slot enum for background, border/outline, text fill/outline, image, mask, shadow, backdrop, overlay, and custom slots
   - [ ] per-state style rules for hover, active, focus, disabled, invalid, selected, checked, and open
-  - [x] first-pass bindable shader parameters, textures, graph image names, buffers, gradients, and color values
-  - [x] first-pass element-slot shader targeting for background, border/outline, image, and custom render commands
-  - [x] strongly typed custom uniforms and additional app-provided uniforms/resources carried alongside built-in UI command data
   - [ ] offscreen effect routes for bloom, blur, drop shadow, glow, and custom passes
 - [ ] Add full text styling controls at the widget layer:
   - [ ] font family fallback lists, exact font handles, synthetic fallback policy, and missing-glyph diagnostics
@@ -512,61 +321,25 @@ Prompt-sized UI/control execution order:
 
 - [ ] Implement arena/reuse strategy equivalent to Clay’s low-allocation hot path
 - [ ] Add shape-aware scrollable containers:
-  - [x] persistent clamped scroll state with targeted and hit-tested scroll events
-  - [x] first-pass clipped scroll container builder with vertical, horizontal, and both-axis offsets
-  - [x] vertical, horizontal, and both-axis scrolling
   - [ ] wheel, touchpad, keyboard, drag-scroll, and programmatic scroll input
-  - [x] first-pass programmatic scroll commands for scroll-by, scroll-to, page, start, and end movement
-  - [x] first-pass scrollbar metrics and composable visual scrollbar builders
   - [ ] overlay scrollbars and custom scrollbar styling
   - [ ] scroll snapping, momentum hooks, sticky children, and anchor preservation
   - [ ] virtualized child measurement for large lists and editor buffers
 - [ ] Add Clay-level scroll physics/momentum and external scroll offset query parity
 - [ ] Add floating/attach-point semantics parity (`attach_to_parent`, `attach_to_id`, clip inheritance, pointer passthrough modes)
-  - [x] first-pass absolute child positioning in `LayoutInput`
-  - [x] descendant subtree translation when a positioned parent moves
-  - [x] first-pass anchored floating rect placement from an anchor rect, side, alignment, offset, and viewport margin
-  - [x] first-pass viewport collision handling with flip, clamp, and flip-then-clamp policies
-  - [x] direct `attach_to_id` resolution from a computed `LayoutTree`
   - [ ] clip inheritance and transform-aware attach rects for nested/offscreen hosts
 - [ ] Add a UI top-layer and portal system for modals, dropdowns, popovers, tooltips, context menus, and drag previews
-  - [x] first-pass transparent portal host builder for top-layer content
-  - [x] first-pass modal backdrop layer builder that clips to the viewport and captures input
-  - [x] first-pass focus scope stack for modal blocking, focus trapping, and restore-focus behavior
-  - [x] first-pass anchored popover/menu placement and collision avoidance helper
-  - [x] first-pass dismiss signaling for outside pointer presses and cancel events
   - [ ] full dismiss policies for escape key mapping, focus loss, parent close, nested scopes, and delayed pointer capture
 - [ ] Add explicit stacking contexts and layer slots:
-  - [x] first-pass `UiLayer` model carried through layout, hit testing, and render command ordering
-  - [x] background/content/foreground/overlay/top-layer slots
   - [ ] app-declared z ordering independent of tree insertion order
-  - [x] hit-test ordering that matches visual stacking across first-pass layer slots
-  - [x] first-pass pointer passthrough, modal blocking, and focus trapping
   - [ ] full event capture, nested modal policies, and keyboard navigation loops
 - [ ] Add parent clipping that can clip children by:
   - [ ] rect
   - [ ] rounded rect
-  - [x] first-pass resolved shape metadata on clip commands
   - [ ] arbitrary path / mask where backend support exists
   - [ ] scroll viewport
   - [ ] shader-generated alpha mask where explicitly requested
-- [ ] Add a CSS-style `mosaic` layout function:
-  - [x] first-pass stable dense packing of heterogenous tiles
-  - [x] first-pass named tile areas, declarative spans, and explicit tile placement with collision diagnostics
-  - [x] first-pass fixed cells, aspect-ratio fit, and span/fill/fit modes
-  - [x] first-pass responsive breakpoint rules for column counts
-  - [x] first-pass deterministic hit-test traversal and viewport filtering
-  - [x] first-pass element builder that emits mosaic tiles as absolute-positioned children
-  - [x] first-pass virtualized viewport builder that preserves full content size
 - [ ] Add virtualized versions of every potentially large primitive:
-  - [x] first-pass fixed-size virtual list range/spacer helper
-  - [x] first-pass virtual list builder
-  - [x] first-pass fixed-size virtual grid range/spacer helper and builder
-  - [x] first-pass fixed-size virtual table range/spacer helper and builder
-  - [x] first-pass fixed-height virtual tree / inspector range/spacer helper and builder
-  - [x] virtual dropdown menu
-  - [x] virtual log viewer
-  - [x] virtual mosaic
   - [ ] virtual rich/code editor
   - [ ] shared item measurement, cache invalidation, scroll anchoring, selection retention, and focus retention
 - [ ] Implement child-between-border emission parity and exact border raster semantics
@@ -576,60 +349,33 @@ Prompt-sized UI/control execution order:
 ### UI rendering completeness
 
 - [ ] Add full render-graph resource binding generation (bind groups, push constants, per-pass parameter buffers) instead of pass skeletons
-  - [x] first-pass graph read planning for UI shader slot image, named-image, and buffer resources
   - [ ] bind group creation and reflected binding layout merge for UI shader slots
-  - [x] first-pass app uniform push-constant byte packing with stable named offsets
-  - [x] first-pass graph pass push-constant attachment for single-command UI shader-slot batches
-  - [x] first-pass multi-command app-uniform parameter batch byte packing with per-command offsets
   - [ ] GPU buffer allocation/upload and binding for per-pass parameter buffers
   - [ ] built-in UI uniform parameter packing for rect, UV, shape, clip, state, time, and DPI scale
 - [ ] Integrate real shader pipelines for all UI slots in engine runtime
 - [ ] Define the UI shape contract shared by rendering, input, clipping, and effects:
   - [ ] rectangle
   - [ ] rounded rectangle with independent radii
-  - [x] first-pass `UiShape` model carried through element style and render commands
-  - [x] rectangle
-  - [x] rounded rectangle with independent radii
-  - [x] per-corner independent shape families and properties
-  - [x] squircle / superellipse
-  - [x] capsule / pill
-  - [x] circle / ellipse
-  - [x] resolved shape coverage helpers used by input hit testing
-  - [x] clip commands carry resolved shape for future mask/scissor backends
   - [ ] arbitrary path / mask
   - [ ] shader-produced coverage mask
 - [ ] Make UI antialiasing analytic and shape-aware for fills, borders, outlines, masks, and clips
-- [ ] Add first-party SVG and raster image primitives:
-  - [x] first-pass `resvg` backed SVG parse/raster asset primitive
-  - [x] exposed SVG/vector AA dials for native AA, supersampling, downsample filter, target scale, pixel snapping, and max render size
-  - [x] first-pass encoded raster image decode into RGBA8 UI assets
-  - [x] image element/widget metadata for fit mode, sampler policy, tint, and edge AA
 - [ ] Add GPU gradient shader implementation and parameter packing contract used by engine pipelines
 - [ ] Add text outline rendering path in engine shader side
 - [ ] Add a UI material/effect model with slots for:
-  - [x] first-pass fill/background shader slot metadata
-  - [x] first-pass border/outline shader slot metadata
   - [ ] text fill/outline/shadow/glow
   - [ ] inner shadow
   - [ ] drop shadow
-  - [x] first-pass mask/clip and backdrop slot declarations
   - [ ] bloom/glow extraction
   - [ ] custom Slang pass hooks
 - [ ] Add element-scoped shader overrides:
-  - [x] select a concrete element by ID and render slot through `ElementStyle` slot bindings
   - [ ] run a custom fragment shader over that slot's exact shape coverage and clip region
-  - [x] carry additional user uniforms alongside built-in UI command data such as element rect, shape, clip, layer, and z order
   - [ ] validate merged built-in/user uniform layouts with stable reflection and clear diagnostics
-  - [x] declare app textures, graph image names, samplers, and small parameter buffers on the element slot descriptor
-  - [x] preserve normal UI hit testing, layout, batching diagnostics, and fallback shader selection metadata
 - [ ] Allow per-slot effect routing so a widget can, for example, send only its border to bloom while keeping the fill in the normal UI pass
 - [ ] Allow UI shaders to sample render-graph resources through explicit declarations:
   - [ ] previous scene color
   - [ ] HDR scene color
   - [ ] depth
   - [ ] normals / material IDs where available
-  - [x] first-pass named graph/debug image declarations resolved into graph reads
-  - [x] first-pass app-provided textures and buffers declared as graph reads
 - [ ] Add backdrop-filter style UI effects that operate on graph images behind the widget:
   - [ ] blur
   - [ ] dim / tint
@@ -807,3 +553,33 @@ This work matters, but it should serve the product tracks instead of replacing t
 
 - [ ] Build a reference scene where the engine’s output is evaluated against the goal of plausibly real-looking realtime footage
 - [ ] Use that scene to drive the next realism-focused rendering priorities instead of guessing from architecture alone
+
+## UI / Event System Additions (TODO ONLY)
+
+### Event Loop
+- [x] Define unified EngineEvent model
+- [x] Implement capture/target/bubble propagation
+- [x] Add EventContext with propagation control
+
+### Input System
+- [ ] Add gamepad abstraction
+- [x] Expand action mapping system (rebinding + config)
+
+### UI Runtime Modes
+- [x] Add passthrough mode
+- [x] Ensure zero-cost disable path
+
+### UI/Event Integration
+- [x] Route events through UI → App/Game priority
+- [x] Add event consumption handling
+
+### UI Rendering Integration
+- [ ] Backdrop effects (blur, tint, distortion)
+- [ ] Depth-aware UI effects
+- [ ] Offscreen UI compositing
+
+### Advanced UI
+- [ ] Code editor widget
+- [ ] Virtualized editor
+- [ ] Advanced scroll physics
+- [ ] Full accessibility support
