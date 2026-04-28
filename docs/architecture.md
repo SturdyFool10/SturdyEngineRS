@@ -58,6 +58,18 @@ The core render graph remains backend-neutral: consumers declare pass reads/writ
 - `include/sturdy_engine.h` is generated from `crates/sturdy-engine-ffi` with `cbindgen`; do not edit it by hand.
 - Rust `bindgen` is reserved for the opposite direction: generating Rust bindings from platform/backend C headers when a backend needs it.
 
+## Coordinate Contract
+
+App-facing window, surface, render-target, UI, and texture pixel coordinates use a top-left origin with positive X right and positive Y down. `(0, 0)` is the top-left pixel edge. For a target of size `(width, height)`, `(width, height)` is the bottom-right pixel edge, not an addressable pixel center.
+
+Integer pixel and texel indices run from `(0, 0)` through `(width - 1, height - 1)`. Rectangles are represented as `origin + size`; their `max_exclusive`, `right`, and `bottom` edges are exclusive so full-target rectangles may end exactly at `(width, height)`.
+
+`WorldSpace` names game/scene coordinates without assigning a global up axis; individual scenes and cameras may be Y-up, Z-up, or otherwise defined. `ClipSpace` names backend-facing homogeneous coordinates after projection and before perspective divide, so backend adapters own clip/NDC differences instead of leaking them into app, UI, or gameplay code.
+
+Coordinate conversions are explicit at space boundaries: logical/physical window pixels convert through the DPI scale factor, logical window and UI pixels convert to `SurfacePx` without axis flips, `SurfacePx` converts to `Ndc` in the audited backend-facing convention, and `RenderTargetPx` converts to `Uv01` by target extent.
+
+World-space cameras own the projection from scene-defined axes into clip/NDC space. A camera may look through a Y-up world, a Z-up world, or a domain-specific coordinate system, but once positions are projected into app-facing window, surface, render-target, texture, or UI coordinates, the top-left/Y-down pixel contract above applies unchanged. UI hit testing, debug overlays, screenshots, scissor rectangles, and screen-space text must not infer their orientation from the world camera's up axis.
+
 ## Binding Generation
 
 Rust is the source of truth for the public C ABI.

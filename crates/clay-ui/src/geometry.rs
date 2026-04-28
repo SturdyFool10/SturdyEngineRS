@@ -40,12 +40,27 @@ impl Rect {
         }
     }
 
-    pub fn right(self) -> f32 {
-        self.origin.x + self.size.width
+    pub fn min(self) -> Vec2 {
+        self.origin
     }
 
+    /// Bottom-right exclusive edge of the rectangle.
+    ///
+    /// A full target rectangle with origin `(0, 0)` and size `(width, height)`
+    /// has max edge `(width, height)`. Integer pixel indices inside it run
+    /// through `(width - 1, height - 1)`.
+    pub fn max_exclusive(self) -> Vec2 {
+        self.origin + self.size.to_vec2()
+    }
+
+    /// Right exclusive edge.
+    pub fn right(self) -> f32 {
+        self.max_exclusive().x
+    }
+
+    /// Bottom exclusive edge.
     pub fn bottom(self) -> f32 {
-        self.origin.y + self.size.height
+        self.max_exclusive().y
     }
 
     pub fn center(self) -> Vec2 {
@@ -54,9 +69,9 @@ impl Rect {
 
     pub fn contains(self, point: Vec2) -> bool {
         point.x >= self.origin.x
-            && point.x <= self.right()
+            && point.x < self.right()
             && point.y >= self.origin.y
-            && point.y <= self.bottom()
+            && point.y < self.bottom()
     }
 
     pub fn inset(self, edges: Edges) -> Self {
@@ -420,6 +435,28 @@ mod tests {
         let shape = UiShape::squircle(12.0, 4.0).with_corner_radius_fallback(radii_all(8.0));
 
         assert_eq!(shape, UiShape::squircle(12.0, 4.0));
+    }
+
+    #[test]
+    fn rect_edges_are_origin_plus_size_with_exclusive_max() {
+        let rect = Rect::new(10.0, 20.0, 30.0, 40.0);
+
+        assert_eq!(rect.min(), Vec2::new(10.0, 20.0));
+        assert_eq!(rect.max_exclusive(), Vec2::new(40.0, 60.0));
+        assert_eq!(rect.right(), 40.0);
+        assert_eq!(rect.bottom(), 60.0);
+        assert_eq!(rect.center(), Vec2::new(25.0, 40.0));
+    }
+
+    #[test]
+    fn rect_contains_excludes_bottom_right_edges() {
+        let rect = Rect::new(0.0, 0.0, 100.0, 40.0);
+
+        assert!(rect.contains(Vec2::new(0.0, 0.0)));
+        assert!(rect.contains(Vec2::new(99.0, 39.0)));
+        assert!(!rect.contains(Vec2::new(100.0, 39.0)));
+        assert!(!rect.contains(Vec2::new(99.0, 40.0)));
+        assert!(!rect.contains(Vec2::new(100.0, 40.0)));
     }
 
     #[test]

@@ -102,10 +102,10 @@ The engine should not crash for recoverable runtime, compositor, asset, input, a
 ### Findings from the current scan
 
 - [ ] Clean up Vulkan allocator panic paths in the backend allocator:
-  - [ ] Replace `expect("fresh block must fit")` with an allocator error that includes requested size, alignment, block capacity, and memory type.
-  - [ ] Replace `expect("allocation block_id not found in pool")` and `expect("no pool for allocation memory type")` with a structured allocator-corruption or invalid-allocation-handle error.
-  - [ ] Replace `position(...).unwrap()` and `last_mut().unwrap()` with `Entry`-style logic or explicit error returns.
-  - [ ] Make deallocation return `Result<()>` so bad allocator state can be reported instead of panicking inside cleanup.
+  - [x] Replace `expect("fresh block must fit")` with an allocator error that includes requested size, alignment, block capacity, and memory type.
+  - [x] Replace `expect("allocation block_id not found in pool")` and `expect("no pool for allocation memory type")` with a structured allocator-corruption or invalid-allocation-handle error.
+  - [x] Replace `position(...).unwrap()` and `last_mut().unwrap()` with `Entry`-style logic or explicit error returns.
+  - [x] Make deallocation return `Result<()>` so bad allocator state can be reported instead of panicking inside cleanup.
   - [ ] Keep debug assertions for impossible allocator invariants, but make release builds return errors with diagnostics.
 - [ ] Clean up Linux Wayland background-effect panic paths:
   - [ ] Replace `expect("inserted state disappeared")` with `HashMap::entry` or a helper that returns `NativeWindowAppearanceError::ApplyFailed` if state creation fails.
@@ -244,8 +244,8 @@ The engine needs one app-facing coordinate convention before more UI, input, ren
 
 - [x] Standardize app-facing screen/window/UI/render-target pixel coordinates as top-left origin, positive X right, positive Y down.
 - [x] Define `(0, 0)` as the top-left pixel edge of the target.
-- [ ] Define `(width, height)` as the bottom-right pixel edge of the target.
-- [ ] Document that integer pixel indices run from `(0, 0)` through `(width - 1, height - 1)`, while rectangle max edges are exclusive and may equal `(width, height)`.
+- [x] Define `(width, height)` as the bottom-right pixel edge of the target.
+- [x] Document that integer pixel indices run from `(0, 0)` through `(width - 1, height - 1)`, while rectangle max edges are exclusive and may equal `(width, height)`.
 - [x] Treat cursor coordinates, widget bounds, scissor/clipping rects, screen-space draw commands, and debug overlays as top-left origin by default.
 - [x] Convert backend-specific clip/NDC conventions inside backend or render-pass adapter code, not in app/UI/game code.
 
@@ -261,22 +261,22 @@ Add small strongly-typed wrappers or clearly named structs for common coordinate
 - [x] `TexelPx`: integer texture texel coordinates.
 - [x] `Uv01`: normalized texture coordinate space.
 - [x] `Ndc`: normalized device coordinate space.
-- [ ] `ClipSpace`: backend-facing clip space after projection.
-- [ ] `WorldSpace`: game/world coordinates, which may be Y-up, Z-up, or otherwise scene-defined.
+- [x] `ClipSpace`: backend-facing clip space after projection.
+- [x] `WorldSpace`: game/world coordinates, which may be Y-up, Z-up, or otherwise scene-defined.
 
 ### Conversion and validation rules
 
 - [x] Add explicit conversion functions for logical-to-physical pixels, window-to-surface pixels, UI-to-surface pixels, surface-to-NDC, and render-target-to-UV.
 - [x] Keep Y-flips in one audited location per backend/pass type.
-- [ ] Add debug assertions for accidentally mixing logical pixels, physical pixels, UVs, and NDC values.
-- [ ] Add golden validation scenes that draw crosshairs, rects, cursor markers, clipped UI, and texture samples at each corner and edge.
-- [ ] Add a test scene that proves `(0,0)` is top-left and `(width,height)` is the bottom-right edge for the window, UI, debug overlay, and render target paths.
+- [x] Add debug assertions for accidentally mixing logical pixels, physical pixels, UVs, and NDC values.
+- [x] Add golden validation scenes that draw crosshairs, rects, cursor markers, clipped UI, and texture samples at each corner and edge.
+- [x] Add a test scene that proves `(0,0)` is top-left and `(width,height)` is the bottom-right edge for the window, UI, debug overlay, and render target paths.
 - [ ] Add a test scene that proves scissor rectangles, texture readbacks, pointer hit tests, and screenshot/export use the same orientation.
-- [ ] Add documentation for when world-space cameras may use Y-up or Z-up while screen-space remains top-left/Y-down.
+- [x] Add documentation for when world-space cameras may use Y-up or Z-up while screen-space remains top-left/Y-down.
 
 ### Other standardization wins
 
-- [ ] Standardize rectangle representation as `origin + size` plus helper accessors for `min`, `max_exclusive`, `center`, and `contains`.
+- [x] Standardize rectangle representation as `origin + size` plus helper accessors for `min`, `max_exclusive`, `center`, and `contains`.
 - [ ] Standardize time as monotonic `Instant`/`Duration` at engine boundaries; do not expose floating seconds except as convenience views.
 - [ ] Standardize color handling: linear scene color internally, explicit sRGB decode/encode, explicit HDR transfer/output policy, and named units for nits where applicable.
 - [ ] Standardize resource naming and debug labels for surfaces, images, buffers, passes, pipelines, and generated resources.

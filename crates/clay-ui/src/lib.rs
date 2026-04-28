@@ -34,8 +34,9 @@ pub use color::{
 };
 pub use context::{TextSceneKey, UiContext, UiFrameOutput, UiTextFrameStats, UiTreeInstance};
 pub use coords::{
-    Ndc, RenderTargetPx, SurfacePx, TexelPx, UiPx, Uv01, WindowLogicalPx, WindowPhysicalPx,
-    logical_to_physical, physical_to_logical, surface_to_ndc, window_logical_to_ui,
+    ClipSpace, Ndc, RenderTargetPx, SurfacePx, TexelPx, UiPx, Uv01, WindowLogicalPx,
+    WindowPhysicalPx, WorldSpace, logical_to_physical, physical_to_logical, render_target_to_uv,
+    surface_to_ndc, ui_to_surface, window_logical_to_surface, window_logical_to_ui,
 };
 pub use element::{Element, ElementKind, ElementStyle, ImageElement, TextElement};
 pub use floating::{

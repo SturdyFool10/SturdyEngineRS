@@ -93,8 +93,13 @@ impl ResourceRegistry {
             if let Err(error) =
                 device.bind_image_memory(image, allocation.memory, allocation.offset)
             {
-                self.allocator.dealloc(device, allocation);
+                let cleanup = self.allocator.dealloc(device, allocation);
                 device.destroy_image(image, None);
+                if let Err(cleanup_error) = cleanup {
+                    return Err(Error::Backend(format!(
+                        "vkBindImageMemory failed: {error:?}; additionally failed to release allocation: {cleanup_error}"
+                    )));
+                }
                 return Err(Error::Backend(format!(
                     "vkBindImageMemory failed: {error:?}"
                 )));
@@ -115,8 +120,13 @@ impl ResourceRegistry {
             match device.create_image_view(&view_info, None) {
                 Ok(view) => view,
                 Err(error) => {
-                    self.allocator.dealloc(device, allocation);
+                    let cleanup = self.allocator.dealloc(device, allocation);
                     device.destroy_image(image, None);
+                    if let Err(cleanup_error) = cleanup {
+                        return Err(Error::Backend(format!(
+                            "vkCreateImageView failed: {error:?}; additionally failed to release allocation: {cleanup_error}"
+                        )));
+                    }
                     return Err(Error::Backend(format!(
                         "vkCreateImageView failed: {error:?}"
                     )));
@@ -259,7 +269,7 @@ impl ResourceRegistry {
                 device.destroy_image(image.image, None);
             }
             if let Some(allocation) = image.allocation {
-                self.allocator.dealloc(device, allocation);
+                self.allocator.dealloc(device, allocation)?;
             }
         }
         Ok(())
@@ -334,8 +344,13 @@ impl ResourceRegistry {
             if let Err(error) =
                 device.bind_buffer_memory(buffer, allocation.memory, allocation.offset)
             {
-                self.allocator.dealloc(device, allocation);
+                let cleanup = self.allocator.dealloc(device, allocation);
                 device.destroy_buffer(buffer, None);
+                if let Err(cleanup_error) = cleanup {
+                    return Err(Error::Backend(format!(
+                        "vkBindBufferMemory failed: {error:?}; additionally failed to release allocation: {cleanup_error}"
+                    )));
+                }
                 return Err(Error::Backend(format!(
                     "vkBindBufferMemory failed: {error:?}"
                 )));
@@ -358,7 +373,7 @@ impl ResourceRegistry {
         if !buf.imported {
             unsafe { device.destroy_buffer(buf.buffer, None) };
             if let Some(allocation) = buf.allocation {
-                self.allocator.dealloc(device, allocation);
+                self.allocator.dealloc(device, allocation)?;
             }
         }
         Ok(())
@@ -501,7 +516,7 @@ impl ResourceRegistry {
                     device.destroy_image(image.image, None);
                 }
                 if let Some(allocation) = image.allocation {
-                    self.allocator.dealloc(device, allocation);
+                    let _ = self.allocator.dealloc(device, allocation);
                 }
             }
         }
@@ -509,7 +524,7 @@ impl ResourceRegistry {
             if !buf.imported {
                 unsafe { device.destroy_buffer(buf.buffer, None) };
                 if let Some(allocation) = buf.allocation {
-                    self.allocator.dealloc(device, allocation);
+                    let _ = self.allocator.dealloc(device, allocation);
                 }
             }
         }

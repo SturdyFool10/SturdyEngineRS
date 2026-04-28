@@ -160,9 +160,12 @@ impl TypePool {
         let id = self.next_block_id;
         self.next_block_id += 1;
         let mut block = Block::new(id, memory, block_capacity, mapped_ptr);
-        let offset = block
-            .allocate(size, alignment)
-            .expect("fresh block must fit");
+        let offset = block.allocate(size, alignment).ok_or_else(|| {
+            Error::Backend(format!(
+                "Vulkan allocator fresh block did not fit request: size={size} alignment={alignment} block_capacity={block_capacity} memory_type={}",
+                self.memory_type
+            ))
+        })?;
         self.blocks.push(block);
         let mapped_ptr = mapped_ptr.map(|base| unsafe { base.add(offset as usize) });
         Ok(Allocation {
@@ -175,28 +178,32 @@ impl TypePool {
         })
     }
 
-    fn dealloc(&mut self, device: &Device, alloc: Allocation) {
-        let block = self
-            .blocks
-            .iter_mut()
-            .find(|b| b.id == alloc.block_id)
-            .expect("allocation block_id not found in pool");
+    fn dealloc(&mut self, device: &Device, alloc: Allocation) -> Result<()> {
+        let Some(block) = self.blocks.iter_mut().find(|b| b.id == alloc.block_id) else {
+            return Err(Error::Backend(format!(
+                "Vulkan allocator invalid allocation handle: block_id={} not found in memory_type={} pool",
+                alloc.block_id, self.memory_type
+            )));
+        };
         block.free(alloc.offset, alloc.size);
         // If the block is now fully free and we have more than one block, release it.
         if block.is_empty() && self.blocks.len() > 1 {
-            let idx = self
-                .blocks
-                .iter()
-                .position(|b| b.id == alloc.block_id)
-                .unwrap();
-            let b = self.blocks.swap_remove(idx);
-            unsafe {
-                if b.mapped_ptr.is_some() {
-                    device.unmap_memory(b.memory);
+            if let Some(idx) = self.blocks.iter().position(|b| b.id == alloc.block_id) {
+                let b = self.blocks.swap_remove(idx);
+                unsafe {
+                    if b.mapped_ptr.is_some() {
+                        device.unmap_memory(b.memory);
+                    }
+                    device.free_memory(b.memory, None);
                 }
-                device.free_memory(b.memory, None);
+            } else {
+                return Err(Error::Backend(format!(
+                    "Vulkan allocator corruption: block_id={} disappeared from memory_type={} pool during deallocation",
+                    alloc.block_id, self.memory_type
+                )));
             }
         }
+        Ok(())
     }
 
     fn destroy_all(&mut self, device: &Device) {
@@ -241,23 +248,29 @@ impl GpuAllocator {
             .property_flags
             .contains(vk::MemoryPropertyFlags::HOST_VISIBLE);
 
-        let pool = match self.pools.iter_mut().find(|p| p.memory_type == memory_type) {
-            Some(p) => p,
+        let pool_index = match self.pools.iter().position(|p| p.memory_type == memory_type) {
+            Some(index) => index,
             None => {
                 self.pools.push(TypePool::new(memory_type, host_visible));
-                self.pools.last_mut().unwrap()
+                self.pools.len() - 1
             }
         };
+        let pool = &mut self.pools[pool_index];
         pool.alloc(device, requirements.size, requirements.alignment)
     }
 
-    pub fn dealloc(&mut self, device: &Device, alloc: Allocation) {
-        let pool = self
+    pub fn dealloc(&mut self, device: &Device, alloc: Allocation) -> Result<()> {
+        let Some(pool) = self
             .pools
             .iter_mut()
             .find(|p| p.memory_type == alloc.memory_type)
-            .expect("no pool for allocation memory type");
-        pool.dealloc(device, alloc);
+        else {
+            return Err(Error::Backend(format!(
+                "Vulkan allocator invalid allocation handle: no pool for memory_type={}",
+                alloc.memory_type
+            )));
+        };
+        pool.dealloc(device, alloc)
     }
 
     pub fn destroy_all(&mut self, device: &Device) {

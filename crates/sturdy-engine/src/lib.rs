@@ -70,8 +70,9 @@ pub use gpu_procedural_texture::GpuProceduralTexture;
 pub use graph_frame::{FullscreenPassBuilder, GraphFrame, ImageNode};
 pub use hdr_pipeline::{HdrMode, HdrPipelineDesc, HdrPreference, ToneMappingOp};
 pub use clay_ui::{
-    Ndc, RenderTargetPx, SurfacePx, TexelPx, UiPx, Uv01, WindowLogicalPx, WindowPhysicalPx,
-    logical_to_physical, physical_to_logical, surface_to_ndc, window_logical_to_ui,
+    ClipSpace, Ndc, RenderTargetPx, SurfacePx, TexelPx, UiPx, Uv01, WindowLogicalPx,
+    WindowPhysicalPx, WorldSpace, logical_to_physical, physical_to_logical, render_target_to_uv,
+    surface_to_ndc, ui_to_surface, window_logical_to_surface, window_logical_to_ui,
 };
 pub use input::{
     ActionBindingRegistry, ActionMap, BindingChange, InputHub, KeyInput, KeyInputState,
