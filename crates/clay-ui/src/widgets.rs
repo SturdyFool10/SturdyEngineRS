@@ -1,10 +1,11 @@
 use crate::{
-    Axis, CornerSpec, Edges, Element, ElementBuilder, ElementId, ElementStyle, FloatingAlign,
+    Axis, Cx, CornerSpec, Edges, Element, ElementBuilder, ElementId, ElementStyle, FloatingAlign,
     FloatingAttachConfig, FloatingAttachError, FloatingOptions, FloatingPlacement, LayoutDirection,
     LayoutInput, LayoutPosition, LayoutSizing, LayoutTree, MosaicLayout, Rect, ScrollAxis,
-    ScrollConfig, Size, TextAlign, TextStyle, TextWrap, UiColor, UiImageOptions, UiLayer, UiShape,
-    VirtualGridLayout, VirtualListLayout, VirtualTableLayout, VirtualTreeLayout, WidgetState,
-    attached_floating_layer, floating::place_subtree_in_layer, radii_all,
+    ScrollConfig, Size, SliderConfig, TextAlign, TextStyle, TextWrap, UiColor, UiImageOptions,
+    UiLayer, UiShape, VirtualGridLayout, VirtualListLayout, VirtualTableLayout, VirtualTreeLayout,
+    WidgetBehavior, WidgetState, attached_floating_layer, floating::place_subtree_in_layer,
+    radii_all,
 };
 use glam::Vec2;
 
@@ -43,6 +44,81 @@ impl Default for WidgetPalette {
     }
 }
 
+pub trait WidgetRenderContext {
+    fn widget_state(&self, id: &ElementId) -> WidgetState;
+    fn widget_palette(&self) -> WidgetPalette;
+
+    fn register_widget_behavior(&self, _id: ElementId, _behavior: WidgetBehavior) {}
+
+    fn register_slider_widget(&self, id: ElementId, axis: Axis, config: SliderConfig) {
+        self.register_widget_behavior(id, WidgetBehavior::slider(axis).pointer_drag(true));
+        let _ = config;
+    }
+
+    fn slider_display_value(&self, _id: &ElementId, config: SliderConfig) -> f32 {
+        let range = (config.max - config.min).max(f32::EPSILON);
+        ((config.initial - config.min) / range).clamp(0.0, 1.0)
+    }
+
+    fn register_text_input_widget(&self, id: ElementId) {
+        self.register_widget_behavior(id, WidgetBehavior::text_input());
+    }
+
+    fn register_drag_bar_widget(&self, id: ElementId, axis: Axis) {
+        self.register_widget_behavior(id, WidgetBehavior::drag_bar(axis));
+    }
+}
+
+impl WidgetRenderContext for Cx<'_> {
+    fn widget_state(&self, id: &ElementId) -> WidgetState {
+        self.state(id)
+    }
+
+    fn widget_palette(&self) -> WidgetPalette {
+        self.palette
+    }
+
+    fn register_widget_behavior(&self, id: ElementId, behavior: WidgetBehavior) {
+        self.register_behavior(id, behavior);
+    }
+
+    fn register_slider_widget(&self, id: ElementId, axis: Axis, config: SliderConfig) {
+        self.register_slider(id, axis, config);
+    }
+
+    fn slider_display_value(&self, id: &ElementId, _config: SliderConfig) -> f32 {
+        self.slider_value_normalized(id)
+    }
+
+    fn register_text_input_widget(&self, id: ElementId) {
+        self.register_text_input(id);
+    }
+
+    fn register_drag_bar_widget(&self, id: ElementId, axis: Axis) {
+        self.register_drag_bar(id, axis);
+    }
+}
+
+impl WidgetRenderContext for WidgetState {
+    fn widget_state(&self, _id: &ElementId) -> WidgetState {
+        self.clone()
+    }
+
+    fn widget_palette(&self) -> WidgetPalette {
+        WidgetPalette::default()
+    }
+}
+
+impl WidgetRenderContext for WidgetPalette {
+    fn widget_state(&self, _id: &ElementId) -> WidgetState {
+        WidgetState::default()
+    }
+
+    fn widget_palette(&self) -> WidgetPalette {
+        *self
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DragBarAxis {
     Horizontal,
@@ -63,7 +139,7 @@ pub struct SegmentSpec {
     pub id: ElementId,
     pub label: String,
     pub selected: bool,
-    pub state: WidgetState,
+    pub state_override: Option<WidgetState>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -73,7 +149,6 @@ pub struct DropdownOptionSpec {
     pub selected: bool,
     pub disabled: bool,
     pub separator_before: bool,
-    pub state: WidgetState,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,7 +167,6 @@ pub struct LogEntrySpec {
     pub message: String,
     pub timestamp: Option<String>,
     pub source: Option<String>,
-    pub state: WidgetState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -142,7 +216,6 @@ pub struct CommandPaletteItemSpec {
     pub group: Option<String>,
     pub selected: bool,
     pub disabled: bool,
-    pub state: WidgetState,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -312,7 +385,6 @@ impl CommandPaletteItemSpec {
             group: None,
             selected: false,
             disabled: false,
-            state: WidgetState::default(),
         }
     }
 
@@ -338,11 +410,6 @@ impl CommandPaletteItemSpec {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
-        self
-    }
-
-    pub fn state(mut self, state: WidgetState) -> Self {
-        self.state = state;
         self
     }
 }
@@ -416,12 +483,7 @@ impl CommandPaletteConfig {
 
 impl SegmentSpec {
     pub fn new(id: ElementId, label: impl Into<String>) -> Self {
-        Self {
-            id,
-            label: label.into(),
-            selected: false,
-            state: WidgetState::default(),
-        }
+        Self { id, label: label.into(), selected: false, state_override: None }
     }
 
     pub fn selected(mut self, selected: bool) -> Self {
@@ -430,21 +492,14 @@ impl SegmentSpec {
     }
 
     pub fn state(mut self, state: WidgetState) -> Self {
-        self.state = state;
+        self.state_override = Some(state);
         self
     }
 }
 
 impl DropdownOptionSpec {
     pub fn new(id: ElementId, label: impl Into<String>) -> Self {
-        Self {
-            id,
-            label: label.into(),
-            selected: false,
-            disabled: false,
-            separator_before: false,
-            state: WidgetState::default(),
-        }
+        Self { id, label: label.into(), selected: false, disabled: false, separator_before: false }
     }
 
     pub fn selected(mut self, selected: bool) -> Self {
@@ -459,11 +514,6 @@ impl DropdownOptionSpec {
 
     pub fn separator_before(mut self, separator_before: bool) -> Self {
         self.separator_before = separator_before;
-        self
-    }
-
-    pub fn state(mut self, state: WidgetState) -> Self {
-        self.state = state;
         self
     }
 }
@@ -492,14 +542,7 @@ impl LogLevel {
 
 impl LogEntrySpec {
     pub fn new(id: ElementId, level: LogLevel, message: impl Into<String>) -> Self {
-        Self {
-            id,
-            level,
-            message: message.into(),
-            timestamp: None,
-            source: None,
-            state: WidgetState::default(),
-        }
+        Self { id, level, message: message.into(), timestamp: None, source: None }
     }
 
     pub fn timestamp(mut self, timestamp: impl Into<String>) -> Self {
@@ -509,11 +552,6 @@ impl LogEntrySpec {
 
     pub fn source(mut self, source: impl Into<String>) -> Self {
         self.source = Some(source.into());
-        self
-    }
-
-    pub fn state(mut self, state: WidgetState) -> Self {
-        self.state = state;
         self
     }
 }
@@ -548,9 +586,9 @@ pub struct TabSpec {
     pub id: ElementId,
     pub label: String,
     pub selected: bool,
-    pub state: WidgetState,
     pub icon_key: Option<String>,
     pub icon_size: f32,
+    pub state_override: Option<WidgetState>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -558,7 +596,6 @@ pub struct BreadcrumbSpec {
     pub id: ElementId,
     pub label: String,
     pub is_current: bool,
-    pub state: WidgetState,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -566,7 +603,7 @@ pub struct AccordionPanelConfig {
     pub id: ElementId,
     pub title: String,
     pub is_open: bool,
-    pub state: WidgetState,
+    pub state_override: Option<WidgetState>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -586,7 +623,6 @@ pub struct ContextMenuItemSpec {
     pub icon_key: Option<String>,
     pub disabled: bool,
     pub separator_before: bool,
-    pub state: WidgetState,
 }
 
 impl TextInputSpec {
@@ -661,23 +697,11 @@ impl NumberInputSpec {
 
 impl TabSpec {
     pub fn new(id: ElementId, label: impl Into<String>) -> Self {
-        Self {
-            id,
-            label: label.into(),
-            selected: false,
-            state: WidgetState::default(),
-            icon_key: None,
-            icon_size: 16.0,
-        }
+        Self { id, label: label.into(), selected: false, icon_key: None, icon_size: 16.0, state_override: None }
     }
 
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
-        self
-    }
-
-    pub fn state(mut self, state: WidgetState) -> Self {
-        self.state = state;
         self
     }
 
@@ -690,37 +714,27 @@ impl TabSpec {
         self.icon_size = icon_size;
         self
     }
+
+    pub fn state(mut self, state: WidgetState) -> Self {
+        self.state_override = Some(state);
+        self
+    }
 }
 
 impl BreadcrumbSpec {
     pub fn new(id: ElementId, label: impl Into<String>) -> Self {
-        Self {
-            id,
-            label: label.into(),
-            is_current: false,
-            state: WidgetState::default(),
-        }
+        Self { id, label: label.into(), is_current: false }
     }
 
     pub fn current(mut self, is_current: bool) -> Self {
         self.is_current = is_current;
         self
     }
-
-    pub fn state(mut self, state: WidgetState) -> Self {
-        self.state = state;
-        self
-    }
 }
 
 impl AccordionPanelConfig {
     pub fn new(id: ElementId, title: impl Into<String>) -> Self {
-        Self {
-            id,
-            title: title.into(),
-            is_open: false,
-            state: WidgetState::default(),
-        }
+        Self { id, title: title.into(), is_open: false, state_override: None }
     }
 
     pub fn open(mut self, is_open: bool) -> Self {
@@ -729,7 +743,7 @@ impl AccordionPanelConfig {
     }
 
     pub fn state(mut self, state: WidgetState) -> Self {
-        self.state = state;
+        self.state_override = Some(state);
         self
     }
 }
@@ -760,15 +774,7 @@ impl BadgeVariant {
 
 impl ContextMenuItemSpec {
     pub fn new(id: ElementId, label: impl Into<String>) -> Self {
-        Self {
-            id,
-            label: label.into(),
-            shortcut: None,
-            icon_key: None,
-            disabled: false,
-            separator_before: false,
-            state: WidgetState::default(),
-        }
+        Self { id, label: label.into(), shortcut: None, icon_key: None, disabled: false, separator_before: false }
     }
 
     pub fn shortcut(mut self, shortcut: impl Into<String>) -> Self {
@@ -790,11 +796,6 @@ impl ContextMenuItemSpec {
         self.separator_before = separator_before;
         self
     }
-
-    pub fn state(mut self, state: WidgetState) -> Self {
-        self.state = state;
-        self
-    }
 }
 
 // ── Batch-2 spec types ────────────────────────────────────────────────────────
@@ -805,7 +806,7 @@ pub struct ListItemSpec {
     pub label: String,
     pub sublabel: Option<String>,
     pub selected: bool,
-    pub state: WidgetState,
+    pub state_override: Option<WidgetState>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -821,7 +822,6 @@ pub struct TableHeaderSpec {
     pub label: String,
     pub width: f32,
     pub sort: SortDirection,
-    pub state: WidgetState,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -829,7 +829,6 @@ pub struct PropertyRowSpec {
     pub id: ElementId,
     pub label: String,
     pub label_width: f32,
-    pub state: WidgetState,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -838,8 +837,6 @@ pub struct ChipSpec {
     pub label: String,
     pub variant: BadgeVariant,
     pub can_remove: bool,
-    pub remove_state: WidgetState,
-    pub state: WidgetState,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -848,7 +845,6 @@ pub struct NotificationSpec {
     pub message: String,
     pub variant: BadgeVariant,
     pub action_label: Option<String>,
-    pub action_state: WidgetState,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -856,18 +852,11 @@ pub struct StatusBarSectionSpec {
     pub id: ElementId,
     pub label: String,
     pub value: Option<String>,
-    pub state: WidgetState,
 }
 
 impl ListItemSpec {
     pub fn new(id: ElementId, label: impl Into<String>) -> Self {
-        Self {
-            id,
-            label: label.into(),
-            sublabel: None,
-            selected: false,
-            state: WidgetState::default(),
-        }
+        Self { id, label: label.into(), sublabel: None, selected: false, state_override: None }
     }
 
     pub fn sublabel(mut self, sublabel: impl Into<String>) -> Self {
@@ -881,64 +870,36 @@ impl ListItemSpec {
     }
 
     pub fn state(mut self, state: WidgetState) -> Self {
-        self.state = state;
+        self.state_override = Some(state);
         self
     }
 }
 
 impl TableHeaderSpec {
     pub fn new(id: ElementId, label: impl Into<String>, width: f32) -> Self {
-        Self {
-            id,
-            label: label.into(),
-            width: width.max(0.0),
-            sort: SortDirection::None,
-            state: WidgetState::default(),
-        }
+        Self { id, label: label.into(), width: width.max(0.0), sort: SortDirection::None }
     }
 
     pub fn sort(mut self, sort: SortDirection) -> Self {
         self.sort = sort;
         self
     }
-
-    pub fn state(mut self, state: WidgetState) -> Self {
-        self.state = state;
-        self
-    }
 }
 
 impl PropertyRowSpec {
     pub fn new(id: ElementId, label: impl Into<String>) -> Self {
-        Self {
-            id,
-            label: label.into(),
-            label_width: 120.0,
-            state: WidgetState::default(),
-        }
+        Self { id, label: label.into(), label_width: 120.0 }
     }
 
     pub fn label_width(mut self, width: f32) -> Self {
         self.label_width = width.max(0.0);
         self
     }
-
-    pub fn state(mut self, state: WidgetState) -> Self {
-        self.state = state;
-        self
-    }
 }
 
 impl ChipSpec {
     pub fn new(id: ElementId, label: impl Into<String>) -> Self {
-        Self {
-            id,
-            label: label.into(),
-            variant: BadgeVariant::Default,
-            can_remove: false,
-            remove_state: WidgetState::default(),
-            state: WidgetState::default(),
-        }
+        Self { id, label: label.into(), variant: BadgeVariant::Default, can_remove: false }
     }
 
     pub fn variant(mut self, variant: BadgeVariant) -> Self {
@@ -950,68 +911,40 @@ impl ChipSpec {
         self.can_remove = can_remove;
         self
     }
-
-    pub fn remove_state(mut self, remove_state: WidgetState) -> Self {
-        self.remove_state = remove_state;
-        self
-    }
-
-    pub fn state(mut self, state: WidgetState) -> Self {
-        self.state = state;
-        self
-    }
 }
 
 impl NotificationSpec {
     pub fn new(id: ElementId, message: impl Into<String>, variant: BadgeVariant) -> Self {
-        Self {
-            id,
-            message: message.into(),
-            variant,
-            action_label: None,
-            action_state: WidgetState::default(),
-        }
+        Self { id, message: message.into(), variant, action_label: None }
     }
 
     pub fn action(mut self, label: impl Into<String>) -> Self {
         self.action_label = Some(label.into());
         self
     }
-
-    pub fn action_state(mut self, action_state: WidgetState) -> Self {
-        self.action_state = action_state;
-        self
-    }
 }
 
 impl StatusBarSectionSpec {
     pub fn new(id: ElementId, label: impl Into<String>) -> Self {
-        Self {
-            id,
-            label: label.into(),
-            value: None,
-            state: WidgetState::default(),
-        }
+        Self { id, label: label.into(), value: None }
     }
 
     pub fn value(mut self, value: impl Into<String>) -> Self {
         self.value = Some(value.into());
         self
     }
-
-    pub fn state(mut self, state: WidgetState) -> Self {
-        self.state = state;
-        self
-    }
 }
 
 // ── Widget builders ────────────────────────────────────────────────────────────
 
-pub fn button(id: ElementId, label: impl Into<String>, state: &WidgetState) -> Element {
-    button_with_palette(id, label, state, &WidgetPalette::default())
+pub fn button<C: WidgetRenderContext + ?Sized>(id: ElementId, label: impl Into<String>, cx: &C) -> Element {
+    cx.register_widget_behavior(id.clone(), WidgetBehavior::interactive());
+    let state = cx.widget_state(&id);
+    let palette = cx.widget_palette();
+    button_with_palette(id, label, &state, &palette)
 }
 
-pub fn button_with_palette(
+pub(crate) fn button_with_palette(
     id: ElementId,
     label: impl Into<String>,
     state: &WidgetState,
@@ -1041,16 +974,14 @@ pub fn button_with_palette(
         .build()
 }
 
-pub fn radio(
-    id: ElementId,
-    label: impl Into<String>,
-    checked: bool,
-    state: &WidgetState,
-) -> Element {
-    radio_with_palette(id, label, checked, state, &WidgetPalette::default())
+pub fn radio<C: WidgetRenderContext + ?Sized>(id: ElementId, label: impl Into<String>, checked: bool, cx: &C) -> Element {
+    cx.register_widget_behavior(id.clone(), WidgetBehavior::interactive());
+    let state = cx.widget_state(&id);
+    let palette = cx.widget_palette();
+    radio_with_palette(id, label, checked, &state, &palette)
 }
 
-pub fn radio_with_palette(
+pub(crate) fn radio_with_palette(
     id: ElementId,
     label: impl Into<String>,
     checked: bool,
@@ -1093,16 +1024,14 @@ pub fn radio_with_palette(
         .build()
 }
 
-pub fn checkbox(
-    id: ElementId,
-    label: impl Into<String>,
-    checked: bool,
-    state: &WidgetState,
-) -> Element {
-    checkbox_with_palette(id, label, checked, state, &WidgetPalette::default())
+pub fn checkbox<C: WidgetRenderContext + ?Sized>(id: ElementId, label: impl Into<String>, checked: bool, cx: &C) -> Element {
+    cx.register_widget_behavior(id.clone(), WidgetBehavior::interactive());
+    let state = cx.widget_state(&id);
+    let palette = cx.widget_palette();
+    checkbox_with_palette(id, label, checked, &state, &palette)
 }
 
-pub fn checkbox_with_palette(
+pub(crate) fn checkbox_with_palette(
     id: ElementId,
     label: impl Into<String>,
     checked: bool,
@@ -1166,16 +1095,14 @@ pub fn checkbox_with_palette(
         .build()
 }
 
-pub fn toggle(
-    id: ElementId,
-    label: impl Into<String>,
-    checked: bool,
-    state: &WidgetState,
-) -> Element {
-    toggle_with_palette(id, label, checked, state, &WidgetPalette::default())
+pub fn toggle<C: WidgetRenderContext + ?Sized>(id: ElementId, label: impl Into<String>, checked: bool, cx: &C) -> Element {
+    cx.register_widget_behavior(id.clone(), WidgetBehavior::interactive());
+    let state = cx.widget_state(&id);
+    let palette = cx.widget_palette();
+    toggle_with_palette(id, label, checked, &state, &palette)
 }
 
-pub fn toggle_with_palette(
+pub(crate) fn toggle_with_palette(
     id: ElementId,
     label: impl Into<String>,
     checked: bool,
@@ -1244,62 +1171,40 @@ pub fn toggle_with_palette(
         .build()
 }
 
-pub fn segmented_control(
+pub fn segmented_control<C: WidgetRenderContext + ?Sized>(
     id: ElementId,
     segments: impl IntoIterator<Item = SegmentSpec>,
-) -> Element {
-    segmented_control_with_palette(id, segments, &WidgetPalette::default())
-}
-
-pub fn segmented_control_with_palette(
-    id: ElementId,
-    segments: impl IntoIterator<Item = SegmentSpec>,
-    palette: &WidgetPalette,
+    cx: &C,
 ) -> Element {
     let segments = segments.into_iter().collect::<Vec<_>>();
     let count = segments.len();
+    let palette = cx.widget_palette();
     let mut builder = ElementBuilder::container(id).layout(LayoutInput {
-        width: LayoutSizing::Fit {
-            min: 0.0,
-            max: f32::INFINITY,
-        },
-        height: LayoutSizing::Fit {
-            min: 0.0,
-            max: f32::INFINITY,
-        },
+        width: LayoutSizing::Fit { min: 0.0, max: f32::INFINITY },
+        height: LayoutSizing::Fit { min: 0.0, max: f32::INFINITY },
         direction: LayoutDirection::LeftToRight,
         ..LayoutInput::default()
     });
 
     for (index, segment) in segments.into_iter().enumerate() {
-        let mut style = control_style(
-            &segment.state,
-            palette,
-            segment.selected,
-            0.0,
-            Edges::symmetric(10.0, 6.0),
-        );
+        cx.register_widget_behavior(segment.id.clone(), WidgetBehavior::interactive());
+        let state = segment.state_override.clone().unwrap_or_else(|| cx.widget_state(&segment.id));
+        let mut style = control_style(&state, &palette, segment.selected, 0.0, Edges::symmetric(10.0, 6.0));
         style.shape = segment_shape(index, count, 7.0);
-        style.outline_width = Edges::all(if segment.state.focused { 2.0 } else { 1.0 });
+        style.outline_width = Edges::all(if state.focused { 2.0 } else { 1.0 });
 
         builder = builder.child(
             ElementBuilder::container(segment.id.clone())
                 .style(style)
                 .layout(LayoutInput {
-                    width: LayoutSizing::Fit {
-                        min: 0.0,
-                        max: f32::INFINITY,
-                    },
-                    height: LayoutSizing::Fit {
-                        min: 0.0,
-                        max: f32::INFINITY,
-                    },
+                    width: LayoutSizing::Fit { min: 0.0, max: f32::INFINITY },
+                    height: LayoutSizing::Fit { min: 0.0, max: f32::INFINITY },
                     ..LayoutInput::default()
                 })
                 .child(label_element(
                     ElementId::local("label", 0, &segment.id),
                     segment.label,
-                    text_color(&segment.state, palette, segment.selected),
+                    text_color(&state, &palette, segment.selected),
                 ))
                 .build(),
         );
@@ -1308,11 +1213,16 @@ pub fn segmented_control_with_palette(
     builder.build()
 }
 
-pub fn drag_bar(id: ElementId, axis: impl Into<DragBarAxis>, state: &WidgetState) -> Element {
-    drag_bar_with_palette(id, axis, state, &WidgetPalette::default())
+pub fn drag_bar<C: WidgetRenderContext + ?Sized>(id: ElementId, axis: impl Into<DragBarAxis>, cx: &C) -> Element {
+    let axis_enum: DragBarAxis = axis.into();
+    let crate_axis = match axis_enum { DragBarAxis::Horizontal => Axis::Horizontal, DragBarAxis::Vertical => Axis::Vertical };
+    cx.register_drag_bar_widget(id.clone(), crate_axis);
+    let state = cx.widget_state(&id);
+    let palette = cx.widget_palette();
+    drag_bar_with_palette(id, axis_enum, &state, &palette)
 }
 
-pub fn drag_bar_with_palette(
+pub(crate) fn drag_bar_with_palette(
     id: ElementId,
     axis: impl Into<DragBarAxis>,
     state: &WidgetState,
@@ -1347,16 +1257,22 @@ pub fn drag_bar_with_palette(
         .build()
 }
 
-pub fn slider(
-    id: ElementId,
-    axis: impl Into<DragBarAxis>,
-    value: f32,
-    state: &WidgetState,
-) -> Element {
-    slider_with_palette(id, axis, value, state, &WidgetPalette::default())
+pub fn slider<C, S>(id: ElementId, axis: impl Into<DragBarAxis>, config: S, cx: &C) -> Element
+where
+    C: WidgetRenderContext + ?Sized,
+    S: Into<SliderConfig>,
+{
+    let axis_enum: DragBarAxis = axis.into();
+    let crate_axis = match axis_enum { DragBarAxis::Horizontal => Axis::Horizontal, DragBarAxis::Vertical => Axis::Vertical };
+    let config = config.into();
+    cx.register_slider_widget(id.clone(), crate_axis, config);
+    let value = cx.slider_display_value(&id, config);
+    let state = cx.widget_state(&id);
+    let palette = cx.widget_palette();
+    slider_with_palette(id, axis_enum, value, &state, &palette)
 }
 
-pub fn slider_with_palette(
+pub(crate) fn slider_with_palette(
     id: ElementId,
     axis: impl Into<DragBarAxis>,
     value: f32,
@@ -1456,11 +1372,13 @@ pub fn slider_with_palette(
         .build()
 }
 
-pub fn progress_bar(id: ElementId, value: f32, state: &WidgetState) -> Element {
-    progress_bar_with_palette(id, value, state, &WidgetPalette::default())
+pub fn progress_bar<C: WidgetRenderContext + ?Sized>(id: ElementId, value: f32, cx: &C) -> Element {
+    let state = cx.widget_state(&id);
+    let palette = cx.widget_palette();
+    progress_bar_with_palette(id, value, &state, &palette)
 }
 
-pub fn progress_bar_with_palette(
+pub(crate) fn progress_bar_with_palette(
     id: ElementId,
     value: f32,
     state: &WidgetState,
@@ -1672,11 +1590,13 @@ pub fn tooltip_surface(
         .build()
 }
 
-pub fn scrollbar(id: ElementId, metrics: ScrollbarMetrics, state: &WidgetState) -> Element {
-    scrollbar_with_palette(id, metrics, state, &WidgetPalette::default())
+pub fn scrollbar<C: WidgetRenderContext + ?Sized>(id: ElementId, metrics: ScrollbarMetrics, cx: &C) -> Element {
+    let state = cx.widget_state(&id);
+    let palette = cx.widget_palette();
+    scrollbar_with_palette(id, metrics, &state, &palette)
 }
 
-pub fn scrollbar_with_palette(
+pub(crate) fn scrollbar_with_palette(
     id: ElementId,
     metrics: ScrollbarMetrics,
     state: &WidgetState,
@@ -1860,10 +1780,11 @@ pub fn scroll_container_with_scrollbars_and_direction(
                 ..LayoutInput::default()
             })
             .child(viewport)
-            .child(scrollbar(
+            .child(scrollbar_with_palette(
                 vertical_bar_id,
                 vertical_metrics,
                 &WidgetState::default(),
+                &WidgetPalette::default(),
             ))
             .build(),
         ScrollAxis::Horizontal => ElementBuilder::container(id)
@@ -1881,10 +1802,11 @@ pub fn scroll_container_with_scrollbars_and_direction(
                 ..LayoutInput::default()
             })
             .child(viewport)
-            .child(scrollbar(
+            .child(scrollbar_with_palette(
                 horizontal_bar_id,
                 horizontal_metrics,
                 &WidgetState::default(),
+                &WidgetPalette::default(),
             ))
             .build(),
         ScrollAxis::Both => {
@@ -1903,10 +1825,11 @@ pub fn scroll_container_with_scrollbars_and_direction(
                     ..LayoutInput::default()
                 })
                 .child(viewport)
-                .child(scrollbar(
+                .child(scrollbar_with_palette(
                     vertical_bar_id,
                     vertical_metrics,
                     &WidgetState::default(),
+                    &WidgetPalette::default(),
                 ))
                 .build();
 
@@ -1925,10 +1848,11 @@ pub fn scroll_container_with_scrollbars_and_direction(
                     ..LayoutInput::default()
                 })
                 .child(row)
-                .child(scrollbar(
+                .child(scrollbar_with_palette(
                     horizontal_bar_id,
                     horizontal_metrics,
                     &WidgetState::default(),
+                    &WidgetPalette::default(),
                 ))
                 .build()
         }
@@ -2025,13 +1949,16 @@ pub fn virtual_list(
     )
 }
 
-pub fn dropdown_option(
+pub fn dropdown_option<C: WidgetRenderContext + ?Sized>(
     option: DropdownOptionSpec,
     row_height: f32,
-    palette: &WidgetPalette,
+    cx: &C,
 ) -> Element {
-    let mut state = option.state.clone();
+    cx.register_widget_behavior(option.id.clone(), WidgetBehavior::interactive());
+    let mut state = cx.widget_state(&option.id);
     state.disabled |= option.disabled;
+    let palette = cx.widget_palette();
+    let palette = &palette;
     let row_id = option.id.clone();
     let mut style = control_style(
         &state,
@@ -2101,35 +2028,20 @@ pub fn dropdown_option(
         .build()
 }
 
-pub fn virtual_dropdown_menu(
+pub fn virtual_dropdown_menu<C: WidgetRenderContext + ?Sized>(
     id: ElementId,
     width: LayoutSizing,
     layout: &VirtualListLayout,
     visible_options: impl IntoIterator<Item = DropdownOptionSpec>,
-) -> Element {
-    virtual_dropdown_menu_with_palette(
-        id,
-        width,
-        layout,
-        visible_options,
-        &WidgetPalette::default(),
-    )
-}
-
-pub fn virtual_dropdown_menu_with_palette(
-    id: ElementId,
-    width: LayoutSizing,
-    layout: &VirtualListLayout,
-    visible_options: impl IntoIterator<Item = DropdownOptionSpec>,
-    palette: &WidgetPalette,
+    cx: &C,
 ) -> Element {
     let rows = visible_options
         .into_iter()
-        .map(|option| dropdown_option(option, layout.item_extent, palette));
+        .map(|option| dropdown_option(option, layout.item_extent, cx));
     let mut menu = virtual_list(id, width, layout.viewport_extent, layout, rows);
     menu.style = ElementStyle {
-        background: palette.surface,
-        outline: palette.outline,
+        background: cx.widget_palette().surface,
+        outline: cx.widget_palette().outline,
         outline_width: Edges::all(1.0),
         corner_radius: radii_all(8.0),
         padding: Edges::ZERO,
@@ -2139,11 +2051,15 @@ pub fn virtual_dropdown_menu_with_palette(
     menu
 }
 
-pub fn log_entry(entry: LogEntrySpec, row_height: f32, palette: &WidgetPalette) -> Element {
+pub fn log_entry<C: WidgetRenderContext + ?Sized>(entry: LogEntrySpec, row_height: f32, cx: &C) -> Element {
+    cx.register_widget_behavior(entry.id.clone(), WidgetBehavior::interactive());
+    let state = cx.widget_state(&entry.id);
+    let palette = cx.widget_palette();
+    let palette = &palette;
     let row_id = entry.id.clone();
-    let focused = entry.state.focused;
+    let focused = state.focused;
     let mut style = ElementStyle {
-        background: if entry.state.hovered || entry.state.focused {
+        background: if state.hovered || state.focused {
             palette.surface_hovered
         } else {
             UiColor::TRANSPARENT
@@ -2213,32 +2129,18 @@ pub fn log_entry(entry: LogEntrySpec, row_height: f32, palette: &WidgetPalette) 
         .build()
 }
 
-pub fn virtual_log_viewer(
+pub fn virtual_log_viewer<C: WidgetRenderContext + ?Sized>(
     id: ElementId,
     width: LayoutSizing,
     layout: &VirtualListLayout,
     visible_entries: impl IntoIterator<Item = LogEntrySpec>,
-) -> Element {
-    virtual_log_viewer_with_palette(
-        id,
-        width,
-        layout,
-        visible_entries,
-        &WidgetPalette::default(),
-    )
-}
-
-pub fn virtual_log_viewer_with_palette(
-    id: ElementId,
-    width: LayoutSizing,
-    layout: &VirtualListLayout,
-    visible_entries: impl IntoIterator<Item = LogEntrySpec>,
-    palette: &WidgetPalette,
+    cx: &C,
 ) -> Element {
     let rows = visible_entries
         .into_iter()
-        .map(|entry| log_entry(entry, layout.item_extent, palette));
+        .map(|entry| log_entry(entry, layout.item_extent, cx));
     let mut viewer = virtual_list(id, width, layout.viewport_extent, layout, rows);
+    let palette = cx.widget_palette();
     viewer.style = ElementStyle {
         background: palette.surface.with_alpha(0.82),
         outline: palette.outline,
@@ -2555,8 +2457,10 @@ fn mosaic_content_from_tile_rects(
 
 // ── New public widgets ─────────────────────────────────────────────────────────
 
-pub fn label(id: ElementId, text: impl Into<String>, state: &WidgetState) -> Element {
-    label_with_palette(id, text, state, &WidgetPalette::default())
+pub fn label<C: WidgetRenderContext + ?Sized>(id: ElementId, text: impl Into<String>, cx: &C) -> Element {
+    let state = cx.widget_state(&id);
+    let palette = cx.widget_palette();
+    compact_text(id, text, text_color(&state, &palette, false), 14.0, 18.0)
 }
 
 pub fn label_with_palette(
@@ -2725,57 +2629,44 @@ pub fn empty_state_with_palette(
     builder.build()
 }
 
-pub fn tab_bar(id: ElementId, tabs: impl IntoIterator<Item = TabSpec>) -> Element {
-    tab_bar_with_palette(id, tabs, &WidgetPalette::default())
-}
-
-pub fn tab_bar_with_palette(
-    id: ElementId,
-    tabs: impl IntoIterator<Item = TabSpec>,
-    palette: &WidgetPalette,
-) -> Element {
+pub fn tab_bar<C: WidgetRenderContext + ?Sized>(id: ElementId, tabs: impl IntoIterator<Item = TabSpec>, cx: &C) -> Element {
     let mut builder = ElementBuilder::container(id).layout(LayoutInput {
-        width: LayoutSizing::Grow {
-            min: 0.0,
-            max: f32::INFINITY,
-        },
-        height: LayoutSizing::Fit {
-            min: 0.0,
-            max: f32::INFINITY,
-        },
+        width: LayoutSizing::Grow { min: 0.0, max: f32::INFINITY },
+        height: LayoutSizing::Fit { min: 0.0, max: f32::INFINITY },
         direction: LayoutDirection::LeftToRight,
         ..LayoutInput::default()
     });
 
+    let palette = cx.widget_palette();
+    let palette = &palette;
     for tab in tabs {
         let tab_id = tab.id.clone();
+        cx.register_widget_behavior(tab.id.clone(), WidgetBehavior::interactive());
+        let state = tab.state_override.clone().unwrap_or_else(|| cx.widget_state(&tab.id));
         let mut tab_style = ElementStyle {
-            background: if tab.state.pressed || tab.state.captured {
+            background: if state.pressed || state.captured {
                 palette.surface_pressed
-            } else if tab.state.hovered {
+            } else if state.hovered {
                 palette.surface_hovered
             } else {
                 UiColor::TRANSPARENT
             },
             outline: if tab.selected {
                 palette.accent
-            } else if tab.state.focused {
+            } else if state.focused {
                 palette.outline_focus
             } else {
                 UiColor::TRANSPARENT
             },
-            outline_width: Edges {
-                bottom: 2.0,
-                ..Edges::ZERO
-            },
+            outline_width: Edges { bottom: 2.0, ..Edges::ZERO },
             padding: Edges::symmetric(12.0, 8.0),
             ..ElementStyle::default()
         };
-        if tab.state.disabled {
+        if state.disabled {
             tab_style.background = UiColor::TRANSPARENT;
         }
 
-        let label_color = if tab.state.disabled {
+        let label_color = if state.disabled {
             palette.muted_text
         } else if tab.selected {
             palette.accent
@@ -2822,37 +2713,26 @@ pub fn tab_bar_with_palette(
     builder.build()
 }
 
-pub fn breadcrumbs(id: ElementId, items: impl IntoIterator<Item = BreadcrumbSpec>) -> Element {
-    breadcrumbs_with_palette(id, items, &WidgetPalette::default())
-}
-
-pub fn breadcrumbs_with_palette(
-    id: ElementId,
-    items: impl IntoIterator<Item = BreadcrumbSpec>,
-    palette: &WidgetPalette,
-) -> Element {
+pub fn breadcrumbs<C: WidgetRenderContext + ?Sized>(id: ElementId, items: impl IntoIterator<Item = BreadcrumbSpec>, cx: &C) -> Element {
     let items: Vec<BreadcrumbSpec> = items.into_iter().collect();
     let count = items.len();
     let mut builder = ElementBuilder::container(id).layout(LayoutInput {
-        width: LayoutSizing::Fit {
-            min: 0.0,
-            max: f32::INFINITY,
-        },
-        height: LayoutSizing::Fit {
-            min: 0.0,
-            max: f32::INFINITY,
-        },
+        width: LayoutSizing::Fit { min: 0.0, max: f32::INFINITY },
+        height: LayoutSizing::Fit { min: 0.0, max: f32::INFINITY },
         direction: LayoutDirection::LeftToRight,
         align_y: crate::Align::Center,
         gap: 4.0,
         ..LayoutInput::default()
     });
 
+    let palette = cx.widget_palette();
     for (index, item) in items.into_iter().enumerate() {
         let item_id = item.id.clone();
+        cx.register_widget_behavior(item.id.clone(), WidgetBehavior::interactive());
+        let state = cx.widget_state(&item.id);
         let color = if item.is_current {
             palette.text
-        } else if item.state.hovered {
+        } else if state.hovered {
             palette.accent
         } else {
             palette.muted_text
@@ -2861,23 +2741,21 @@ pub fn breadcrumbs_with_palette(
 
         if index + 1 < count {
             let sep_id = ElementId::local("sep", 0, &item_id);
-            builder =
-                builder.child(compact_text(sep_id, "›", palette.muted_text, 13.0, 16.0));
+            builder = builder.child(compact_text(sep_id, "›", palette.muted_text, 13.0, 16.0));
         }
     }
 
     builder.build()
 }
 
-pub fn text_input(
-    id: ElementId,
-    spec: &TextInputSpec,
-    state: &WidgetState,
-) -> Element {
-    text_input_with_palette(id, spec, state, &WidgetPalette::default())
+pub fn text_input<C: WidgetRenderContext + ?Sized>(id: ElementId, spec: &TextInputSpec, cx: &C) -> Element {
+    cx.register_text_input_widget(id.clone());
+    let state = cx.widget_state(&id);
+    let palette = cx.widget_palette();
+    text_input_impl(id, spec, &state, &palette)
 }
 
-pub fn text_input_with_palette(
+pub(crate) fn text_input_impl(
     id: ElementId,
     spec: &TextInputSpec,
     state: &WidgetState,
@@ -2958,10 +2836,10 @@ pub fn text_input_with_palette(
     }
 
     if state.focused {
-        if let Some(cx) = spec.cursor_x {
+        if let Some(cursor_x) = spec.cursor_x {
             inner = inner.child(cursor_element(
                 ElementId::local("cursor", 0, &id),
-                cx,
+                cursor_x,
                 content_height,
                 palette.accent,
             ));
@@ -2997,15 +2875,14 @@ pub fn text_input_with_palette(
         .build()
 }
 
-pub fn number_input(
-    id: ElementId,
-    spec: &NumberInputSpec,
-    state: &WidgetState,
-) -> Element {
-    number_input_with_palette(id, spec, state, &WidgetPalette::default())
+pub fn number_input<C: WidgetRenderContext + ?Sized>(id: ElementId, spec: &NumberInputSpec, cx: &C) -> Element {
+    cx.register_text_input_widget(id.clone());
+    let state = cx.widget_state(&id);
+    let palette = cx.widget_palette();
+    number_input_impl(id, spec, &state, &palette)
 }
 
-pub fn number_input_with_palette(
+pub(crate) fn number_input_impl(
     id: ElementId,
     spec: &NumberInputSpec,
     state: &WidgetState,
@@ -3065,10 +2942,10 @@ pub fn number_input_with_palette(
     }
 
     if state.focused {
-        if let Some(cx) = spec.cursor_x {
+        if let Some(cursor_x) = spec.cursor_x {
             inner = inner.child(cursor_element(
                 ElementId::local("cursor", 0, &id),
-                cx,
+                cursor_x,
                 content_height,
                 palette.accent,
             ));
@@ -3158,11 +3035,14 @@ pub fn number_input_with_palette(
         .build()
 }
 
-pub fn search_box(id: ElementId, spec: &TextInputSpec, state: &WidgetState) -> Element {
-    search_box_with_palette(id, spec, state, &WidgetPalette::default())
+pub fn search_box<C: WidgetRenderContext + ?Sized>(id: ElementId, spec: &TextInputSpec, cx: &C) -> Element {
+    cx.register_text_input_widget(id.clone());
+    let state = cx.widget_state(&id);
+    let palette = cx.widget_palette();
+    search_box_impl(id, spec, &state, &palette)
 }
 
-pub fn search_box_with_palette(
+pub(crate) fn search_box_impl(
     id: ElementId,
     spec: &TextInputSpec,
     state: &WidgetState,
@@ -3224,10 +3104,10 @@ pub fn search_box_with_palette(
     }
 
     if state.focused {
-        if let Some(cx) = spec.cursor_x {
+        if let Some(cursor_x) = spec.cursor_x {
             inner = inner.child(cursor_element(
                 ElementId::local("cursor", 0, &id),
-                cx,
+                cursor_x,
                 content_height,
                 palette.accent,
             ));
@@ -3255,16 +3135,14 @@ pub fn search_box_with_palette(
         .build()
 }
 
-pub fn select(
-    id: ElementId,
-    selected_label: impl Into<String>,
-    is_open: bool,
-    state: &WidgetState,
-) -> Element {
-    select_with_palette(id, selected_label, is_open, state, &WidgetPalette::default())
+pub fn select<C: WidgetRenderContext + ?Sized>(id: ElementId, selected_label: impl Into<String>, is_open: bool, cx: &C) -> Element {
+    cx.register_widget_behavior(id.clone(), WidgetBehavior::interactive());
+    let state = cx.widget_state(&id);
+    let palette = cx.widget_palette();
+    select_with_palette(id, selected_label, is_open, &state, &palette)
 }
 
-pub fn select_with_palette(
+pub(crate) fn select_with_palette(
     id: ElementId,
     selected_label: impl Into<String>,
     is_open: bool,
@@ -3308,16 +3186,14 @@ pub fn select_with_palette(
         .build()
 }
 
-pub fn icon_button(
-    id: ElementId,
-    icon_key: impl AsRef<str>,
-    icon_size: f32,
-    state: &WidgetState,
-) -> Element {
-    icon_button_with_palette(id, icon_key, icon_size, state, &WidgetPalette::default())
+pub fn icon_button<C: WidgetRenderContext + ?Sized>(id: ElementId, icon_key: impl AsRef<str>, icon_size: f32, cx: &C) -> Element {
+    cx.register_widget_behavior(id.clone(), WidgetBehavior::interactive());
+    let state = cx.widget_state(&id);
+    let palette = cx.widget_palette();
+    icon_button_with_palette(id, icon_key, icon_size, &state, &palette)
 }
 
-pub fn icon_button_with_palette(
+pub(crate) fn icon_button_with_palette(
     id: ElementId,
     icon_key: impl AsRef<str>,
     icon_size: f32,
@@ -3386,51 +3262,36 @@ pub fn toolbar_with_palette(
     builder.build()
 }
 
-pub fn accordion_panel(
+pub fn accordion_panel<C: WidgetRenderContext + ?Sized>(
     id: ElementId,
     config: AccordionPanelConfig,
     content: Option<Element>,
-) -> Element {
-    accordion_panel_with_palette(id, config, content, &WidgetPalette::default())
-}
-
-pub fn accordion_panel_with_palette(
-    id: ElementId,
-    config: AccordionPanelConfig,
-    content: Option<Element>,
-    palette: &WidgetPalette,
+    cx: &C,
 ) -> Element {
     let header_id = config.id.clone();
+    cx.register_widget_behavior(config.id.clone(), WidgetBehavior::interactive());
+    let state = config.state_override.clone().unwrap_or_else(|| cx.widget_state(&config.id));
+    let palette = cx.widget_palette();
+    let palette = &palette;
     let chevron_char = if config.is_open { "▼" } else { "›" };
     let mut header_style = ElementStyle {
-        background: if config.state.pressed || config.state.captured {
+        background: if state.pressed || state.captured {
             palette.surface_pressed
-        } else if config.state.hovered || config.state.focused {
+        } else if state.hovered || state.focused {
             palette.surface_hovered
         } else {
             palette.surface
         },
-        outline: if config.state.focused {
-            palette.outline_focus
-        } else {
-            palette.outline
-        },
-        outline_width: Edges {
-            bottom: 1.0,
-            ..Edges::ZERO
-        },
+        outline: if state.focused { palette.outline_focus } else { palette.outline },
+        outline_width: Edges { bottom: 1.0, ..Edges::ZERO },
         padding: Edges::symmetric(12.0, 10.0),
         ..ElementStyle::default()
     };
-    if config.state.disabled {
+    if state.disabled {
         header_style.background = palette.surface_disabled;
     }
 
-    let label_color = if config.state.disabled {
-        palette.muted_text
-    } else {
-        palette.text
-    };
+    let label_color = if state.disabled { palette.muted_text } else { palette.text };
     let mut label_el = compact_text(
         ElementId::local("label", 0, &header_id),
         config.title,
@@ -3688,13 +3549,16 @@ pub fn dialog_surface_with_palette(
     builder.child(body_builder.build()).build()
 }
 
-pub fn context_menu_item(
+pub fn context_menu_item<C: WidgetRenderContext + ?Sized>(
     item: ContextMenuItemSpec,
     row_height: f32,
-    palette: &WidgetPalette,
+    cx: &C,
 ) -> Element {
-    let mut state = item.state.clone();
+    cx.register_widget_behavior(item.id.clone(), WidgetBehavior::interactive());
+    let mut state = cx.widget_state(&item.id);
     state.disabled |= item.disabled;
+    let palette = cx.widget_palette();
+    let palette = &palette;
     let row_id = item.id.clone();
 
     let mut style = ElementStyle {
@@ -3792,36 +3656,21 @@ pub fn context_menu_item(
     row.build()
 }
 
-pub fn virtual_context_menu(
+pub fn virtual_context_menu<C: WidgetRenderContext + ?Sized>(
     id: ElementId,
     width: f32,
     layout: &VirtualListLayout,
     visible_items: impl IntoIterator<Item = ContextMenuItemSpec>,
-) -> Element {
-    virtual_context_menu_with_palette(
-        id,
-        width,
-        layout,
-        visible_items,
-        &WidgetPalette::default(),
-    )
-}
-
-pub fn virtual_context_menu_with_palette(
-    id: ElementId,
-    width: f32,
-    layout: &VirtualListLayout,
-    visible_items: impl IntoIterator<Item = ContextMenuItemSpec>,
-    palette: &WidgetPalette,
+    cx: &C,
 ) -> Element {
     let rows = visible_items
         .into_iter()
-        .map(|item| context_menu_item(item, layout.item_extent, palette));
+        .map(|item| context_menu_item(item, layout.item_extent, cx));
     let width_sizing = LayoutSizing::Fixed(width.max(0.0));
     let mut menu = virtual_list(id, width_sizing, layout.viewport_extent, layout, rows);
     menu.style = ElementStyle {
-        background: palette.surface,
-        outline: palette.outline,
+        background: cx.widget_palette().surface,
+        outline: cx.widget_palette().outline,
         outline_width: Edges::all(1.0),
         corner_radius: radii_all(8.0),
         ..ElementStyle::default()
@@ -3834,39 +3683,21 @@ pub fn command_palette(
     id: ElementId,
     config: CommandPaletteConfig,
     input_spec: &TextInputSpec,
-    input_state: &WidgetState,
     layout: &VirtualListLayout,
     visible_items: impl IntoIterator<Item = CommandPaletteItemSpec>,
-) -> Element {
-    command_palette_with_palette(
-        id,
-        config,
-        input_spec,
-        input_state,
-        layout,
-        visible_items,
-        &WidgetPalette::default(),
-    )
-}
-
-pub fn command_palette_with_palette(
-    id: ElementId,
-    config: CommandPaletteConfig,
-    input_spec: &TextInputSpec,
-    input_state: &WidgetState,
-    layout: &VirtualListLayout,
-    visible_items: impl IntoIterator<Item = CommandPaletteItemSpec>,
-    palette: &WidgetPalette,
+    cx: &Cx,
 ) -> Element {
     let panel_id = ElementId::local("panel", 0, &id);
     let input_id = ElementId::local("input", 0, &panel_id);
     let list_id = ElementId::local("results", 0, &panel_id);
     let header_id = ElementId::local("header", 0, &panel_id);
 
-    let input_el = text_input_with_palette(input_id, input_spec, input_state, palette);
+    let input_el = text_input(input_id, input_spec, cx);
 
+    let sim = cx.sim;
+    let palette = cx.palette;
     let rows = visible_items.into_iter().map(|item| {
-        command_palette_item_row(item, layout.item_extent, palette)
+        command_palette_item_row(item, layout.item_extent, sim, &palette)
     });
     let results_list = {
         let mut list = virtual_list(
@@ -3988,14 +3819,14 @@ pub fn command_palette_with_palette(
 
 // ── Batch-2 widget builders ───────────────────────────────────────────────────
 
-pub fn list_item(item: ListItemSpec) -> Element {
-    list_item_with_palette(item, &WidgetPalette::default())
-}
-
-pub fn list_item_with_palette(item: ListItemSpec, palette: &WidgetPalette) -> Element {
+pub fn list_item<C: WidgetRenderContext + ?Sized>(item: ListItemSpec, cx: &C) -> Element {
+    cx.register_widget_behavior(item.id.clone(), WidgetBehavior::interactive());
+    let state = item.state_override.clone().unwrap_or_else(|| cx.widget_state(&item.id));
+    let palette = cx.widget_palette();
+    let palette = &palette;
     let row_id = item.id.clone();
-    let style = hoverable_row_style(&item.state, palette, item.selected);
-    let label_color = if item.state.disabled {
+    let style = hoverable_row_style(&state, palette, item.selected);
+    let label_color = if state.disabled {
         palette.muted_text
     } else if item.selected {
         palette.accent_text
@@ -4034,7 +3865,7 @@ pub fn list_item_with_palette(item: ListItemSpec, palette: &WidgetPalette) -> El
     row = row.child(label_el);
 
     if let Some(sub) = item.sublabel {
-        let sub_color = if item.state.disabled || item.selected {
+        let sub_color = if state.disabled || item.selected {
             label_color.with_alpha(0.6)
         } else {
             palette.muted_text
@@ -4051,20 +3882,20 @@ pub fn list_item_with_palette(item: ListItemSpec, palette: &WidgetPalette) -> El
     row.build()
 }
 
-pub fn table_header_cell(spec: TableHeaderSpec, height: f32, palette: &WidgetPalette) -> Element {
+pub fn table_header_cell<C: WidgetRenderContext + ?Sized>(spec: TableHeaderSpec, height: f32, cx: &C) -> Element {
+    cx.register_widget_behavior(spec.id.clone(), WidgetBehavior::interactive());
+    let state = cx.widget_state(&spec.id);
+    let palette = cx.widget_palette();
+    let palette = &palette;
     let cell_id = spec.id.clone();
-    let bg = if spec.state.pressed || spec.state.captured {
+    let bg = if state.pressed || state.captured {
         palette.surface_pressed
-    } else if spec.state.hovered || spec.state.focused {
+    } else if state.hovered || state.focused {
         palette.surface_hovered
     } else {
         palette.surface
     };
-    let label_color = if spec.state.disabled {
-        palette.muted_text
-    } else {
-        palette.text
-    };
+    let label_color = if state.disabled { palette.muted_text } else { palette.text };
 
     let sort_char = match spec.sort {
         SortDirection::None => "",
@@ -4109,64 +3940,37 @@ pub fn table_header_cell(spec: TableHeaderSpec, height: f32, palette: &WidgetPal
         .build()
 }
 
-pub fn table_header_row(
+pub fn table_header_row<C: WidgetRenderContext + ?Sized>(
     id: ElementId,
     height: f32,
     specs: impl IntoIterator<Item = TableHeaderSpec>,
+    cx: &C,
 ) -> Element {
-    table_header_row_with_palette(id, height, specs, &WidgetPalette::default())
-}
-
-pub fn table_header_row_with_palette(
-    id: ElementId,
-    height: f32,
-    specs: impl IntoIterator<Item = TableHeaderSpec>,
-    palette: &WidgetPalette,
-) -> Element {
+    let palette = cx.widget_palette();
     let mut builder = ElementBuilder::container(id)
-        .style(ElementStyle {
-            background: palette.surface,
-            ..ElementStyle::default()
-        })
+        .style(ElementStyle { background: palette.surface, ..ElementStyle::default() })
         .layout(LayoutInput {
-            width: LayoutSizing::Grow {
-                min: 0.0,
-                max: f32::INFINITY,
-            },
+            width: LayoutSizing::Grow { min: 0.0, max: f32::INFINITY },
             height: LayoutSizing::Fixed(height.max(0.0)),
             direction: LayoutDirection::LeftToRight,
             ..LayoutInput::default()
         });
 
     for spec in specs {
-        builder = builder.child(table_header_cell(spec, height, palette));
+        builder = builder.child(table_header_cell(spec, height, cx));
     }
 
     builder.build()
 }
 
-pub fn property_row(
-    spec: PropertyRowSpec,
-    value: Element,
-    row_height: f32,
-) -> Element {
-    property_row_with_palette(spec, value, row_height, &WidgetPalette::default())
-}
-
-pub fn property_row_with_palette(
-    spec: PropertyRowSpec,
-    value: Element,
-    row_height: f32,
-    palette: &WidgetPalette,
-) -> Element {
+pub fn property_row<C: WidgetRenderContext + ?Sized>(spec: PropertyRowSpec, value: Element, row_height: f32, cx: &C) -> Element {
+    let state = cx.widget_state(&spec.id);
+    let palette = cx.widget_palette();
+    let palette = &palette;
     let row_id = spec.id.clone();
     let label_id = ElementId::local("label", 0, &row_id);
-    let style = hoverable_row_style(&spec.state, palette, false);
-    let label_color = if spec.state.disabled {
-        palette.muted_text
-    } else {
-        palette.muted_text
-    };
+    let style = hoverable_row_style(&state, palette, false);
+    let label_color = palette.muted_text;
 
     let mut label_el = compact_text(label_id, spec.label, label_color, 13.0, 16.0);
     label_el.layout.width = LayoutSizing::Fixed(spec.label_width.max(0.0));
@@ -4189,18 +3993,17 @@ pub fn property_row_with_palette(
         .build()
 }
 
-pub fn chip(spec: ChipSpec) -> Element {
-    chip_with_palette(spec, &WidgetPalette::default())
-}
-
-pub fn chip_with_palette(spec: ChipSpec, palette: &WidgetPalette) -> Element {
+pub fn chip<C: WidgetRenderContext + ?Sized>(spec: ChipSpec, cx: &C) -> Element {
+    cx.register_widget_behavior(spec.id.clone(), WidgetBehavior::interactive());
+    let state = cx.widget_state(&spec.id);
+    let palette = cx.widget_palette();
+    let palette = &palette;
     let chip_id = spec.id.clone();
+    let remove_id = ElementId::local("remove", 0, &chip_id);
+    cx.register_widget_behavior(remove_id.clone(), WidgetBehavior::interactive());
+    let remove_state = cx.widget_state(&remove_id);
     let (bg, fg) = spec.variant.colors(palette);
-    let border = if spec.state.focused {
-        palette.outline_focus
-    } else {
-        palette.outline
-    };
+    let border = if state.focused { palette.outline_focus } else { palette.outline };
 
     let mut chip_builder = ElementBuilder::container(chip_id.clone())
         .style(ElementStyle {
@@ -4234,15 +4037,15 @@ pub fn chip_with_palette(spec: ChipSpec, palette: &WidgetPalette) -> Element {
         ));
 
     if spec.can_remove {
-        let rm_bg = if spec.remove_state.pressed || spec.remove_state.captured {
+        let rm_bg = if remove_state.pressed || remove_state.captured {
             fg.with_alpha(0.35)
-        } else if spec.remove_state.hovered {
+        } else if remove_state.hovered {
             fg.with_alpha(0.2)
         } else {
             UiColor::TRANSPARENT
         };
         chip_builder = chip_builder.child(
-            ElementBuilder::container(ElementId::local("remove", 0, &chip_id))
+            ElementBuilder::container(remove_id)
                 .style(ElementStyle {
                     background: rm_bg,
                     corner_radius: radii_all(999.0),
@@ -4269,11 +4072,13 @@ pub fn chip_with_palette(spec: ChipSpec, palette: &WidgetPalette) -> Element {
     chip_builder.build()
 }
 
-pub fn notification(spec: NotificationSpec) -> Element {
-    notification_with_palette(spec, &WidgetPalette::default())
-}
-
-pub fn notification_with_palette(spec: NotificationSpec, palette: &WidgetPalette) -> Element {
+pub fn notification<C: WidgetRenderContext + ?Sized>(spec: NotificationSpec, cx: &C) -> Element {
+    let action_id = ElementId::local("action", 0, &spec.id);
+    cx.register_widget_behavior(spec.id.clone(), WidgetBehavior::interactive());
+    cx.register_widget_behavior(action_id.clone(), WidgetBehavior::interactive());
+    let action_state = cx.widget_state(&action_id);
+    let palette = cx.widget_palette();
+    let palette = &palette;
     let notif_id = spec.id.clone();
     let (bg, fg) = spec.variant.colors(palette);
     let accent_bar_id = ElementId::local("bar", 0, &notif_id);
@@ -4348,11 +4153,11 @@ pub fn notification_with_palette(spec: NotificationSpec, palette: &WidgetPalette
 
     if let Some(action_label) = spec.action_label {
         row = row.child(
-            ElementBuilder::container(ElementId::local("action", 0, &notif_id))
+            ElementBuilder::container(action_id)
                 .style(ElementStyle {
-                    background: if spec.action_state.pressed || spec.action_state.captured {
+                    background: if action_state.pressed || action_state.captured {
                         fg.with_alpha(0.3)
-                    } else if spec.action_state.hovered {
+                    } else if action_state.hovered {
                         fg.with_alpha(0.15)
                     } else {
                         UiColor::TRANSPARENT
@@ -4388,36 +4193,34 @@ pub fn notification_with_palette(spec: NotificationSpec, palette: &WidgetPalette
     row.build()
 }
 
-pub fn status_bar(
-    id: ElementId,
-    sections: impl IntoIterator<Item = StatusBarSectionSpec>,
-) -> Element {
-    status_bar_with_palette(id, sections, &WidgetPalette::default())
-}
 
 pub fn status_bar_with_palette(
     id: ElementId,
     sections: impl IntoIterator<Item = StatusBarSectionSpec>,
     palette: &WidgetPalette,
 ) -> Element {
+    status_bar(id, sections, palette)
+}
+
+pub fn status_bar<C: WidgetRenderContext + ?Sized>(
+    id: ElementId,
+    sections: impl IntoIterator<Item = StatusBarSectionSpec>,
+    cx: &C,
+) -> Element {
     let sections: Vec<StatusBarSectionSpec> = sections.into_iter().collect();
     let count = sections.len();
+    let palette = cx.widget_palette();
+    let palette = &palette;
     let mut builder = ElementBuilder::container(id.clone())
         .style(ElementStyle {
             background: palette.surface,
             outline: palette.outline,
-            outline_width: Edges {
-                top: 1.0,
-                ..Edges::ZERO
-            },
+            outline_width: Edges { top: 1.0, ..Edges::ZERO },
             padding: Edges::symmetric(12.0, 0.0),
             ..ElementStyle::default()
         })
         .layout(LayoutInput {
-            width: LayoutSizing::Grow {
-                min: 0.0,
-                max: f32::INFINITY,
-            },
+            width: LayoutSizing::Grow { min: 0.0, max: f32::INFINITY },
             height: LayoutSizing::Fixed(24.0),
             direction: LayoutDirection::LeftToRight,
             align_y: crate::Align::Center,
@@ -4427,30 +4230,21 @@ pub fn status_bar_with_palette(
 
     for (i, section) in sections.into_iter().enumerate() {
         let sec_id = section.id.clone();
+        let sec_state = cx.widget_state(&section.id);
         let text = if let Some(val) = section.value {
             format!("{}: {}", section.label, val)
         } else {
             section.label
         };
-        let color = if section.state.hovered {
-            palette.accent
-        } else {
-            palette.muted_text
-        };
+        let color = if sec_state.hovered { palette.accent } else { palette.muted_text };
         let mut text_el = compact_text(sec_id, text, color, 11.0, 14.0);
-        text_el.layout.width = LayoutSizing::Fit {
-            min: 0.0,
-            max: f32::INFINITY,
-        };
+        text_el.layout.width = LayoutSizing::Fit { min: 0.0, max: f32::INFINITY };
         builder = builder.child(text_el);
 
         if i + 1 < count {
             builder = builder.child(
                 ElementBuilder::container(ElementId::local("sep", i as u32, &id))
-                    .style(ElementStyle {
-                        background: palette.outline,
-                        ..ElementStyle::default()
-                    })
+                    .style(ElementStyle { background: palette.outline, ..ElementStyle::default() })
                     .layout(LayoutInput {
                         width: LayoutSizing::Fixed(1.0),
                         height: LayoutSizing::Fixed(14.0),
@@ -4689,9 +4483,10 @@ fn cursor_element(id: ElementId, x: f32, height: f32, color: UiColor) -> Element
 fn command_palette_item_row(
     item: CommandPaletteItemSpec,
     row_height: f32,
+    sim: &crate::InputSimulator,
     palette: &WidgetPalette,
 ) -> Element {
-    let mut state = item.state.clone();
+    let mut state = sim.widget_state(&item.id);
     state.disabled |= item.disabled;
     let row_id = item.id.clone();
 
@@ -4925,15 +4720,25 @@ fn segment_shape(index: usize, count: usize, radius: f32) -> UiShape {
 mod tests {
     use super::*;
     use crate::{
-        ElementKind, LayoutCache, LayoutTree, MosaicConfig, MosaicTileMode, MosaicTileSpec, Size,
-        UiAntialiasing, UiImageFit, UiImageSampling, VirtualGridConfig, VirtualListConfig,
-        VirtualTableConfig, VirtualTreeConfig,
+        Cx, ElementKind, InputSimulator, LayoutCache, LayoutTree, MosaicConfig, MosaicTileMode,
+        MosaicTileSpec, Size, UiAntialiasing, UiImageFit, UiImageSampling, VirtualGridConfig,
+        VirtualListConfig, VirtualTableConfig, VirtualTreeConfig,
     };
+
+    /// Create a no-interaction Cx for widget structure tests.
+    fn test_cx_and_sim() -> (InputSimulator, WidgetPalette) {
+        (InputSimulator::default(), WidgetPalette::default())
+    }
+    macro_rules! cx {
+        ($sim:expr, $palette:expr) => {
+            Cx::new(&$sim, $palette)
+        };
+    }
 
     #[test]
     fn button_builder_marks_label_as_nowrap() {
         let id = ElementId::new("button");
-        let element = button(id.clone(), "Run", &WidgetState::default());
+        let element = button_with_palette(id.clone(), "Run", &WidgetState::default(), &WidgetPalette::default());
 
         assert_eq!(element.children.len(), 1);
         let ElementKind::Text(text) = &element.children[0].kind else {
@@ -4959,7 +4764,7 @@ mod tests {
     #[test]
     fn checked_toggle_places_knob_at_end() {
         let id = ElementId::new("toggle");
-        let element = toggle(id, "Enabled", true, &WidgetState::default());
+        let element = toggle_with_palette(id, "Enabled", true, &WidgetState::default(), &WidgetPalette::default());
         let track = &element.children[0];
 
         assert_eq!(track.layout.align_x, crate::Align::End);
@@ -4969,7 +4774,7 @@ mod tests {
     #[test]
     fn checked_checkbox_adds_check_mark() {
         let id = ElementId::new("checkbox");
-        let element = checkbox(id, "Accept", true, &WidgetState::default());
+        let element = checkbox_with_palette(id, "Accept", true, &WidgetState::default(), &WidgetPalette::default());
         let box_element = &element.children[0];
 
         assert_eq!(box_element.children.len(), 1);
@@ -4983,6 +4788,8 @@ mod tests {
     #[test]
     fn segmented_control_shapes_outer_segments() {
         let id = ElementId::new("segments");
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
         let element = segmented_control(
             id.clone(),
             [
@@ -4990,6 +4797,7 @@ mod tests {
                 SegmentSpec::new(ElementId::local("two", 0, &id), "Two").selected(true),
                 SegmentSpec::new(ElementId::local("three", 0, &id), "Three"),
             ],
+            &cx,
         );
 
         assert!(matches!(
@@ -5006,7 +4814,7 @@ mod tests {
     #[test]
     fn drag_bar_has_stable_axis_dimensions() {
         let id = ElementId::new("drag");
-        let element = drag_bar(id, DragBarAxis::Vertical, &WidgetState::default());
+        let element = drag_bar_with_palette(id, DragBarAxis::Vertical, &WidgetState::default(), &WidgetPalette::default());
 
         assert_eq!(element.layout.width, LayoutSizing::Fixed(6.0));
         assert!(matches!(element.layout.height, LayoutSizing::Grow { .. }));
@@ -5015,7 +4823,7 @@ mod tests {
     #[test]
     fn slider_clamps_value_into_fill_percent() {
         let id = ElementId::new("slider");
-        let element = slider(id, DragBarAxis::Horizontal, 2.0, &WidgetState::default());
+        let element = slider_with_palette(id, DragBarAxis::Horizontal, 2.0, &WidgetState::default(), &WidgetPalette::default());
 
         assert_eq!(element.children[0].layout.width, LayoutSizing::Percent(1.0));
         assert!(element.layout.clip_x);
@@ -5025,7 +4833,7 @@ mod tests {
     #[test]
     fn progress_bar_uses_clamped_fill_percent() {
         let id = ElementId::new("progress");
-        let element = progress_bar(id, -1.0, &WidgetState::default());
+        let element = progress_bar_with_palette(id, -1.0, &WidgetState::default(), &WidgetPalette::default());
 
         assert_eq!(element.children[0].layout.width, LayoutSizing::Percent(0.0));
         assert_eq!(element.layout.height, LayoutSizing::Fixed(8.0));
@@ -5223,10 +5031,11 @@ mod tests {
             90.0,
             18.0,
         );
-        let element = scrollbar(
+        let element = scrollbar_with_palette(
             ElementId::new("scrollbar"),
             metrics,
             &WidgetState::default(),
+            &WidgetPalette::default(),
         );
 
         assert_eq!(element.layout.width, LayoutSizing::Fixed(90.0));
@@ -5237,7 +5046,7 @@ mod tests {
 
     #[test]
     fn widget_builders_produce_layoutable_trees() {
-        let root = button(ElementId::new("button"), "Layout", &WidgetState::default());
+        let root = button_with_palette(ElementId::new("button"), "Layout", &WidgetState::default(), &WidgetPalette::default());
 
         let layout =
             LayoutTree::compute(&root, Size::new(200.0, 40.0), &mut LayoutCache::default())
@@ -5297,7 +5106,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let element = virtual_dropdown_menu(id, LayoutSizing::Fixed(180.0), &layout, options);
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
+        let element = virtual_dropdown_menu(id, LayoutSizing::Fixed(180.0), &layout, options, &cx);
 
         assert!(element.layout.clip_x);
         assert!(element.layout.clip_y);
@@ -5353,7 +5164,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let element = virtual_log_viewer(id, LayoutSizing::Fixed(360.0), &layout, entries);
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
+        let element = virtual_log_viewer(id, LayoutSizing::Fixed(360.0), &layout, entries, &cx);
 
         assert!(element.layout.clip_x);
         assert!(element.layout.clip_y);
@@ -5756,14 +5569,16 @@ mod tests {
         let id = ElementId::new("tabs");
         let tab_a = ElementId::local("a", 0, &id);
         let tab_b = ElementId::local("b", 0, &id);
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
         let el = tab_bar(
             id,
             [
                 TabSpec::new(tab_a, "A").selected(true),
                 TabSpec::new(tab_b, "B"),
             ],
+            &cx,
         );
-        let palette = WidgetPalette::default();
         let selected = &el.children[0];
         let unselected = &el.children[1];
         assert_eq!(selected.style.outline, palette.accent);
@@ -5775,9 +5590,12 @@ mod tests {
     fn tab_with_icon_has_icon_and_label_children() {
         let id = ElementId::new("tabs");
         let tab_a = ElementId::local("a", 0, &id);
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
         let el = tab_bar(
             id,
             [TabSpec::new(tab_a, "Files").icon("icon-folder").icon_size(14.0)],
+            &cx,
         );
         let tab = &el.children[0];
         assert_eq!(tab.children.len(), 2);
@@ -5793,6 +5611,8 @@ mod tests {
         let a = ElementId::local("a", 0, &id);
         let b = ElementId::local("b", 0, &id);
         let c = ElementId::local("c", 0, &id);
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
         let el = breadcrumbs(
             id,
             [
@@ -5800,6 +5620,7 @@ mod tests {
                 BreadcrumbSpec::new(b, "Docs"),
                 BreadcrumbSpec::new(c, "Page").current(true),
             ],
+            &cx,
         );
         // 3 items + 2 separators = 5 children
         assert_eq!(el.children.len(), 5);
@@ -5813,7 +5634,7 @@ mod tests {
     fn text_input_shows_placeholder_when_empty() {
         let id = ElementId::new("field");
         let spec = TextInputSpec::new("").placeholder("Enter name");
-        let el = text_input(id, &spec, &WidgetState::default());
+        let el = text_input_impl(id, &spec, &WidgetState::default(), &WidgetPalette::default());
         let inner = &el.children[0];
         // last child of inner is the text element
         let text_child = inner.children.last().expect("should have text child");
@@ -5828,7 +5649,7 @@ mod tests {
     fn text_input_masks_password_value() {
         let id = ElementId::new("field");
         let spec = TextInputSpec::new("secret").password(true);
-        let el = text_input(id, &spec, &WidgetState::default());
+        let el = text_input_impl(id, &spec, &WidgetState::default(), &WidgetPalette::default());
         let inner = &el.children[0];
         let text_child = inner.children.last().expect("should have text child");
         let ElementKind::Text(text) = &text_child.kind else {
@@ -5843,7 +5664,7 @@ mod tests {
         let spec = TextInputSpec::new("hello").cursor_x(42.0);
         let mut state = WidgetState::default();
         state.focused = true;
-        let el = text_input(id, &spec, &state);
+        let el = text_input_impl(id, &spec, &state, &WidgetPalette::default());
         let inner = &el.children[0];
         // cursor + text = 2 children when focused
         assert_eq!(inner.children.len(), 2);
@@ -5861,7 +5682,7 @@ mod tests {
     fn text_input_with_selection_adds_selection_element() {
         let id = ElementId::new("field");
         let spec = TextInputSpec::new("hello world").selection(10.0, 55.0);
-        let el = text_input(id, &spec, &WidgetState::default());
+        let el = text_input_impl(id, &spec, &WidgetState::default(), &WidgetPalette::default());
         let inner = &el.children[0];
         // selection + text = 2 children (unfocused so no cursor)
         assert_eq!(inner.children.len(), 2);
@@ -5882,14 +5703,14 @@ mod tests {
         let mut state = WidgetState::default();
         state.focused = true;
         state.invalid = true;
-        let el = text_input_with_palette(id, &spec, &state, &WidgetPalette::default());
+        let el = text_input_impl(id, &spec, &state, &WidgetPalette::default());
         assert_eq!(el.style.outline, WidgetPalette::default().outline_invalid);
     }
 
     #[test]
     fn select_trigger_shows_chevron_down_when_closed() {
         let id = ElementId::new("sel");
-        let el = select(id, "Option A", false, &WidgetState::default());
+        let el = select_with_palette(id, "Option A", false, &WidgetState::default(), &WidgetPalette::default());
         let chevron = &el.children[1];
         let ElementKind::Text(text) = &chevron.kind else {
             panic!("chevron should be text");
@@ -5900,7 +5721,7 @@ mod tests {
     #[test]
     fn select_trigger_shows_chevron_up_when_open() {
         let id = ElementId::new("sel");
-        let el = select(id, "Option A", true, &WidgetState::default());
+        let el = select_with_palette(id, "Option A", true, &WidgetState::default(), &WidgetPalette::default());
         let chevron = &el.children[1];
         let ElementKind::Text(text) = &chevron.kind else {
             panic!("chevron should be text");
@@ -5911,7 +5732,7 @@ mod tests {
     #[test]
     fn icon_button_contains_image_child() {
         let id = ElementId::new("btn");
-        let el = icon_button(id, "icon-gear", 20.0, &WidgetState::default());
+        let el = icon_button_with_palette(id, "icon-gear", 20.0, &WidgetState::default(), &WidgetPalette::default());
         assert_eq!(el.children.len(), 1);
         let ElementKind::Image(img) = &el.children[0].kind else {
             panic!("icon_button child should be image");
@@ -5926,7 +5747,9 @@ mod tests {
         let header_id = ElementId::local("section", 0, &id);
         let config = AccordionPanelConfig::new(header_id, "Section").open(false);
         let content = Element::new(ElementId::new("body"));
-        let el = accordion_panel(id, config, Some(content));
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
+        let el = accordion_panel(id, config, Some(content), &cx);
         // Only the header child (content is suppressed when closed)
         assert_eq!(el.children.len(), 1);
     }
@@ -5937,7 +5760,9 @@ mod tests {
         let header_id = ElementId::local("section", 0, &id);
         let config = AccordionPanelConfig::new(header_id, "Section").open(true);
         let content = Element::new(ElementId::new("body"));
-        let el = accordion_panel(id, config, Some(content));
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
+        let el = accordion_panel(id, config, Some(content), &cx);
         assert_eq!(el.children.len(), 2);
     }
 
@@ -5966,8 +5791,9 @@ mod tests {
     fn context_menu_item_separator_adds_top_outline() {
         let id = ElementId::new("item");
         let spec = ContextMenuItemSpec::new(id, "Cut").separator_before(true);
-        let palette = WidgetPalette::default();
-        let el = context_menu_item(spec, 28.0, &palette);
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
+        let el = context_menu_item(spec, 28.0, &cx);
         assert_eq!(el.style.outline_width.top, 1.0);
         assert_eq!(el.style.outline_width.bottom, 0.0);
     }
@@ -5976,7 +5802,9 @@ mod tests {
     fn context_menu_item_with_icon_uses_image_child() {
         let id = ElementId::new("item");
         let spec = ContextMenuItemSpec::new(id, "Open").icon("icon-open");
-        let el = context_menu_item(spec, 28.0, &WidgetPalette::default());
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
+        let el = context_menu_item(spec, 28.0, &cx);
         let ElementKind::Image(img) = &el.children[0].kind else {
             panic!("first child should be icon image");
         };
@@ -5987,7 +5815,9 @@ mod tests {
     fn context_menu_item_without_icon_uses_spacer_placeholder() {
         let id = ElementId::new("item");
         let spec = ContextMenuItemSpec::new(id, "Delete");
-        let el = context_menu_item(spec, 28.0, &WidgetPalette::default());
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
+        let el = context_menu_item(spec, 28.0, &cx);
         // Without icon, first child should be a container spacer (not image)
         assert!(
             matches!(el.children[0].kind, ElementKind::Container),
@@ -6015,7 +5845,9 @@ mod tests {
     fn list_item_selected_uses_selected_surface() {
         let id = ElementId::new("item");
         let spec = ListItemSpec::new(id, "Project A").selected(true);
-        let el = list_item_with_palette(spec, &WidgetPalette::default());
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
+        let el = list_item(spec, &cx);
         assert_eq!(el.style.background, WidgetPalette::default().surface_selected);
     }
 
@@ -6023,7 +5855,9 @@ mod tests {
     fn list_item_with_sublabel_has_two_text_children() {
         let id = ElementId::new("item");
         let spec = ListItemSpec::new(id, "Main").sublabel("subtitle text");
-        let el = list_item(spec);
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
+        let el = list_item(spec, &cx);
         assert_eq!(el.children.len(), 2);
         let ElementKind::Text(label) = &el.children[0].kind else {
             panic!("first child should be text");
@@ -6040,6 +5874,8 @@ mod tests {
         let id = ElementId::new("header");
         let a = ElementId::local("col-a", 0, &id);
         let b = ElementId::local("col-b", 0, &id);
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
         let el = table_header_row(
             id,
             28.0,
@@ -6047,6 +5883,7 @@ mod tests {
                 TableHeaderSpec::new(a, "Name", 160.0).sort(SortDirection::Ascending),
                 TableHeaderSpec::new(b, "Size", 80.0),
             ],
+            &cx,
         );
         assert_eq!(el.children.len(), 2);
         assert_eq!(el.layout.height, LayoutSizing::Fixed(28.0));
@@ -6061,7 +5898,9 @@ mod tests {
     fn table_header_cell_descending_shows_down_arrow() {
         let id = ElementId::new("col");
         let spec = TableHeaderSpec::new(id, "Date", 100.0).sort(SortDirection::Descending);
-        let cell = table_header_cell(spec, 28.0, &WidgetPalette::default());
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
+        let cell = table_header_cell(spec, 28.0, &cx);
         let ElementKind::Text(txt) = &cell.children[0].kind else {
             panic!("cell should contain text");
         };
@@ -6073,7 +5912,9 @@ mod tests {
         let id = ElementId::new("prop");
         let spec = PropertyRowSpec::new(id.clone(), "Opacity").label_width(100.0);
         let value = Element::new(ElementId::local("value", 0, &id));
-        let el = property_row(spec, value, 32.0);
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
+        let el = property_row(spec, value, 32.0, &cx);
         assert_eq!(el.children.len(), 2);
         assert_eq!(el.layout.height, LayoutSizing::Fixed(32.0));
         let ElementKind::Text(label) = &el.children[0].kind else {
@@ -6086,7 +5927,9 @@ mod tests {
     fn chip_without_remove_has_one_text_child() {
         let id = ElementId::new("chip");
         let spec = ChipSpec::new(id, "Rust").variant(BadgeVariant::Info);
-        let el = chip(spec);
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
+        let el = chip(spec, &cx);
         assert_eq!(el.children.len(), 1);
         let ElementKind::Text(label) = &el.children[0].kind else {
             panic!("chip child should be text");
@@ -6098,7 +5941,9 @@ mod tests {
     fn chip_with_remove_has_label_and_close_button() {
         let id = ElementId::new("chip");
         let spec = ChipSpec::new(id, "v1.0").can_remove(true);
-        let el = chip(spec);
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
+        let el = chip(spec, &cx);
         assert_eq!(el.children.len(), 2);
     }
 
@@ -6106,7 +5951,9 @@ mod tests {
     fn notification_accent_bar_and_message_present() {
         let id = ElementId::new("notif");
         let spec = NotificationSpec::new(id, "Build failed", BadgeVariant::Error);
-        let el = notification(spec);
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
+        let el = notification(spec, &cx);
         // accent bar + message = 2 children
         assert_eq!(el.children.len(), 2);
         let msg_child = &el.children[1];
@@ -6121,7 +5968,9 @@ mod tests {
         let id = ElementId::new("notif");
         let spec = NotificationSpec::new(id, "Update available", BadgeVariant::Info)
             .action("Install");
-        let el = notification(spec);
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
+        let el = notification(spec, &cx);
         assert_eq!(el.children.len(), 3);
     }
 
@@ -6131,6 +5980,8 @@ mod tests {
         let a = ElementId::local("a", 0, &id);
         let b = ElementId::local("b", 0, &id);
         let c = ElementId::local("c", 0, &id);
+        let (sim, palette) = test_cx_and_sim();
+        let cx = Cx::new(&sim, palette);
         let el = status_bar(
             id,
             [
@@ -6138,6 +5989,7 @@ mod tests {
                 StatusBarSectionSpec::new(b, "Errors").value("0"),
                 StatusBarSectionSpec::new(c, "Ready"),
             ],
+            &cx,
         );
         // 3 sections + 2 × (divider + gap) = 3 + 4 = 7 children
         assert_eq!(el.children.len(), 7);

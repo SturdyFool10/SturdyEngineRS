@@ -268,35 +268,34 @@ Prompt-sized text follow-up chunks:
 
 Prompt-sized UI/control execution order:
 
-- [ ] `P2.U2` Add shape-aware scroll containers with parent clipping, scrollbars, wheel/touchpad input, keyboard scroll, inertial/momentum hooks, and external scroll offset control
-- [ ] `P2.U6` Add multiline text inputs with wrapping, scrolling, selection, clipboard, IME, undo/redo, soft tabs, line navigation, and shape-aware clipping
+- [x] `P2.U2` Basic scroll containers: scroll_container_with_scrollbars, parent clipping (clip_x/clip_y), wheel/touchpad input, keyboard scroll, and external scroll offset control are implemented. Inertial/momentum hooks remain.
+  - [ ] Remaining: inertial/momentum scroll physics, scroll snapping, sticky children
+- [ ] `P2.U6` Add multiline text inputs with wrapping, scrolling, selection, clipboard, IME, undo/redo, soft tabs, line navigation, and shape-aware clipping (text_input widget exists with multiline flag; actual cursor/selection/clipboard logic not yet wired)
 - [ ] `P2.U7` Add stylable multiline text editing rich enough for code editors: per-range styling, syntax/highlight spans, gutters, line numbers, diagnostics, inline widgets, minimap hooks, code folding hooks, and performant viewport virtualization
 - [ ] `P2.U9` Add date, time, and date-time selector widgets with typed entry, picker popovers, min/max, locale/time-zone formatting hooks, and keyboard-only operation
-- [ ] `P2.U11` Add first-class UI layering and stacking contexts so apps can declare what renders behind/in front of what without relying on tree order hacks
+- [ ] `P2.U11` Add first-class UI layering and stacking contexts so apps can declare what renders behind/in front of what without relying on tree order hacks (UiLayer enum and portal_host/modal_layer exist; full z-ordered stacking context API incomplete)
 - [ ] `P2.U12` Add shader/effect style slots for backgrounds, borders, masks, text fills, outlines, shadows, glows, backdrop filters, and per-state transitions, with Slang parameter binding and render-graph pass integration
-- [ ] `P2.U13` Add shape-aware rendering, clipping, hit testing, focus rings, shadows, and effect regions so rounded rects, independent corner shapes, squircles, paths, and masks behave consistently across input and paint
+- [ ] `P2.U13` Add shape-aware rendering, clipping, hit testing, focus rings, shadows, and effect regions so rounded rects, independent corner shapes, squircles, paths, and masks behave consistently across input and paint (CornerSpec and UiShape for hit testing exist; GPU-side shape-aware rendering not yet integrated)
 - [ ] `P2.U14` Add fancy default border options: per-side/per-corner styling, inner/outer/center strokes, dashed/dotted/double strokes, gradient borders, image/shader borders, glow/bloom borders, and polished focus/error/selection presets
-- [ ] `P2.U15` Add virtualized variants for large widgets so lists, grids, tables, trees, logs, inspectors, dropdowns, mosaics, and code editors avoid drawing offscreen elements while preserving measurement, keyboard navigation, selection, and scroll responsiveness
+- [x] `P2.U15` Virtualized variants: virtual_list, virtual_grid, virtual_table, virtual_tree, virtual_log_viewer, virtual_mosaic, virtual_context_menu, virtual_dropdown_menu all implemented. Code editor virtualization remains (P2.U7).
 - [ ] `P2.U16` Add render-graph-aware backdrop/effect shaders so UI surfaces can sample named scene images, blur/grade/dim the game behind a pause menu tile, and route effects through explicit graph resources
 - [ ] `P2.U17` Add validation scenes for all standard widgets, nested scrolling, modals, shape clipping, shader styles, virtualized controls, render-graph backdrops, and resize/scale-factor behavior
 
-- [ ] Add a standard widget layer for:
-  - [ ] stylable multiline/code-editor text inputs
-  - [ ] time selectors
-  - [ ] date selectors
-  - [ ] date-time selectors
-  - [ ] lists
-  - [ ] tables
-  - [ ] grids
-  - [ ] trees / inspectors
-  - [ ] property editors
+**Foundation widgets (implemented):**
+- Interactive controls: button, checkbox, radio, toggle, slider, progress_bar, drag_bar, segmented_control
+- Input fields: text_input (visual), number_input, search_box, select
+- Navigation: tab_bar, breadcrumbs, accordion_panel
+- Containers: card, group_box, dialog_surface, toolbar, status_bar, scroll_container variants, portal_host, modal_layer, tooltip_layer
+- Data display: label, badge, chip, notification, empty_state, divider, list_item, property_row, table_header_cell, table_header_row, log_entry, image, icon_button, scrollbar
+- Layout helpers: mosaic_container, context_menu_item, command_palette
+- `WidgetRenderContext` trait with `Cx<'_>` (deferred registration path), `WidgetPalette`, and `WidgetState` implementations
+
+- [ ] Add remaining standard widgets:
   - [ ] color pickers
+  - [ ] date / time / date-time selectors
+  - [ ] code/rich-text editor
 - [ ] Keep widgets composable with shader-driven visuals instead of forcing a theme-only path
-- [ ] Treat every widget as a shape-aware object for:
-  - [ ] focus rings
-  - [ ] scroll regions
-  - [ ] shadows / outlines / glow
-  - [ ] accessibility bounds
+- [ ] Treat every widget as a shape-aware object for focus rings, scroll regions, shadows, and accessibility bounds
 - [ ] Add shape primitives and corner controls suitable for high-end UI work:
   - [ ] per-corner smoothing and antialiasing controls
   - [ ] shape composition for cutouts, holes, masks, and decorative corners
@@ -309,42 +308,25 @@ Prompt-sized UI/control execution order:
 - [ ] Add widget APIs for shader/effect customization that feel familiar to web developers:
   - [ ] per-state style rules for hover, active, focus, disabled, invalid, selected, checked, and open
   - [ ] offscreen effect routes for bloom, blur, drop shadow, glow, and custom passes
-- [ ] Add full text styling controls at the widget layer:
-  - [ ] font family fallback lists, exact font handles, synthetic fallback policy, and missing-glyph diagnostics
-  - [ ] size, line height, weight, stretch, slant/italic, variation axes, and optical sizing
-  - [ ] OpenType features, kerning, ligatures, numeric styles, stylistic sets, and language/script tags
-  - [ ] color, gradients, opacity, outline, shadow, glow, background spans, and selection styling
-  - [ ] wrapping, truncation, ellipsis, alignment, baseline, letter spacing, word spacing, and tab stops
+- [ ] Add full text styling controls at the widget layer
 - [ ] Add first-party inspector/panel patterns for graphics tools and game tools
 
 ### Layout and interaction behavior
 
 - [ ] Implement arena/reuse strategy equivalent to Clay’s low-allocation hot path
-- [ ] Add shape-aware scrollable containers:
-  - [ ] wheel, touchpad, keyboard, drag-scroll, and programmatic scroll input
-  - [ ] overlay scrollbars and custom scrollbar styling
-  - [ ] scroll snapping, momentum hooks, sticky children, and anchor preservation
-  - [ ] virtualized child measurement for large lists and editor buffers
-- [ ] Add Clay-level scroll physics/momentum and external scroll offset query parity
-- [ ] Add floating/attach-point semantics parity (`attach_to_parent`, `attach_to_id`, clip inheritance, pointer passthrough modes)
-  - [ ] clip inheritance and transform-aware attach rects for nested/offscreen hosts
-- [ ] Add a UI top-layer and portal system for modals, dropdowns, popovers, tooltips, context menus, and drag previews
-  - [ ] full dismiss policies for escape key mapping, focus loss, parent close, nested scopes, and delayed pointer capture
-- [ ] Add explicit stacking contexts and layer slots:
-  - [ ] app-declared z ordering independent of tree insertion order
-  - [ ] full event capture, nested modal policies, and keyboard navigation loops
-- [ ] Add parent clipping that can clip children by:
-  - [ ] rect
-  - [ ] rounded rect
-  - [ ] arbitrary path / mask where backend support exists
-  - [ ] scroll viewport
-  - [ ] shader-generated alpha mask where explicitly requested
-- [ ] Add virtualized versions of every potentially large primitive:
-  - [ ] virtual rich/code editor
-  - [ ] shared item measurement, cache invalidation, scroll anchoring, selection retention, and focus retention
+- [x] Add scroll containers with wheel, touchpad, keyboard, drag-scroll, and programmatic scroll input; overlay scrollbars; external scroll offset query
+  - [ ] Remaining: scroll snapping, momentum/inertia hooks, sticky children, anchor preservation
+- [ ] Add Clay-level scroll physics/momentum
+- [x] Add floating/attach-point semantics: `anchored_floating_layer`, `attached_floating_layer`, FloatingOptions, FloatingPlacement, FloatingCollision, clip inheritance
+- [x] Add a UI top-layer and portal system: portal_host, modal_layer, tooltip_layer, UiTree multi-root for overlays
+  - [ ] Remaining: full dismiss policies (escape mapping, focus loss, nested scope, delayed pointer capture)
+- [x] Add parent clipping by rect and scroll viewport (clip_x/clip_y in LayoutInput)
+  - [ ] Remaining: rounded-rect clip, arbitrary path/mask, shader-generated alpha mask
+- [x] Add virtualized scrolling / large-list support (virtual_list, virtual_grid, virtual_table, virtual_tree, virtual_log_viewer, virtual_mosaic)
+  - [ ] Remaining: virtual rich/code editor; scroll anchoring, selection retention across scroll
+- [ ] Add explicit stacking contexts and layer slots with full event capture and keyboard navigation loops
 - [ ] Implement child-between-border emission parity and exact border raster semantics
-- [ ] Add virtualized scrolling / large-list support
-- [ ] Add robust app-facing event/state plumbing so users do not need large glue layers
+- [x] Add robust app-facing event/state plumbing (InputHub, WidgetRenderContext, Cx deferred-registration, UiEventResult consumption flags; no large glue layer needed)
 
 ### UI rendering completeness
 
@@ -554,24 +536,32 @@ This work matters, but it should serve the product tracks instead of replacing t
 - [ ] Build a reference scene where the engine’s output is evaluated against the goal of plausibly real-looking realtime footage
 - [ ] Use that scene to drive the next realism-focused rendering priorities instead of guessing from architecture alone
 
-## UI / Event System Additions (TODO ONLY)
+## UI / Event System Additions
 
 ### Event Loop
-- [x] Define unified EngineEvent model
-- [x] Implement capture/target/bubble propagation
-- [x] Add EventContext with propagation control
+- [x] Define unified EngineEvent model (InputEvent: Pointer, Scroll, Key, Text, Activate, Focus, Blur, Cancel)
+- [x] Implement capture/target/bubble propagation (EventPhase, propagation_path, bubble_path)
+- [x] Add EventContext with propagation control (stop_propagation, prevent_default)
 
 ### Input System
+- [x] Mouse input fully wired: CursorMoved/MouseInput/MouseWheel → InputHub → InputSimulator hit-test → widget states
+- [x] Pointer events: hover, press, drag, scroll; captured/released-this-frame phases
+- [x] Slider drag tracking with SliderConfig (min/max/step/track_extent)
+- [x] Scroll containers: wheel, keyboard (arrow/page/home/end), programmatic set/scroll_by/scroll_to
+- [x] FocusScope: modal, trap_focus, block_background_input, dismiss_on_outside_pointer
+- [x] Bubble listeners for container-level activation detection
+- [x] WidgetEventCallbacks for per-element custom handlers
+- [x] Expand action mapping system (ActionMap, ActionBindingRegistry, KeybindCapture, rebinding + config)
 - [ ] Add gamepad abstraction
-- [x] Expand action mapping system (rebinding + config)
 
 ### UI Runtime Modes
-- [x] Add passthrough mode
-- [x] Ensure zero-cost disable path
+- [x] Add passthrough mode (UiMode::Passthrough: visual state only, no event consumption)
+- [x] Ensure zero-cost disable path (UiMode::Disabled: discard queue, no work)
 
 ### UI/Event Integration
-- [x] Route events through UI → App/Game priority
-- [x] Add event consumption handling
+- [x] Route events through UI → App/Game priority (UiEventResult: pointer_consumed, key_consumed, keys_consumed, scroll_consumed, text_consumed)
+- [x] Add event consumption handling (per-key consumption check via key_input_consumed)
+- [x] Cx deferred-registration context: PendingRegistrations apply behaviors/configs after tree build, before update
 
 ### UI Rendering Integration
 - [ ] Backdrop effects (blur, tint, distortion)
@@ -580,6 +570,6 @@ This work matters, but it should serve the product tracks instead of replacing t
 
 ### Advanced UI
 - [ ] Code editor widget
-- [ ] Virtualized editor
-- [ ] Advanced scroll physics
-- [ ] Full accessibility support
+- [ ] Virtualized code editor
+- [ ] Scroll inertia/momentum physics
+- [ ] Full accessibility support (accessibility_label in WidgetConfig is a stub)

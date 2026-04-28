@@ -379,7 +379,10 @@ impl ActionMap {
     /// Add a binding for an action. Multiple bindings per action are supported
     /// (e.g. both `Space` and `KeyW` for "Jump").
     pub fn bind(&mut self, action: impl Into<String>, binding: Keybind) {
-        self.bindings.entry(action.into()).or_default().push(binding);
+        self.bindings
+            .entry(action.into())
+            .or_default()
+            .push(binding);
     }
 
     /// Remove all bindings for an action.
@@ -489,6 +492,15 @@ impl ActionMap {
     /// `true` on the frame the action's key was released.
     pub fn just_released(&self, action: &str) -> bool {
         self.just_released.contains(action)
+    }
+}
+
+fn clay_modifiers(modifiers: KeyModifiers) -> clay_ui::ModifierKeys {
+    clay_ui::ModifierKeys {
+        ctrl: modifiers.ctrl,
+        alt: modifiers.alt,
+        shift: modifiers.shift,
+        super_: modifiers.super_,
     }
 }
 
@@ -614,20 +626,30 @@ impl InputHub {
     /// Routes the key to the UI simulator and buffers it for action dispatch.
     pub fn on_key_input(&mut self, input: &KeyInput) {
         use clay_ui::InputEvent;
+
+        let modifiers = clay_modifiers(input.modifiers);
+
         // Route key name to simulator.
         if let KeyToken::Key(name) = &input.key {
-            self.simulator.queue(InputEvent::Key {
+            self.simulator.queue(InputEvent::KeyWithModifiers {
                 name: name.clone(),
                 pressed: input.state == KeyInputState::Pressed,
                 repeat: input.repeat,
+                modifiers,
             });
         }
-        // Route text (first press only — not repeats).
-        if input.state == KeyInputState::Pressed && !input.repeat {
+
+        // Route text on every press. Text callbacks should see repeating text
+        // exactly when the platform's text-input path produced it.
+        if input.state == KeyInputState::Pressed {
             if let Some(text) = &input.text {
-                self.simulator.queue(InputEvent::Text(text.clone()));
+                self.simulator.queue(InputEvent::TextWithModifiers {
+                    text: text.clone(),
+                    modifiers,
+                });
             }
         }
+
         // Buffer for deferred action dispatch after simulator.update().
         self.pending_key_inputs.push(input.clone());
     }
@@ -745,7 +767,11 @@ fn keybind_matches(binding: &Keybind, input: &KeyInput) -> bool {
         (Some(k), KeyToken::Key(ik)) => k == ik,
         _ => false,
     };
-    key_ok && binding.modifiers().iter().all(|&m| input.modifiers.contains(m))
+    key_ok
+        && binding
+            .modifiers()
+            .iter()
+            .all(|&m| input.modifiers.contains(m))
 }
 
 fn display_key_name(name: &str) -> String {
@@ -849,7 +875,10 @@ mod tests {
         KeyInput {
             key: KeyToken::Key(key.into()),
             state: KeyInputState::Pressed,
-            modifiers: KeyModifiers { ctrl: true, ..KeyModifiers::default() },
+            modifiers: KeyModifiers {
+                ctrl: true,
+                ..KeyModifiers::default()
+            },
             repeat: false,
             text: None,
         }
@@ -955,7 +984,10 @@ mod tests {
         let event = KeyInput {
             key: KeyToken::Key("Space".into()),
             state: KeyInputState::Pressed,
-            modifiers: KeyModifiers { shift: true, ..KeyModifiers::default() },
+            modifiers: KeyModifiers {
+                shift: true,
+                ..KeyModifiers::default()
+            },
             repeat: false,
             text: None,
         };

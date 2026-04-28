@@ -1,8 +1,141 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
 
 use glam::Vec2;
 
 use crate::{Axis, ElementId, LayoutTree, UiLayer, UiShape};
+
+// ── Build-time widget context ─────────────────────────────────────────────────
+
+/// Deferred registrations collected while building a widget tree.
+///
+/// Apply with [`PendingRegistrations::apply`] before calling
+/// [`InputSimulator::update`].
+#[derive(Default)]
+pub struct PendingRegistrations {
+    behaviors: HashMap<u64, (ElementId, WidgetBehavior)>,
+    slider_configs: HashMap<u64, (ElementId, SliderConfig)>,
+    scroll_configs: HashMap<u64, (ElementId, ScrollConfig)>,
+}
+
+impl PendingRegistrations {
+    /// Push all collected registrations into the simulator.
+    pub fn apply(self, sim: &mut InputSimulator) {
+        for (_, (id, behavior)) in self.behaviors {
+            sim.set_widget_behavior(id, behavior);
+        }
+        for (_, (id, config)) in self.slider_configs {
+            sim.set_slider_config(id, config);
+        }
+        for (_, (id, config)) in self.scroll_configs {
+            sim.set_scroll_config(id, config);
+        }
+    }
+}
+
+/// Build-time context passed to every widget builder.
+///
+/// Holds a shared reference to the [`InputSimulator`] (for reading per-frame
+/// widget states) plus the active [`crate::WidgetPalette`].  Non-default input
+/// behaviors — sliders, scroll containers, text inputs — queue their
+/// registrations into the owned [`PendingRegistrations`] so they can be
+/// applied to the simulator (which needs `&mut`) after tree building.
+///
+/// # Typical frame loop
+///
+/// ```ignore
+/// let sim = hub.simulator();
+/// let mut cx = Cx::new(sim, palette);
+///
+/// let tree = build_my_ui(&mut cx, viewport);
+///
+/// let pending = cx.finish();
+/// pending.apply(hub.simulator_mut());   // apply before update!
+///
+/// hub.update(&layout);
+/// ```
+pub struct Cx<'a> {
+    pub(crate) sim: &'a InputSimulator,
+    /// The active widget palette. Read by widget builders for all colors.
+    pub palette: crate::WidgetPalette,
+    pending: RefCell<PendingRegistrations>,
+}
+
+impl<'a> Cx<'a> {
+    pub fn new(sim: &'a InputSimulator, palette: crate::WidgetPalette) -> Self {
+        Self { sim, palette, pending: RefCell::new(PendingRegistrations::default()) }
+    }
+
+    /// Returns the current interaction state for `id` (hover, press, focus, …).
+    pub fn state(&self, id: &ElementId) -> WidgetState {
+        self.sim.widget_state(id)
+    }
+
+    /// Returns the normalized (0 – 1) display value of a slider.
+    ///
+    /// Returns 0.0 if the slider has not been registered yet.
+    pub fn slider_value_normalized(&self, id: &ElementId) -> f32 {
+        let raw = self.sim.slider_value(id);
+        if let Some(config) = self.sim.slider_config(id) {
+            let range = (config.max - config.min).max(f32::EPSILON);
+            ((raw - config.min) / range).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Returns the raw slider value.
+    pub fn slider_value(&self, id: &ElementId) -> f32 {
+        self.sim.slider_value(id)
+    }
+
+    /// Returns the layout-space scroll offset (negated) for child positioning.
+    pub fn scroll_layout_offset(&self, id: &ElementId) -> glam::Vec2 {
+        self.sim.scroll_layout_offset(id)
+    }
+
+    // ── Deferred registration ─────────────────────────────────────────────────
+
+    /// Queue slider behavior + config. Called by [`crate::slider`] automatically.
+    pub fn register_behavior(&self, id: ElementId, behavior: WidgetBehavior) {
+        let hash = id.hash;
+        self.pending.borrow_mut().behaviors.insert(hash, (id, behavior));
+    }
+
+    pub fn register_slider(&self, id: ElementId, axis: crate::Axis, config: SliderConfig) {
+        let hash = id.hash;
+        let mut pending = self.pending.borrow_mut();
+        pending.behaviors.insert(hash, (id.clone(), WidgetBehavior::slider(axis)));
+        pending.slider_configs.insert(hash, (id, config));
+    }
+
+    /// Queue scroll-area behavior + config. Called by scroll container widgets automatically.
+    pub fn register_scroll(&self, id: ElementId, config: ScrollConfig) {
+        let hash = id.hash;
+        let mut pending = self.pending.borrow_mut();
+        pending.behaviors.insert(hash, (id.clone(), WidgetBehavior::scroll_area()));
+        pending.scroll_configs.insert(hash, (id, config));
+    }
+
+    /// Queue text-input behavior. Called by text input widgets automatically.
+    pub fn register_text_input(&self, id: ElementId) {
+        let hash = id.hash;
+        self.pending.borrow_mut().behaviors.insert(hash, (id, WidgetBehavior::text_input()));
+    }
+
+    /// Queue drag-bar behavior. Called by drag bar widgets automatically.
+    pub fn register_drag_bar(&self, id: ElementId, axis: crate::Axis) {
+        let hash = id.hash;
+        self.pending.borrow_mut().behaviors.insert(hash, (id, WidgetBehavior::drag_bar(axis)));
+    }
+
+    /// Consume the context and return the deferred registrations.
+    pub fn finish(self) -> PendingRegistrations {
+        self.pending.into_inner()
+    }
+}
 
 // ── Event propagation model ───────────────────────────────────────────────────
 
@@ -28,11 +161,12 @@ pub enum EventPhase {
 pub struct EventContext {
     phase: EventPhase,
     stopped: bool,
+    default_prevented: bool,
 }
 
 impl EventContext {
     pub fn new(phase: EventPhase) -> Self {
-        Self { phase, stopped: false }
+        Self { phase, stopped: false, default_prevented: false }
     }
 
     pub fn phase(&self) -> EventPhase {
@@ -47,6 +181,15 @@ impl EventContext {
     /// Prevent this event from reaching any more handlers.
     pub fn stop_propagation(&mut self) {
         self.stopped = true;
+    }
+
+    /// Prevent the widget's built-in behavior for this event.
+    pub fn prevent_default(&mut self) {
+        self.default_prevented = true;
+    }
+
+    pub fn default_prevented(&self) -> bool {
+        self.default_prevented
     }
 }
 
@@ -205,6 +348,119 @@ impl ScrollConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ModifierKeys {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub super_: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UiKeyEvent {
+    pub target: ElementId,
+    pub name: String,
+    pub pressed: bool,
+    pub repeat: bool,
+    pub modifiers: ModifierKeys,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UiTextEvent {
+    pub target: ElementId,
+    pub text: String,
+    pub modifiers: ModifierKeys,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UiPointerEvent {
+    pub target: ElementId,
+    pub pointer: PointerState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UiActivationEvent {
+    pub target: ElementId,
+}
+
+type KeyCallback = Box<dyn FnMut(&UiKeyEvent, &mut EventContext)>;
+type TextCallback = Box<dyn FnMut(&UiTextEvent, &mut EventContext)>;
+type PointerCallback = Box<dyn FnMut(&UiPointerEvent, &mut EventContext)>;
+type ActivationCallback = Box<dyn FnMut(&UiActivationEvent, &mut EventContext)>;
+
+#[derive(Default)]
+pub struct WidgetEventCallbacks {
+    pub on_key_down: Option<KeyCallback>,
+    pub on_key_up: Option<KeyCallback>,
+    pub on_text: Option<TextCallback>,
+    pub on_pointer_down: Option<PointerCallback>,
+    pub on_pointer_up: Option<PointerCallback>,
+    pub on_pointer_move: Option<PointerCallback>,
+    pub on_activate: Option<ActivationCallback>,
+}
+
+impl WidgetEventCallbacks {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn on_key_down<F>(mut self, f: F) -> Self
+    where
+        F: FnMut(&UiKeyEvent, &mut EventContext) + 'static,
+    {
+        self.on_key_down = Some(Box::new(f));
+        self
+    }
+
+    pub fn on_key_up<F>(mut self, f: F) -> Self
+    where
+        F: FnMut(&UiKeyEvent, &mut EventContext) + 'static,
+    {
+        self.on_key_up = Some(Box::new(f));
+        self
+    }
+
+    pub fn on_text<F>(mut self, f: F) -> Self
+    where
+        F: FnMut(&UiTextEvent, &mut EventContext) + 'static,
+    {
+        self.on_text = Some(Box::new(f));
+        self
+    }
+
+    pub fn on_pointer_down<F>(mut self, f: F) -> Self
+    where
+        F: FnMut(&UiPointerEvent, &mut EventContext) + 'static,
+    {
+        self.on_pointer_down = Some(Box::new(f));
+        self
+    }
+
+    pub fn on_pointer_up<F>(mut self, f: F) -> Self
+    where
+        F: FnMut(&UiPointerEvent, &mut EventContext) + 'static,
+    {
+        self.on_pointer_up = Some(Box::new(f));
+        self
+    }
+
+    pub fn on_pointer_move<F>(mut self, f: F) -> Self
+    where
+        F: FnMut(&UiPointerEvent, &mut EventContext) + 'static,
+    {
+        self.on_pointer_move = Some(Box::new(f));
+        self
+    }
+
+    pub fn on_activate<F>(mut self, f: F) -> Self
+    where
+        F: FnMut(&UiActivationEvent, &mut EventContext) + 'static,
+    {
+        self.on_activate = Some(Box::new(f));
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum InputEvent {
     Pointer(PointerState),
@@ -221,7 +477,17 @@ pub enum InputEvent {
         pressed: bool,
         repeat: bool,
     },
+    KeyWithModifiers {
+        name: String,
+        pressed: bool,
+        repeat: bool,
+        modifiers: ModifierKeys,
+    },
     Text(String),
+    TextWithModifiers {
+        text: String,
+        modifiers: ModifierKeys,
+    },
     Activate(ElementId),
     Focus(ElementId),
     Blur,
@@ -332,12 +598,51 @@ impl WidgetBehavior {
     }
 }
 
+impl WidgetBehavior {
+    pub fn keyboard_activate(mut self, enabled: bool) -> Self {
+        self.keyboard_activate = enabled;
+        self
+    }
+
+    pub fn keyboard_scroll(mut self, enabled: bool) -> Self {
+        self.keyboard_scroll = enabled;
+        self
+    }
+
+    pub fn keyboard_slider(mut self, enabled: bool) -> Self {
+        self.keyboard_slider = enabled;
+        self
+    }
+
+    pub fn keyboard_escape(mut self, enabled: bool) -> Self {
+        self.keyboard_escape = enabled;
+        self
+    }
+
+    pub fn pointer_activate(mut self, enabled: bool) -> Self {
+        self.pointer_activate = enabled;
+        self
+    }
+
+    pub fn pointer_scroll(mut self, enabled: bool) -> Self {
+        self.pointer_scroll = enabled;
+        self
+    }
+
+    pub fn pointer_drag(mut self, enabled: bool) -> Self {
+        self.pointer_drag = enabled;
+        self
+    }
+}
+
 /// Configuration for a `Slider`-kind widget. Register with
 /// `InputSimulator::set_slider_config` alongside the widget behavior.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SliderConfig {
     pub min: f32,
     pub max: f32,
+    /// Starting value on the first frame. Defaults to `min`.
+    pub initial: f32,
     /// Value change per arrow-key press.
     pub step: f32,
     /// Value change for Page Up / Page Down.
@@ -351,6 +656,7 @@ impl Default for SliderConfig {
         Self {
             min: 0.0,
             max: 1.0,
+            initial: 0.0,
             step: 0.01,
             large_step: 0.1,
             track_extent: 100.0,
@@ -363,8 +669,15 @@ impl SliderConfig {
         Self {
             min,
             max,
+            initial: min,
             ..Self::default()
         }
+    }
+
+    /// Set the starting value (clamped to [min, max]).
+    pub fn initial(mut self, value: f32) -> Self {
+        self.initial = value.clamp(self.min, self.max);
+        self
     }
 
     pub fn step(mut self, step: f32) -> Self {
@@ -388,6 +701,12 @@ impl SliderConfig {
 
     fn range(&self) -> f32 {
         (self.max - self.min).max(0.0)
+    }
+}
+
+impl From<f32> for SliderConfig {
+    fn from(value: f32) -> Self {
+        SliderConfig::new(0.0, 1.0).initial(value)
     }
 }
 
@@ -525,6 +844,7 @@ pub struct InputSimulator {
     bubble_listeners: HashSet<u64>,
     /// Elements notified via bubble propagation during this update call.
     bubbled_activations: HashSet<u64>,
+    callbacks: HashMap<u64, WidgetEventCallbacks>,
 }
 
 impl InputSimulator {
@@ -590,7 +910,7 @@ impl InputSimulator {
     /// automatically on drag and on keyboard arrow keys when the element is
     /// focused.  Call this each frame alongside `set_widget_behavior`.
     pub fn set_slider_config(&mut self, id: ElementId, config: SliderConfig) {
-        let clamped = config.clamp(*self.slider_values.entry(id.hash).or_insert(config.min));
+        let clamped = config.clamp(*self.slider_values.entry(id.hash).or_insert(config.initial));
         self.slider_values.insert(id.hash, clamped);
         self.slider_configs.insert(id.hash, config);
     }
@@ -598,6 +918,11 @@ impl InputSimulator {
     /// Returns the current value for a registered slider (0.0 if not registered).
     pub fn slider_value(&self, id: &ElementId) -> f32 {
         self.slider_values.get(&id.hash).copied().unwrap_or(0.0)
+    }
+
+    /// Returns the registered [`SliderConfig`] for `id`, if any.
+    pub fn slider_config(&self, id: &ElementId) -> Option<&SliderConfig> {
+        self.slider_configs.get(&id.hash)
     }
 
     /// Programmatically set a slider value; clamped to [min, max] if a config
@@ -734,6 +1059,14 @@ impl InputSimulator {
     /// [`update`](Self::update) call and `id` was registered as a bubble listener.
     pub fn bubble_activated(&self, id: &ElementId) -> bool {
         self.bubbled_activations.contains(&id.hash)
+    }
+
+    pub fn set_event_callbacks(&mut self, id: ElementId, callbacks: WidgetEventCallbacks) {
+        self.callbacks.insert(id.hash, callbacks);
+    }
+
+    pub fn clear_event_callbacks(&mut self, id: &ElementId) {
+        self.callbacks.remove(&id.hash);
     }
 
     pub fn push_focus_scope(&mut self, scope: FocusScope) {
@@ -899,7 +1232,15 @@ impl InputSimulator {
             match event {
                 InputEvent::Pointer(pointer) => {
                     self.pointer = pointer;
-                    self.update_pointer_interaction(tree, pointer);
+                    let target = self.pointer_callback_target(tree, pointer);
+                    let default_prevented = target
+                        .as_ref()
+                        .is_some_and(|id| self.dispatch_pointer_callbacks(tree, id, pointer));
+                    if !default_prevented {
+                        self.update_pointer_interaction(tree, pointer);
+                    } else {
+                        self.event_result.pointer_consumed = true;
+                    }
                 }
                 InputEvent::Scroll { target, delta } => {
                     // Resolve the starting element: explicit target (if scope
@@ -916,28 +1257,19 @@ impl InputSimulator {
                     }
                 }
                 InputEvent::Key { name, pressed, repeat } => {
-                    self.handle_key_event(tree, &name, pressed, repeat);
+                    self.handle_key_event(tree, &name, pressed, repeat, ModifierKeys::default());
+                }
+                InputEvent::KeyWithModifiers { name, pressed, repeat, modifiers } => {
+                    self.handle_key_event(tree, &name, pressed, repeat, modifiers);
                 }
                 InputEvent::Text(text) => {
-                    // Route to focused TextInput widgets; accumulate for
-                    // the caller to consume via `text_this_frame()`.
-                    let is_text_target = self
-                        .focused
-                        .as_ref()
-                        .and_then(|id| self.behaviors.get(&id.hash))
-                        .is_some_and(|b| matches!(b.kind, WidgetKind::TextInput));
-                    if is_text_target {
-                        self.text_buffer.push_str(&text);
-                        if !text.is_empty() {
-                            self.event_result.text_consumed = true;
-                        }
-                    }
+                    self.handle_text_event(tree, text, ModifierKeys::default());
+                }
+                InputEvent::TextWithModifiers { text, modifiers } => {
+                    self.handle_text_event(tree, text, modifiers);
                 }
                 InputEvent::Activate(id) => {
-                    if self.activation_allowed(tree, &id) {
-                        self.active.insert(id.hash);
-                        self.propagate_bubble_activation(id.hash, tree);
-                    }
+                    self.activate_widget(tree, &id);
                 }
                 InputEvent::Focus(id) => {
                     if self.focus_allowed(tree, &id) {
@@ -970,9 +1302,14 @@ impl InputSimulator {
     pub fn hit_test(&self, tree: &LayoutTree, point: Vec2) -> Option<Hit> {
         tree.nodes
             .iter()
-            .filter(|node| node.shape.contains_point(node.rect, point))
-            .max_by_key(|node| (node.layer, node.z_index))
-            .map(|node| Hit {
+            .enumerate()
+            .filter(|(_, node)| node.shape.contains_point(node.rect, point))
+            .max_by(|(ai, a), (bi, b)| {
+                (a.layer, a.z_index)
+                    .cmp(&(b.layer, b.z_index))
+                    .then_with(|| bi.cmp(ai))
+            })
+            .map(|(_, node)| Hit {
                 id: node.id.clone(),
                 shape: node.shape,
                 layer: node.layer,
@@ -986,19 +1323,27 @@ impl InputSimulator {
             .filter(|scope| scope.block_background_input)
             .map(|_| layout_parent_map(tree));
 
+        // Layout nodes are in post-order (children before parents), so among
+        // nodes with equal (layer, z_index) we prefer the one with the smaller
+        // index — that is the deepest/most-specific descendant under the cursor.
         tree.nodes
             .iter()
-            .filter(|node| node.shape.contains_point(node.rect, point))
-            .filter(|node| !node.transparent_to_input)
-            .filter(|node| !self.widget_config(&node.id).disabled)
-            .filter(|node| match (active_scope, scoped_parent_map.as_ref()) {
+            .enumerate()
+            .filter(|(_, node)| node.shape.contains_point(node.rect, point))
+            .filter(|(_, node)| !node.transparent_to_input)
+            .filter(|(_, node)| !self.widget_config(&node.id).disabled)
+            .filter(|(_, node)| match (active_scope, scoped_parent_map.as_ref()) {
                 (Some(scope), Some(parents)) => {
                     focus_scope_contains_with_parent_map(scope, &node.id, parents, tree.nodes.len())
                 }
                 _ => true,
             })
-            .max_by_key(|node| (node.layer, node.z_index))
-            .map(|node| Hit {
+            .max_by(|(ai, a), (bi, b)| {
+                (a.layer, a.z_index)
+                    .cmp(&(b.layer, b.z_index))
+                    .then_with(|| bi.cmp(ai)) // lower index = deeper child wins
+            })
+            .map(|(_, node)| Hit {
                 id: node.id.clone(),
                 shape: node.shape,
                 layer: node.layer,
@@ -1058,9 +1403,8 @@ impl InputSimulator {
                     self.event_result.pointer_consumed = true;
                     let behavior = self.behaviors.get(&captured.hash);
                     let activate_ok = behavior.map_or(true, |b| b.pointer_activate);
-                    if activate_ok && self.activation_allowed(tree, &captured) {
-                        self.active.insert(captured.hash);
-                        self.propagate_bubble_activation(captured.hash, tree);
+                    if activate_ok {
+                        self.activate_widget(tree, &captured);
                     }
                 } else {
                     self.captured = None;
@@ -1109,20 +1453,55 @@ impl InputSimulator {
         self.slider_values.insert(id.hash, new_value);
     }
 
-    fn handle_key_event(&mut self, tree: &LayoutTree, name: &str, pressed: bool, repeat: bool) {
-        // Escape always dispatches Cancel (checked independently of focus).
+    fn handle_key_event(
+        &mut self,
+        tree: &LayoutTree,
+        name: &str,
+        pressed: bool,
+        repeat: bool,
+        modifiers: ModifierKeys,
+    ) {
+        let focused = self
+            .focused
+            .clone()
+            .filter(|id| !self.widget_config(id).disabled);
+
+        if let Some(focused_id) = &focused {
+            let key_event = UiKeyEvent {
+                target: focused_id.clone(),
+                name: name.to_string(),
+                pressed,
+                repeat,
+                modifiers,
+            };
+            if self.dispatch_key_callbacks(tree, focused_id, &key_event) {
+                self.event_result.key_consumed = true;
+                self.event_result.keys_consumed.insert(name.to_string());
+                return;
+            }
+        }
+
+        // Escape is a default behavior too, so callbacks can prevent it and
+        // focused widgets can opt out with WidgetBehavior::keyboard_escape(false).
         if name == "Escape" && pressed {
-            if let Some(scope) = self.active_focus_scope().cloned() {
-                if scope.dismiss_on_cancel {
-                    self.dismissed_scopes.push(scope.id);
-                    return;
+            let escape_ok = focused
+                .as_ref()
+                .and_then(|id| self.behaviors.get(&id.hash))
+                .map_or(true, |behavior| behavior.keyboard_escape);
+            if escape_ok {
+                if let Some(scope) = self.active_focus_scope().cloned() {
+                    if scope.dismiss_on_cancel {
+                        self.dismissed_scopes.push(scope.id);
+                        self.event_result.key_consumed = true;
+                        self.event_result.keys_consumed.insert(name.to_string());
+                        return;
+                    }
                 }
             }
         }
 
-        let focused = match self.focused.clone() {
-            Some(id) if !self.widget_config(&id).disabled => id,
-            _ => return,
+        let Some(focused) = focused else {
+            return;
         };
 
         let behavior = self
@@ -1138,9 +1517,7 @@ impl InputSimulator {
                     && !matches!(behavior.kind, WidgetKind::TextInput)
                     && (name == "Enter" || name == "Space")
                 {
-                    if self.activation_allowed(tree, &focused) {
-                        self.active.insert(focused.hash);
-                        self.propagate_bubble_activation(focused.hash, tree);
+                    if self.activate_widget(tree, &focused) {
                         self.event_result.key_consumed = true;
                         self.event_result.keys_consumed.insert(name.to_string());
                     }
@@ -1191,6 +1568,149 @@ impl InputSimulator {
                 // Drag bars don't have a keyboard default behavior.
             }
         }
+    }
+
+    fn handle_text_event(&mut self, tree: &LayoutTree, text: String, modifiers: ModifierKeys) {
+        let Some(target) = self.text_target().cloned() else {
+            return;
+        };
+        let text_event = UiTextEvent { target: target.clone(), text, modifiers };
+        if self.dispatch_text_callbacks(tree, &target, &text_event) {
+            self.event_result.text_consumed = true;
+            return;
+        }
+        if !text_event.text.is_empty() {
+            self.text_buffer.push_str(&text_event.text);
+            self.event_result.text_consumed = true;
+        }
+    }
+
+    fn activate_widget(&mut self, tree: &LayoutTree, id: &ElementId) -> bool {
+        if !self.activation_allowed(tree, id) {
+            return false;
+        }
+        let event = UiActivationEvent { target: id.clone() };
+        if self.dispatch_activation_callbacks(tree, id, &event) {
+            self.event_result.pointer_consumed = true;
+            return false;
+        }
+        self.active.insert(id.hash);
+        self.propagate_bubble_activation(id.hash, tree);
+        true
+    }
+
+    fn pointer_callback_target(&self, tree: &LayoutTree, pointer: PointerState) -> Option<ElementId> {
+        match pointer.phase {
+            InteractionPhase::Pressed | InteractionPhase::ReleasedThisFrame => {
+                self.captured.clone().or_else(|| {
+                    self.hit_test_interactive(tree, pointer.position).map(|hit| hit.id)
+                })
+            }
+            InteractionPhase::PressedThisFrame | InteractionPhase::Released => {
+                self.hit_test_interactive(tree, pointer.position).map(|hit| hit.id)
+            }
+        }
+    }
+
+    fn dispatch_key_callbacks(
+        &mut self,
+        tree: &LayoutTree,
+        target: &ElementId,
+        event: &UiKeyEvent,
+    ) -> bool {
+        self.dispatch_bubbling(tree, target, |callbacks, phase, prevented| {
+            let callback = if event.pressed {
+                callbacks.on_key_down.as_mut()
+            } else {
+                callbacks.on_key_up.as_mut()
+            }?;
+            let mut ctx = EventContext::new(phase);
+            if prevented {
+                ctx.prevent_default();
+            }
+            callback(event, &mut ctx);
+            Some(ctx)
+        })
+    }
+
+    fn dispatch_text_callbacks(
+        &mut self,
+        tree: &LayoutTree,
+        target: &ElementId,
+        event: &UiTextEvent,
+    ) -> bool {
+        self.dispatch_bubbling(tree, target, |callbacks, phase, prevented| {
+            let callback = callbacks.on_text.as_mut()?;
+            let mut ctx = EventContext::new(phase);
+            if prevented {
+                ctx.prevent_default();
+            }
+            callback(event, &mut ctx);
+            Some(ctx)
+        })
+    }
+
+    fn dispatch_pointer_callbacks(
+        &mut self,
+        tree: &LayoutTree,
+        target: &ElementId,
+        pointer: PointerState,
+    ) -> bool {
+        let event = UiPointerEvent { target: target.clone(), pointer };
+        self.dispatch_bubbling(tree, target, |callbacks, phase, prevented| {
+            let callback = match pointer.phase {
+                InteractionPhase::PressedThisFrame => callbacks.on_pointer_down.as_mut(),
+                InteractionPhase::ReleasedThisFrame => callbacks.on_pointer_up.as_mut(),
+                InteractionPhase::Pressed | InteractionPhase::Released => callbacks.on_pointer_move.as_mut(),
+            }?;
+            let mut ctx = EventContext::new(phase);
+            if prevented {
+                ctx.prevent_default();
+            }
+            callback(&event, &mut ctx);
+            Some(ctx)
+        })
+    }
+
+    fn dispatch_activation_callbacks(
+        &mut self,
+        tree: &LayoutTree,
+        target: &ElementId,
+        event: &UiActivationEvent,
+    ) -> bool {
+        self.dispatch_bubbling(tree, target, |callbacks, phase, prevented| {
+            let callback = callbacks.on_activate.as_mut()?;
+            let mut ctx = EventContext::new(phase);
+            if prevented {
+                ctx.prevent_default();
+            }
+            callback(event, &mut ctx);
+            Some(ctx)
+        })
+    }
+
+    fn dispatch_bubbling(
+        &mut self,
+        tree: &LayoutTree,
+        target: &ElementId,
+        mut call: impl FnMut(&mut WidgetEventCallbacks, EventPhase, bool) -> Option<EventContext>,
+    ) -> bool {
+        let mut default_prevented = false;
+        let path = self.bubble_path(target, tree);
+        for (index, id) in path.iter().enumerate() {
+            let phase = if index == 0 { EventPhase::Target } else { EventPhase::Bubble };
+            let Some(callbacks) = self.callbacks.get_mut(&id.hash) else {
+                continue;
+            };
+            let Some(ctx) = call(callbacks, phase, default_prevented) else {
+                continue;
+            };
+            default_prevented |= ctx.default_prevented();
+            if !ctx.is_propagating() {
+                break;
+            }
+        }
+        default_prevented
     }
 
     /// Walk from `source_hash` up the layout tree, marking every registered
