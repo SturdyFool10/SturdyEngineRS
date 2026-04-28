@@ -1,13 +1,34 @@
 use crate::{
-    Axis, Cx, CornerSpec, Edges, Element, ElementBuilder, ElementId, ElementStyle, FloatingAlign,
-    FloatingAttachConfig, FloatingAttachError, FloatingOptions, FloatingPlacement, LayoutDirection,
-    LayoutInput, LayoutPosition, LayoutSizing, LayoutTree, MosaicLayout, Rect, ScrollAxis,
-    ScrollConfig, Size, SliderConfig, TextAlign, TextStyle, TextWrap, UiColor, UiImageOptions,
-    UiLayer, UiShape, VirtualGridLayout, VirtualListLayout, VirtualTableLayout, VirtualTreeLayout,
-    WidgetBehavior, WidgetState, attached_floating_layer, floating::place_subtree_in_layer,
-    radii_all,
+    Axis, Cx, CornerSpec, Easing, Edges, Element, ElementBuilder, ElementId, ElementStyle,
+    FloatingAlign, FloatingAttachConfig, FloatingAttachError, FloatingOptions, FloatingPlacement,
+    LayoutDirection, LayoutInput, LayoutPosition, LayoutSizing, LayoutTree, MosaicLayout, Rect,
+    ScrollAxis, ScrollConfig, Size, SliderConfig, TextAlign, TextStyle, TextWrap, UiColor,
+    UiImageOptions, UiLayer, UiShape, VirtualGridLayout, VirtualListLayout, VirtualTableLayout,
+    VirtualTreeLayout, WidgetBehavior, WidgetState, attached_floating_layer,
+    floating::place_subtree_in_layer, radii_all,
 };
 use glam::Vec2;
+
+/// Configuration for toggle switch animations.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ToggleAnimConfig {
+    /// Seconds elapsed since the last frame (pass 0.0 to snap with no animation).
+    pub delta_time: f32,
+    /// Duration of the full on→off or off→on transition in seconds.
+    pub duration: f32,
+    /// Easing function applied to the linear progress before use for rendering.
+    pub easing: Easing,
+}
+
+impl Default for ToggleAnimConfig {
+    fn default() -> Self {
+        Self {
+            delta_time: 0.0,
+            duration: 0.15,
+            easing: Easing::EaseInOut,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WidgetPalette {
@@ -67,6 +88,13 @@ pub trait WidgetRenderContext {
     fn register_drag_bar_widget(&self, id: ElementId, axis: Axis) {
         self.register_widget_behavior(id, WidgetBehavior::drag_bar(axis));
     }
+
+    /// Returns the eased animation progress (0.0=off, 1.0=on) for a toggle.
+    /// Default implementation returns `target` instantly (no animation).
+    fn advance_toggle_animation(&self, id: &ElementId, target: f32, _config: ToggleAnimConfig) -> f32 {
+        let _ = id;
+        target
+    }
 }
 
 impl WidgetRenderContext for Cx<'_> {
@@ -96,6 +124,10 @@ impl WidgetRenderContext for Cx<'_> {
 
     fn register_drag_bar_widget(&self, id: ElementId, axis: Axis) {
         self.register_drag_bar(id, axis);
+    }
+
+    fn advance_toggle_animation(&self, id: &ElementId, target: f32, config: ToggleAnimConfig) -> f32 {
+        self.advance_toggle_animation(id, target, config.duration, config.delta_time, config.easing)
     }
 }
 
@@ -988,11 +1020,18 @@ pub(crate) fn radio_with_palette(
     state: &WidgetState,
     palette: &WidgetPalette,
 ) -> Element {
+    // The indicator uses the user's `id` so that activation events are
+    // associated with the id the caller registered.  The outer row container
+    // is transparent so clicking the label text does not activate the widget.
+    let outer_id = ElementId::local("outer", 0, &id);
     let mut indicator_style = control_style(state, palette, checked, 999.0, Edges::ZERO);
     indicator_style.outline_width = Edges::all(if state.focused { 2.0 } else { 1.0 });
-    let dot_id = ElementId::local("dot", 0, &id);
 
-    ElementBuilder::container(id.clone())
+    ElementBuilder::container(outer_id)
+        .style(ElementStyle {
+            transparent_to_input: true,
+            ..ElementStyle::default()
+        })
         .layout(LayoutInput {
             width: LayoutSizing::Fit {
                 min: 0.0,
@@ -1007,7 +1046,7 @@ pub(crate) fn radio_with_palette(
             ..LayoutInput::default()
         })
         .child(
-            ElementBuilder::container(dot_id)
+            ElementBuilder::container(id.clone())
                 .style(indicator_style)
                 .layout(LayoutInput {
                     width: LayoutSizing::Fixed(16.0),
@@ -1038,8 +1077,11 @@ pub(crate) fn checkbox_with_palette(
     state: &WidgetState,
     palette: &WidgetPalette,
 ) -> Element {
-    let box_id = ElementId::local("box", 0, &id);
-    let mark_id = ElementId::local("mark", 0, &box_id);
+    // The box indicator uses the user's `id` so activation events match the
+    // registered id.  The outer row is transparent so the label does not
+    // receive click events.
+    let outer_id = ElementId::local("outer", 0, &id);
+    let mark_id = ElementId::local("mark", 0, &id);
     let mut box_style = control_style(state, palette, checked, 4.0, Edges::all(3.0));
     box_style.outline_width = Edges::all(if state.focused { 2.0 } else { 1.0 });
     let mark_style = ElementStyle {
@@ -1052,7 +1094,7 @@ pub(crate) fn checkbox_with_palette(
         ..ElementStyle::default()
     };
 
-    let mut box_builder = ElementBuilder::container(box_id)
+    let mut box_builder = ElementBuilder::container(id.clone())
         .style(box_style)
         .layout(LayoutInput {
             width: LayoutSizing::Fixed(16.0),
@@ -1072,7 +1114,11 @@ pub(crate) fn checkbox_with_palette(
         );
     }
 
-    ElementBuilder::container(id.clone())
+    ElementBuilder::container(outer_id)
+        .style(ElementStyle {
+            transparent_to_input: true,
+            ..ElementStyle::default()
+        })
         .layout(LayoutInput {
             width: LayoutSizing::Fit {
                 min: 0.0,
@@ -1095,23 +1141,41 @@ pub(crate) fn checkbox_with_palette(
         .build()
 }
 
-pub fn toggle<C: WidgetRenderContext + ?Sized>(id: ElementId, label: impl Into<String>, checked: bool, cx: &C) -> Element {
+pub fn toggle<C: WidgetRenderContext + ?Sized>(
+    id: ElementId,
+    label: impl Into<String>,
+    checked: bool,
+    anim: ToggleAnimConfig,
+    cx: &C,
+) -> Element {
+    // The pill indicator uses the user's `id` so that activation events are
+    // associated with the registered id.
     cx.register_widget_behavior(id.clone(), WidgetBehavior::interactive());
     let state = cx.widget_state(&id);
     let palette = cx.widget_palette();
-    toggle_with_palette(id, label, checked, &state, &palette)
+    let target = if checked { 1.0 } else { 0.0 };
+    let progress = cx.advance_toggle_animation(&id, target, anim);
+    toggle_with_palette(id, label, progress, &state, &palette)
 }
 
 pub(crate) fn toggle_with_palette(
     id: ElementId,
     label: impl Into<String>,
-    checked: bool,
+    progress: f32,
     state: &WidgetState,
     palette: &WidgetPalette,
 ) -> Element {
-    let track_id = ElementId::local("track", 0, &id);
-    let knob_id = ElementId::local("knob", 0, &track_id);
-    let mut track_style = control_style(state, palette, checked, 999.0, Edges::all(2.0));
+    // `id` IS the pill/track indicator.  The outer row container is transparent
+    // so clicking the label does not activate the widget.
+    let outer_id = ElementId::local("outer", 0, &id);
+    let knob_id = ElementId::local("knob", 0, &id);
+    let progress = progress.clamp(0.0, 1.0);
+
+    // Track: Fixed 36×20, padding 2px all sides → inner 32×16.
+    // Knob: Fixed 16×16, travel range = inner_width - knob_width = 16 px.
+    let knob_offset_x = progress * 16.0;
+
+    let mut track_style = control_style(state, palette, progress >= 0.5, 999.0, Edges::all(2.0));
     track_style.outline_width = Edges::all(if state.focused { 2.0 } else { 1.0 });
     let knob_style = ElementStyle {
         background: if state.disabled {
@@ -1120,10 +1184,15 @@ pub(crate) fn toggle_with_palette(
             palette.accent_text
         },
         corner_radius: radii_all(999.0),
+        transparent_to_input: true,
         ..ElementStyle::default()
     };
 
-    ElementBuilder::container(id.clone())
+    ElementBuilder::container(outer_id)
+        .style(ElementStyle {
+            transparent_to_input: true,
+            ..ElementStyle::default()
+        })
         .layout(LayoutInput {
             width: LayoutSizing::Fit {
                 min: 0.0,
@@ -1138,17 +1207,13 @@ pub(crate) fn toggle_with_palette(
             ..LayoutInput::default()
         })
         .child(
-            ElementBuilder::container(track_id)
+            ElementBuilder::container(id.clone())
                 .style(track_style)
                 .layout(LayoutInput {
                     width: LayoutSizing::Fixed(36.0),
                     height: LayoutSizing::Fixed(20.0),
-                    direction: LayoutDirection::LeftToRight,
-                    align_x: if checked {
-                        crate::Align::End
-                    } else {
-                        crate::Align::Start
-                    },
+                    clip_x: true,
+                    clip_y: true,
                     ..LayoutInput::default()
                 })
                 .child(
@@ -1157,6 +1222,9 @@ pub(crate) fn toggle_with_palette(
                         .layout(LayoutInput {
                             width: LayoutSizing::Fixed(16.0),
                             height: LayoutSizing::Fixed(16.0),
+                            position: LayoutPosition::Absolute {
+                                offset: Vec2::new(knob_offset_x, 0.0),
+                            },
                             ..LayoutInput::default()
                         })
                         .build(),
@@ -1166,7 +1234,7 @@ pub(crate) fn toggle_with_palette(
         .child(label_element(
             ElementId::local("label", 0, &id),
             label,
-            text_color(state, palette, checked),
+            text_color(state, palette, progress >= 0.5),
         ))
         .build()
 }
@@ -1283,59 +1351,47 @@ pub(crate) fn slider_with_palette(
     let value = value.clamp(0.0, 1.0);
     let fill_id = ElementId::local("fill", 0, &id);
     let thumb_id = ElementId::local("thumb", 0, &id);
+
+    // Layout uses the original fill+thumb flow so the track keeps its 2 px
+    // padding and the fill extends Percent(value) of the content area.  Both
+    // children are transparent_to_input so hit-testing always reaches the
+    // track element (which carries the slider behaviour).
+    //
+    // The drag-to-value mapping in input.rs uses inner_left = padding(2) +
+    // thumb_radius(8) = 10 px and inner_width = track_width − 20 so that
+    // dragging to the thumb centre gives the exact value.
     let mut track_style = control_style(state, palette, false, 999.0, Edges::all(2.0));
     track_style.outline_width = Edges::all(if state.focused { 2.0 } else { 1.0 });
+
     let fill_style = ElementStyle {
-        background: if state.disabled {
-            palette.muted_text
-        } else {
-            palette.accent
-        },
+        background: if state.disabled { palette.muted_text } else { palette.accent },
         corner_radius: radii_all(999.0),
+        transparent_to_input: true,
         ..ElementStyle::default()
     };
     let thumb_style = ElementStyle {
-        background: if state.disabled {
-            palette.muted_text
-        } else {
-            palette.accent_text
-        },
+        background: if state.disabled { palette.muted_text } else { palette.accent_text },
         outline: palette.outline,
         outline_width: Edges::all(1.0),
         corner_radius: radii_all(999.0),
+        transparent_to_input: true,
         ..ElementStyle::default()
     };
-    let (width, height, direction, fill_width, fill_height, thumb_width, thumb_height) = match axis
-    {
+
+    let (width, height, direction, fill_width, fill_height) = match axis {
         DragBarAxis::Horizontal => (
-            LayoutSizing::Grow {
-                min: 64.0,
-                max: f32::INFINITY,
-            },
+            LayoutSizing::Grow { min: 64.0, max: f32::INFINITY },
             LayoutSizing::Fixed(20.0),
             LayoutDirection::LeftToRight,
             LayoutSizing::Percent(value),
-            LayoutSizing::Grow {
-                min: 0.0,
-                max: f32::INFINITY,
-            },
-            LayoutSizing::Fixed(16.0),
-            LayoutSizing::Fixed(16.0),
+            LayoutSizing::Grow { min: 0.0, max: f32::INFINITY },
         ),
         DragBarAxis::Vertical => (
             LayoutSizing::Fixed(20.0),
-            LayoutSizing::Grow {
-                min: 64.0,
-                max: f32::INFINITY,
-            },
+            LayoutSizing::Grow { min: 64.0, max: f32::INFINITY },
             LayoutDirection::TopToBottom,
-            LayoutSizing::Grow {
-                min: 0.0,
-                max: f32::INFINITY,
-            },
+            LayoutSizing::Grow { min: 0.0, max: f32::INFINITY },
             LayoutSizing::Percent(value),
-            LayoutSizing::Fixed(16.0),
-            LayoutSizing::Fixed(16.0),
         ),
     };
 
@@ -1363,8 +1419,8 @@ pub(crate) fn slider_with_palette(
             ElementBuilder::container(thumb_id)
                 .style(thumb_style)
                 .layout(LayoutInput {
-                    width: thumb_width,
-                    height: thumb_height,
+                    width: LayoutSizing::Fixed(16.0),
+                    height: LayoutSizing::Fixed(16.0),
                     ..LayoutInput::default()
                 })
                 .build(),
@@ -4764,11 +4820,30 @@ mod tests {
     #[test]
     fn checked_toggle_places_knob_at_end() {
         let id = ElementId::new("toggle");
-        let element = toggle_with_palette(id, "Enabled", true, &WidgetState::default(), &WidgetPalette::default());
+        // progress=1.0 → knob_offset_x = 1.0 * 16.0 = 16.0
+        let element = toggle_with_palette(id, "Enabled", 1.0, &WidgetState::default(), &WidgetPalette::default());
         let track = &element.children[0];
 
-        assert_eq!(track.layout.align_x, crate::Align::End);
         assert_eq!(track.children.len(), 1);
+        let knob = &track.children[0];
+        assert_eq!(
+            knob.layout.position,
+            crate::LayoutPosition::Absolute { offset: Vec2::new(16.0, 0.0) },
+        );
+    }
+
+    #[test]
+    fn unchecked_toggle_places_knob_at_start() {
+        let id = ElementId::new("toggle");
+        // progress=0.0 → knob_offset_x = 0.0
+        let element = toggle_with_palette(id, "Enabled", 0.0, &WidgetState::default(), &WidgetPalette::default());
+        let track = &element.children[0];
+
+        let knob = &track.children[0];
+        assert_eq!(
+            knob.layout.position,
+            crate::LayoutPosition::Absolute { offset: Vec2::new(0.0, 0.0) },
+        );
     }
 
     #[test]

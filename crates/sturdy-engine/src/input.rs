@@ -543,7 +543,7 @@ fn clay_modifiers(modifiers: KeyModifiers) -> clay_ui::ModifierKeys {
 pub struct InputHub {
     simulator: clay_ui::InputSimulator,
     actions: ActionMap,
-    cursor: glam::Vec2,
+    cursor: clay_ui::WindowLogicalPx,
     primary_held: bool,
     /// `KeyInput` events received since the last `update()`, drained into
     /// `ActionMap` after the simulator has run (so UI priority is respected).
@@ -561,7 +561,7 @@ impl InputHub {
         Self {
             simulator: clay_ui::InputSimulator::default(),
             actions: ActionMap::new(),
-            cursor: glam::Vec2::ZERO,
+            cursor: clay_ui::WindowLogicalPx::ZERO,
             primary_held: false,
             pending_key_inputs: Vec::new(),
         }
@@ -570,16 +570,16 @@ impl InputHub {
     // ── EngineApp bridge ──────────────────────────────────────────────────────
 
     /// Call from `EngineApp::pointer_moved`.
-    pub fn on_pointer_moved(&mut self, x: f32, y: f32) {
+    pub fn on_pointer_moved(&mut self, pos: clay_ui::WindowLogicalPx) {
         use clay_ui::{InputEvent, InteractionPhase, PointerButton, PointerState};
-        self.cursor = glam::Vec2::new(x, y);
+        self.cursor = pos;
         let phase = if self.primary_held {
             InteractionPhase::Pressed
         } else {
             InteractionPhase::Released
         };
         self.simulator.queue(InputEvent::Pointer(PointerState {
-            position: self.cursor,
+            position: pos.to_vec2(),
             button: PointerButton::Primary,
             phase,
         }));
@@ -588,9 +588,9 @@ impl InputHub {
     /// Call from `EngineApp::pointer_button`.
     ///
     /// `button` follows the convention 0 = primary, 1 = secondary, 2 = middle.
-    pub fn on_pointer_button(&mut self, x: f32, y: f32, button: u8, pressed: bool) {
+    pub fn on_pointer_button(&mut self, pos: clay_ui::WindowLogicalPx, button: u8, pressed: bool) {
         use clay_ui::{InputEvent, InteractionPhase, PointerButton, PointerState};
-        self.cursor = glam::Vec2::new(x, y);
+        self.cursor = pos;
         if button == 0 {
             self.primary_held = pressed;
         }
@@ -606,7 +606,7 @@ impl InputHub {
             InteractionPhase::ReleasedThisFrame
         };
         self.simulator.queue(InputEvent::Pointer(PointerState {
-            position: self.cursor,
+            position: pos.to_vec2(),
             button: btn,
             phase,
         }));
@@ -718,8 +718,8 @@ impl InputHub {
         &mut self.actions
     }
 
-    /// Current cursor position in window-space pixels.
-    pub fn cursor_pos(&self) -> glam::Vec2 {
+    /// Current cursor position in top-left/Y-down `WindowLogicalPx`.
+    pub fn cursor_pos(&self) -> clay_ui::WindowLogicalPx {
         self.cursor
     }
 

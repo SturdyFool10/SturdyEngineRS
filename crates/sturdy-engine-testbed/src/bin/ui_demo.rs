@@ -7,8 +7,8 @@ use clay_ui::{
     Axis, Edges, Element, ElementBuilder, ElementId, ElementKind, ElementStyle, LayoutCache,
     LayoutDirection, LayoutInput, LayoutSizing, LayoutTree, ListItemSpec, ScrollConfig, Size,
     SliderConfig, StatusBarSectionSpec, TabSpec, TextWrap, UiColor, UiTree, VirtualListConfig,
-    WidgetBehavior, WidgetPalette, WidgetState, button, checkbox, label, list_item, radio,
-    slider, status_bar_with_palette, tab_bar, toggle, virtual_list,
+    WidgetBehavior, WidgetPalette, WidgetState, WindowLogicalPx, button, checkbox, label,
+    list_item, radio, slider, status_bar_with_palette, tab_bar, toggle, virtual_list,
 };
 use glam::Vec2;
 use sturdy_engine::{
@@ -50,7 +50,6 @@ struct UiDemo {
     layout_cache: LayoutCache,
     palette: WidgetPalette,
     hub: InputHub,
-    surface_height: f32,
 
     active_tab: usize,
 
@@ -104,7 +103,6 @@ impl EngineApp for UiDemo {
             layout_cache: LayoutCache::default(),
             palette: WidgetPalette::default(),
             hub,
-            surface_height: 700.0,
             active_tab: 0,
             click_counts: [0; 3],
             checkboxes: [true, false, true],
@@ -116,22 +114,20 @@ impl EngineApp for UiDemo {
         })
     }
 
-    // Route pointer events manually so we can flip cursor Y before hit-testing.
-    // Winit Y is inverted relative to the layout coordinate space on this platform.
-    fn pointer_moved(&mut self, x: f32, y: f32, _surface: &mut Surface) -> Result<()> {
-        self.hub.on_pointer_moved(x, self.surface_height - y);
+    fn pointer_moved(&mut self, pos: WindowLogicalPx, _surface: &mut Surface) -> Result<()> {
+        self.hub.on_pointer_moved(pos);
         Ok(())
     }
 
     fn pointer_button(
-        &mut self, x: f32, y: f32, button: u8, pressed: bool, _surface: &mut Surface,
+        &mut self, pos: WindowLogicalPx, button: u8, pressed: bool, _surface: &mut Surface,
     ) -> Result<()> {
-        self.hub.on_pointer_button(x, self.surface_height - y, button, pressed);
+        self.hub.on_pointer_button(pos, button, pressed);
         Ok(())
     }
 
     fn pointer_scroll(
-        &mut self, _x: f32, _y: f32, delta_x: f32, delta_y: f32, _surface: &mut Surface,
+        &mut self, _pos: WindowLogicalPx, delta_x: f32, delta_y: f32, _surface: &mut Surface,
     ) -> Result<()> {
         self.hub.on_pointer_scroll(delta_x, delta_y);
         Ok(())
@@ -144,7 +140,6 @@ impl EngineApp for UiDemo {
 
     fn render(&mut self, frame: &mut ShellFrame<'_>, surface_image: &SurfaceImage) -> Result<()> {
         let ext = surface_image.desc().extent;
-        self.surface_height = ext.height as f32;
         let viewport = Size::new(ext.width as f32, ext.height as f32);
 
         // Build tree + layout so the hub can hit-test against real geometry.
@@ -213,9 +208,8 @@ impl EngineApp for UiDemo {
             render_element(&mut overlay, ext.width, ext.height, root, &layout, None);
         }
 
-        // Cursor crosshair. hub.cursor_pos() is already in layout space (Y flipped
-        // at the pointer callback level), so draw directly at cx.
-        let cx = self.hub.cursor_pos();
+        // Cursor crosshair at the current pointer position (top-left/Y-down).
+        let cx = self.hub.cursor_pos().to_vec2();
         let col = [0.95, 0.65, 0.15, 0.85_f32];
         overlay.filled_rect_screen(ext.width, ext.height, [(cx.x - 8.0).max(0.0), cx.y - 0.5], [16.0, 1.0], col);
         overlay.filled_rect_screen(ext.width, ext.height, [cx.x - 0.5, (cx.y - 8.0).max(0.0)], [1.0, 16.0], col);
@@ -225,8 +219,7 @@ impl EngineApp for UiDemo {
         Ok(())
     }
 
-    fn resize(&mut self, _w: u32, h: u32) -> Result<()> {
-        self.surface_height = h as f32;
+    fn resize(&mut self, _w: u32, _h: u32) -> Result<()> {
         Ok(())
     }
 }
@@ -460,6 +453,7 @@ impl UiDemo {
             toggle_id(),
             "Auto-refresh",
             self.toggle_on,
+            clay_ui::ToggleAnimConfig::default(),
             &self.hub.widget_state(&toggle_id()),
         ));
 

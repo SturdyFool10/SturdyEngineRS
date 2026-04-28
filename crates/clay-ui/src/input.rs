@@ -5,7 +5,7 @@ use std::{
 
 use glam::Vec2;
 
-use crate::{Axis, ElementId, LayoutTree, UiLayer, UiShape};
+use crate::{Axis, Easing, EasingRegistry, ElementId, LayoutTree, Rect, UiLayer, UiShape};
 
 // ── Build-time widget context ─────────────────────────────────────────────────
 
@@ -18,6 +18,7 @@ pub struct PendingRegistrations {
     behaviors: HashMap<u64, (ElementId, WidgetBehavior)>,
     slider_configs: HashMap<u64, (ElementId, SliderConfig)>,
     scroll_configs: HashMap<u64, (ElementId, ScrollConfig)>,
+    toggle_anim_updates: HashMap<u64, (ElementId, f32)>,
 }
 
 impl PendingRegistrations {
@@ -31,6 +32,9 @@ impl PendingRegistrations {
         }
         for (_, (id, config)) in self.scroll_configs {
             sim.set_scroll_config(id, config);
+        }
+        for (_, (id, progress)) in self.toggle_anim_updates {
+            sim.set_toggle_animation_progress(id, progress);
         }
     }
 }
@@ -129,6 +133,35 @@ impl<'a> Cx<'a> {
     pub fn register_drag_bar(&self, id: ElementId, axis: crate::Axis) {
         let hash = id.hash;
         self.pending.borrow_mut().behaviors.insert(hash, (id, WidgetBehavior::drag_bar(axis)));
+    }
+
+    /// Advances the toggle animation for `id` toward `target` (0.0=off, 1.0=on)
+    /// and returns the eased progress value for rendering this frame.
+    ///
+    /// On the first call for a given id the progress snaps to `target` so there
+    /// is no jarring animation from zero.  Pass `dt=0.0` to always snap.
+    pub fn advance_toggle_animation(
+        &self,
+        id: &ElementId,
+        target: f32,
+        duration: f32,
+        dt: f32,
+        easing: Easing,
+    ) -> f32 {
+        let target = target.clamp(0.0, 1.0);
+        let current = self.sim.toggle_animation_progress(id, target);
+        let new_linear = if dt > 0.0 && duration > f32::EPSILON {
+            let step = dt / duration;
+            if target >= 0.5 {
+                (current + step).min(1.0)
+            } else {
+                (current - step).max(0.0)
+            }
+        } else {
+            target
+        };
+        self.pending.borrow_mut().toggle_anim_updates.insert(id.hash, (id.clone(), new_linear));
+        self.sim.easing_registry().evaluate(easing, new_linear)
     }
 
     /// Consume the context and return the deferred registrations.
@@ -837,6 +870,11 @@ pub struct InputSimulator {
     slider_values: HashMap<u64, f32>,
     /// (drag-start position, value at drag start) keyed by element hash.
     drag_origins: HashMap<u64, (Vec2, f32)>,
+    /// Track rect captured on press; used for absolute-position slider mapping.
+    slider_track_rects: HashMap<u64, Rect>,
+    /// Linear animation progress (0=off, 1=on) for toggle widgets.
+    toggle_anim: HashMap<u64, f32>,
+    easing_registry: EasingRegistry,
     text_buffer: String,
     event_result: UiEventResult,
     mode: UiMode,
@@ -933,6 +971,32 @@ impl InputSimulator {
             .get(&id.hash)
             .map_or(value, |c| c.clamp(value));
         self.slider_values.insert(id.hash, clamped);
+    }
+
+    // ── Toggle animation API ──────────────────────────────────────────────────
+
+    /// Returns the stored linear animation progress (0=off, 1=on) for a toggle,
+    /// falling back to `default` when the toggle has not been registered yet.
+    pub fn toggle_animation_progress(&self, id: &ElementId, default: f32) -> f32 {
+        self.toggle_anim.get(&id.hash).copied().unwrap_or(default)
+    }
+
+    /// Store the linear animation progress for a toggle (called via
+    /// [`PendingRegistrations::apply`]).
+    pub fn set_toggle_animation_progress(&mut self, id: ElementId, progress: f32) {
+        self.toggle_anim.insert(id.hash, progress.clamp(0.0, 1.0));
+    }
+
+    /// Returns a reference to the easing registry so widgets can evaluate
+    /// custom easing curves registered by the application.
+    pub fn easing_registry(&self) -> &EasingRegistry {
+        &self.easing_registry
+    }
+
+    /// Returns a mutable reference to the easing registry for registering
+    /// custom easing curves.
+    pub fn easing_registry_mut(&mut self) -> &mut EasingRegistry {
+        &mut self.easing_registry
     }
 
     // ── Drag bar API ──────────────────────────────────────────────────────────
@@ -1367,8 +1431,7 @@ impl InputSimulator {
                     self.event_result.pointer_consumed = true;
                     self.focused = Some(hit.id.clone());
                     self.pressed = Some(hit.id.clone());
-                    // Record drag origin for sliders and drag bars so we can
-                    // compute the displacement relative to where the press started.
+                    // Record drag origin for drag bars (sliders use track-rect instead).
                     let start_value = self.slider_values.get(&hit.id.hash).copied().unwrap_or(0.0);
                     if let Some(behavior) = self.behaviors.get(&hit.id.hash) {
                         if behavior.pointer_drag
@@ -1379,6 +1442,33 @@ impl InputSimulator {
                         {
                             self.drag_origins
                                 .insert(hit.id.hash, (pointer.position, start_value));
+                        }
+                    }
+                    // For sliders: capture the track rect and snap value to click position.
+                    if let Some(behavior) = self.behaviors.get(&hit.id.hash).cloned() {
+                        if behavior.pointer_drag {
+                            if let WidgetKind::Slider { axis } = behavior.kind {
+                                if let Some(node) = tree.nodes.iter().find(|n| n.id.hash == hit.id.hash) {
+                                    let rect = node.rect;
+                                    self.slider_track_rects.insert(hit.id.hash, rect);
+                                    if let Some(config) = self.slider_configs.get(&hit.id.hash).copied() {
+                                        let normalized = match axis {
+                                            Axis::Horizontal => {
+                                                let inner_left = rect.origin.x + 10.0;
+                                                let inner_width = (rect.size.width - 20.0).max(f32::EPSILON);
+                                                (pointer.position.x - inner_left) / inner_width
+                                            }
+                                            Axis::Vertical => {
+                                                let inner_top = rect.origin.y + 10.0;
+                                                let inner_height = (rect.size.height - 20.0).max(f32::EPSILON);
+                                                (pointer.position.y - inner_top) / inner_height
+                                            }
+                                        };
+                                        let new_value = config.clamp(config.min + normalized.clamp(0.0, 1.0) * config.range());
+                                        self.slider_values.insert(hit.id.hash, new_value);
+                                    }
+                                }
+                            }
                         }
                     }
                     self.captured = Some(hit.id);
@@ -1417,6 +1507,7 @@ impl InputSimulator {
                 self.pressed = None;
                 if let Some(old) = self.captured.take() {
                     self.drag_origins.remove(&old.hash);
+                    self.slider_track_rects.remove(&old.hash);
                 }
             }
         }
@@ -1430,26 +1521,27 @@ impl InputSimulator {
         let WidgetKind::Slider { axis } = behavior.kind else {
             return;
         };
-        let (start_pos, start_value) = match self.drag_origins.get(&id.hash).copied() {
-            Some(o) => o,
-            None => return,
+        let config = self.slider_configs.get(&id.hash).copied().unwrap_or_default();
+        // Use the track rect captured on press for absolute-position mapping.
+        // The slider layout has 2 px padding (from control_style) plus an 8 px
+        // thumb radius, so the thumb CENTRE travels from track+10 to track+W−10,
+        // giving inner_left = 10 and inner_width = W − 20.
+        let Some(rect) = self.slider_track_rects.get(&id.hash).copied() else {
+            return;
         };
-        let config = self
-            .slider_configs
-            .get(&id.hash)
-            .copied()
-            .unwrap_or_default();
-        let drag_delta = pointer_pos - start_pos;
-        let axis_delta = match axis {
-            Axis::Horizontal => drag_delta.x,
-            Axis::Vertical => drag_delta.y,
+        let normalized = match axis {
+            Axis::Horizontal => {
+                let inner_left = rect.origin.x + 10.0;
+                let inner_width = (rect.size.width - 20.0).max(f32::EPSILON);
+                (pointer_pos.x - inner_left) / inner_width
+            }
+            Axis::Vertical => {
+                let inner_top = rect.origin.y + 10.0;
+                let inner_height = (rect.size.height - 20.0).max(f32::EPSILON);
+                (pointer_pos.y - inner_top) / inner_height
+            }
         };
-        let value_delta = if config.track_extent > 0.0 {
-            axis_delta / config.track_extent * config.range()
-        } else {
-            0.0
-        };
-        let new_value = config.clamp(start_value + value_delta);
+        let new_value = config.clamp(config.min + normalized.clamp(0.0, 1.0) * config.range());
         self.slider_values.insert(id.hash, new_value);
     }
 
@@ -2717,31 +2809,32 @@ mod tests {
         let layout = layout_for(&element);
         let mut input = InputSimulator::default();
         input.set_widget_behavior(id.clone(), WidgetBehavior::slider(Axis::Horizontal));
-        // Track is 100px wide, range 0..1.
+        // Track element is 100×40 at origin (0,0).
+        // inner_left = 10 (padding 2 + thumb_radius 8), inner_width = 100 - 20 = 80.
+        // Pressing at x=50 maps to (50-10)/80 = 0.5 exactly.
         input.set_slider_config(
             id.clone(),
             SliderConfig::new(0.0, 1.0).step(0.01).track_extent(100.0),
         );
         input.set_slider_value(&id, 0.0);
 
-        // Press at x=10 (inside the 100×40 test element).
+        // Press at x=50: value snaps to (50-10)/80 = 0.5.
         input.queue(InputEvent::Pointer(PointerState {
-            position: Vec2::new(10.0, 20.0),
+            position: Vec2::new(50.0, 20.0),
             phase: InteractionPhase::PressedThisFrame,
             ..PointerState::default()
         }));
         input.update(&layout);
+        assert!((input.slider_value(&id) - 0.5).abs() < 1e-5, "press snaps to 0.5");
 
-        // Drag 50px to the right.
+        // Drag to x=90 (inner right edge, 10+80=90): value should be (90-10)/80 = 1.0.
         input.queue(InputEvent::Pointer(PointerState {
-            position: Vec2::new(60.0, 20.0),
+            position: Vec2::new(90.0, 20.0),
             phase: InteractionPhase::Pressed,
             ..PointerState::default()
         }));
         input.update(&layout);
-
-        // Value should be 0.5 (50px / 100px * 1.0 range).
-        assert!((input.slider_value(&id) - 0.5).abs() < 1e-5);
+        assert!((input.slider_value(&id) - 1.0).abs() < 1e-5, "drag to right edge gives 1.0");
     }
 
     #[test]

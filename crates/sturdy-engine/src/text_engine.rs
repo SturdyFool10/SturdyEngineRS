@@ -415,27 +415,8 @@ fn should_use_msdf(desc: &TextDrawDesc) -> bool {
     text_raster_path(desc) == TextRasterPath::Msdf
 }
 
-fn flip_textui_quad_y(positions: [[f32; 2]; 4], source_bounds_max_y: f32) -> [[f32; 2]; 4] {
-    let mut min_x = f32::INFINITY;
-    let mut max_x = f32::NEG_INFINITY;
-    let mut min_y = f32::INFINITY;
-    let mut max_y = f32::NEG_INFINITY;
-
-    for position in positions {
-        min_x = min_x.min(position[0]);
-        max_x = max_x.max(position[0]);
-        min_y = min_y.min(position[1]);
-        max_y = max_y.max(position[1]);
-    }
-
-    let flipped_min_y = source_bounds_max_y - max_y;
-    let flipped_max_y = source_bounds_max_y - min_y;
-    [
-        [min_x, flipped_min_y],
-        [max_x, flipped_min_y],
-        [max_x, flipped_max_y],
-        [min_x, flipped_max_y],
-    ]
+fn flip_textui_quad_y(positions: [[f32; 2]; 4], _source_bounds_max_y: f32) -> [[f32; 2]; 4] {
+    positions
 }
 
 fn prepare_legacy_quad(quad: &TextGlyphQuad) -> PreparedTextQuad {

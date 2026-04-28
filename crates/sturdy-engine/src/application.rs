@@ -290,23 +290,23 @@ pub trait EngineApp {
     }
 
     /// Handle pointer (mouse/touch) movement.
-    /// `x` and `y` are in logical (window-space) pixels.
+    ///
+    /// `pos` is in top-left/Y-down `WindowLogicalPx` (DPI-scaled window pixels).
     fn pointer_moved(
         &mut self,
-        _x: f32,
-        _y: f32,
+        _pos: clay_ui::WindowLogicalPx,
         _surface: &mut Surface,
     ) -> Result<(), Self::Error> {
         Ok(())
     }
 
     /// Handle a pointer button press or release.
-    /// `button` follows the convention 0 = primary, 1 = secondary, 2 = middle.
-    /// `x` and `y` are the cursor position at the time of the event.
+    ///
+    /// `pos` is in top-left/Y-down `WindowLogicalPx`. `button` follows the
+    /// convention 0 = primary, 1 = secondary, 2 = middle.
     fn pointer_button(
         &mut self,
-        _x: f32,
-        _y: f32,
+        _pos: clay_ui::WindowLogicalPx,
         _button: u8,
         _pressed: bool,
         _surface: &mut Surface,
@@ -315,12 +315,12 @@ pub trait EngineApp {
     }
 
     /// Handle a scroll wheel or touchpad scroll.
-    /// `delta_x` and `delta_y` are in logical pixels (positive Y = down).
-    /// `x` and `y` are the cursor position at the time of the event.
+    ///
+    /// `pos` is the cursor position in `WindowLogicalPx`.
+    /// `delta_x` and `delta_y` are in logical pixels, positive Y = down.
     fn pointer_scroll(
         &mut self,
-        _x: f32,
-        _y: f32,
+        _pos: clay_ui::WindowLogicalPx,
         _delta_x: f32,
         _delta_y: f32,
         _surface: &mut Surface,
@@ -843,7 +843,7 @@ where
             applied_settings_revision: 0,
             started_at: Instant::now(),
             _config: config,
-            cursor_pos: (0.0, 0.0),
+            cursor_pos: clay_ui::WindowLogicalPx::ZERO,
             primary_held: false,
         })
         .expect("event loop exited unexpectedly");
@@ -860,7 +860,7 @@ struct ShellApp<App: EngineApp> {
     #[allow(dead_code)]
     started_at: Instant,
     _config: WindowConfig,
-    cursor_pos: (f32, f32),
+    cursor_pos: clay_ui::WindowLogicalPx,
     primary_held: bool,
 }
 
@@ -960,12 +960,22 @@ where
                 }
             }
             winit::event::WindowEvent::CursorMoved { position, .. } => {
-                let (x, y) = (position.x as f32, position.y as f32);
-                self.cursor_pos = (x, y);
+                // winit CursorMoved delivers PhysicalPosition. Convert to
+                // WindowLogicalPx (top-left/Y-down) at the platform boundary.
+                let scale = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.scale_factor() as f32)
+                    .unwrap_or(1.0);
+                let pos = clay_ui::WindowLogicalPx::new(
+                    position.x as f32 / scale,
+                    position.y as f32 / scale,
+                );
+                self.cursor_pos = pos;
                 if let Some(hub) = self.app_state.input_hub() {
-                    hub.on_pointer_moved(x, y);
+                    hub.on_pointer_moved(pos);
                 } else if let Err(e) =
-                    self.app_state.pointer_moved(x, y, self.runtime.surface_mut())
+                    self.app_state.pointer_moved(pos, self.runtime.surface_mut())
                 {
                     eprintln!("pointer_moved failed: {e:?}");
                     std::process::exit(1);
@@ -983,12 +993,12 @@ where
                 if btn == 0 {
                     self.primary_held = pressed;
                 }
-                let (x, y) = self.cursor_pos;
+                let pos = self.cursor_pos;
                 if let Some(hub) = self.app_state.input_hub() {
-                    hub.on_pointer_button(x, y, btn, pressed);
+                    hub.on_pointer_button(pos, btn, pressed);
                 } else if let Err(e) =
                     self.app_state
-                        .pointer_button(x, y, btn, pressed, self.runtime.surface_mut())
+                        .pointer_button(pos, btn, pressed, self.runtime.surface_mut())
                 {
                     eprintln!("pointer_button failed: {e:?}");
                     std::process::exit(1);
@@ -1000,12 +1010,12 @@ where
                     MouseScrollDelta::LineDelta(x, y) => (x * 20.0, -y * 20.0),
                     MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
                 };
-                let (x, y) = self.cursor_pos;
+                let pos = self.cursor_pos;
                 if let Some(hub) = self.app_state.input_hub() {
                     hub.on_pointer_scroll(dx, dy);
                 } else if let Err(e) =
                     self.app_state
-                        .pointer_scroll(x, y, dx, dy, self.runtime.surface_mut())
+                        .pointer_scroll(pos, dx, dy, self.runtime.surface_mut())
                 {
                     eprintln!("pointer_scroll failed: {e:?}");
                     std::process::exit(1);

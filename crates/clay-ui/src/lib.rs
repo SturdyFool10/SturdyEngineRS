@@ -7,6 +7,7 @@
 pub mod batch;
 pub mod color;
 pub mod context;
+pub mod coords;
 pub mod element;
 pub mod floating;
 pub mod font_discovery;
@@ -32,6 +33,10 @@ pub use color::{
     UiColor, color_computation_mode,
 };
 pub use context::{TextSceneKey, UiContext, UiFrameOutput, UiTextFrameStats, UiTreeInstance};
+pub use coords::{
+    Ndc, RenderTargetPx, SurfacePx, TexelPx, UiPx, Uv01, WindowLogicalPx, WindowPhysicalPx,
+    logical_to_physical, physical_to_logical, surface_to_ndc, window_logical_to_ui,
+};
 pub use element::{Element, ElementKind, ElementStyle, ImageElement, TextElement};
 pub use floating::{
     FloatingAlign, FloatingAttachConfig, FloatingAttachError, FloatingCollision,
@@ -86,7 +91,8 @@ pub use widgets::{
     CommandPaletteItemSpec, ContextMenuItemSpec, DragBarAxis, DropdownOptionSpec, ListItemSpec,
     LogEntrySpec, LogLevel, ModalLayerConfig, NotificationSpec, NumberInputSpec, PortalHostConfig,
     PropertyRowSpec, ScrollbarMetrics, SegmentSpec, SortDirection, StatusBarSectionSpec, TabSpec,
-    TableHeaderSpec, TextInputSpec, TooltipConfig, WidgetPalette, WidgetRenderContext,
+    TableHeaderSpec, TextInputSpec, ToggleAnimConfig, TooltipConfig, WidgetPalette,
+    WidgetRenderContext,
     accordion_panel, badge, breadcrumbs, button, card, card_with_palette, checkbox, chip,
     command_palette, context_menu_item, dialog_surface, dialog_surface_with_palette, divider,
     drag_bar, dropdown_option, empty_state, empty_state_with_palette, group_box,

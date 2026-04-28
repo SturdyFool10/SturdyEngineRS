@@ -176,13 +176,13 @@ impl TextOverlay {
                     }
 
                     let ndc_x = sx0 / fw * 2.0 - 1.0;
-                    let ndc_y = 1.0 - sy0 / fh * 2.0;
+                    let ndc_y = sy0 / fh * 2.0 - 1.0;
                     let ndc_w = (sx1 - sx0) / fw * 2.0;
-                    let ndc_h = -((sy1 - sy0) / fh * 2.0);
+                    let ndc_h = (sy1 - sy0) / fh * 2.0;
                     batch.push(
                         [ndc_x, ndc_y],
                         [ndc_w, ndc_h],
-                        [u0, v1, u1, v0],
+                        [u0, v0, u1, v1],
                         quad.color,
                     );
                 }

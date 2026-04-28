@@ -481,7 +481,7 @@ impl DebugOverlayRenderer {
 fn screen_to_ndc(width: u32, height: u32, point: [f32; 2]) -> [f32; 2] {
     [
         point[0] / width.max(1) as f32 * 2.0 - 1.0,
-        1.0 - point[1] / height.max(1) as f32 * 2.0,
+        point[1] / height.max(1) as f32 * 2.0 - 1.0,
     ]
 }
 
@@ -495,7 +495,7 @@ fn ui_shape_mesh(engine: &Engine, width: u32, height: u32, shape: &UiShape) -> R
     let ndc_origin = screen_to_ndc(width, height, origin);
     let ndc_size = [
         size[0] / width.max(1) as f32 * 2.0,
-        -size[1] / height.max(1) as f32 * 2.0,
+        size[1] / height.max(1) as f32 * 2.0,
     ];
 
     let mut batch = QuadBatch::new();

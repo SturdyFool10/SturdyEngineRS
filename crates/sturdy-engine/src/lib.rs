@@ -69,6 +69,10 @@ pub use device_manager::{AdapterEntry, DeviceManager};
 pub use gpu_procedural_texture::GpuProceduralTexture;
 pub use graph_frame::{FullscreenPassBuilder, GraphFrame, ImageNode};
 pub use hdr_pipeline::{HdrMode, HdrPipelineDesc, HdrPreference, ToneMappingOp};
+pub use clay_ui::{
+    Ndc, RenderTargetPx, SurfacePx, TexelPx, UiPx, Uv01, WindowLogicalPx, WindowPhysicalPx,
+    logical_to_physical, physical_to_logical, surface_to_ndc, window_logical_to_ui,
+};
 pub use input::{
     ActionBindingRegistry, ActionMap, BindingChange, InputHub, KeyInput, KeyInputState,
     KeyModifier, KeyModifiers, KeyToken, Keybind, KeybindCapture,
