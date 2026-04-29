@@ -606,10 +606,10 @@ If a roadmap item is still too large for one prompt, split it again until the pr
 
 - [x] `P0.R1` Add a panic audit script that scans production crates for `.unwrap()`, `.expect()`, `panic!`, `todo!`, and `unimplemented!`, excluding `#[cfg(test)]` blocks and generated files where possible.
 - [x] `P0.R2` Define the production panic policy in docs and CI: hard incompatibility may abort; recoverable runtime/platform/backend failures must return structured diagnostics.
-- [ ] `P0.R3` Convert the Vulkan allocator's deallocation and block-selection panic paths into `Result`-returning code with allocator diagnostics.
-- [ ] `P0.R4` Convert Linux Wayland background-effect state insertion and protocol fallback paths to non-panicking apply/degrade results.
-- [ ] `P0.R5` Move Linux Wayland background-effect internals under `platform/linux/wayland/background_effect` and keep `linux/mod.rs` as a thin adapter.
-- [ ] `P0.R6` Add KDE/KWin blur fallback support behind the Linux platform adapter, with ext-background-effect-v1 preferred when available.
+- [x] `P0.R3` Convert the Vulkan allocator's deallocation and block-selection panic paths into `Result`-returning code with allocator diagnostics.
+- [x] `P0.R4` Convert Linux Wayland background-effect state insertion and protocol fallback paths to non-panicking apply/degrade results.
+- [x] `P0.R5` Move Linux Wayland background-effect internals under `platform/linux/wayland/background_effect` and keep `linux/mod.rs` as a thin adapter.
+- [x] `P0.R6` Add KDE/KWin blur fallback support behind the Linux platform adapter, with ext-background-effect-v1 preferred when available.
 - [ ] `P0.R7` Add platform capability queries and degraded apply results so engine/runtime code never matches on Linux/Windows/macOS compositor details directly.
 - [ ] `P0.R8` Add tests or validation harnesses for no-protocol, ext-only, KDE-only, ext-to-KDE fallback, and no-blur fallback paths.
 
