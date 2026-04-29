@@ -3,7 +3,6 @@
 //! Use this crate from Rust applications. It wraps the core handle-oriented API
 //! with RAII resource types and builder-style descriptors while keeping the
 //! lower-level `sturdy-engine-core` crate available for engine internals.
-
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -329,6 +328,7 @@ impl Engine {
         key: GraphImageCacheKey,
         desc: ImageDesc,
     ) -> Result<(core::ImageHandle, ImageDesc)> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut cache = self
             .graph_image_cache
             .lock()

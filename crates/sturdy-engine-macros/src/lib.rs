@@ -51,3 +51,29 @@ pub fn push_constants(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
+
+/// Deprecated no-op retained for compatibility with local experiments.
+///
+/// `tools/panic-audit.py` no longer recognizes this attribute. Use a
+/// `//panic allowed, reason = "<reason>"` comment immediately before the
+/// reviewed statement instead.
+///
+/// # Usage
+///
+/// Apply it to the `let` statement or expression statement that contains the
+/// panic site.  An optional string literal gives the reason.
+///
+/// ```ignore
+/// //panic allowed, reason = "poisoned mutex is unrecoverable"
+/// let guard = self.inner.lock().expect("device mutex poisoned");
+///
+/// //panic allowed, reason = "poisoned mutex is unrecoverable"
+/// let guard = self.inner
+///     .lock()
+///     .expect("device mutex poisoned");
+/// ```
+#[proc_macro_attribute]
+pub fn allow_panic(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Intentional no-op: return the annotated item completely unchanged.
+    item
+}

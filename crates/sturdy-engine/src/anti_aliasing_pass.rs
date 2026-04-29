@@ -157,6 +157,7 @@ impl AntiAliasingPass {
             height: desc.extent.height,
             format: desc.format,
         };
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut history = self.history.lock().expect("AA history mutex poisoned");
         if history.key != Some(key) {
             history.key = Some(key);

@@ -1,0 +1,8 @@
+[
+  {
+    "label": "Panic Audit",
+    "command": "python3 tools/panic-audit.py",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "tags": ["audit"]
+  }
+]

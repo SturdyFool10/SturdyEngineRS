@@ -658,6 +658,7 @@ impl MaterialAsset {
 
 impl Default for MaterialAsset {
     fn default() -> Self {
+        //panic allowed, reason = "Default impl uses hardcoded valid parameters; failure is a code defect"
         Self::new("default_material", "passthrough_fragment.slang")
             .with_vertex_kind(MeshVertexKind::V2d)
             .build()
@@ -951,7 +952,7 @@ impl MaterialAssetLoader {
         Self {
             loaded_assets: Vec::new(),
             loader_state: MaterialAssetLoaderState::default(),
-            engine: Engine::new().expect("failed to create engine"),
+            engine: Engine::new().expect("failed to create engine"), //panic allowed, reason = "material asset loader initialization requires an engine; failure is unrecoverable here"
             shader_compilation_cache: MaterialShaderCompilationCache::new(),
         }
     }
@@ -1085,7 +1086,7 @@ impl MaterialAssetValidator {
         Self {
             validated_assets: Vec::new(),
             validator_state: MaterialAssetValidatorState::default(),
-            engine: Engine::new().expect("failed to create engine"),
+            engine: Engine::new().expect("failed to create engine"), //panic allowed, reason = "material asset validator initialization requires an engine; failure is unrecoverable here"
             shader_validation_cache: MaterialShaderValidationCache::new(),
         }
     }
@@ -1302,7 +1303,7 @@ impl MaterialAssetCache {
             cached_assets: Vec::new(),
             size_limit: 100,
             eviction_strategy: MaterialAssetCacheEvictionStrategy::LRU,
-            engine: Engine::new().expect("failed to create engine"),
+            engine: Engine::new().expect("failed to create engine"), //panic allowed, reason = "material asset cache initialization requires an engine; failure is unrecoverable here"
             hit_count: 0,
             miss_count: 0,
         }
@@ -1463,7 +1464,7 @@ impl MaterialCrossLanguageCompiler {
         Self {
             compiled_assets: Vec::new(),
             compiler_state: MaterialCrossLanguageCompilerState::default(),
-            engine: Engine::new().expect("failed to create engine"),
+            engine: Engine::new().expect("failed to create engine"), //panic allowed, reason = "cross-language compiler initialization requires an engine; failure is unrecoverable here"
             shader_compilation_cache: MaterialShaderCompilationCache::new(),
             cross_language_cache: MaterialCrossLanguageCache::new(),
         }

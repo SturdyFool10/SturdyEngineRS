@@ -14,7 +14,9 @@ pub fn load_entry() -> Result<Entry> {
 }
 
 pub fn create_instance(entry: &Entry, config: &VulkanBackendConfig) -> Result<Instance> {
+    //panic allowed, reason = "static string literal cannot contain NUL bytes"
     let app_name = CString::new("SturdyEngine").expect("static string has no nul");
+    //panic allowed, reason = "static string literal cannot contain NUL bytes"
     let engine_name = CString::new("SturdyEngine").expect("static string has no nul");
     let app_info = vk::ApplicationInfo::default()
         .application_name(&app_name)
@@ -57,6 +59,7 @@ fn requested_layers(entry: &Entry, validation: bool) -> Result<Vec<CString>> {
         return Ok(Vec::new());
     }
 
+    //panic allowed, reason = "static string literal cannot contain NUL bytes"
     let wanted = CString::new("VK_LAYER_KHRONOS_validation").expect("static string has no nul");
     let layers = unsafe {
         entry
@@ -137,6 +140,7 @@ fn push_extension(
     has_extension: &impl Fn(&CStr) -> bool,
     name: &'static str,
 ) {
+    //panic allowed, reason = "static &str parameter cannot contain NUL bytes"
     let extension = CString::new(name).expect("static extension name has no nul bytes");
     if has_extension(&extension) {
         extensions.push(extension);

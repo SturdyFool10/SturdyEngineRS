@@ -342,6 +342,7 @@ impl Material {
 
 impl Default for Material {
     fn default() -> Self {
+        //panic allowed, reason = "Default impl uses hardcoded valid parameters; failure is a code defect"
         Self::new("default_material")
             .with_vertex_kind(MeshVertexKind::V2d)
             .with_fragment_shader("passthrough_fragment.slang")

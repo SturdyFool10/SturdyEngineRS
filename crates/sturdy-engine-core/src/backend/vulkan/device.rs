@@ -704,11 +704,12 @@ fn push_unique(values: &mut Vec<String>, value: String) {
 fn required_device_extensions() -> Vec<&'static CStr> {
     #[cfg(target_os = "macos")]
     {
-        vec![
-            ash::khr::swapchain::NAME,
-            CStr::from_bytes_with_nul(b"VK_KHR_portability_subset\0")
-                .expect("static extension name has nul terminator"),
-        ]
+        vec![ash::khr::swapchain::NAME, {
+            //panic allowed, reason = "static extension name constant cannot contain NUL bytes"
+            let ext = CStr::from_bytes_with_nul(b"VK_KHR_portability_subset\0")
+                .expect("static extension name has nul terminator");
+            ext
+        }]
     }
     #[cfg(not(target_os = "macos"))]
     {

@@ -88,6 +88,7 @@ impl MipPyramid {
 
     /// The coarsest (smallest) level — the last in the chain.
     pub fn coarsest(&self) -> &GraphImage {
+        //panic allowed, reason = "non-empty by construction: at least one mip level is always present"
         self.levels.last().expect("mip pyramid is never empty")
     }
 }

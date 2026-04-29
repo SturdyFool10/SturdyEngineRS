@@ -144,6 +144,7 @@ impl PipelineRegistry {
     ) -> Result<()> {
         let module = shaders.module(desc.shader)?;
         let stage = shaders.stage(desc.shader)?;
+        //panic allowed, reason = "layout is resolved by the caller before the backend; absence is a caller defect"
         let layout_handle = desc
             .layout
             .expect("compute pipeline layout must be resolved before backend call");
@@ -191,6 +192,7 @@ impl PipelineRegistry {
         shaders: &ShaderRegistry,
         descriptors: &DescriptorRegistry,
     ) -> Result<()> {
+        //panic allowed, reason = "layout is resolved by the caller before the backend; absence is a caller defect"
         let layout_handle = desc
             .layout
             .expect("graphics pipeline layout must be resolved before backend call");
@@ -247,6 +249,7 @@ impl PipelineRegistry {
         } else {
             None
         };
+        //panic allowed, reason = "fragment_entry is Some whenever desc.fragment_shader is Some; enforced by the outer if-let"
         let fragment_stage = if let Some(shader) = desc.fragment_shader {
             Some(
                 vk::PipelineShaderStageCreateInfo::default()

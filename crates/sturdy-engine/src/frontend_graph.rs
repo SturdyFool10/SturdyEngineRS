@@ -379,6 +379,7 @@ impl ShaderProgram {
         self.fragment = fragment;
         self.reflection = reflection;
         self.pipeline_layout = pipeline_layout;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
             .expect("shader program pipeline mutex poisoned")
@@ -409,6 +410,7 @@ impl ShaderProgram {
     }
 
     fn pipeline_handle(&self, format: Format, samples: u8) -> Result<core::PipelineHandle> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut pipelines = self
             .pipelines
             .lock()
@@ -2218,6 +2220,7 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
     // Phase 3: submit in scheduled order (Option::take avoids needing Clone on PassDesc).
     let mut slots: Vec<Option<PassDesc>> = resolved.into_iter().map(Some).collect();
     for idx in order {
+        //panic allowed, reason = "scheduler invariant: each slot index appears exactly once in the schedule"
         let pass = slots[idx]
             .take()
             .expect("scheduler produced duplicate index");

@@ -1694,6 +1694,7 @@ dependencies = [
  "ash",
  "ash-window",
  "raw-window-handle",
+ "sturdy-engine-macros",
 ]
 
 [[package]]

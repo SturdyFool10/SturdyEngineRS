@@ -255,6 +255,7 @@ impl ResourceRegistry {
 
     pub fn destroy_image(&mut self, device: &Device, handle: ImageHandle) -> Result<()> {
         let image = self.images.remove(&handle).ok_or(Error::InvalidHandle)?;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         destroy_cached_image_views(
             device,
             &mut self
@@ -499,6 +500,7 @@ impl ResourceRegistry {
     }
 
     pub fn destroy_all(&mut self, device: &Device) {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         for (_, view) in self
             .image_views
             .lock()
@@ -571,6 +573,7 @@ impl ResourceRegistry {
             image: handle,
             subresource: normalized,
         };
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         if let Some(view) = self
             .image_views
             .lock()
@@ -597,7 +600,9 @@ impl ResourceRegistry {
                 .create_image_view(&view_info, None)
                 .map_err(|error| Error::Backend(format!("vkCreateImageView failed: {error:?}")))?
         };
-        self.image_views
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let _prev = self
+            .image_views
             .lock()
             .expect("vulkan image view cache mutex poisoned")
             .insert(key, view);

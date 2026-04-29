@@ -1,5 +1,5 @@
-use crate::{Buffer, BufferDesc, BufferUsage, Engine, Result};
 use super::object::InstanceData;
+use crate::{Buffer, BufferDesc, BufferUsage, Engine, Result};
 
 /// Accumulated instance data for a single mesh, split into static and dynamic halves.
 ///
@@ -52,6 +52,7 @@ impl InstanceBatch {
             self.static_dirty = true;
         }
 
+        //panic allowed, reason = "guaranteed Some: buffer was just created or was already Some in the branch above"
         let buf = self.gpu_buffer.as_ref().unwrap();
 
         if self.static_dirty && !self.static_instances.is_empty() {

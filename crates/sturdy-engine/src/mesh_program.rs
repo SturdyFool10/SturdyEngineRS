@@ -187,6 +187,7 @@ impl MeshProgram {
         self.fragment = fragment;
         self.reflection = reflection;
         self.pipeline_layout = pipeline_layout;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
             .expect("mesh program pipeline mutex poisoned")
@@ -209,6 +210,7 @@ impl MeshProgram {
             stage: ShaderStage::Vertex,
         })?;
         self.vertex = vertex;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
             .expect("mesh program pipeline mutex poisoned")
@@ -221,6 +223,7 @@ impl MeshProgram {
         format: Format,
         samples: u8,
     ) -> Result<core::PipelineHandle> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut pipelines = self
             .pipelines
             .lock()

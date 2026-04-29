@@ -604,8 +604,8 @@ If a roadmap item is still too large for one prompt, split it again until the pr
 
 ### Robustness and platform-isolation execution chunks
 
-- [ ] `P0.R1` Add a panic audit script that scans production crates for `.unwrap()`, `.expect()`, `panic!`, `todo!`, and `unimplemented!`, excluding `#[cfg(test)]` blocks and generated files where possible.
-- [ ] `P0.R2` Define the production panic policy in docs and CI: hard incompatibility may abort; recoverable runtime/platform/backend failures must return structured diagnostics.
+- [x] `P0.R1` Add a panic audit script that scans production crates for `.unwrap()`, `.expect()`, `panic!`, `todo!`, and `unimplemented!`, excluding `#[cfg(test)]` blocks and generated files where possible.
+- [x] `P0.R2` Define the production panic policy in docs and CI: hard incompatibility may abort; recoverable runtime/platform/backend failures must return structured diagnostics.
 - [ ] `P0.R3` Convert the Vulkan allocator's deallocation and block-selection panic paths into `Result`-returning code with allocator diagnostics.
 - [ ] `P0.R4` Convert Linux Wayland background-effect state insertion and protocol fallback paths to non-panicking apply/degrade results.
 - [ ] `P0.R5` Move Linux Wayland background-effect internals under `platform/linux/wayland/background_effect` and keep `linux/mod.rs` as a thin adapter.

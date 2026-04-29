@@ -37,3 +37,4 @@ Thumbs.db
 flamegraph.svg
 perf.data
 perf.data.*
+/tools/__pycache__

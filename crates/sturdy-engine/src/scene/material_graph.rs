@@ -557,6 +557,7 @@ impl MaterialGraph {
 
 impl Default for MaterialGraph {
     fn default() -> Self {
+        //panic allowed, reason = "Default impl uses hardcoded valid parameters; failure is a code defect"
         Self::new("default_material_graph")
             .with_material_node(MaterialPreset::Pbr)
             .with_raytraced_node(MaterialPreset::RaytracedPbr)
@@ -617,6 +618,7 @@ impl MaterialGraphBuilder {
 
     /// Set the material nodes for this material graph from a preset.
     pub fn with_material_node_preset(mut self, preset: MaterialPreset) -> Self {
+        //panic allowed, reason = "MaterialPreset enum variants use hardcoded parameters; failure is a code defect"
         self.material_nodes.push(MaterialNode::new(preset.build().expect("preset should always build")));
         self
     }
@@ -629,6 +631,7 @@ impl MaterialGraphBuilder {
 
     /// Set the rasterized nodes for this material graph from a preset.
     pub fn with_rasterized_node_preset(mut self, preset: MaterialPreset) -> Self {
+        //panic allowed, reason = "MaterialPreset enum variants use hardcoded parameters; failure is a code defect"
         self.rasterized_nodes.push(RasterizedNode::new(preset.build().expect("preset should always build")));
         self
     }
@@ -641,6 +644,7 @@ impl MaterialGraphBuilder {
 
     /// Set the hybrid nodes for this material graph from a preset.
     pub fn with_hybrid_node_preset(mut self, preset: MaterialPreset) -> Self {
+        //panic allowed, reason = "MaterialPreset enum variants use hardcoded parameters; failure is a code defect"
         self.hybrid_nodes.push(HybridNode::new(preset.build().expect("preset should always build")));
         self
     }
@@ -653,6 +657,7 @@ impl MaterialGraphBuilder {
 
     /// Set the raytraced nodes for this material graph from a preset.
     pub fn with_raytraced_node_preset(mut self, preset: MaterialPreset) -> Self {
+        //panic allowed, reason = "MaterialPreset enum variants use hardcoded parameters; failure is a code defect"
         self.raytraced_nodes.push(RaytracedNode::new(preset.build().expect("preset should always build")));
         self
     }
@@ -665,6 +670,7 @@ impl MaterialGraphBuilder {
 
     /// Set the path traced nodes for this material graph from a preset.
     pub fn with_path_traced_node_preset(mut self, preset: MaterialPreset) -> Self {
+        //panic allowed, reason = "MaterialPreset enum variants use hardcoded parameters; failure is a code defect"
         self.path_traced_nodes.push(PathTracedNode::new(preset.build().expect("preset should always build")));
         self
     }
@@ -1980,12 +1986,14 @@ pub struct OfflineRenderGraph {
 impl OfflineRenderGraph {
     /// Create an offline render graph.
     pub fn new() -> Self {
+        //panic allowed, reason = "Null backend is guaranteed to initialise successfully; failure is a code defect"
+        let render_target = RenderTarget::new(Engine::with_backend(BackendKind::Null).expect("null engine should always create"), "offline_render_target", 1920, 1080, Format::Rgba16Float).expect("offline render target should always create");
         Self {
             passes: Vec::new(),
             images: Vec::new(),
             buffers: Vec::new(),
             render_frame: Frame::new(),
-            render_target: RenderTarget::new(Engine::with_backend(BackendKind::Null).expect("null engine should always create"), "offline_render_target", 1920, 1080, Format::Rgba16Float).expect("offline render target should always create"),
+            render_target,
             hdr_image: GraphImage::new(),
             tonemap_program: ShaderProgram::new(),
             bloom_pass: BloomPass::new(),

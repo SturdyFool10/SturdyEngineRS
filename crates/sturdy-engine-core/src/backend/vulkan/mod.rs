@@ -130,6 +130,7 @@ impl Backend for VulkanBackend {
     }
 
     fn create_image(&self, handle: ImageHandle, desc: ImageDesc) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
             .expect("vulkan resource registry rwlock poisoned")
@@ -141,6 +142,7 @@ impl Backend for VulkanBackend {
         handle: ImageHandle,
         desc: ExternalImageDesc,
     ) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         match desc.handle {
             ExternalImageHandle::Vulkan(external) => self
                 .resources
@@ -151,6 +153,7 @@ impl Backend for VulkanBackend {
     }
 
     fn create_transient_image(&self, handle: ImageHandle, desc: ImageDesc) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
             .expect("vulkan resource registry rwlock poisoned")
@@ -158,11 +161,13 @@ impl Backend for VulkanBackend {
     }
 
     fn destroy_image(&self, handle: ImageHandle) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut resources = self
             .resources
             .write()
             .expect("vulkan resource registry rwlock poisoned");
         let view = resources.image_view(handle)?;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
             .expect("vulkan pipeline registry mutex poisoned")
@@ -171,6 +176,7 @@ impl Backend for VulkanBackend {
     }
 
     fn create_buffer(&self, handle: BufferHandle, desc: BufferDesc) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
             .expect("vulkan resource registry rwlock poisoned")
@@ -182,6 +188,7 @@ impl Backend for VulkanBackend {
         handle: BufferHandle,
         desc: ExternalBufferDesc,
     ) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         match desc.handle {
             ExternalBufferHandle::Vulkan(external) => self
                 .resources
@@ -192,6 +199,7 @@ impl Backend for VulkanBackend {
     }
 
     fn destroy_buffer(&self, handle: BufferHandle) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
             .expect("vulkan resource registry rwlock poisoned")
@@ -199,6 +207,7 @@ impl Backend for VulkanBackend {
     }
 
     fn create_sampler(&self, handle: SamplerHandle, desc: SamplerDesc) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
             .expect("vulkan resource registry rwlock poisoned")
@@ -206,6 +215,7 @@ impl Backend for VulkanBackend {
     }
 
     fn destroy_sampler(&self, handle: SamplerHandle) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
             .expect("vulkan resource registry rwlock poisoned")
@@ -213,6 +223,7 @@ impl Backend for VulkanBackend {
     }
 
     fn write_buffer(&self, handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
             .expect("vulkan resource registry rwlock poisoned")
@@ -220,6 +231,7 @@ impl Backend for VulkanBackend {
     }
 
     fn read_buffer(&self, handle: BufferHandle, offset: u64, out: &mut [u8]) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .read()
             .expect("vulkan resource registry rwlock poisoned")
@@ -227,6 +239,7 @@ impl Backend for VulkanBackend {
     }
 
     fn create_shader(&self, handle: ShaderHandle, desc: &ShaderDesc) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shaders
             .lock()
             .expect("vulkan shader registry mutex poisoned")
@@ -234,6 +247,7 @@ impl Backend for VulkanBackend {
     }
 
     fn destroy_shader(&self, handle: ShaderHandle) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shaders
             .lock()
             .expect("vulkan shader registry mutex poisoned")
@@ -245,6 +259,7 @@ impl Backend for VulkanBackend {
         handle: PipelineLayoutHandle,
         layout: &CanonicalPipelineLayout,
     ) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.descriptors
             .write()
             .expect("vulkan descriptor registry rwlock poisoned")
@@ -252,6 +267,7 @@ impl Backend for VulkanBackend {
     }
 
     fn destroy_pipeline_layout(&self, handle: PipelineLayoutHandle) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.descriptors
             .write()
             .expect("vulkan descriptor registry rwlock poisoned")
@@ -259,10 +275,12 @@ impl Backend for VulkanBackend {
     }
 
     fn create_bind_group(&self, handle: BindGroupHandle, desc: &BindGroupDesc) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let resources = self
             .resources
             .read()
             .expect("vulkan resource registry rwlock poisoned");
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.descriptors
             .write()
             .expect("vulkan descriptor registry rwlock poisoned")
@@ -270,6 +288,7 @@ impl Backend for VulkanBackend {
     }
 
     fn destroy_bind_group(&self, handle: BindGroupHandle) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.descriptors
             .write()
             .expect("vulkan descriptor registry rwlock poisoned")
@@ -281,14 +300,17 @@ impl Backend for VulkanBackend {
         handle: PipelineHandle,
         desc: ComputePipelineDesc,
     ) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let shaders = self
             .shaders
             .lock()
             .expect("vulkan shader registry mutex poisoned");
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let descriptors = self
             .descriptors
             .read()
             .expect("vulkan descriptor registry rwlock poisoned");
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
             .expect("vulkan pipeline registry mutex poisoned")
@@ -300,14 +322,17 @@ impl Backend for VulkanBackend {
         handle: PipelineHandle,
         desc: &GraphicsPipelineDesc,
     ) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let shaders = self
             .shaders
             .lock()
             .expect("vulkan shader registry mutex poisoned");
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let descriptors = self
             .descriptors
             .read()
             .expect("vulkan descriptor registry rwlock poisoned");
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
             .expect("vulkan pipeline registry mutex poisoned")
@@ -315,6 +340,7 @@ impl Backend for VulkanBackend {
     }
 
     fn destroy_pipeline(&self, handle: PipelineHandle) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
             .expect("vulkan pipeline registry mutex poisoned")
@@ -326,6 +352,7 @@ impl Backend for VulkanBackend {
         handle: SurfaceHandle,
         desc: NativeSurfaceDesc,
     ) -> Result<SurfaceInfo> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
@@ -346,10 +373,12 @@ impl Backend for VulkanBackend {
                 .device_wait_idle()
                 .map_err(|error| Error::Backend(format!("vkDeviceWaitIdle failed: {error:?}")))?;
         }
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
             .expect("vulkan pipeline registry mutex poisoned")
             .clear_all_framebuffers(&self.device);
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
@@ -367,10 +396,12 @@ impl Backend for VulkanBackend {
                 .device_wait_idle()
                 .map_err(|error| Error::Backend(format!("vkDeviceWaitIdle failed: {error:?}")))?;
         }
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
             .expect("vulkan pipeline registry mutex poisoned")
             .clear_all_framebuffers(&self.device);
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
@@ -383,14 +414,17 @@ impl Backend for VulkanBackend {
                 .device_wait_idle()
                 .map_err(|error| Error::Backend(format!("vkDeviceWaitIdle failed: {error:?}")))?;
         }
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         *self
             .active_surface
             .lock()
             .expect("vulkan active surface mutex poisoned") = None;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
             .expect("vulkan pipeline registry mutex poisoned")
             .clear_all_framebuffers(&self.device);
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
@@ -399,6 +433,7 @@ impl Backend for VulkanBackend {
     }
 
     fn query_surface_capabilities(&self, handle: SurfaceHandle) -> Result<SurfaceCapabilities> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
@@ -406,6 +441,7 @@ impl Backend for VulkanBackend {
     }
 
     fn set_image_debug_name(&self, handle: ImageHandle, name: &str) {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         if let Ok(image) = self
             .resources
             .read()
@@ -417,6 +453,7 @@ impl Backend for VulkanBackend {
     }
 
     fn set_buffer_debug_name(&self, handle: BufferHandle, name: &str) {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         if let Ok(buffer) = self
             .resources
             .read()
@@ -428,6 +465,7 @@ impl Backend for VulkanBackend {
     }
 
     fn set_pipeline_debug_name(&self, handle: PipelineHandle, name: &str) {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         if let Ok(pipeline) = self
             .pipelines
             .lock()
@@ -443,15 +481,18 @@ impl Backend for VulkanBackend {
         surface: SurfaceHandle,
         image: ImageHandle,
     ) -> Result<(ImageDesc, u64)> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let acquired = self
             .surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
             .acquire_image(surface)?;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
             .expect("vulkan resource registry rwlock poisoned")
             .import_image(image, acquired.image, acquired.image_view, acquired.desc)?;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         *self
             .active_surface
             .lock()
@@ -460,11 +501,13 @@ impl Backend for VulkanBackend {
     }
 
     fn present_surface(&self, surface: SurfaceHandle) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let result = self
             .surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
             .present(self.queues.graphics, surface);
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         *self
             .active_surface
             .lock()
@@ -475,11 +518,13 @@ impl Backend for VulkanBackend {
     fn flush(&self, graph: &CompiledGraph) -> Result<SubmissionHandle> {
         // Resolve per-surface semaphores if a swapchain image was acquired.
         let (wait_sem, signal_sem) = {
+            //panic allowed, reason = "poisoned mutex is unrecoverable"
             let active = *self
                 .active_surface
                 .lock()
                 .expect("vulkan active surface mutex poisoned");
             if let Some(sh) = active {
+                //panic allowed, reason = "poisoned mutex is unrecoverable"
                 let sems = self
                     .surfaces
                     .lock()
@@ -492,6 +537,7 @@ impl Backend for VulkanBackend {
         };
 
         // Bind transient images to alias heap memories before recording begins.
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         bind_transient_images_to_alias_heaps(
             &self.device,
             &self.instance,
@@ -507,18 +553,22 @@ impl Backend for VulkanBackend {
             graph,
         )?;
 
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let resources = self
             .resources
             .read()
             .expect("vulkan resource registry rwlock poisoned");
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let descriptors = self
             .descriptors
             .read()
             .expect("vulkan descriptor registry rwlock poisoned");
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut pipelines = self
             .pipelines
             .lock()
             .expect("vulkan pipeline registry mutex poisoned");
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut commands = self
             .commands
             .lock()
@@ -538,6 +588,7 @@ impl Backend for VulkanBackend {
     }
 
     fn wait_submission(&self, token: SubmissionHandle) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.commands
             .lock()
             .expect("vulkan command context mutex poisoned")

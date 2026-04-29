@@ -218,6 +218,7 @@ fn with_session<T>(f: impl FnOnce(*mut sys::SlangSession) -> T) -> T {
         assert!(!s.is_null(), "slang: spCreateSession returned null");
         std::sync::Mutex::new(s as usize)
     });
+    //panic allowed, reason = "poisoned mutex is unrecoverable"
     let guard = lock.lock().expect("slang session mutex poisoned");
     f(*guard as *mut sys::SlangSession)
 }
@@ -296,6 +297,7 @@ fn reflect_pipeline_layout_inner(
         if is_file {
             sys::spAddTranslationUnitSourceFile(request, tu, path_or_source_cstr.as_ptr());
         } else {
+            //panic allowed, reason = "static byte string has an explicit NUL terminator at the last byte"
             let inline_path = std::ffi::CStr::from_bytes_with_nul(b"<inline>\0").unwrap();
             sys::spAddTranslationUnitSourceString(
                 request,
@@ -632,6 +634,7 @@ pub fn compile_and_reflect(
         if is_file {
             sys::spAddTranslationUnitSourceFile(request, tu, path_or_source_cstr.as_ptr());
         } else {
+            //panic allowed, reason = "static byte string has an explicit NUL terminator at the last byte"
             let inline_path = std::ffi::CStr::from_bytes_with_nul(b"<inline>\0").unwrap();
             sys::spAddTranslationUnitSourceString(
                 request,
