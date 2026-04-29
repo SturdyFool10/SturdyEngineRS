@@ -50,4 +50,14 @@ mod tests {
             WindowBackdrop::Material(_)
         ));
     }
+
+    #[test]
+    fn native_window_appearance_error_marks_degraded_results() {
+        let degraded = NativeWindowAppearanceError::Degraded("fallback".into());
+        let failed = NativeWindowAppearanceError::ApplyFailed("failed".into());
+
+        assert!(degraded.is_degraded());
+        assert!(!failed.is_degraded());
+        assert!(degraded.to_string().contains("degraded"));
+    }
 }

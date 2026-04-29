@@ -69,7 +69,11 @@ pub struct Cx<'a> {
 
 impl<'a> Cx<'a> {
     pub fn new(sim: &'a InputSimulator, palette: crate::WidgetPalette) -> Self {
-        Self { sim, palette, pending: RefCell::new(PendingRegistrations::default()) }
+        Self {
+            sim,
+            palette,
+            pending: RefCell::new(PendingRegistrations::default()),
+        }
     }
 
     /// Returns the current interaction state for `id` (hover, press, focus, …).
@@ -105,13 +109,18 @@ impl<'a> Cx<'a> {
     /// Queue slider behavior + config. Called by [`crate::slider`] automatically.
     pub fn register_behavior(&self, id: ElementId, behavior: WidgetBehavior) {
         let hash = id.hash;
-        self.pending.borrow_mut().behaviors.insert(hash, (id, behavior));
+        self.pending
+            .borrow_mut()
+            .behaviors
+            .insert(hash, (id, behavior));
     }
 
     pub fn register_slider(&self, id: ElementId, axis: crate::Axis, config: SliderConfig) {
         let hash = id.hash;
         let mut pending = self.pending.borrow_mut();
-        pending.behaviors.insert(hash, (id.clone(), WidgetBehavior::slider(axis)));
+        pending
+            .behaviors
+            .insert(hash, (id.clone(), WidgetBehavior::slider(axis)));
         pending.slider_configs.insert(hash, (id, config));
     }
 
@@ -119,20 +128,28 @@ impl<'a> Cx<'a> {
     pub fn register_scroll(&self, id: ElementId, config: ScrollConfig) {
         let hash = id.hash;
         let mut pending = self.pending.borrow_mut();
-        pending.behaviors.insert(hash, (id.clone(), WidgetBehavior::scroll_area()));
+        pending
+            .behaviors
+            .insert(hash, (id.clone(), WidgetBehavior::scroll_area()));
         pending.scroll_configs.insert(hash, (id, config));
     }
 
     /// Queue text-input behavior. Called by text input widgets automatically.
     pub fn register_text_input(&self, id: ElementId) {
         let hash = id.hash;
-        self.pending.borrow_mut().behaviors.insert(hash, (id, WidgetBehavior::text_input()));
+        self.pending
+            .borrow_mut()
+            .behaviors
+            .insert(hash, (id, WidgetBehavior::text_input()));
     }
 
     /// Queue drag-bar behavior. Called by drag bar widgets automatically.
     pub fn register_drag_bar(&self, id: ElementId, axis: crate::Axis) {
         let hash = id.hash;
-        self.pending.borrow_mut().behaviors.insert(hash, (id, WidgetBehavior::drag_bar(axis)));
+        self.pending
+            .borrow_mut()
+            .behaviors
+            .insert(hash, (id, WidgetBehavior::drag_bar(axis)));
     }
 
     /// Advances the toggle animation for `id` toward `target` (0.0=off, 1.0=on)
@@ -160,7 +177,10 @@ impl<'a> Cx<'a> {
         } else {
             target
         };
-        self.pending.borrow_mut().toggle_anim_updates.insert(id.hash, (id.clone(), new_linear));
+        self.pending
+            .borrow_mut()
+            .toggle_anim_updates
+            .insert(id.hash, (id.clone(), new_linear));
         self.sim.easing_registry().evaluate(easing, new_linear)
     }
 
@@ -199,7 +219,11 @@ pub struct EventContext {
 
 impl EventContext {
     pub fn new(phase: EventPhase) -> Self {
-        Self { phase, stopped: false, default_prevented: false }
+        Self {
+            phase,
+            stopped: false,
+            default_prevented: false,
+        }
     }
 
     pub fn phase(&self) -> EventPhase {
@@ -1072,8 +1096,11 @@ impl InputSimulator {
         }
         let parent_map: HashMap<u64, u64> =
             tree.nodes.iter().map(|n| (n.id.hash, n.parent)).collect();
-        let id_map: HashMap<u64, ElementId> =
-            tree.nodes.iter().map(|n| (n.id.hash, n.id.clone())).collect();
+        let id_map: HashMap<u64, ElementId> = tree
+            .nodes
+            .iter()
+            .map(|n| (n.id.hash, n.id.clone()))
+            .collect();
 
         let mut path = vec![target.clone()];
         let mut current = parent_map.get(&target.hash).copied().unwrap_or(0);
@@ -1320,10 +1347,19 @@ impl InputSimulator {
                         self.apply_scroll_propagating(tree, start.hash, delta);
                     }
                 }
-                InputEvent::Key { name, pressed, repeat } => {
+                InputEvent::Key {
+                    name,
+                    pressed,
+                    repeat,
+                } => {
                     self.handle_key_event(tree, &name, pressed, repeat, ModifierKeys::default());
                 }
-                InputEvent::KeyWithModifiers { name, pressed, repeat, modifiers } => {
+                InputEvent::KeyWithModifiers {
+                    name,
+                    pressed,
+                    repeat,
+                    modifiers,
+                } => {
                     self.handle_key_event(tree, &name, pressed, repeat, modifiers);
                 }
                 InputEvent::Text(text) => {
@@ -1396,12 +1432,17 @@ impl InputSimulator {
             .filter(|(_, node)| node.shape.contains_point(node.rect, point))
             .filter(|(_, node)| !node.transparent_to_input)
             .filter(|(_, node)| !self.widget_config(&node.id).disabled)
-            .filter(|(_, node)| match (active_scope, scoped_parent_map.as_ref()) {
-                (Some(scope), Some(parents)) => {
-                    focus_scope_contains_with_parent_map(scope, &node.id, parents, tree.nodes.len())
-                }
-                _ => true,
-            })
+            .filter(
+                |(_, node)| match (active_scope, scoped_parent_map.as_ref()) {
+                    (Some(scope), Some(parents)) => focus_scope_contains_with_parent_map(
+                        scope,
+                        &node.id,
+                        parents,
+                        tree.nodes.len(),
+                    ),
+                    _ => true,
+                },
+            )
             .max_by(|(ai, a), (bi, b)| {
                 (a.layer, a.z_index)
                     .cmp(&(b.layer, b.z_index))
@@ -1448,23 +1489,32 @@ impl InputSimulator {
                     if let Some(behavior) = self.behaviors.get(&hit.id.hash).cloned() {
                         if behavior.pointer_drag {
                             if let WidgetKind::Slider { axis } = behavior.kind {
-                                if let Some(node) = tree.nodes.iter().find(|n| n.id.hash == hit.id.hash) {
+                                if let Some(node) =
+                                    tree.nodes.iter().find(|n| n.id.hash == hit.id.hash)
+                                {
                                     let rect = node.rect;
                                     self.slider_track_rects.insert(hit.id.hash, rect);
-                                    if let Some(config) = self.slider_configs.get(&hit.id.hash).copied() {
+                                    if let Some(config) =
+                                        self.slider_configs.get(&hit.id.hash).copied()
+                                    {
                                         let normalized = match axis {
                                             Axis::Horizontal => {
                                                 let inner_left = rect.origin.x + 10.0;
-                                                let inner_width = (rect.size.width - 20.0).max(f32::EPSILON);
+                                                let inner_width =
+                                                    (rect.size.width - 20.0).max(f32::EPSILON);
                                                 (pointer.position.x - inner_left) / inner_width
                                             }
                                             Axis::Vertical => {
                                                 let inner_top = rect.origin.y + 10.0;
-                                                let inner_height = (rect.size.height - 20.0).max(f32::EPSILON);
+                                                let inner_height =
+                                                    (rect.size.height - 20.0).max(f32::EPSILON);
                                                 (pointer.position.y - inner_top) / inner_height
                                             }
                                         };
-                                        let new_value = config.clamp(config.min + normalized.clamp(0.0, 1.0) * config.range());
+                                        let new_value = config.clamp(
+                                            config.min
+                                                + normalized.clamp(0.0, 1.0) * config.range(),
+                                        );
                                         self.slider_values.insert(hit.id.hash, new_value);
                                     }
                                 }
@@ -1521,7 +1571,11 @@ impl InputSimulator {
         let WidgetKind::Slider { axis } = behavior.kind else {
             return;
         };
-        let config = self.slider_configs.get(&id.hash).copied().unwrap_or_default();
+        let config = self
+            .slider_configs
+            .get(&id.hash)
+            .copied()
+            .unwrap_or_default();
         // Use the track rect captured on press for absolute-position mapping.
         // The slider layout has 2 px padding (from control_style) plus an 8 px
         // thumb radius, so the thumb CENTRE travels from track+10 to track+W−10,
@@ -1666,7 +1720,11 @@ impl InputSimulator {
         let Some(target) = self.text_target().cloned() else {
             return;
         };
-        let text_event = UiTextEvent { target: target.clone(), text, modifiers };
+        let text_event = UiTextEvent {
+            target: target.clone(),
+            text,
+            modifiers,
+        };
         if self.dispatch_text_callbacks(tree, &target, &text_event) {
             self.event_result.text_consumed = true;
             return;
@@ -1691,16 +1749,21 @@ impl InputSimulator {
         true
     }
 
-    fn pointer_callback_target(&self, tree: &LayoutTree, pointer: PointerState) -> Option<ElementId> {
+    fn pointer_callback_target(
+        &self,
+        tree: &LayoutTree,
+        pointer: PointerState,
+    ) -> Option<ElementId> {
         match pointer.phase {
             InteractionPhase::Pressed | InteractionPhase::ReleasedThisFrame => {
                 self.captured.clone().or_else(|| {
-                    self.hit_test_interactive(tree, pointer.position).map(|hit| hit.id)
+                    self.hit_test_interactive(tree, pointer.position)
+                        .map(|hit| hit.id)
                 })
             }
-            InteractionPhase::PressedThisFrame | InteractionPhase::Released => {
-                self.hit_test_interactive(tree, pointer.position).map(|hit| hit.id)
-            }
+            InteractionPhase::PressedThisFrame | InteractionPhase::Released => self
+                .hit_test_interactive(tree, pointer.position)
+                .map(|hit| hit.id),
         }
     }
 
@@ -1748,12 +1811,17 @@ impl InputSimulator {
         target: &ElementId,
         pointer: PointerState,
     ) -> bool {
-        let event = UiPointerEvent { target: target.clone(), pointer };
+        let event = UiPointerEvent {
+            target: target.clone(),
+            pointer,
+        };
         self.dispatch_bubbling(tree, target, |callbacks, phase, prevented| {
             let callback = match pointer.phase {
                 InteractionPhase::PressedThisFrame => callbacks.on_pointer_down.as_mut(),
                 InteractionPhase::ReleasedThisFrame => callbacks.on_pointer_up.as_mut(),
-                InteractionPhase::Pressed | InteractionPhase::Released => callbacks.on_pointer_move.as_mut(),
+                InteractionPhase::Pressed | InteractionPhase::Released => {
+                    callbacks.on_pointer_move.as_mut()
+                }
             }?;
             let mut ctx = EventContext::new(phase);
             if prevented {
@@ -1790,7 +1858,11 @@ impl InputSimulator {
         let mut default_prevented = false;
         let path = self.bubble_path(target, tree);
         for (index, id) in path.iter().enumerate() {
-            let phase = if index == 0 { EventPhase::Target } else { EventPhase::Bubble };
+            let phase = if index == 0 {
+                EventPhase::Target
+            } else {
+                EventPhase::Bubble
+            };
             let Some(callbacks) = self.callbacks.get_mut(&id.hash) else {
                 continue;
             };
@@ -1849,8 +1921,10 @@ impl InputSimulator {
 
             // Try to consume scroll at this node.
             if let Some(config) = self.scroll_configs.get(&current).copied() {
-                let scroll_ok =
-                    self.behaviors.get(&current).map_or(true, |b| b.pointer_scroll);
+                let scroll_ok = self
+                    .behaviors
+                    .get(&current)
+                    .map_or(true, |b| b.pointer_scroll);
                 if scroll_ok && !config.disabled {
                     let consumed = self.consume_scroll(current, remaining, config);
                     remaining -= consumed;
@@ -2825,7 +2899,10 @@ mod tests {
             ..PointerState::default()
         }));
         input.update(&layout);
-        assert!((input.slider_value(&id) - 0.5).abs() < 1e-5, "press snaps to 0.5");
+        assert!(
+            (input.slider_value(&id) - 0.5).abs() < 1e-5,
+            "press snaps to 0.5"
+        );
 
         // Drag to x=90 (inner right edge, 10+80=90): value should be (90-10)/80 = 1.0.
         input.queue(InputEvent::Pointer(PointerState {
@@ -2834,7 +2911,10 @@ mod tests {
             ..PointerState::default()
         }));
         input.update(&layout);
-        assert!((input.slider_value(&id) - 1.0).abs() < 1e-5, "drag to right edge gives 1.0");
+        assert!(
+            (input.slider_value(&id) - 1.0).abs() < 1e-5,
+            "drag to right edge gives 1.0"
+        );
     }
 
     #[test]
@@ -2898,9 +2978,7 @@ mod tests {
         let scope_id = ElementId::new("scope");
         let root_id = ElementId::new("root");
         let mut input = InputSimulator::default();
-        input.push_focus_scope(
-            FocusScope::new(scope_id.clone(), root_id).dismiss_on_cancel(true),
-        );
+        input.push_focus_scope(FocusScope::new(scope_id.clone(), root_id).dismiss_on_cancel(true));
 
         input.queue(InputEvent::Key {
             name: "Escape".into(),
@@ -2910,7 +2988,11 @@ mod tests {
         input.update(&LayoutTree::default());
 
         assert_eq!(
-            input.dismissed_focus_scopes().iter().map(|id| id.hash).collect::<Vec<_>>(),
+            input
+                .dismissed_focus_scopes()
+                .iter()
+                .map(|id| id.hash)
+                .collect::<Vec<_>>(),
             vec![scope_id.hash]
         );
     }

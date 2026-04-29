@@ -120,9 +120,7 @@ impl TextOverlay {
         for page in &tiled_text_frame.atlas_pages {
             let mut batch = QuadBatch::new();
             for draw in &tiled_text_frame.draws {
-                let clip = descs
-                    .get(draw.source_index)
-                    .and_then(|d| d.clip_rect);
+                let clip = descs.get(draw.source_index).and_then(|d| d.clip_rect);
                 for quad in &draw.quads {
                     if quad.atlas_page != page.page_index {
                         continue;
@@ -179,12 +177,7 @@ impl TextOverlay {
                     let ndc_y = sy0 / fh * 2.0 - 1.0;
                     let ndc_w = (sx1 - sx0) / fw * 2.0;
                     let ndc_h = (sy1 - sy0) / fh * 2.0;
-                    batch.push(
-                        [ndc_x, ndc_y],
-                        [ndc_w, ndc_h],
-                        [u0, v0, u1, v1],
-                        quad.color,
-                    );
+                    batch.push([ndc_x, ndc_y], [ndc_w, ndc_h], [u0, v0, u1, v1], quad.color);
                 }
             }
             if !batch.is_empty() {

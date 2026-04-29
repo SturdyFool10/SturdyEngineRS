@@ -9,6 +9,7 @@ pub enum NativeWindowAppearanceError {
     UnsupportedWindowHandle,
     UnsupportedDisplayHandle,
     PlatformUnavailable(&'static str),
+    Degraded(String),
     ApplyFailed(String),
 }
 
@@ -18,12 +19,19 @@ impl fmt::Display for NativeWindowAppearanceError {
             Self::UnsupportedWindowHandle => write!(f, "unsupported native window handle"),
             Self::UnsupportedDisplayHandle => write!(f, "unsupported native display handle"),
             Self::PlatformUnavailable(reason) => write!(f, "{reason}"),
+            Self::Degraded(reason) => write!(f, "degraded native window appearance: {reason}"),
             Self::ApplyFailed(reason) => write!(f, "{reason}"),
         }
     }
 }
 
 impl std::error::Error for NativeWindowAppearanceError {}
+
+impl NativeWindowAppearanceError {
+    pub fn is_degraded(&self) -> bool {
+        matches!(self, Self::Degraded(_))
+    }
+}
 
 pub fn apply_native_window_appearance_for_window(
     window: &(impl HasWindowHandle + HasDisplayHandle),

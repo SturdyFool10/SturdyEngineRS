@@ -55,12 +55,12 @@ use sturdy_engine_core::SurfaceSize;
 use crate::{
     AntiAliasingMode, AntiAliasingPass, AppRuntime, BloomConfig, BloomPass, DebugImageRegistry,
     DefaultSceneTargetConfig, DiagnosticLevel, Engine, GraphImage, KeyInput, KeyModifiers,
-    MotionVectorDebugPass, Result as EngineResult, RuntimeController, RuntimeDiagnostics,
-    RuntimeGraphDiagnostics, RuntimeSettingChange, RuntimeSettingId, RuntimeSettingKey,
-    ShaderProgram, Surface, SurfaceHdrPreference, SurfaceImage, SurfacePresentMode,
-    SurfaceRecreateDesc, SurfaceTransparency, WindowAppearance, WindowAppearancePreset,
-    WindowBackdrop, WindowCornerStyle, WindowMaterialKind, WindowMode, WindowTransparencyDesc,
-    apply_native_window_appearance_for_window,
+    MotionVectorDebugPass, NativeWindowAppearanceError, Result as EngineResult, RuntimeController,
+    RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimeSettingChange, RuntimeSettingId,
+    RuntimeSettingKey, ShaderProgram, Surface, SurfaceHdrPreference, SurfaceImage,
+    SurfacePresentMode, SurfaceRecreateDesc, SurfaceTransparency, WindowAppearance,
+    WindowAppearancePreset, WindowBackdrop, WindowCornerStyle, WindowMaterialKind, WindowMode,
+    WindowTransparencyDesc, apply_native_window_appearance_for_window,
 };
 
 #[cfg(target_os = "macos")]
@@ -553,6 +553,13 @@ impl<'a> ShellFrame<'a> {
                 diagnostics.motion_warning.as_deref().unwrap_or("none")
             ),
             format!(
+                "native window appearance: {}",
+                diagnostics
+                    .native_window_appearance
+                    .as_deref()
+                    .unwrap_or("unpublished")
+            ),
+            format!(
                 "camera-locked passes: {}",
                 if diagnostics.camera_locked_passes.is_empty() {
                     "none".to_string()
@@ -753,6 +760,22 @@ pub fn run<App: EngineApp>(config: WindowConfig)
 where
     App::Error: std::fmt::Debug,
 {
+    if let Err(error) = try_run::<App>(config) {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+/// Try to run the application with the given window configuration.
+///
+/// Unlike [`run`], this returns setup and event-loop errors to the caller
+/// instead of panicking. Once the platform event loop starts, fatal runtime
+/// errors are still reported through the shell and terminate the process.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn try_run<App: EngineApp>(config: WindowConfig) -> std::result::Result<(), String>
+where
+    App::Error: std::fmt::Debug,
+{
     use winit::{
         dpi::{LogicalPosition, LogicalSize},
         event_loop::{ControlFlow, EventLoop},
@@ -760,10 +783,11 @@ where
     };
 
     // Create the engine
-    let engine = Engine::new().expect("failed to create engine");
+    let engine = Engine::new().map_err(|error| format!("failed to create engine: {error}"))?;
 
     // Create event loop
-    let event_loop: EventLoop<()> = EventLoop::new().expect("failed to create event loop");
+    let event_loop: EventLoop<()> =
+        EventLoop::new().map_err(|error| format!("failed to create event loop: {error}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
     // Create window
@@ -789,14 +813,19 @@ where
             attributes,
             config.appearance,
         ))
-        .expect("failed to create window");
+        .map_err(|error| format!("failed to create window: {error}"))?;
 
-    if let Err(err) = apply_native_window_appearance_for_window(
+    let native_appearance_result = apply_native_window_appearance_for_window(
         &window,
         Some((window.inner_size().width, window.inner_size().height)),
         config.appearance,
-    ) {
-        eprintln!("native window appearance setup fell back to winit: {err}");
+    );
+    if let Err(err) = &native_appearance_result {
+        if err.is_degraded() {
+            eprintln!("native window appearance setup degraded: {err}");
+        } else {
+            eprintln!("native window appearance setup fell back to winit: {err}");
+        }
     }
 
     // Create surface from window
@@ -813,20 +842,21 @@ where
                 SurfaceHdrPreference::Sdr
             },
         )
-        .expect("failed to create surface");
+        .map_err(|error| format!("failed to create surface: {error}"))?;
 
     // Initialize the application
-    let app_state = match App::init(&engine, &surface) {
-        Ok(app) => app,
-        Err(e) => {
-            eprintln!("failed to initialize application: {e:?}");
-            std::process::exit(1);
-        }
-    };
+    let app_state = App::init(&engine, &surface)
+        .map_err(|error| format!("failed to initialize application: {error:?}"))?;
 
     let mut runtime = AppRuntime::new(engine, surface);
     seed_window_settings(runtime.controller_mut(), &config)
-        .expect("failed to seed runtime window settings");
+        .map_err(|error| format!("failed to seed runtime window settings: {error}"))?;
+    runtime.controller().update_diagnostics(|diagnostics| {
+        diagnostics.native_window_appearance = Some(native_window_appearance_diagnostic(
+            config.appearance,
+            &native_appearance_result,
+        ));
+    });
     runtime.controller().set_settings(window_settings_snapshot(
         &window,
         &config,
@@ -846,7 +876,7 @@ where
             cursor_pos: clay_ui::WindowLogicalPx::ZERO,
             primary_held: false,
         })
-        .expect("event loop exited unexpectedly");
+        .map_err(|error| format!("event loop exited unexpectedly: {error}"))
 }
 
 // Internal winit ApplicationHandler implementation
@@ -939,8 +969,7 @@ where
                     if let Some(hub) = self.app_state.input_hub() {
                         hub.on_key_input(&input);
                     } else {
-                        if let Err(e) =
-                            self.app_state.key_input(&input, self.runtime.surface_mut())
+                        if let Err(e) = self.app_state.key_input(&input, self.runtime.surface_mut())
                         {
                             eprintln!("key input handler failed: {e:?}");
                             std::process::exit(1);
@@ -974,8 +1003,9 @@ where
                 self.cursor_pos = pos;
                 if let Some(hub) = self.app_state.input_hub() {
                     hub.on_pointer_moved(pos);
-                } else if let Err(e) =
-                    self.app_state.pointer_moved(pos, self.runtime.surface_mut())
+                } else if let Err(e) = self
+                    .app_state
+                    .pointer_moved(pos, self.runtime.surface_mut())
                 {
                     eprintln!("pointer_moved failed: {e:?}");
                     std::process::exit(1);
@@ -1262,8 +1292,12 @@ fn apply_window_appearance_from_settings(
         Some((window.inner_size().width, window.inner_size().height)),
         appearance,
     );
-    if let Err(err) = native_result {
-        eprintln!("native window appearance apply fell back to winit: {err}");
+    if let Err(err) = &native_result {
+        if err.is_degraded() {
+            eprintln!("native window appearance apply degraded: {err}");
+        } else {
+            eprintln!("native window appearance apply fell back to winit: {err}");
+        }
 
         #[cfg(target_os = "windows")]
         {
@@ -1277,6 +1311,66 @@ fn apply_window_appearance_from_settings(
                 WindowBackdrop::Blurred(_) | WindowBackdrop::Material(_)
             ));
         }
+    }
+
+    controller.update_diagnostics(|diagnostics| {
+        diagnostics.native_window_appearance = Some(native_window_appearance_diagnostic(
+            appearance,
+            &native_result,
+        ));
+    });
+}
+
+fn native_window_appearance_diagnostic(
+    appearance: WindowAppearance,
+    result: &std::result::Result<(), NativeWindowAppearanceError>,
+) -> String {
+    let requested = match appearance.backdrop {
+        WindowBackdrop::None => "none",
+        WindowBackdrop::Transparent(_) => "transparent",
+        WindowBackdrop::Blurred(_) => "blur",
+        WindowBackdrop::Material(_) => "material",
+    };
+    let protocol = native_window_appearance_protocol(appearance);
+    match result {
+        Ok(()) => format!("protocol={protocol} requested={requested} status=applied"),
+        Err(error) if error.is_degraded() => {
+            format!(
+                "protocol={protocol} requested={requested} status=degraded fallback=winit reason={error}"
+            )
+        }
+        Err(error) => {
+            format!(
+                "protocol={protocol} requested={requested} status=failed fallback=winit reason={error}"
+            )
+        }
+    }
+}
+
+fn native_window_appearance_protocol(appearance: WindowAppearance) -> &'static str {
+    let wants_backdrop = matches!(
+        appearance.backdrop,
+        WindowBackdrop::Blurred(_) | WindowBackdrop::Material(_)
+    );
+    if !wants_backdrop {
+        return "none";
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        "wayland/ext-background-effect-v1"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "windows/system-backdrop"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "macos/native-visual-effect"
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        "unsupported"
     }
 }
 

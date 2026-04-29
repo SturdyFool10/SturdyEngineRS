@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     ptr::NonNull,
     sync::{Mutex, OnceLock},
 };
@@ -104,16 +104,11 @@ pub fn apply_native_window_appearance(
     let mut states = wayland_states().lock().map_err(|_| {
         NativeWindowAppearanceError::ApplyFailed("wayland blur state lock poisoned".into())
     })?;
-    let state = if let Some(state) = states.get_mut(&surface_key) {
-        state
-    } else {
-        states.insert(
-            surface_key,
-            create_wayland_state(display.display, window.surface)?,
-        );
-        states
-            .get_mut(&surface_key)
-            .expect("inserted state disappeared")
+    let state = match states.entry(surface_key) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => {
+            entry.insert(create_wayland_state(display.display, window.surface)?)
+        }
     };
 
     let region = state
@@ -159,7 +154,11 @@ fn create_wayland_state(
     let qh = queue.handle();
     let compositor = globals
         .bind::<wl_compositor::WlCompositor, _, _>(&qh, 1..=6, ())
-        .map_err(|err| NativeWindowAppearanceError::ApplyFailed(err.to_string()))?;
+        .map_err(|err| {
+            NativeWindowAppearanceError::Degraded(format!(
+                "Wayland compositor global is unavailable; falling back to basic transparency/no native blur: {err}"
+            ))
+        })?;
     let manager = globals
         .bind::<ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1, _, _>(
             &qh,
@@ -167,8 +166,8 @@ fn create_wayland_state(
             (),
         )
         .map_err(|err| {
-            NativeWindowAppearanceError::ApplyFailed(format!(
-                "Wayland compositor does not expose ext-background-effect-v1: {err}",
+            NativeWindowAppearanceError::Degraded(format!(
+                "Wayland compositor does not expose ext-background-effect-v1; falling back to basic transparency/no native blur: {err}",
             ))
         })?;
 
@@ -178,14 +177,25 @@ fn create_wayland_state(
             surface.as_ptr().cast(),
         )
     }
-    .map_err(|_| NativeWindowAppearanceError::ApplyFailed("invalid foreign wl_surface".into()))?;
+    .map_err(|_| {
+        NativeWindowAppearanceError::Degraded(
+            "invalid foreign wl_surface; falling back to basic transparency/no native blur".into(),
+        )
+    })?;
     let surface = wl_surface::WlSurface::from_id(&connection, surface_id).map_err(|_| {
-        NativeWindowAppearanceError::ApplyFailed("failed to wrap foreign wl_surface".into())
+        NativeWindowAppearanceError::Degraded(
+            "failed to wrap foreign wl_surface; falling back to basic transparency/no native blur"
+                .into(),
+        )
     })?;
     let effect = manager.get_background_effect(&surface, &qh, ());
     queue
         .roundtrip(&mut WaylandDispatchState)
-        .map_err(|err| NativeWindowAppearanceError::ApplyFailed(err.to_string()))?;
+        .map_err(|err| {
+            NativeWindowAppearanceError::Degraded(format!(
+                "Wayland compositor refused ext-background-effect-v1 setup; falling back to basic transparency/no native blur: {err}"
+            ))
+        })?;
 
     Ok(WaylandBackdropState {
         connection,

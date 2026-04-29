@@ -120,14 +120,22 @@ impl EngineApp for UiDemo {
     }
 
     fn pointer_button(
-        &mut self, pos: WindowLogicalPx, button: u8, pressed: bool, _surface: &mut Surface,
+        &mut self,
+        pos: WindowLogicalPx,
+        button: u8,
+        pressed: bool,
+        _surface: &mut Surface,
     ) -> Result<()> {
         self.hub.on_pointer_button(pos, button, pressed);
         Ok(())
     }
 
     fn pointer_scroll(
-        &mut self, _pos: WindowLogicalPx, delta_x: f32, delta_y: f32, _surface: &mut Surface,
+        &mut self,
+        _pos: WindowLogicalPx,
+        delta_x: f32,
+        delta_y: f32,
+        _surface: &mut Surface,
     ) -> Result<()> {
         self.hub.on_pointer_scroll(delta_x, delta_y);
         Ok(())
@@ -197,7 +205,8 @@ impl EngineApp for UiDemo {
 
         // Background.
         overlay.filled_rect_screen(
-            ext.width, ext.height,
+            ext.width,
+            ext.height,
             [0.0, 0.0],
             [ext.width as f32, ext.height as f32],
             [0.007, 0.013, 0.022, 1.0],
@@ -211,10 +220,23 @@ impl EngineApp for UiDemo {
         // Cursor crosshair at the current pointer position (top-left/Y-down).
         let cx = self.hub.cursor_pos().to_vec2();
         let col = [0.95, 0.65, 0.15, 0.85_f32];
-        overlay.filled_rect_screen(ext.width, ext.height, [(cx.x - 8.0).max(0.0), cx.y - 0.5], [16.0, 1.0], col);
-        overlay.filled_rect_screen(ext.width, ext.height, [cx.x - 0.5, (cx.y - 8.0).max(0.0)], [1.0, 16.0], col);
+        overlay.filled_rect_screen(
+            ext.width,
+            ext.height,
+            [(cx.x - 8.0).max(0.0), cx.y - 0.5],
+            [16.0, 1.0],
+            col,
+        );
+        overlay.filled_rect_screen(
+            ext.width,
+            ext.height,
+            [cx.x - 0.5, (cx.y - 8.0).max(0.0)],
+            [1.0, 16.0],
+            col,
+        );
 
-        self.overlay.draw(frame.inner(), &swapchain, ext.width, ext.height, &overlay)?;
+        self.overlay
+            .draw(frame.inner(), &swapchain, ext.width, ext.height, &overlay)?;
         frame.inner().present_image(&swapchain)?;
         Ok(())
     }
@@ -278,16 +300,26 @@ impl UiDemo {
             .style(ElementStyle {
                 background: UiColor::from_rgba8(12, 18, 28, 255),
                 outline: UiColor::from_rgba8(255, 255, 255, 18),
-                outline_width: Edges { bottom: 1.0, ..Edges::ZERO },
+                outline_width: Edges {
+                    bottom: 1.0,
+                    ..Edges::ZERO
+                },
                 ..ElementStyle::default()
             })
             .layout(LayoutInput {
                 width: LayoutSizing::Fixed(width),
-                height: LayoutSizing::Fit { min: 0.0, max: f32::INFINITY },
+                height: LayoutSizing::Fit {
+                    min: 0.0,
+                    max: f32::INFINITY,
+                },
                 direction: LayoutDirection::LeftToRight,
                 ..LayoutInput::default()
             })
-            .child(tab_bar(ElementId::local("bar", 0, &id), tabs, &self.palette))
+            .child(tab_bar(
+                ElementId::local("bar", 0, &id),
+                tabs,
+                &self.palette,
+            ))
             .build()
     }
 
@@ -324,18 +356,23 @@ impl UiDemo {
 
         // Left: three big buttons with live click counts.
         let btn_labels = ["Primary Action", "Secondary", "Danger"];
-        let mut btn_col = ElementBuilder::container(ElementId::local("left", 0, &id))
-            .layout(LayoutInput {
+        let mut btn_col =
+            ElementBuilder::container(ElementId::local("left", 0, &id)).layout(LayoutInput {
                 width: LayoutSizing::Fixed(col_w),
-                height: LayoutSizing::Fit { min: 0.0, max: f32::INFINITY },
+                height: LayoutSizing::Fit {
+                    min: 0.0,
+                    max: f32::INFINITY,
+                },
                 direction: LayoutDirection::TopToBottom,
                 gap: 10.0,
                 ..LayoutInput::default()
             });
 
-        btn_col = btn_col.child(
-            label(ElementId::local("lbl", 0, &id), "Click any button:", &WidgetState::default()),
-        );
+        btn_col = btn_col.child(label(
+            ElementId::local("lbl", 0, &id),
+            "Click any button:",
+            &WidgetState::default(),
+        ));
 
         for (i, lbl) in btn_labels.iter().enumerate() {
             let bid = btn_id(i);
@@ -367,10 +404,13 @@ impl UiDemo {
         let cursor = self.hub.cursor_pos();
         let any_pressed = (0..3).any(|i| self.hub.widget_state(&btn_id(i)).pressed);
 
-        let mut right_col = ElementBuilder::container(ElementId::local("right", 0, &id))
-            .layout(LayoutInput {
+        let mut right_col =
+            ElementBuilder::container(ElementId::local("right", 0, &id)).layout(LayoutInput {
                 width: LayoutSizing::Fixed(col_w),
-                height: LayoutSizing::Fit { min: 0.0, max: f32::INFINITY },
+                height: LayoutSizing::Fit {
+                    min: 0.0,
+                    max: f32::INFINITY,
+                },
                 direction: LayoutDirection::TopToBottom,
                 gap: 8.0,
                 ..LayoutInput::default()
@@ -419,14 +459,16 @@ impl UiDemo {
 
         // Left: checkboxes + toggle.
         let cb_labels = ["Enable shadows", "Show wireframe", "V-Sync"];
-        let mut left = ElementBuilder::container(left_id.clone())
-            .layout(LayoutInput {
-                width: LayoutSizing::Fixed(col_w),
-                height: LayoutSizing::Fit { min: 0.0, max: f32::INFINITY },
-                direction: LayoutDirection::TopToBottom,
-                gap: 10.0,
-                ..LayoutInput::default()
-            });
+        let mut left = ElementBuilder::container(left_id.clone()).layout(LayoutInput {
+            width: LayoutSizing::Fixed(col_w),
+            height: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            direction: LayoutDirection::TopToBottom,
+            gap: 10.0,
+            ..LayoutInput::default()
+        });
 
         left = left.child(label(
             ElementId::local("clbl", 0, &left_id),
@@ -459,14 +501,16 @@ impl UiDemo {
 
         // Right: radio + slider.
         let radio_labels = ["Vulkan", "D3D12", "Metal"];
-        let mut right = ElementBuilder::container(right_id.clone())
-            .layout(LayoutInput {
-                width: LayoutSizing::Fixed(col_w),
-                height: LayoutSizing::Fit { min: 0.0, max: f32::INFINITY },
-                direction: LayoutDirection::TopToBottom,
-                gap: 10.0,
-                ..LayoutInput::default()
-            });
+        let mut right = ElementBuilder::container(right_id.clone()).layout(LayoutInput {
+            width: LayoutSizing::Fixed(col_w),
+            height: LayoutSizing::Fit {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
+            direction: LayoutDirection::TopToBottom,
+            gap: 10.0,
+            ..LayoutInput::default()
+        });
 
         right = right.child(label(
             ElementId::local("rlbl", 0, &right_id),
@@ -486,7 +530,10 @@ impl UiDemo {
         right = right.child(spacer(ElementId::local("sp", 0, &right_id), 8.0));
         right = right.child(label(
             ElementId::local("slbl", 0, &right_id),
-            format!("Slider — drag to change ({:.0}%)", self.slider_value * 100.0),
+            format!(
+                "Slider — drag to change ({:.0}%)",
+                self.slider_value * 100.0
+            ),
             &WidgetState::default(),
         ));
         right = right.child(slider(
@@ -513,14 +560,13 @@ impl UiDemo {
 
     fn build_list_tab(&self, id: ElementId, width: f32, height: f32) -> Element {
         let (selected_id, selected_sub) = LIST_ITEMS[self.list_selected];
-        let mut col = ElementBuilder::container(id.clone())
-            .layout(LayoutInput {
-                width: LayoutSizing::Fixed(width),
-                height: LayoutSizing::Fixed(height),
-                direction: LayoutDirection::TopToBottom,
-                gap: 12.0,
-                ..LayoutInput::default()
-            });
+        let mut col = ElementBuilder::container(id.clone()).layout(LayoutInput {
+            width: LayoutSizing::Fixed(width),
+            height: LayoutSizing::Fixed(height),
+            direction: LayoutDirection::TopToBottom,
+            gap: 12.0,
+            ..LayoutInput::default()
+        });
 
         col = col.child(label(
             ElementId::local("hint", 0, &id),
@@ -530,7 +576,8 @@ impl UiDemo {
 
         // Virtualised scrollable list.
         let list_viewport_h = (height - 60.0).max(40.0);
-        let config = VirtualListConfig::new(LIST_ITEMS.len(), 36.0, list_viewport_h, self.list_scroll);
+        let config =
+            VirtualListConfig::new(LIST_ITEMS.len(), 36.0, list_viewport_h, self.list_scroll);
         let layout = config.layout();
         let items: Vec<Element> = layout
             .visible_range
@@ -578,8 +625,7 @@ impl UiDemo {
                 .value(tab_names[self.active_tab]),
             StatusBarSectionSpec::new(ElementId::local("s1", 0, &id), "cursor")
                 .value(format!("({:.0}, {:.0})", cursor.x, cursor.y)),
-            StatusBarSectionSpec::new(ElementId::local("s2", 0, &id), "hovered")
-                .value(hovered),
+            StatusBarSectionSpec::new(ElementId::local("s2", 0, &id), "hovered").value(hovered),
         ];
 
         let mut sb = status_bar_with_palette(id, sections, &self.palette);
@@ -613,7 +659,8 @@ fn render_element(
             let r = element.style.corner_radius.x.max(0.0);
             if r > 0.0 {
                 overlay.filled_rounded_rect_screen(
-                    width, height,
+                    width,
+                    height,
                     [visible.origin.x, visible.origin.y],
                     [visible.size.width, visible.size.height],
                     r,
@@ -621,7 +668,8 @@ fn render_element(
                 );
             } else {
                 overlay.filled_rect_screen(
-                    width, height,
+                    width,
+                    height,
                     [visible.origin.x, visible.origin.y],
                     [visible.size.width, visible.size.height],
                     element.style.background.to_f32_array(),
@@ -634,7 +682,10 @@ fn render_element(
                 .font_size(text.style.font_size)
                 .line_height(text.style.line_height);
             let desc = TextDrawDesc::new(text.text.clone())
-                .placement(TextPlacement::Screen2d { x: rect.origin.x, y: rect.origin.y })
+                .placement(TextPlacement::Screen2d {
+                    x: rect.origin.x,
+                    y: rect.origin.y,
+                })
                 .typography(typo)
                 .color(text.style.color.to_f32_array());
             let desc = if text.style.wrap == TextWrap::Words {
@@ -661,7 +712,8 @@ fn render_element(
             };
             if ow > 0.0 {
                 overlay.rounded_rectangle_outline_screen(
-                    width, height,
+                    width,
+                    height,
                     [visible.origin.x, visible.origin.y],
                     [visible.size.width, visible.size.height],
                     element.style.corner_radius.x.max(0.0),
@@ -689,7 +741,10 @@ fn intersect(a: clay_ui::Rect, b: clay_ui::Rect) -> clay_ui::Rect {
 fn spacer(id: ElementId, h: f32) -> Element {
     ElementBuilder::container(id)
         .layout(LayoutInput {
-            width: LayoutSizing::Grow { min: 0.0, max: f32::INFINITY },
+            width: LayoutSizing::Grow {
+                min: 0.0,
+                max: f32::INFINITY,
+            },
             height: LayoutSizing::Fixed(h),
             ..LayoutInput::default()
         })

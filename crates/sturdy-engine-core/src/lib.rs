@@ -41,7 +41,7 @@ pub use binding::{
 pub use buffer::{BufferDesc, BufferUsage};
 pub use caps::Caps;
 pub use device::{Device, DeviceDesc, Frame, enumerate_adapters};
-pub use error::{Error, Result};
+pub use error::{Error, ErrorCategory, Result};
 pub use external_resource::{
     ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle,
     VulkanExternalBuffer, VulkanExternalImage,

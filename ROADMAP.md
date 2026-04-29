@@ -101,36 +101,36 @@ The engine should not crash for recoverable runtime, compositor, asset, input, a
 
 ### Findings from the current scan
 
-- [ ] Clean up Vulkan allocator panic paths in the backend allocator:
+- [x] Clean up Vulkan allocator panic paths in the backend allocator:
   - [x] Replace `expect("fresh block must fit")` with an allocator error that includes requested size, alignment, block capacity, and memory type.
   - [x] Replace `expect("allocation block_id not found in pool")` and `expect("no pool for allocation memory type")` with a structured allocator-corruption or invalid-allocation-handle error.
   - [x] Replace `position(...).unwrap()` and `last_mut().unwrap()` with `Entry`-style logic or explicit error returns.
   - [x] Make deallocation return `Result<()>` so bad allocator state can be reported instead of panicking inside cleanup.
-  - [ ] Keep debug assertions for impossible allocator invariants, but make release builds return errors with diagnostics.
-- [ ] Clean up Linux Wayland background-effect panic paths:
-  - [ ] Replace `expect("inserted state disappeared")` with `HashMap::entry` or a helper that returns `NativeWindowAppearanceError::ApplyFailed` if state creation fails.
-  - [ ] Treat missing Wayland globals, missing protocol capabilities, invalid foreign handles, and compositor refusal as degraded `WindowReconfigure` results, not crashes.
-  - [ ] Report the selected background-effect protocol and fallback reason in runtime diagnostics.
-- [ ] Clean up build-script panics in `sturdy-engine-ffi`:
-  - [ ] Keep header generation optional unless `STURDY_GENERATE_HEADER` explicitly requests it.
-  - [ ] When explicitly requested, fail with actionable diagnostics that mention `cbindgen`, output path, and the command that failed.
-  - [ ] Avoid panicking for workspace path assumptions; return a clear build error instead.
+  - [x] Keep debug assertions for impossible allocator invariants, but make release builds return errors with diagnostics.
+- [x] Clean up Linux Wayland background-effect panic paths:
+  - [x] Replace `expect("inserted state disappeared")` with `HashMap::entry` or a helper that returns `NativeWindowAppearanceError::ApplyFailed` if state creation fails.
+  - [x] Treat missing Wayland globals, missing protocol capabilities, invalid foreign handles, and compositor refusal as degraded `WindowReconfigure` results, not crashes.
+  - [x] Report the selected background-effect protocol and fallback reason in runtime diagnostics.
+- [x] Clean up build-script panics in `sturdy-engine-ffi`:
+  - [x] Keep header generation optional unless `STURDY_GENERATE_HEADER` explicitly requests it.
+  - [x] When explicitly requested, fail with actionable diagnostics that mention `cbindgen`, output path, and the command that failed.
+  - [x] Avoid panicking for workspace path assumptions; return a clear build error instead.
 - [ ] Separate policy for tests and examples:
   - [ ] Tests may unwrap fixture setup when the panic message documents the invariant being tested.
-  - [ ] Examples and testbed apps should show the engine's error-reporting path instead of crashing on common setup failures.
+  - [x] Examples and testbed apps should show the engine's error-reporting path instead of crashing on common setup failures.
   - [ ] Render-graph tests may keep assertion-oriented `expect` calls under `#[cfg(test)]`, but shared test helpers should carry good failure messages.
-- [ ] Audit raw-handle, foreign-object, and OS integration code for unchecked assumptions, because these are user-environment failures rather than engine invariants.
+- [x] Audit raw-handle, foreign-object, and OS integration code for unchecked assumptions, because these are user-environment failures rather than engine invariants.
 
 ### Robust error model
 
-- [ ] Add or standardize error categories for:
-  - [ ] `HardIncompatible`: cannot run the engine or backend at all.
-  - [ ] `Unsupported`: feature unavailable on the current platform/backend/compositor.
-  - [ ] `Degraded`: requested feature partially applied with a documented fallback.
-  - [ ] `InvalidInput`: app/user requested an impossible or malformed operation.
-  - [ ] `BackendFailure`: driver/API operation failed.
-  - [ ] `PlatformFailure`: OS/window/compositor operation failed.
-  - [ ] `ResourceStateCorruption`: engine internal state is inconsistent but can be reported before shutdown.
+- [x] Add or standardize error categories for:
+  - [x] `HardIncompatible`: cannot run the engine or backend at all.
+  - [x] `Unsupported`: feature unavailable on the current platform/backend/compositor.
+  - [x] `Degraded`: requested feature partially applied with a documented fallback.
+  - [x] `InvalidInput`: app/user requested an impossible or malformed operation.
+  - [x] `BackendFailure`: driver/API operation failed.
+  - [x] `PlatformFailure`: OS/window/compositor operation failed.
+  - [x] `ResourceStateCorruption`: engine internal state is inconsistent but can be reported before shutdown.
 - [ ] Attach enough context to errors to debug them without reproducing immediately: setting key, apply path, backend, platform, adapter, surface size, and relevant handles or resource names.
 - [ ] Add user-facing diagnostics for failures that app authors or users can fix, and keep internal cause chains for developers.
 - [ ] Make runtime setting application return exact, degraded, rejected, unavailable, or failed results instead of only `Ok` / `Err`.

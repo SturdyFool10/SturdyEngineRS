@@ -52,11 +52,16 @@ pub use antialiasing::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use application::{
     EngineApp, MotionVectorLayer, MotionVectorSpace, RuntimeMotionVectorDesc,
-    RuntimePostProcessDesc, RuntimePostProcessOutput, ShellFrame, WindowConfig, run,
+    RuntimePostProcessDesc, RuntimePostProcessOutput, ShellFrame, WindowConfig, run, try_run,
 };
 pub use bloom_pass::{
     BloomCompositeConstants, BloomConfig, BloomPass, BrightPassConstants, DownsampleConstants,
     UpsampleConstants,
+};
+pub use clay_ui::{
+    ClipSpace, Ndc, RenderTargetPx, SurfacePx, TexelPx, UiPx, Uv01, WindowLogicalPx,
+    WindowPhysicalPx, WorldSpace, logical_to_physical, physical_to_logical, render_target_to_uv,
+    surface_to_ndc, ui_to_surface, window_logical_to_surface, window_logical_to_ui,
 };
 pub use compute_program::ComputeProgram;
 pub use debug_draw_2d::{DebugDraw2d, DebugDrawStyle};
@@ -69,11 +74,6 @@ pub use device_manager::{AdapterEntry, DeviceManager};
 pub use gpu_procedural_texture::GpuProceduralTexture;
 pub use graph_frame::{FullscreenPassBuilder, GraphFrame, ImageNode};
 pub use hdr_pipeline::{HdrMode, HdrPipelineDesc, HdrPreference, ToneMappingOp};
-pub use clay_ui::{
-    ClipSpace, Ndc, RenderTargetPx, SurfacePx, TexelPx, UiPx, Uv01, WindowLogicalPx,
-    WindowPhysicalPx, WorldSpace, logical_to_physical, physical_to_logical, render_target_to_uv,
-    surface_to_ndc, ui_to_surface, window_logical_to_surface, window_logical_to_ui,
-};
 pub use input::{
     ActionBindingRegistry, ActionMap, BindingChange, InputHub, KeyInput, KeyInputState,
     KeyModifier, KeyModifiers, KeyToken, Keybind, KeybindCapture,
@@ -127,9 +127,9 @@ pub use sturdy_engine_core::{
     BufferDesc, BufferUsage, BufferUse, CanonicalBinding, CanonicalGroupLayout,
     CanonicalPipelineLayout, Caps, ColorTargetDesc, CompareOp, CompiledShaderArtifact,
     ComputePipelineDesc, CopyBufferToImageDesc, CopyImageToBufferDesc, CullMode,
-    D3d12RawCapabilities, DispatchDesc, DrawDesc, Error, Extent3d, ExternalBufferDesc,
-    ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode, Format,
-    FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc,
+    D3d12RawCapabilities, DispatchDesc, DrawDesc, Error, ErrorCategory, Extent3d,
+    ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode,
+    Format, FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc,
     ImageBuilder, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse, IndexBufferBinding,
     IndexFormat, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
     NativeHandleCapability, NativeHandleKind, NativeHandleOwnership, PassDesc, PassWork,
@@ -496,17 +496,14 @@ impl Engine {
         size: SurfaceSize,
         hdr: SurfaceHdrPreference,
     ) -> Result<Surface> {
-        use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
         let display = window
             .display_handle()
             .map_err(|e| Error::InvalidInput(e.to_string()))?;
         let window_handle = window
             .window_handle()
             .map_err(|e| Error::InvalidInput(e.to_string()))?;
-        // SAFETY: The window outlives the surface because both live in the same
-        // ShellApp struct and the surface is dropped before the window.
-        let raw_display: RawDisplayHandle = unsafe { std::mem::transmute_copy(&display) };
-        let raw_window: RawWindowHandle = unsafe { std::mem::transmute_copy(&window_handle) };
+        let raw_display = display.as_raw();
+        let raw_window = window_handle.as_raw();
         let mut desc = NativeSurfaceDesc::new(
             raw_display,
             raw_window,
