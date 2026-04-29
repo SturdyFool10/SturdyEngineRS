@@ -55,6 +55,12 @@ enum WaylandBackdropEffect {
     },
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum WaylandBackdropProtocol {
+    ExtBackground,
+    KdeBlur,
+}
+
 fn wayland_states() -> &'static Mutex<HashMap<usize, WaylandBackdropState>> {
     static STATES: OnceLock<Mutex<HashMap<usize, WaylandBackdropState>>> = OnceLock::new();
     STATES.get_or_init(|| Mutex::new(HashMap::new()))
@@ -74,12 +80,7 @@ pub fn apply(
     };
 
     let surface_key = window.surface.as_ptr() as usize;
-    let wants_blur = matches!(
-        appearance.backdrop,
-        WindowBackdrop::Blurred(_) | WindowBackdrop::Material(_)
-    );
-
-    if !wants_blur {
+    if !wants_native_blur(appearance) {
         disable_blur(surface_key)?;
         return Ok(());
     }
@@ -148,19 +149,41 @@ fn create_state(
     display: NonNull<std::ffi::c_void>,
     surface: NonNull<std::ffi::c_void>,
 ) -> Result<WaylandBackdropState, NativeWindowAppearanceError> {
-    match create_ext_background_state(display, surface) {
-        Ok(state) => Ok(state),
-        Err(ext_error) if ext_error.is_degraded() => {
-            match create_kde_blur_state(display, surface) {
-                Ok(state) => Ok(state),
-                Err(kde_error) if kde_error.is_degraded() => {
-                    Err(NativeWindowAppearanceError::Degraded(format!(
-                        "{ext_error}; KDE/KWin blur fallback also unavailable: {kde_error}"
-                    )))
-                }
-                Err(kde_error) => Err(kde_error),
+    choose_backdrop_protocol(
+        || {
+            create_ext_background_state(display, surface)
+                .map(|state| (WaylandBackdropProtocol::ExtBackground, state))
+        },
+        || {
+            create_kde_blur_state(display, surface)
+                .map(|state| (WaylandBackdropProtocol::KdeBlur, state))
+        },
+    )
+    .map(|(_, state)| state)
+}
+
+fn wants_native_blur(appearance: WindowAppearance) -> bool {
+    matches!(
+        appearance.backdrop,
+        WindowBackdrop::Blurred(_) | WindowBackdrop::Material(_)
+    )
+}
+
+fn choose_backdrop_protocol<T>(
+    try_ext: impl FnOnce() -> Result<(WaylandBackdropProtocol, T), NativeWindowAppearanceError>,
+    try_kde: impl FnOnce() -> Result<(WaylandBackdropProtocol, T), NativeWindowAppearanceError>,
+) -> Result<(WaylandBackdropProtocol, T), NativeWindowAppearanceError> {
+    match try_ext() {
+        Ok(result) => Ok(result),
+        Err(ext_error) if ext_error.is_degraded() => match try_kde() {
+            Ok(result) => Ok(result),
+            Err(kde_error) if kde_error.is_degraded() => {
+                Err(NativeWindowAppearanceError::Degraded(format!(
+                    "{ext_error}; KDE/KWin blur fallback also unavailable: {kde_error}"
+                )))
             }
-        }
+            Err(kde_error) => Err(kde_error),
+        },
         Err(error) => Err(error),
     }
 }
@@ -281,4 +304,99 @@ fn new_queue_handle(connection: &Connection) -> QueueHandle<WaylandDispatchState
     connection
         .new_event_queue::<WaylandDispatchState>()
         .handle()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{WindowAppearance, WindowAppearancePreset};
+
+    #[test]
+    fn protocol_selection_prefers_ext_background_effect() {
+        let mut kde_called = false;
+        let selected = choose_backdrop_protocol(
+            || Ok((WaylandBackdropProtocol::ExtBackground, "ext")),
+            || {
+                kde_called = true;
+                Ok((WaylandBackdropProtocol::KdeBlur, "kde"))
+            },
+        )
+        .expect("ext path should be selected");
+
+        assert_eq!(selected, (WaylandBackdropProtocol::ExtBackground, "ext"));
+        assert!(!kde_called);
+    }
+
+    #[test]
+    fn protocol_selection_uses_kde_when_ext_is_unavailable() {
+        let selected = choose_backdrop_protocol(
+            || Err(NativeWindowAppearanceError::Degraded("missing ext".into())),
+            || Ok((WaylandBackdropProtocol::KdeBlur, "kde")),
+        )
+        .expect("kde fallback should be selected");
+
+        assert_eq!(selected, (WaylandBackdropProtocol::KdeBlur, "kde"));
+    }
+
+    #[test]
+    fn protocol_selection_uses_kde_when_ext_setup_is_refused() {
+        let selected = choose_backdrop_protocol(
+            || Err(NativeWindowAppearanceError::Degraded("ext refused".into())),
+            || Ok((WaylandBackdropProtocol::KdeBlur, "kde")),
+        )
+        .expect("kde fallback should be selected after ext setup refusal");
+
+        assert_eq!(selected, (WaylandBackdropProtocol::KdeBlur, "kde"));
+    }
+
+    #[test]
+    fn protocol_selection_reports_no_supported_protocol() {
+        let err = choose_backdrop_protocol::<()>(
+            || Err(NativeWindowAppearanceError::Degraded("missing ext".into())),
+            || Err(NativeWindowAppearanceError::Degraded("missing kde".into())),
+        )
+        .expect_err("both missing protocols should degrade");
+
+        assert!(err.is_degraded());
+        let message = err.to_string();
+        assert!(message.contains("missing ext"));
+        assert!(message.contains("missing kde"));
+    }
+
+    #[test]
+    fn protocol_selection_does_not_fallback_after_hard_failure() {
+        let mut kde_called = false;
+        let err = choose_backdrop_protocol::<()>(
+            || {
+                Err(NativeWindowAppearanceError::ApplyFailed(
+                    "registry failed".into(),
+                ))
+            },
+            || {
+                kde_called = true;
+                Ok((WaylandBackdropProtocol::KdeBlur, ()))
+            },
+        )
+        .expect_err("hard ext failure should stop selection");
+
+        assert_eq!(
+            err,
+            NativeWindowAppearanceError::ApplyFailed("registry failed".into())
+        );
+        assert!(!kde_called);
+    }
+
+    #[test]
+    fn no_blur_appearances_skip_native_blur_protocols() {
+        assert!(!wants_native_blur(WindowAppearance::default()));
+        assert!(!wants_native_blur(WindowAppearance::from_preset(
+            WindowAppearancePreset::Transparent
+        )));
+        assert!(wants_native_blur(WindowAppearance::from_preset(
+            WindowAppearancePreset::Blur
+        )));
+        assert!(wants_native_blur(WindowAppearance::from_preset(
+            WindowAppearancePreset::ThinMaterial
+        )));
+    }
 }

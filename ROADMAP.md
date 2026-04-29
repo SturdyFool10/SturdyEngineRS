@@ -611,7 +611,7 @@ If a roadmap item is still too large for one prompt, split it again until the pr
 - [x] `P0.R5` Move Linux Wayland background-effect internals under `platform/linux/wayland/background_effect` and keep `linux/mod.rs` as a thin adapter.
 - [x] `P0.R6` Add KDE/KWin blur fallback support behind the Linux platform adapter, with ext-background-effect-v1 preferred when available.
 - [ ] `P0.R7` Add platform capability queries and degraded apply results so engine/runtime code never matches on Linux/Windows/macOS compositor details directly.
-- [ ] `P0.R8` Add tests or validation harnesses for no-protocol, ext-only, KDE-only, ext-to-KDE fallback, and no-blur fallback paths.
+- [x] `P0.R8` Add tests or validation harnesses for no-protocol, ext-only, KDE-only, ext-to-KDE fallback, and no-blur fallback paths.
 
 
 
