@@ -5,7 +5,10 @@ use sturdy_engine_core::{
     PassWork, QueueType, RgState, SubresourceRange,
 };
 
-use crate::{Buffer, BufferDesc, BufferUsage, Engine, Format, Frame, ImageRef, Result};
+use crate::{
+    Buffer, BufferDesc, BufferUsage, Engine, Format, Frame, FrameSyncReason, FrameSyncReport,
+    ImageRef, Result,
+};
 
 /// Captures a GPU image to a CPU-readable buffer and optionally saves it to disk.
 ///
@@ -15,8 +18,7 @@ use crate::{Buffer, BufferDesc, BufferUsage, Engine, Format, Frame, ImageRef, Re
 /// // At frame-record time (before flush/wait):
 /// let capture = ScreenshotCapture::new(&engine, width, height, format)?;
 /// capture.record_readback(&mut frame, &scene_color_image)?;
-/// frame.flush()?;
-/// frame.wait()?;
+/// capture.finish_readback(&mut frame)?;
 ///
 /// // After wait — the buffer is ready on CPU:
 /// capture.save_png("screenshot.png")?;
@@ -51,8 +53,8 @@ impl ScreenshotCapture {
 
     /// Add a GPU image-to-buffer copy pass to `frame`.
     ///
-    /// Call this while recording the frame, then `flush()` and `wait()` before
-    /// reading pixels or saving.
+    /// Call this while recording the frame, then
+    /// [`finish_readback`](Self::finish_readback) before reading pixels or saving.
     pub fn record_readback(&self, frame: &mut Frame, source: &impl ImageRef) -> Result<()> {
         let image_handle: ImageHandle = source.image_handle();
         let buffer_handle: BufferHandle = self.buffer.handle();
@@ -94,9 +96,19 @@ impl ScreenshotCapture {
         })
     }
 
+    /// Submit the recorded readback work and wait until the CPU buffer is ready.
+    ///
+    /// This is an explicit blocking API for screenshot/readback use cases and
+    /// reports `FrameSyncReason::ReadbackCompletion` for both the submit and wait.
+    pub fn finish_readback(&self, frame: &mut Frame) -> Result<(FrameSyncReport, FrameSyncReport)> {
+        let flush = frame.flush_with_reason(FrameSyncReason::ReadbackCompletion)?;
+        let wait = frame.wait_with_reason(FrameSyncReason::ReadbackCompletion)?;
+        Ok((flush, wait))
+    }
+
     /// Read the captured pixels back to the CPU as raw bytes.
     ///
-    /// Must be called after `frame.flush()` and `frame.wait()`.
+    /// Must be called after [`finish_readback`](Self::finish_readback).
     /// The returned bytes are in the native format of the source image.
     pub fn read_raw_pixels(&self) -> Result<Vec<u8>> {
         let size = self.buffer.desc().size as usize;
@@ -116,7 +128,7 @@ impl ScreenshotCapture {
 
     /// Save the captured image as a PNG file at `path`.
     ///
-    /// Must be called after `frame.flush()` and `frame.wait()`.
+    /// Must be called after [`finish_readback`](Self::finish_readback).
     pub fn save_png(&self, path: impl AsRef<Path>) -> Result<()> {
         let pixels = self.read_rgba8_pixels()?;
         write_png(path.as_ref(), self.width, self.height, &pixels)

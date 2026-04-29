@@ -160,7 +160,7 @@ Runtime content should behave like the rest of the engine: app code queues inten
   - [ ] Rust `include_bytes!` assets.
   - [ ] Rust `include_str!` Slang shader source.
   - [ ] Browser/WebAssembly fetch/package sources for the future WebGPU target.
-- [ ] Extract embedded Slang shader source strings from `text_overlay` and other Rust modules into `.slang` files, then load them with `include_str!` so shader code lives in shader assets instead of inline Rust literals.
+- [x] Extract embedded Slang shader source strings from `text_overlay` and other Rust modules into `.slang` files, then load them with `include_str!` so shader code lives in shader assets instead of inline Rust literals.
 - [ ] Add OS-specific high-performance I/O adapters behind the platform layer instead of baking them into engine/render code:
   - [ ] Linux: prefer `io_uring` when available and safe, fall back to a blocking I/O thread pool using `pread`/normal file APIs.
   - [ ] Windows: prefer DirectStorage where it fits the Vulkan asset pipeline, fall back to overlapped/thread-pool file I/O.
@@ -188,6 +188,7 @@ Runtime content should behave like the rest of the engine: app code queues inten
 - [ ] Add asset lifetime and eviction rules that cooperate with frames-in-flight, deferred destruction, hot reload, and render graph resource aliases.
 - [ ] Add asset streaming diagnostics: selected I/O backend, queue depth, bytes/sec, decode time, transcode time, upload bytes/frame, upload stalls avoided, residency budget, evictions, failures, and shader compile latency.
 - [ ] Add explicit blocking APIs only for app-requested cases like loading screens, tests, screenshots/readbacks, editor import steps, or shutdown; they must report exactly what they waited on.
+  - [x] Route screenshot/readback completion through an explicit `ReadbackCompletion` sync helper that reports the submit and wait.
 
 ### Runtime Slang shader compilation rules
 

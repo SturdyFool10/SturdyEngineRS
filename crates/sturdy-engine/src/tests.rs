@@ -684,6 +684,20 @@ fn explicit_sync_reports_submission_and_wait_reason() {
 }
 
 #[test]
+fn screenshot_readback_reports_explicit_blocking_reason() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let mut frame = engine.begin_frame().unwrap();
+    let capture = ScreenshotCapture::new(&engine, 1, 1, Format::Rgba8Unorm).unwrap();
+
+    let (flush_report, wait_report) = capture.finish_readback(&mut frame).unwrap();
+
+    assert_eq!(flush_report.reason, FrameSyncReason::ReadbackCompletion);
+    assert_eq!(wait_report.reason, FrameSyncReason::ReadbackCompletion);
+    assert!(flush_report.submitted);
+    assert!(wait_report.waited);
+}
+
+#[test]
 fn consecutive_flushes_succeed() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     for _ in 0..3 {
