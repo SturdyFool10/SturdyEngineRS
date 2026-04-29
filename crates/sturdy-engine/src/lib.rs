@@ -95,8 +95,8 @@ pub use runtime::{
     RuntimePassTiming, RuntimeSettingChange, RuntimeSettingDescriptor, RuntimeSettingEntry,
     RuntimeSettingId, RuntimeSettingKey, RuntimeSettingOption, RuntimeSettingSource,
     RuntimeSettingSupport, RuntimeSettingValue, RuntimeSettingsSnapshot,
-    RuntimeSettingsTransaction, RuntimeTimingSummary, RuntimeUserDiagnostic, SceneRenderContext,
-    ShaderCompileError, UiContext, WindowMode,
+    RuntimeSettingsTransaction, RuntimeTimingSummary, RuntimeUserDiagnostic,
+    RuntimeWindowDiagnostics, SceneRenderContext, ShaderCompileError, UiContext, WindowMode,
 };
 pub use sampler_catalog::SamplerPreset;
 pub use screenshot::ScreenshotCapture;

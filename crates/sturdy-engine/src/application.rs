@@ -48,7 +48,10 @@
 //! }
 //! ```
 
-use std::{collections::VecDeque, time::Instant};
+use std::{
+    collections::{HashMap, VecDeque},
+    time::Instant,
+};
 
 use sturdy_engine_core::SurfaceSize;
 
@@ -57,11 +60,11 @@ use crate::{
     DefaultSceneTargetConfig, DiagnosticLevel, Engine, GraphImage, KeyInput, KeyModifiers,
     MotionVectorDebugPass, NativeWindowAppearanceApplyReport, Result as EngineResult,
     RuntimeController, RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimeSettingChange,
-    RuntimeSettingId, RuntimeSettingKey, RuntimeUserDiagnostic, ShaderProgram, Surface,
-    SurfaceHdrPreference, SurfaceImage, SurfacePresentMode, SurfaceRecreateDesc,
-    SurfaceTransparency, WindowAppearance, WindowAppearancePreset, WindowBackdrop,
-    WindowCornerStyle, WindowHandle, WindowMaterialKind, WindowMode, WindowRegistry,
-    WindowTransparencyDesc, appearance_wants_native_blur,
+    RuntimeSettingId, RuntimeSettingKey, RuntimeUserDiagnostic, RuntimeWindowDiagnostics,
+    ShaderProgram, Surface, SurfaceHdrPreference, SurfaceImage, SurfacePresentMode,
+    SurfaceRecreateDesc, SurfaceTransparency, WindowAppearance, WindowAppearancePreset,
+    WindowBackdrop, WindowCornerStyle, WindowHandle, WindowMaterialKind, WindowMode,
+    WindowRegistry, WindowTransparencyDesc, appearance_wants_native_blur,
     apply_native_window_appearance_report_for_window, current_platform,
 };
 
@@ -653,6 +656,22 @@ impl<'a> ShellFrame<'a> {
                     .unwrap_or("unpublished")
             ),
             format!(
+                "windows: live={} focused={} hovered={} dirty={} surface-wait={}",
+                diagnostics.windows.live_count,
+                diagnostics
+                    .windows
+                    .focused_window
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                diagnostics
+                    .windows
+                    .hovered_window
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                diagnostics.windows.dirty_count,
+                diagnostics.windows.waiting_for_surface_recreation_count,
+            ),
+            format!(
                 "runtime setting apply: {}",
                 diagnostics
                     .runtime_setting_apply
@@ -972,21 +991,28 @@ where
     ));
 
     let mut windows = WindowRegistry::new();
-    let primary_window = windows.insert(window);
+    let primary_window = windows.insert(ShellWindow::new(
+        window,
+        config.appearance,
+        native_appearance_report.clone(),
+    ));
+    let mut winit_windows = HashMap::new();
+    if let Some(window) = windows.get(primary_window) {
+        winit_windows.insert(window.window().id(), primary_window);
+    }
 
     // Run event loop
     event_loop
         .run_app(&mut ShellApp {
             runtime,
             windows,
+            winit_windows,
             primary_window,
             app_state,
             modifiers: KeyModifiers::default(),
             applied_settings_revision: 0,
             started_at: Instant::now(),
             _config: config,
-            cursor_pos: clay_ui::WindowLogicalPx::ZERO,
-            primary_held: false,
         })
         .map_err(|error| format!("event loop exited unexpectedly: {error}"))
 }
@@ -995,7 +1021,8 @@ where
 #[cfg(not(target_arch = "wasm32"))]
 struct ShellApp<App: EngineApp> {
     runtime: AppRuntime,
-    windows: WindowRegistry<winit::window::Window>,
+    windows: WindowRegistry<ShellWindow>,
+    winit_windows: HashMap<winit::window::WindowId, WindowHandle>,
     primary_window: WindowHandle,
     app_state: App,
     modifiers: KeyModifiers,
@@ -1003,8 +1030,6 @@ struct ShellApp<App: EngineApp> {
     #[allow(dead_code)]
     started_at: Instant,
     _config: WindowConfig,
-    cursor_pos: clay_ui::WindowLogicalPx,
-    primary_held: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1017,6 +1042,7 @@ where
         _event_loop: &winit::event_loop::ActiveEventLoop,
         _cause: winit::event::StartCause,
     ) {
+        self.publish_window_diagnostics();
         if let Err(e) = self.apply_pending_runtime_settings() {
             eprintln!("runtime settings apply failed: {e:?}");
             std::process::exit(1);
@@ -1025,57 +1051,299 @@ where
 
     fn resumed(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
         // Window already created
-        if let Some(window) = self.primary_window() {
-            window.request_redraw();
-        }
+        self.request_redraw_for_window(self.primary_window);
     }
 
     fn window_event(
         &mut self,
         _event_loop: &winit::event_loop::ActiveEventLoop,
-        _window_id: winit::window::WindowId,
+        window_id: winit::window::WindowId,
         event: winit::event::WindowEvent,
     ) {
-        match event {
-            winit::event::WindowEvent::CloseRequested => {
-                std::process::exit(0);
+        let Some(window) = self.window_handle_for_winit_id(window_id) else {
+            return;
+        };
+        self.dispatch_window_event(ShellWindowEvent { window, event });
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
+        self.request_redraw_for_window(self.primary_window);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct ShellWindowEvent {
+    window: WindowHandle,
+    event: winit::event::WindowEvent,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShellWindowCloseAction {
+    ExitApplication,
+    RemoveWindow(WindowHandle),
+    IgnoreUnknown,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct SafeAreaInsets {
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug)]
+struct ShellWindowState {
+    scale_factor: f64,
+    surface_size: SurfaceSize,
+    safe_area: SafeAreaInsets,
+    cursor_pos: clay_ui::WindowLogicalPx,
+    primary_held: bool,
+    focused: bool,
+    hovered: bool,
+    dirty: bool,
+    waiting_for_surface_recreation: bool,
+    appearance: WindowAppearance,
+    native_appearance_report: NativeWindowAppearanceApplyReport,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct ShellWindow {
+    window: winit::window::Window,
+    state: ShellWindowState,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ShellWindow {
+    fn new(
+        window: winit::window::Window,
+        appearance: WindowAppearance,
+        native_appearance_report: NativeWindowAppearanceApplyReport,
+    ) -> Self {
+        let size = window.inner_size();
+        let state = ShellWindowState {
+            scale_factor: window.scale_factor(),
+            surface_size: SurfaceSize {
+                width: size.width.max(1),
+                height: size.height.max(1),
+            },
+            safe_area: SafeAreaInsets::default(),
+            cursor_pos: clay_ui::WindowLogicalPx::ZERO,
+            primary_held: false,
+            focused: false,
+            hovered: false,
+            dirty: true,
+            waiting_for_surface_recreation: false,
+            appearance,
+            native_appearance_report,
+        };
+        Self { window, state }
+    }
+
+    fn window(&self) -> &winit::window::Window {
+        &self.window
+    }
+
+    fn state(&self) -> &ShellWindowState {
+        &self.state
+    }
+
+    fn state_mut(&mut self) -> &mut ShellWindowState {
+        &mut self.state
+    }
+
+    fn refresh_surface_state(&mut self) {
+        let size = self.window.inner_size();
+        self.state.scale_factor = self.window.scale_factor();
+        self.state.surface_size = SurfaceSize {
+            width: size.width.max(1),
+            height: size.height.max(1),
+        };
+        self.state.dirty = true;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<App: EngineApp> ShellApp<App>
+where
+    App::Error: std::fmt::Debug,
+{
+    fn primary_window(&self) -> Option<&winit::window::Window> {
+        self.windows
+            .get(self.primary_window)
+            .map(ShellWindow::window)
+    }
+
+    fn window_for_handle(&self, handle: WindowHandle) -> Option<&winit::window::Window> {
+        self.windows.get(handle).map(ShellWindow::window)
+    }
+
+    fn window_state_for_handle(&self, handle: WindowHandle) -> Option<&ShellWindowState> {
+        self.windows.get(handle).map(ShellWindow::state)
+    }
+
+    fn window_context_for_handle_mut(&mut self, handle: WindowHandle) -> Option<&mut ShellWindow> {
+        self.windows.get_mut(handle)
+    }
+
+    fn close_action_for_window(&self, handle: WindowHandle) -> ShellWindowCloseAction {
+        close_action_for_window(self.primary_window, self.windows.contains(handle), handle)
+    }
+
+    fn close_non_primary_window(&mut self, handle: WindowHandle) {
+        if handle == self.primary_window {
+            return;
+        }
+        let Some(winit_id) = self.windows.get(handle).map(|window| window.window().id()) else {
+            return;
+        };
+        self.windows.remove(handle);
+        self.winit_windows.remove(&winit_id);
+        self.publish_window_diagnostics();
+    }
+
+    fn request_redraw_for_window(&mut self, handle: WindowHandle) {
+        if let Some(window) = self.window_context_for_handle_mut(handle) {
+            window.state_mut().dirty = true;
+            window.window().request_redraw();
+        }
+    }
+
+    fn publish_window_diagnostics(&self) {
+        let windows = self.window_diagnostics();
+        self.runtime.controller().update_diagnostics(|diagnostics| {
+            diagnostics.windows = windows;
+        });
+    }
+
+    fn window_diagnostics(&self) -> RuntimeWindowDiagnostics {
+        let mut diagnostics = RuntimeWindowDiagnostics {
+            live_count: self.windows.live_count(),
+            ..RuntimeWindowDiagnostics::default()
+        };
+        for (handle, window) in self.windows.iter() {
+            let state = window.state();
+            let id = handle.id().raw();
+            if state.focused {
+                diagnostics.focused_window = Some(id);
             }
-            winit::event::WindowEvent::Resized(size) => {
+            if state.hovered {
+                diagnostics.hovered_window = Some(id);
+            }
+            if state.dirty {
+                diagnostics.dirty_count += 1;
+            }
+            if state.waiting_for_surface_recreation {
+                diagnostics.waiting_for_surface_recreation_count += 1;
+            }
+        }
+        diagnostics
+    }
+
+    fn window_handle_for_winit_id(
+        &self,
+        window_id: winit::window::WindowId,
+    ) -> Option<WindowHandle> {
+        self.winit_windows.get(&window_id).copied()
+    }
+
+    fn dispatch_window_event(&mut self, event: ShellWindowEvent) {
+        let window_handle = event.window;
+        match event {
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::CloseRequested,
+                ..
+            } => match self.close_action_for_window(window_handle) {
+                ShellWindowCloseAction::ExitApplication => {
+                    std::process::exit(0);
+                }
+                ShellWindowCloseAction::RemoveWindow(window) => {
+                    self.close_non_primary_window(window);
+                }
+                ShellWindowCloseAction::IgnoreUnknown => {}
+            },
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::Resized(size),
+                ..
+            } => {
                 if size.width > 0 && size.height > 0 {
+                    if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                        window.refresh_surface_state();
+                    }
                     if let Err(e) = self.app_state.resize(size.width, size.height) {
                         eprintln!("resize failed: {e:?}");
                         std::process::exit(1);
                     }
-                    if let Err(e) = self.runtime.surface_mut().resize(SurfaceSize {
+                    let resize_result = self.runtime.surface_mut().resize(SurfaceSize {
                         width: size.width.max(1),
                         height: size.height.max(1),
-                    }) {
+                    });
+                    if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                        window.state_mut().waiting_for_surface_recreation = resize_result.is_err();
+                    }
+                    if let Err(e) = resize_result {
                         eprintln!("surface resize failed: {e:?}");
                     }
-                    if let Some(window) = self.primary_window() {
+                    if let Some(window) = self.window_for_handle(window_handle) {
                         let snapshot = window_settings_snapshot(
                             window,
                             &self._config,
                             self.runtime.controller(),
                         );
                         self.runtime.controller().set_settings(snapshot);
-                        apply_window_appearance_from_settings(window, self.runtime.controller());
-                        window.request_redraw();
+                        let native_appearance_report = apply_window_appearance_from_settings(
+                            window,
+                            self.runtime.controller(),
+                        );
+                        let appearance = window_appearance_from_settings(self.runtime.controller());
+                        if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                            window.state_mut().appearance = appearance;
+                            window.state_mut().native_appearance_report = native_appearance_report;
+                        }
+                        self.request_redraw_for_window(window_handle);
                     }
                 }
             }
-            winit::event::WindowEvent::Moved(position) => {
-                if let Some(window) = self.primary_window() {
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::ScaleFactorChanged { .. },
+                ..
+            } => {
+                if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                    window.refresh_surface_state();
+                }
+            }
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::Focused(focused),
+                ..
+            } => {
+                if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                    window.state_mut().focused = focused;
+                }
+            }
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::Moved(position),
+                ..
+            } => {
+                if let Some(window) = self.window_for_handle(window_handle) {
                     let mut snapshot =
                         window_settings_snapshot(window, &self._config, self.runtime.controller());
                     snapshot.window_position = Some((position.x, position.y));
                     self.runtime.controller().set_settings(snapshot);
                 }
             }
-            winit::event::WindowEvent::ModifiersChanged(modifiers) => {
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::ModifiersChanged(modifiers),
+                ..
+            } => {
                 self.modifiers = crate::input::key_modifiers_from_winit(modifiers.state());
             }
-            winit::event::WindowEvent::KeyboardInput { event, .. } => {
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::KeyboardInput { event, .. },
+                ..
+            } => {
                 use winit::event::ElementState;
                 use winit::keyboard::Key;
                 if let Some(input) = crate::input::KeyInput::from_winit(&event, self.modifiers) {
@@ -1101,12 +1369,18 @@ where
                     }
                 }
             }
-            winit::event::WindowEvent::CursorMoved { position, .. } => {
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::CursorMoved { position, .. },
+                ..
+            } => {
                 // winit CursorMoved delivers top-left/Y-down physical pixels.
                 // Keep shell UI input in the same space as the surface/debug
                 // overlay so hit testing and displayed geometry share one rect.
                 let pos = clay_ui::WindowLogicalPx::new(position.x as f32, position.y as f32);
-                self.cursor_pos = pos;
+                if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                    window.state_mut().cursor_pos = pos;
+                    window.state_mut().hovered = true;
+                }
                 if let Some(hub) = self.app_state.input_hub() {
                     hub.on_pointer_moved(pos);
                 } else if let Err(e) = self
@@ -1117,7 +1391,19 @@ where
                     std::process::exit(1);
                 }
             }
-            winit::event::WindowEvent::MouseInput { state, button, .. } => {
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::CursorLeft { .. },
+                ..
+            } => {
+                if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                    window.state_mut().hovered = false;
+                    window.state_mut().primary_held = false;
+                }
+            }
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::MouseInput { state, button, .. },
+                ..
+            } => {
                 use winit::event::{ElementState, MouseButton};
                 let btn: u8 = match button {
                     MouseButton::Left => 0,
@@ -1126,10 +1412,14 @@ where
                     _ => 3,
                 };
                 let pressed = state == ElementState::Pressed;
-                if btn == 0 {
-                    self.primary_held = pressed;
-                }
-                let pos = self.cursor_pos;
+                let pos = if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                    if btn == 0 {
+                        window.state_mut().primary_held = pressed;
+                    }
+                    window.state().cursor_pos
+                } else {
+                    clay_ui::WindowLogicalPx::ZERO
+                };
                 if let Some(hub) = self.app_state.input_hub() {
                     hub.on_pointer_button(pos, btn, pressed);
                 } else if let Err(e) =
@@ -1140,13 +1430,19 @@ where
                     std::process::exit(1);
                 }
             }
-            winit::event::WindowEvent::MouseWheel { delta, .. } => {
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::MouseWheel { delta, .. },
+                ..
+            } => {
                 use winit::event::MouseScrollDelta;
                 let (dx, dy) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (x * 20.0, -y * 20.0),
                     MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
                 };
-                let pos = self.cursor_pos;
+                let pos = self
+                    .window_state_for_handle(window_handle)
+                    .map(|state| state.cursor_pos)
+                    .unwrap_or(clay_ui::WindowLogicalPx::ZERO);
                 if let Some(hub) = self.app_state.input_hub() {
                     hub.on_pointer_scroll(dx, dy);
                 } else if let Err(e) =
@@ -1157,16 +1453,22 @@ where
                     std::process::exit(1);
                 }
             }
-            winit::event::WindowEvent::RedrawRequested => {
-                let (window_scale_factor, window_logical_size) =
-                    if let Some(window) = self.primary_window() {
-                        let size = window.inner_size();
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::RedrawRequested,
+                ..
+            } => {
+                let (window_scale_factor, window_logical_size, _window_safe_area) =
+                    if let Some(state) = self.window_state_for_handle(window_handle) {
                         (
-                            window.scale_factor() as f32,
-                            Some([size.width as f32, size.height as f32]),
+                            state.scale_factor as f32,
+                            Some([
+                                state.surface_size.width as f32,
+                                state.surface_size.height as f32,
+                            ]),
+                            state.safe_area,
                         )
                     } else {
-                        (1.0, None)
+                        (1.0, None, SafeAreaInsets::default())
                     };
                 let mut runtime_frame = match self.runtime.acquire_frame() {
                     Ok(frame) => frame,
@@ -1196,28 +1498,14 @@ where
                     std::process::exit(1);
                 }
 
-                if let Some(window) = self.primary_window() {
-                    window.request_redraw();
+                if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                    window.state_mut().dirty = false;
                 }
+                self.request_redraw_for_window(window_handle);
             }
             _ => {}
         }
-    }
-
-    fn about_to_wait(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
-        if let Some(window) = self.primary_window() {
-            window.request_redraw();
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl<App: EngineApp> ShellApp<App>
-where
-    App::Error: std::fmt::Debug,
-{
-    fn primary_window(&self) -> Option<&winit::window::Window> {
-        self.windows.get(self.primary_window)
+        self.publish_window_diagnostics();
     }
 
     fn apply_pending_runtime_settings(&mut self) -> Result<(), App::Error> {
@@ -1259,11 +1547,17 @@ where
             )
         });
         if affects_native_window {
-            if let Some(window) = self.primary_window() {
-                apply_window_appearance_from_settings(window, controller);
+            if let Some(window) = self.window_for_handle(self.primary_window) {
+                let native_appearance_report =
+                    apply_window_appearance_from_settings(window, controller);
+                let appearance = window_appearance_from_settings(controller);
                 let snapshot =
                     window_settings_snapshot(window, &self._config, self.runtime.controller());
                 self.runtime.controller().set_settings(snapshot);
+                if let Some(window) = self.window_context_for_handle_mut(self.primary_window) {
+                    window.state_mut().appearance = appearance;
+                    window.state_mut().native_appearance_report = native_appearance_report;
+                }
             }
         }
 
@@ -1297,6 +1591,9 @@ where
         let transparent = controller.bool_setting(RuntimeSettingKey::SurfaceTransparency);
 
         let surface_size = self.runtime.surface().size();
+        if let Some(window) = self.window_context_for_handle_mut(self.primary_window) {
+            window.state_mut().waiting_for_surface_recreation = true;
+        }
         if let Err(e) = self.runtime.surface_mut().recreate(SurfaceRecreateDesc {
             size: Some(surface_size),
             transparent,
@@ -1326,6 +1623,9 @@ where
                 e.category()
             );
             std::process::exit(1);
+        }
+        if let Some(window) = self.window_context_for_handle_mut(self.primary_window) {
+            window.state_mut().waiting_for_surface_recreation = false;
         }
         let context = runtime_setting_apply_context(controller, changes, surface_size, "applied");
         self.runtime.controller().update_diagnostics(|diagnostics| {
@@ -1371,6 +1671,21 @@ fn parse_present_mode_setting(value: &str) -> Option<SurfacePresentMode> {
         "Immediate" => Some(SurfacePresentMode::Immediate),
         "RelaxedFifo" => Some(SurfacePresentMode::RelaxedFifo),
         _ => None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn close_action_for_window(
+    primary_window: WindowHandle,
+    window_known: bool,
+    requested_window: WindowHandle,
+) -> ShellWindowCloseAction {
+    if !window_known {
+        ShellWindowCloseAction::IgnoreUnknown
+    } else if requested_window == primary_window {
+        ShellWindowCloseAction::ExitApplication
+    } else {
+        ShellWindowCloseAction::RemoveWindow(requested_window)
     }
 }
 
@@ -1518,7 +1833,7 @@ fn seed_window_settings(
 fn apply_window_appearance_from_settings(
     window: &winit::window::Window,
     controller: &RuntimeController,
-) {
+) -> NativeWindowAppearanceApplyReport {
     let appearance = window_appearance_from_settings(controller);
     let wants_transparency = appearance.transparency == SurfaceTransparency::Enabled;
 
@@ -1556,6 +1871,7 @@ fn apply_window_appearance_from_settings(
     controller.update_diagnostics(|diagnostics| {
         diagnostics.native_window_appearance = Some(native_report.diagnostic_string());
     });
+    native_report
 }
 
 fn window_appearance_from_settings(controller: &RuntimeController) -> WindowAppearance {
@@ -1857,5 +2173,44 @@ mod tests {
             Some(ShellEventLoopCommand::CreateWindow(second))
         );
         assert_eq!(queue.pop_front(), None);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn close_action_exits_for_primary_window() {
+        let mut windows = WindowRegistry::new();
+        let primary = windows.insert("primary");
+
+        assert_eq!(
+            close_action_for_window(primary, windows.contains(primary), primary),
+            ShellWindowCloseAction::ExitApplication
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn close_action_removes_non_primary_window() {
+        let mut windows = WindowRegistry::new();
+        let primary = windows.insert("primary");
+        let secondary = windows.insert("secondary");
+
+        assert_eq!(
+            close_action_for_window(primary, windows.contains(secondary), secondary),
+            ShellWindowCloseAction::RemoveWindow(secondary)
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn close_action_ignores_unknown_window() {
+        let mut windows = WindowRegistry::new();
+        let primary = windows.insert("primary");
+        let stale = windows.insert("stale");
+        assert_eq!(windows.remove(stale), Some("stale"));
+
+        assert_eq!(
+            close_action_for_window(primary, windows.contains(stale), stale),
+            ShellWindowCloseAction::IgnoreUnknown
+        );
     }
 }

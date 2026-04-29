@@ -794,6 +794,7 @@ pub struct RuntimeDiagnostics {
     pub motion_validation: Option<String>,
     pub motion_warning: Option<String>,
     pub native_window_appearance: Option<String>,
+    pub windows: RuntimeWindowDiagnostics,
     pub runtime_setting_apply: Option<String>,
     pub frame_sync: Option<String>,
     pub user_diagnostics: Vec<RuntimeUserDiagnostic>,
@@ -805,6 +806,15 @@ pub struct RuntimeDiagnostics {
     pub shader_compile_errors: Vec<ShaderCompileError>,
     /// Asset paths that are missing or stale, surfaced via `RuntimeController::report_asset_state`.
     pub asset_diagnostics: Vec<AssetDiagnostic>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeWindowDiagnostics {
+    pub live_count: usize,
+    pub focused_window: Option<u64>,
+    pub hovered_window: Option<u64>,
+    pub dirty_count: usize,
+    pub waiting_for_surface_recreation_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -102,6 +102,20 @@ impl<T> WindowRegistry<T> {
         self.get(handle).is_some()
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (WindowHandle, &T)> {
+        self.slots.iter().enumerate().filter_map(|(index, slot)| {
+            slot.value.as_ref().map(|value| {
+                (
+                    WindowHandle {
+                        id: WindowId(index as u64),
+                        generation: slot.generation,
+                    },
+                    value,
+                )
+            })
+        })
+    }
+
     pub fn live_count(&self) -> usize {
         self.slots
             .iter()
@@ -147,5 +161,17 @@ mod tests {
 
         assert_eq!(registry.remove(old), None);
         assert_eq!(registry.get(new), Some(&2));
+    }
+
+    #[test]
+    fn iter_returns_live_handles() {
+        let mut registry = WindowRegistry::new();
+        let removed = registry.insert("removed");
+        let live = registry.insert("live");
+        assert_eq!(registry.remove(removed), Some("removed"));
+
+        let entries = registry.iter().collect::<Vec<_>>();
+
+        assert_eq!(entries, vec![(live, &"live")]);
     }
 }

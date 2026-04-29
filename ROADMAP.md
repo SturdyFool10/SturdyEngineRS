@@ -621,10 +621,10 @@ If a roadmap item is still too large for one prompt, split it again until the pr
 - [x] Add `WindowHandle` with generation checks so stale handles cannot silently target a newly-created window.
 - [x] Add `WindowDesc` and route window creation through the runtime/event-loop command queue.
 - [x] Create a default primary window through the same code path used for every later spawned window.
-- [ ] Route native `WindowEvent`s into per-window engine events before input/UI/app dispatch.
-- [ ] Store per-window DPI scale, surface size, safe area, cursor state, focus state, and compositor-effect state.
-- [ ] Update the app shell so closing one non-primary window tears down only that window's UI/surface/swapchain state.
-- [ ] Add diagnostics for live window count, focused window, hovered window, dirty windows, and windows waiting for surface recreation.
+- [x] Route native `WindowEvent`s into per-window engine events before input/UI/app dispatch.
+- [x] Store per-window DPI scale, surface size, safe area, cursor state, focus state, and compositor-effect state.
+- [x] Update the app shell so closing one non-primary window tears down only that window's UI/surface/swapchain state.
+- [x] Add diagnostics for live window count, focused window, hovered window, dirty windows, and windows waiting for surface recreation.
 
 ### Runtime settings and no-restart architecture
 
