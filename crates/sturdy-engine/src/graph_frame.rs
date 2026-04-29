@@ -284,8 +284,22 @@ impl GraphFrame {
         self.frame.flush()
     }
 
+    pub fn flush_with_reason(
+        &mut self,
+        reason: crate::FrameSyncReason,
+    ) -> Result<crate::FrameSyncReport> {
+        self.frame.flush_with_reason(reason)
+    }
+
     pub fn wait(&self) -> Result<()> {
         self.frame.wait()
+    }
+
+    pub fn wait_with_reason(
+        &self,
+        reason: crate::FrameSyncReason,
+    ) -> Result<crate::FrameSyncReport> {
+        self.frame.wait_with_reason(reason)
     }
 }
 

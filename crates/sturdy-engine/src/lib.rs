@@ -438,8 +438,8 @@ impl Engine {
             &pixels,
         )?;
         let _ = image.set_debug_name(&format!("procedural-{name}"));
-        frame.flush()?;
-        frame.wait()?;
+        frame.flush_with_reason(FrameSyncReason::CompatibilityShim)?;
+        frame.wait_with_reason(FrameSyncReason::CompatibilityShim)?;
         Ok(image)
     }
 
@@ -774,6 +774,71 @@ impl SurfaceImage {
 impl Drop for SurfaceImage {
     fn drop(&mut self) {
         let _ = self.device.destroy_image(self.handle);
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FrameSyncReason {
+    FrameBoundaryPresent,
+    ReadbackCompletion,
+    CompatibilityShim,
+    ExplicitUserRequest,
+    Shutdown,
+    DeviceLossRecovery,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrameSyncReport {
+    pub reason: FrameSyncReason,
+    pub submitted: bool,
+    pub waited: bool,
+    pub presented: bool,
+    pub submission: Option<SubmissionHandle>,
+    pub notes: Vec<String>,
+}
+
+impl FrameSyncReport {
+    fn submitted(reason: FrameSyncReason, submission: SubmissionHandle) -> Self {
+        Self {
+            reason,
+            submitted: true,
+            waited: false,
+            presented: false,
+            submission: Some(submission),
+            notes: vec![
+                "flush may wait for the previous frame fence before submitting new work"
+                    .to_string(),
+            ],
+        }
+    }
+
+    fn waited(reason: FrameSyncReason, waited: bool, submission: Option<SubmissionHandle>) -> Self {
+        Self {
+            reason,
+            submitted: false,
+            waited,
+            presented: false,
+            submission,
+            notes: if waited {
+                vec!["wait blocked until the submitted frame completed".to_string()]
+            } else {
+                vec!["wait skipped because no submission exists for this frame".to_string()]
+            },
+        }
+    }
+
+    fn frame_boundary_present(reason: FrameSyncReason, submission: SubmissionHandle) -> Self {
+        Self {
+            reason,
+            submitted: true,
+            waited: true,
+            presented: true,
+            submission: Some(submission),
+            notes: vec![
+                "frame-boundary present submitted queued work, waited for completion, then presented"
+                    .to_string(),
+            ],
+        }
     }
 }
 
@@ -1320,12 +1385,33 @@ impl Frame {
         self.inner.flush()
     }
 
+    /// Explicitly submit queued frame work and report why synchronization is allowed here.
+    pub fn flush_with_reason(&mut self, reason: FrameSyncReason) -> Result<FrameSyncReport> {
+        let submission = self.flush()?;
+        Ok(FrameSyncReport::submitted(reason, submission))
+    }
+
     pub fn present(&mut self) -> Result<()> {
         self.inner.present()
     }
 
     pub fn wait(&self) -> Result<()> {
         self.inner.wait()
+    }
+
+    /// Explicitly wait for this frame's submission and report why blocking is allowed here.
+    pub fn wait_with_reason(&self, reason: FrameSyncReason) -> Result<FrameSyncReport> {
+        let submission = self.inner.last_submission();
+        self.wait()?;
+        Ok(FrameSyncReport::waited(
+            reason,
+            submission.is_some(),
+            submission,
+        ))
+    }
+
+    pub(crate) fn last_submission(&self) -> Option<SubmissionHandle> {
+        self.inner.last_submission()
     }
 
     /// Finish rendering this frame and present to the given surface in a single call.
@@ -1343,8 +1429,18 @@ impl Frame {
     /// **Note**: The caller must have already called [`present_image`](Self::present_image)
     /// with the surface image that will be presented.
     pub fn finish_and_present(&mut self, surface: &Surface) -> Result<()> {
-        self.flush()?;
+        self.finish_and_present_with_reason(surface, FrameSyncReason::FrameBoundaryPresent)?;
+        Ok(())
+    }
+
+    pub fn finish_and_present_with_reason(
+        &mut self,
+        surface: &Surface,
+        reason: FrameSyncReason,
+    ) -> Result<FrameSyncReport> {
+        let submission = self.flush()?;
         self.wait()?;
-        surface.present()
+        surface.present()?;
+        Ok(FrameSyncReport::frame_boundary_present(reason, submission))
     }
 }

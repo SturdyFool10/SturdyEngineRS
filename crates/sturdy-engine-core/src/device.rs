@@ -1094,6 +1094,10 @@ impl Frame {
             None => Ok(()),
         }
     }
+
+    pub fn last_submission(&self) -> Option<SubmissionHandle> {
+        self.last_submission
+    }
 }
 
 impl Drop for Frame {

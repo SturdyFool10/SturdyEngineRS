@@ -662,6 +662,28 @@ fn flush_returns_submission_handle() {
 }
 
 #[test]
+fn explicit_sync_reports_submission_and_wait_reason() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let mut frame = engine.begin_frame().unwrap();
+
+    let flush_report = frame
+        .flush_with_reason(FrameSyncReason::ExplicitUserRequest)
+        .unwrap();
+    assert_eq!(flush_report.reason, FrameSyncReason::ExplicitUserRequest);
+    assert!(flush_report.submitted);
+    assert!(!flush_report.waited);
+    assert!(flush_report.submission.is_some());
+
+    let wait_report = frame
+        .wait_with_reason(FrameSyncReason::ExplicitUserRequest)
+        .unwrap();
+    assert_eq!(wait_report.reason, FrameSyncReason::ExplicitUserRequest);
+    assert!(!wait_report.submitted);
+    assert!(wait_report.waited);
+    assert_eq!(wait_report.submission, flush_report.submission);
+}
+
+#[test]
 fn consecutive_flushes_succeed() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     for _ in 0..3 {

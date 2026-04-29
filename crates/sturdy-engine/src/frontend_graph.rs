@@ -1115,8 +1115,30 @@ impl RenderFrame {
         inner.frame.flush()
     }
 
+    pub fn flush_with_reason(
+        &self,
+        reason: crate::FrameSyncReason,
+    ) -> Result<crate::FrameSyncReport> {
+        let submission = self.flush()?;
+        Ok(crate::FrameSyncReport::submitted(reason, submission))
+    }
+
     pub fn wait(&self) -> Result<()> {
         self.inner.borrow().frame.wait()
+    }
+
+    pub fn wait_with_reason(
+        &self,
+        reason: crate::FrameSyncReason,
+    ) -> Result<crate::FrameSyncReport> {
+        let inner = self.inner.borrow();
+        let submission = inner.frame.last_submission();
+        inner.frame.wait()?;
+        Ok(crate::FrameSyncReport::waited(
+            reason,
+            submission.is_some(),
+            submission,
+        ))
     }
 
     pub fn present_image(&self, image: &GraphImage) -> Result<()> {

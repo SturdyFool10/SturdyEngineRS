@@ -142,8 +142,9 @@ The engine should not crash for recoverable runtime, compositor, asset, input, a
 - [ ] Ensure normal draw, image, shader, mesh, object, UI, and render-target APIs only enqueue intent/resource mutations for the current frame or a named future frame.
 - [ ] Reflect queued shader work, resolve pipeline/binding metadata, batch draw calls/objects/meshes, compile graph dependencies, order passes, encode backend commands, and submit only during the frame finalization path.
 - [ ] Restrict CPU/GPU waiting to frame-boundary policy: frames-in-flight throttling, swapchain/present policy, readback completion requested by the app, or explicit shutdown/device-loss recovery.
-- [ ] Add an expert-only explicit flush API that requires a reason enum and returns a diagnostic report explaining what was submitted, waited on, and why.
+- [x] Add an expert-only explicit flush API that requires a reason enum and returns a diagnostic report explaining what was submitted, waited on, and why.
 - [ ] Add diagnostics for accidental synchronization: blocking upload, immediate readback, pipeline compile stall, queue idle, fence wait, swapchain acquire/present wait, and graph-finalization cost.
+  - [x] Report explicit frame flush/wait/present synchronization reason, submission token, and whether the frame submitted, waited, or presented.
 - [ ] Keep engine samples and testbeds on the deferred path so examples teach queue-and-finalize behavior instead of immediate-mode flushing.
 
 ### Runtime asset, texture, and shader compilation rules
@@ -159,6 +160,7 @@ Runtime content should behave like the rest of the engine: app code queues inten
   - [ ] Rust `include_bytes!` assets.
   - [ ] Rust `include_str!` Slang shader source.
   - [ ] Browser/WebAssembly fetch/package sources for the future WebGPU target.
+- [ ] Extract embedded Slang shader source strings from `text_overlay` and other Rust modules into `.slang` files, then load them with `include_str!` so shader code lives in shader assets instead of inline Rust literals.
 - [ ] Add OS-specific high-performance I/O adapters behind the platform layer instead of baking them into engine/render code:
   - [ ] Linux: prefer `io_uring` when available and safe, fall back to a blocking I/O thread pool using `pread`/normal file APIs.
   - [ ] Windows: prefer DirectStorage where it fits the Vulkan asset pipeline, fall back to overlapped/thread-pool file I/O.

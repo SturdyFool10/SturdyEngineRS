@@ -567,6 +567,10 @@ impl<'a> ShellFrame<'a> {
                     .unwrap_or("unpublished")
             ),
             format!(
+                "frame sync: {}",
+                diagnostics.frame_sync.as_deref().unwrap_or("unpublished")
+            ),
+            format!(
                 "user diagnostics: {}",
                 if diagnostics.user_diagnostics.is_empty() {
                     "none".to_string()
@@ -719,9 +723,22 @@ impl<'a> ShellFrame<'a> {
     /// This is a convenience method that calls `flush()`, `wait()`, and
     /// `surface.present()` in sequence.
     pub fn finish_and_present(&mut self, surface: &Surface) -> EngineResult<()> {
-        self.inner.flush()?;
-        self.inner.wait()?;
+        let flush_report = self
+            .inner
+            .flush_with_reason(crate::FrameSyncReason::FrameBoundaryPresent)?;
+        let wait_report = self
+            .inner
+            .wait_with_reason(crate::FrameSyncReason::FrameBoundaryPresent)?;
         surface.present()?;
+        self.controller.update_diagnostics(|diagnostics| {
+            diagnostics.frame_sync = Some(format!(
+                "reason={:?} submitted={} waited={} presented=true submission={:?}",
+                flush_report.reason,
+                flush_report.submitted,
+                wait_report.waited,
+                flush_report.submission
+            ));
+        });
         Ok(())
     }
 }

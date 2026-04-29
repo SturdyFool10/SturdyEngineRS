@@ -237,9 +237,22 @@ impl<'a> AppRuntimeFrame<'a> {
     ///
     /// Records CPU-measured frame time into `RuntimeDiagnostics.timings` after presenting.
     pub fn finish_and_present(&mut self) -> Result<()> {
-        self.render_frame.flush()?;
-        self.render_frame.wait()?;
+        let flush_report = self
+            .render_frame
+            .flush_with_reason(crate::FrameSyncReason::FrameBoundaryPresent)?;
+        let wait_report = self
+            .render_frame
+            .wait_with_reason(crate::FrameSyncReason::FrameBoundaryPresent)?;
         self.runtime.surface.present()?;
+        self.runtime.controller.update_diagnostics(|d| {
+            d.frame_sync = Some(format!(
+                "reason={:?} submitted={} waited={} presented=true submission={:?}",
+                flush_report.reason,
+                flush_report.submitted,
+                wait_report.waited,
+                flush_report.submission
+            ));
+        });
         if let Some(start) = self.runtime.frame_start.take() {
             let elapsed_ms = start.elapsed().as_secs_f32() * 1000.0;
             self.runtime.controller.update_diagnostics(|d| {
@@ -754,6 +767,7 @@ pub struct RuntimeDiagnostics {
     pub motion_warning: Option<String>,
     pub native_window_appearance: Option<String>,
     pub runtime_setting_apply: Option<String>,
+    pub frame_sync: Option<String>,
     pub user_diagnostics: Vec<RuntimeUserDiagnostic>,
     pub camera_locked_passes: Vec<String>,
     pub debug_images: Vec<String>,
