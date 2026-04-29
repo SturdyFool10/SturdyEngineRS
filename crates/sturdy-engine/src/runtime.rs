@@ -753,6 +753,8 @@ pub struct RuntimeDiagnostics {
     pub motion_validation: Option<String>,
     pub motion_warning: Option<String>,
     pub native_window_appearance: Option<String>,
+    pub runtime_setting_apply: Option<String>,
+    pub user_diagnostics: Vec<RuntimeUserDiagnostic>,
     pub camera_locked_passes: Vec<String>,
     pub debug_images: Vec<String>,
     pub graph: RuntimeGraphDiagnostics,
@@ -761,6 +763,13 @@ pub struct RuntimeDiagnostics {
     pub shader_compile_errors: Vec<ShaderCompileError>,
     /// Asset paths that are missing or stale, surfaced via `RuntimeController::report_asset_state`.
     pub asset_diagnostics: Vec<AssetDiagnostic>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeUserDiagnostic {
+    pub message: String,
+    pub detail: Option<String>,
+    pub setting: Option<RuntimeSettingId>,
 }
 
 /// Summary information about the currently recorded render graph.
@@ -1067,8 +1076,9 @@ impl RuntimeShared {
         };
 
         if !entry.support.is_supported {
-            return RuntimeChangeResult::Rejected {
+            return RuntimeChangeResult::Unavailable {
                 setting: id,
+                path: Some(entry.descriptor.apply_path),
                 reason: entry
                     .support
                     .reason
@@ -1088,7 +1098,7 @@ impl RuntimeShared {
         }
 
         if entry.value == value {
-            return RuntimeChangeResult::Applied {
+            return RuntimeChangeResult::Exact {
                 setting: id,
                 path: entry.descriptor.apply_path,
             };
@@ -1108,7 +1118,7 @@ impl RuntimeShared {
             self.change_log.drain(0..excess);
         }
 
-        RuntimeChangeResult::Applied {
+        RuntimeChangeResult::Exact {
             setting: id,
             path: entry.descriptor.apply_path,
         }
@@ -1121,10 +1131,17 @@ impl RuntimeShared {
                 revision: self.apply_notifications_revision,
                 result: result.clone(),
             });
+            if let Some(diagnostic) = result.user_diagnostic() {
+                self.diagnostics.user_diagnostics.push(diagnostic);
+            }
         }
         if self.apply_notifications.len() > 256 {
             let excess = self.apply_notifications.len() - 256;
             self.apply_notifications.drain(0..excess);
+        }
+        if self.diagnostics.user_diagnostics.len() > 64 {
+            let excess = self.diagnostics.user_diagnostics.len() - 64;
+            self.diagnostics.user_diagnostics.drain(0..excess);
         }
         self.last_apply_report = Some(report);
     }
@@ -1169,6 +1186,24 @@ pub enum RuntimeApplyPath {
     SurfaceRecreate,
     WindowReconfigure,
     DeviceMigration,
+}
+
+impl RuntimeApplyPath {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Immediate => "immediate",
+            Self::GraphRebuild => "graph_rebuild",
+            Self::SurfaceRecreate => "surface_recreate",
+            Self::WindowReconfigure => "window_reconfigure",
+            Self::DeviceMigration => "device_migration",
+        }
+    }
+}
+
+impl fmt::Display for RuntimeApplyPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Identifier for one runtime setting, including app-defined settings.
@@ -1555,6 +1590,10 @@ pub struct RuntimeApplyNotification {
 /// Outcome for an individual runtime-setting request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeChangeResult {
+    Exact {
+        setting: RuntimeSettingId,
+        path: RuntimeApplyPath,
+    },
     Applied {
         setting: RuntimeSettingId,
         path: RuntimeApplyPath,
@@ -1568,6 +1607,53 @@ pub enum RuntimeChangeResult {
         setting: RuntimeSettingId,
         reason: String,
     },
+    Unavailable {
+        setting: RuntimeSettingId,
+        path: Option<RuntimeApplyPath>,
+        reason: String,
+    },
+    Failed {
+        setting: RuntimeSettingId,
+        path: RuntimeApplyPath,
+        reason: String,
+    },
+}
+
+impl RuntimeChangeResult {
+    pub fn user_diagnostic(&self) -> Option<RuntimeUserDiagnostic> {
+        match self {
+            Self::Exact { .. } | Self::Applied { .. } => None,
+            Self::Degraded {
+                setting, reason, ..
+            } => Some(RuntimeUserDiagnostic {
+                message: format!("{} was applied with a fallback.", setting.label()),
+                detail: Some(reason.clone()),
+                setting: Some(setting.clone()),
+            }),
+            Self::Rejected { setting, reason } => Some(RuntimeUserDiagnostic {
+                message: format!(
+                    "{} was not changed because the requested value is invalid.",
+                    setting.label()
+                ),
+                detail: Some(reason.clone()),
+                setting: Some(setting.clone()),
+            }),
+            Self::Unavailable {
+                setting, reason, ..
+            } => Some(RuntimeUserDiagnostic {
+                message: format!("{} is unavailable in this runtime.", setting.label()),
+                detail: Some(reason.clone()),
+                setting: Some(setting.clone()),
+            }),
+            Self::Failed {
+                setting, reason, ..
+            } => Some(RuntimeUserDiagnostic {
+                message: format!("{} could not be applied.", setting.label()),
+                detail: Some(reason.clone()),
+                setting: Some(setting.clone()),
+            }),
+        }
+    }
 }
 
 /// Mutable transaction over runtime settings.
@@ -1631,7 +1717,7 @@ impl<'a> RuntimeSettingsTransaction<'a> {
             let result = match pending {
                 RuntimePendingSettingChange::Note(setting) => {
                     match shared.setting_entries.get(&setting) {
-                        Some(entry) => RuntimeChangeResult::Applied {
+                        Some(entry) => RuntimeChangeResult::Exact {
                             setting,
                             path: entry.descriptor.apply_path,
                         },

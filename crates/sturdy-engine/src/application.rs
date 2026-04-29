@@ -57,10 +57,10 @@ use crate::{
     DefaultSceneTargetConfig, DiagnosticLevel, Engine, GraphImage, KeyInput, KeyModifiers,
     MotionVectorDebugPass, NativeWindowAppearanceError, Result as EngineResult, RuntimeController,
     RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimeSettingChange, RuntimeSettingId,
-    RuntimeSettingKey, ShaderProgram, Surface, SurfaceHdrPreference, SurfaceImage,
-    SurfacePresentMode, SurfaceRecreateDesc, SurfaceTransparency, WindowAppearance,
+    RuntimeSettingKey, RuntimeUserDiagnostic, ShaderProgram, Surface, SurfaceHdrPreference,
+    SurfaceImage, SurfacePresentMode, SurfaceRecreateDesc, SurfaceTransparency, WindowAppearance,
     WindowAppearancePreset, WindowBackdrop, WindowCornerStyle, WindowMaterialKind, WindowMode,
-    WindowTransparencyDesc, apply_native_window_appearance_for_window,
+    WindowTransparencyDesc, apply_native_window_appearance_for_window, current_platform,
 };
 
 #[cfg(target_os = "macos")]
@@ -558,6 +558,26 @@ impl<'a> ShellFrame<'a> {
                     .native_window_appearance
                     .as_deref()
                     .unwrap_or("unpublished")
+            ),
+            format!(
+                "runtime setting apply: {}",
+                diagnostics
+                    .runtime_setting_apply
+                    .as_deref()
+                    .unwrap_or("unpublished")
+            ),
+            format!(
+                "user diagnostics: {}",
+                if diagnostics.user_diagnostics.is_empty() {
+                    "none".to_string()
+                } else {
+                    diagnostics
+                        .user_diagnostics
+                        .iter()
+                        .map(|diagnostic| diagnostic.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                }
             ),
             format!(
                 "camera-locked passes: {}",
@@ -1180,9 +1200,33 @@ where
             preferred_present_mode,
             ..SurfaceRecreateDesc::default()
         }) {
-            eprintln!("surface recreation from runtime settings failed: {e:?}");
+            let context =
+                runtime_setting_apply_context(controller, changes, surface_size, "failed");
+            self.runtime.controller().update_diagnostics(|diagnostics| {
+                diagnostics.runtime_setting_apply = Some(format!(
+                    "{context} error_category={:?} reason={e}",
+                    e.category()
+                ));
+                diagnostics.user_diagnostics.push(RuntimeUserDiagnostic {
+                    message: "Runtime setting changes could not be applied to the surface."
+                        .to_string(),
+                    detail: Some(format!(
+                        "{context} error_category={:?} reason={e}",
+                        e.category()
+                    )),
+                    setting: None,
+                });
+            });
+            eprintln!(
+                "surface recreation from runtime settings failed: {context} error_category={:?} reason={e}",
+                e.category()
+            );
             std::process::exit(1);
         }
+        let context = runtime_setting_apply_context(controller, changes, surface_size, "applied");
+        self.runtime.controller().update_diagnostics(|diagnostics| {
+            diagnostics.runtime_setting_apply = Some(context);
+        });
         self.runtime.refresh_controller_state();
         if let Some(window) = self.window.as_ref() {
             let snapshot =
@@ -1190,6 +1234,29 @@ where
             self.runtime.controller().set_settings(snapshot);
         }
     }
+}
+
+fn runtime_setting_apply_context(
+    controller: &RuntimeController,
+    changes: &[RuntimeSettingChange],
+    surface_size: SurfaceSize,
+    status: &str,
+) -> String {
+    let diagnostics = controller.diagnostics();
+    let settings = changes
+        .iter()
+        .map(|change| format!("{}@{}#{}", change.setting, change.path, change.revision))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "status={status} platform={:?} backend={:?} adapter={} surface={}x{} settings=[{}]",
+        current_platform(),
+        diagnostics.backend,
+        diagnostics.adapter_name.as_deref().unwrap_or("<unknown>"),
+        surface_size.width,
+        surface_size.height,
+        settings,
+    )
 }
 
 fn parse_present_mode_setting(value: &str) -> Option<SurfacePresentMode> {

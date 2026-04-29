@@ -131,9 +131,9 @@ The engine should not crash for recoverable runtime, compositor, asset, input, a
   - [x] `BackendFailure`: driver/API operation failed.
   - [x] `PlatformFailure`: OS/window/compositor operation failed.
   - [x] `ResourceStateCorruption`: engine internal state is inconsistent but can be reported before shutdown.
-- [ ] Attach enough context to errors to debug them without reproducing immediately: setting key, apply path, backend, platform, adapter, surface size, and relevant handles or resource names.
-- [ ] Add user-facing diagnostics for failures that app authors or users can fix, and keep internal cause chains for developers.
-- [ ] Make runtime setting application return exact, degraded, rejected, unavailable, or failed results instead of only `Ok` / `Err`.
+- [x] Attach enough context to errors to debug them without reproducing immediately: setting key, apply path, backend, platform, adapter, surface size, and relevant handles or resource names.
+- [x] Add user-facing diagnostics for failures that app authors or users can fix, and keep internal cause chains for developers.
+- [x] Make runtime setting application return exact, degraded, rejected, unavailable, or failed results instead of only `Ok` / `Err`.
 
 ### Default submission and synchronization rule
 

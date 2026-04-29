@@ -247,7 +247,7 @@ fn runtime_controller_placeholder_transaction_is_noop() {
 
     assert_eq!(
         report.changes,
-        vec![RuntimeChangeResult::Applied {
+        vec![RuntimeChangeResult::Exact {
             setting: RuntimeSettingId::from(RuntimeSettingKey::OverlayVisibility),
             path: RuntimeApplyPath::Immediate,
         }]
@@ -270,6 +270,14 @@ fn runtime_setting_keys_report_expected_apply_paths() {
     assert_eq!(
         RuntimeSettingKey::OverlayVisibility.apply_path(),
         RuntimeApplyPath::Immediate
+    );
+    assert_eq!(
+        RuntimeApplyPath::SurfaceRecreate.as_str(),
+        "surface_recreate"
+    );
+    assert_eq!(
+        RuntimeApplyPath::WindowReconfigure.to_string(),
+        "window_reconfigure"
     );
 }
 
@@ -311,7 +319,7 @@ fn runtime_controller_registers_app_settings_and_records_changes() {
 
     assert_eq!(
         report.changes,
-        vec![RuntimeChangeResult::Applied {
+        vec![RuntimeChangeResult::Exact {
             setting: RuntimeSettingId::app("textures.resolution"),
             path: RuntimeApplyPath::Immediate,
         }]
@@ -380,14 +388,16 @@ fn runtime_controller_rejects_unsupported_engine_setting_changes() {
 
     assert!(matches!(
         &report.changes[0],
-        RuntimeChangeResult::Rejected { setting, reason }
+        RuntimeChangeResult::Unavailable {
+            setting, reason, ..
+        }
             if setting == &RuntimeSettingId::from(RuntimeSettingKey::BackendSelection)
                 && reason.contains("not implemented")
     ));
 }
 
 #[test]
-fn runtime_controller_records_apply_notifications_for_applied_and_rejected_requests() {
+fn runtime_controller_records_precise_apply_notifications_and_user_diagnostics() {
     let mut controller = RuntimeController::default();
     let starting_revision = controller.apply_notifications_revision();
 
@@ -406,19 +416,26 @@ fn runtime_controller_records_apply_notifications_for_applied_and_rejected_reque
         vec![
             RuntimeApplyNotification {
                 revision: starting_revision + 1,
-                result: RuntimeChangeResult::Applied {
+                result: RuntimeChangeResult::Exact {
                     setting: RuntimeSettingId::from(RuntimeSettingKey::OverlayVisibility),
                     path: RuntimeApplyPath::Immediate,
                 },
             },
             RuntimeApplyNotification {
                 revision: starting_revision + 2,
-                result: RuntimeChangeResult::Rejected {
+                result: RuntimeChangeResult::Unavailable {
                     setting: RuntimeSettingId::from(RuntimeSettingKey::BackendSelection),
+                    path: Some(RuntimeApplyPath::DeviceMigration),
                     reason: "live backend migration is not implemented yet".to_string(),
                 },
             },
         ]
+    );
+    let diagnostics = controller.diagnostics();
+    assert_eq!(diagnostics.user_diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics.user_diagnostics[0].message,
+        "backend selection is unavailable in this runtime."
     );
 }
 
