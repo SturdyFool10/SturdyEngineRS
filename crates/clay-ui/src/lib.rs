@@ -46,7 +46,7 @@ pub use floating::{
 };
 pub use font_discovery::{FontDiscovery, FontFaceSummary, FontSearchQuery};
 pub use geometry::{Axis, CornerShape, CornerSpec, Edges, Rect, Size, UiShape, radii_all};
-pub use gradient::{ColorStop, Easing, EasingRegistry, Gradient, GradientKind};
+pub use gradient::{ColorStop, Easing, EasingFunction, EasingRegistry, Gradient, GradientKind};
 pub use id::ElementId;
 pub use image_tiling::{ColorSpaceTransformPlan, ImageTile, ImageTilingPlan, UiSurfacePlan};
 pub use input::{
@@ -88,21 +88,23 @@ pub use virtualization::{
     VirtualTreeLayout, VirtualTreeRow,
 };
 pub use widgets::{
-    AccordionPanelConfig, BadgeVariant, BreadcrumbSpec, ChipSpec, CommandPaletteConfig,
-    CommandPaletteItemSpec, ContextMenuItemSpec, DragBarAxis, DropdownOptionSpec, ListItemSpec,
-    LogEntrySpec, LogLevel, ModalLayerConfig, NotificationSpec, NumberInputSpec, PortalHostConfig,
-    PropertyRowSpec, ScrollbarMetrics, SegmentSpec, SortDirection, StatusBarSectionSpec, TabSpec,
-    TableHeaderSpec, TextInputSpec, ToggleAnimConfig, TooltipConfig, WidgetPalette,
-    WidgetRenderContext, accordion_panel, badge, breadcrumbs, button, card, card_with_palette,
-    checkbox, chip, command_palette, context_menu_item, dialog_surface,
+    AccordionPanelConfig, BadgeVariant, BreadcrumbSpec, CheckboxStyle, ChipSpec,
+    CommandPaletteConfig, CommandPaletteItemSpec, ContextMenuItemSpec, DragBarAxis,
+    DropdownOptionSpec, ListItemSpec, LogEntrySpec, LogLevel, ModalLayerConfig, NotificationSpec,
+    NumberInputSpec, PortalHostConfig, PropertyRowSpec, RadioStyle, ScrollbarMetrics, SegmentSpec,
+    SliderStyle, SortDirection, StatusBarSectionSpec, TabSpec, TableHeaderSpec, TextInputSpec,
+    ToggleAnimConfig, ToggleStyle, TooltipConfig, WidgetPalette, WidgetRenderContext,
+    accordion_panel, badge, breadcrumbs, button, card, card_with_palette, checkbox,
+    checkbox_styled, chip, command_palette, context_menu_item, dialog_surface,
     dialog_surface_with_palette, divider, drag_bar, dropdown_option, empty_state,
     empty_state_with_palette, group_box, group_box_with_palette, icon_button, image,
     image_with_options, label, label_with_palette, list_item, log_entry, modal_layer,
     mosaic_container, notification, number_input, portal_host, progress_bar, property_row, radio,
-    scroll_container, scroll_container_with_direction, scroll_container_with_scrollbars,
-    scroll_container_with_scrollbars_and_direction, scrollbar, search_box, segmented_control,
-    select, slider, status_bar, status_bar_with_palette, tab_bar, table_header_cell,
-    table_header_row, text_input, toggle, toolbar, toolbar_with_palette, tooltip_layer,
-    tooltip_layer_with_palette, tooltip_surface, virtual_context_menu, virtual_dropdown_menu,
-    virtual_grid, virtual_list, virtual_log_viewer, virtual_mosaic, virtual_table, virtual_tree,
+    radio_styled, scroll_container, scroll_container_with_direction,
+    scroll_container_with_scrollbars, scroll_container_with_scrollbars_and_direction, scrollbar,
+    search_box, segmented_control, select, slider, slider_styled, status_bar,
+    status_bar_with_palette, tab_bar, table_header_cell, table_header_row, text_input, toggle,
+    toggle_styled, toolbar, toolbar_with_palette, tooltip_layer, tooltip_layer_with_palette,
+    tooltip_surface, virtual_context_menu, virtual_dropdown_menu, virtual_grid, virtual_list,
+    virtual_log_viewer, virtual_mosaic, virtual_table, virtual_tree,
 };

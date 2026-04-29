@@ -138,7 +138,12 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
         });
     }
 
-    if element.style.background.is_visible() || element.style.background_gradient.is_some() {
+    let background_effect = element.style.shader_slot(ShaderSlot::Background).cloned();
+    if element.style.background.is_visible()
+        || element.style.background_gradient.is_some()
+        || element.style.background_shader != ShaderRef::SOLID_COLOR
+        || background_effect.is_some()
+    {
         list.commands.push(RenderCommand {
             id: element.id.clone(),
             rect,
@@ -148,7 +153,7 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
             data: RenderData::Rectangle(RectangleRenderData {
                 color: element.style.background,
                 shader: element.style.background_shader,
-                effect: element.style.shader_slot(ShaderSlot::Background).cloned(),
+                effect: background_effect,
                 gradient: element.style.background_gradient.clone(),
                 corner_radius: element.style.corner_radius,
                 shape,
@@ -201,11 +206,19 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
         }),
     }
 
-    if element.style.outline.is_visible()
-        && (element.style.outline_width.left > 0.0
-            || element.style.outline_width.right > 0.0
-            || element.style.outline_width.top > 0.0
-            || element.style.outline_width.bottom > 0.0)
+    let outline_effect = element
+        .style
+        .shader_slot(ShaderSlot::Border)
+        .or_else(|| element.style.shader_slot(ShaderSlot::Outline))
+        .cloned();
+    let has_outline_width = element.style.outline_width.left > 0.0
+        || element.style.outline_width.right > 0.0
+        || element.style.outline_width.top > 0.0
+        || element.style.outline_width.bottom > 0.0;
+    if has_outline_width
+        && (element.style.outline.is_visible()
+            || element.style.outline_shader != ShaderRef::SOLID_COLOR
+            || outline_effect.is_some())
     {
         list.commands.push(RenderCommand {
             id: element.id.clone(),
@@ -216,11 +229,7 @@ fn append_element_commands(element: &Element, layout: &LayoutTree, list: &mut Re
             data: RenderData::Border(BorderRenderData {
                 color: element.style.outline,
                 shader: element.style.outline_shader,
-                effect: element
-                    .style
-                    .shader_slot(ShaderSlot::Border)
-                    .or_else(|| element.style.shader_slot(ShaderSlot::Outline))
-                    .cloned(),
+                effect: outline_effect,
                 width: element.style.outline_width,
                 corner_radius: element.style.corner_radius,
                 shape,
@@ -424,6 +433,79 @@ mod tests {
         assert_eq!(
             effect.uniform("intensity").map(|uniform| &uniform.value),
             Some(&UiShaderUniformValue::Float(0.75))
+        );
+    }
+
+    #[test]
+    fn transparent_background_with_shader_slot_still_emits_rectangle() {
+        let id = ElementId::new("transparent-shader-bg");
+        let shader = ShaderRef::custom(ShaderHandle(11), PipelineHandle(21));
+        let mut element = Element::new(id.clone());
+        element.layout.width = LayoutSizing::Fixed(100.0);
+        element.layout.height = LayoutSizing::Fixed(40.0);
+        element.style = ElementStyle {
+            background: UiColor::TRANSPARENT,
+            shader_slots: vec![UiShaderSlotBinding::new(ShaderSlot::Background, shader)],
+            ..ElementStyle::default()
+        };
+        let layout = LayoutTree::compute(
+            &element,
+            Size::new(100.0, 40.0),
+            &mut LayoutCache::default(),
+        )
+        .unwrap();
+        let commands = RenderCommandList::from_element_tree(&element, &layout);
+
+        let data = commands
+            .commands
+            .iter()
+            .find_map(|command| match &command.data {
+                RenderData::Rectangle(data) => Some(data),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(data.color, UiColor::TRANSPARENT);
+        assert_eq!(
+            data.effect.as_ref().map(|effect| effect.shader),
+            Some(shader)
+        );
+    }
+
+    #[test]
+    fn transparent_outline_with_shader_slot_still_emits_border() {
+        let id = ElementId::new("transparent-shader-border");
+        let shader = ShaderRef::custom(ShaderHandle(12), PipelineHandle(22));
+        let mut element = Element::new(id.clone());
+        element.layout.width = LayoutSizing::Fixed(100.0);
+        element.layout.height = LayoutSizing::Fixed(40.0);
+        element.style = ElementStyle {
+            outline: UiColor::TRANSPARENT,
+            outline_width: Edges::all(2.0),
+            shader_slots: vec![UiShaderSlotBinding::new(ShaderSlot::Border, shader)],
+            ..ElementStyle::default()
+        };
+        let layout = LayoutTree::compute(
+            &element,
+            Size::new(100.0, 40.0),
+            &mut LayoutCache::default(),
+        )
+        .unwrap();
+        let commands = RenderCommandList::from_element_tree(&element, &layout);
+
+        let data = commands
+            .commands
+            .iter()
+            .find_map(|command| match &command.data {
+                RenderData::Border(data) => Some(data),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(data.color, UiColor::TRANSPARENT);
+        assert_eq!(
+            data.effect.as_ref().map(|effect| effect.shader),
+            Some(shader)
         );
     }
 

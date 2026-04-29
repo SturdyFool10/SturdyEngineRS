@@ -366,6 +366,8 @@ pub struct ShellFrame<'a> {
     debug_images: DebugImageRegistry,
     controller: RuntimeController,
     motion_debug_pass: &'a MotionVectorDebugPass,
+    window_scale_factor: f32,
+    window_logical_size: Option<[f32; 2]>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -421,6 +423,8 @@ impl<'a> ShellFrame<'a> {
             debug_images,
             controller,
             motion_debug_pass,
+            window_scale_factor: 1.0,
+            window_logical_size: None,
         }
     }
 
@@ -432,6 +436,24 @@ impl<'a> ShellFrame<'a> {
     /// Get the underlying frame mutably.
     pub fn inner_mut(&mut self) -> &mut crate::RenderFrame {
         &mut self.inner
+    }
+
+    /// DPI scale factor for converting logical window/UI pixels to physical surface pixels.
+    pub fn window_scale_factor(&self) -> f32 {
+        self.window_scale_factor
+    }
+
+    /// Current drawable window size in logical window/UI pixels, when known.
+    pub fn window_logical_size(&self) -> Option<[f32; 2]> {
+        self.window_logical_size
+    }
+
+    pub(crate) fn set_window_scale_factor(&mut self, scale_factor: f32) {
+        self.window_scale_factor = scale_factor.max(f32::EPSILON);
+    }
+
+    pub(crate) fn set_window_logical_size(&mut self, size: [f32; 2]) {
+        self.window_logical_size = Some([size[0].max(1.0), size[1].max(1.0)]);
     }
 
     /// Create the runtime-owned default HDR scene target for this frame.
@@ -1026,17 +1048,10 @@ where
                 }
             }
             winit::event::WindowEvent::CursorMoved { position, .. } => {
-                // winit CursorMoved delivers PhysicalPosition. Convert to
-                // WindowLogicalPx (top-left/Y-down) at the platform boundary.
-                let scale = self
-                    .window
-                    .as_ref()
-                    .map(|w| w.scale_factor() as f32)
-                    .unwrap_or(1.0);
-                let pos = clay_ui::WindowLogicalPx::new(
-                    position.x as f32 / scale,
-                    position.y as f32 / scale,
-                );
+                // winit CursorMoved delivers top-left/Y-down physical pixels.
+                // Keep shell UI input in the same space as the surface/debug
+                // overlay so hit testing and displayed geometry share one rect.
+                let pos = clay_ui::WindowLogicalPx::new(position.x as f32, position.y as f32);
                 self.cursor_pos = pos;
                 if let Some(hub) = self.app_state.input_hub() {
                     hub.on_pointer_moved(pos);
@@ -1098,6 +1113,16 @@ where
                 };
 
                 let mut render_frame = runtime_frame.shell_frame();
+                let scale = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.scale_factor() as f32)
+                    .unwrap_or(1.0);
+                render_frame.set_window_scale_factor(scale);
+                if let Some(window) = self.window.as_ref() {
+                    let size = window.inner_size();
+                    render_frame.set_window_logical_size([size.width as f32, size.height as f32]);
+                }
 
                 if let Err(e) = self
                     .app_state

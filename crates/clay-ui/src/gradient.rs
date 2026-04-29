@@ -2,14 +2,55 @@ use glam::Vec2;
 
 use crate::{ColorSpaceKind, UiColor, shader::ShaderRef};
 
+pub trait EasingFunction: Send + Sync {
+    fn ease(&self, t: f32) -> f32;
+}
+
+impl<F> EasingFunction for F
+where
+    F: Fn(f32) -> f32 + Send + Sync,
+{
+    fn ease(&self, t: f32) -> f32 {
+        self(t)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Easing {
     Linear,
     EaseIn,
     EaseOut,
     EaseInOut,
+    CubicInOut,
     SmoothStep,
     Custom(u32),
+}
+
+impl EasingFunction for Easing {
+    fn ease(&self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match *self {
+            Easing::Linear => t,
+            Easing::EaseIn => t * t,
+            Easing::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
+            Easing::EaseInOut => {
+                if t < 0.5 {
+                    2.0 * t * t
+                } else {
+                    1.0 - ((-2.0 * t + 2.0).powi(2) * 0.5)
+                }
+            }
+            Easing::CubicInOut => {
+                if t < 0.5 {
+                    4.0 * t * t * t
+                } else {
+                    1.0 - ((-2.0 * t + 2.0).powi(3) * 0.5)
+                }
+            }
+            Easing::SmoothStep => t * t * (3.0 - 2.0 * t),
+            Easing::Custom(_) => t,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -153,7 +194,7 @@ impl Gradient {
 
 #[derive(Default)]
 pub struct EasingRegistry {
-    custom: std::collections::HashMap<u32, Box<dyn Fn(f32) -> f32 + Send + Sync>>,
+    custom: std::collections::HashMap<u32, Box<dyn EasingFunction>>,
 }
 
 impl EasingRegistry {
@@ -161,25 +202,58 @@ impl EasingRegistry {
         &mut self,
         id: u32,
         easing: impl Fn(f32) -> f32 + Send + Sync + 'static,
-    ) -> Option<Box<dyn Fn(f32) -> f32 + Send + Sync>> {
+    ) -> Option<Box<dyn EasingFunction>> {
+        self.register_function(id, easing)
+    }
+
+    pub fn register_function(
+        &mut self,
+        id: u32,
+        easing: impl EasingFunction + 'static,
+    ) -> Option<Box<dyn EasingFunction>> {
         self.custom.insert(id, Box::new(easing))
     }
 
     pub fn evaluate(&self, easing: Easing, t: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);
         match easing {
-            Easing::Linear => t,
-            Easing::EaseIn => t * t,
-            Easing::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
-            Easing::EaseInOut => {
-                if t < 0.5 {
-                    2.0 * t * t
-                } else {
-                    1.0 - ((-2.0 * t + 2.0).powi(2) * 0.5)
-                }
-            }
-            Easing::SmoothStep => t * t * (3.0 - 2.0 * t),
-            Easing::Custom(id) => self.custom.get(&id).map(|f| f(t)).unwrap_or(t),
+            Easing::Custom(id) => self.custom.get(&id).map(|f| f.ease(t)).unwrap_or(t),
+            preset => preset.ease(t),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct HoldThenJump;
+
+    impl EasingFunction for HoldThenJump {
+        fn ease(&self, t: f32) -> f32 {
+            if t < 1.0 { 0.0 } else { 1.0 }
+        }
+    }
+
+    #[test]
+    fn preset_easing_implements_easing_function_trait() {
+        assert!((Easing::CubicInOut.ease(0.5) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn registry_accepts_custom_easing_function_trait_objects() {
+        let mut registry = EasingRegistry::default();
+        registry.register_function(7, HoldThenJump);
+
+        assert_eq!(registry.evaluate(Easing::Custom(7), 0.5), 0.0);
+        assert_eq!(registry.evaluate(Easing::Custom(7), 1.0), 1.0);
+    }
+
+    #[test]
+    fn registry_still_accepts_closure_easing_functions() {
+        let mut registry = EasingRegistry::default();
+        registry.register(9, |t| 1.0 - t);
+
+        assert_eq!(registry.evaluate(Easing::Custom(9), 0.25), 0.75);
     }
 }

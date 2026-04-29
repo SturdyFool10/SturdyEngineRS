@@ -4,13 +4,15 @@
 //! A status bar at the bottom shows cursor position and the hovered element.
 
 use clay_ui::{
-    Axis, Edges, Element, ElementBuilder, ElementId, ElementKind, ElementStyle, LayoutCache,
-    LayoutDirection, LayoutInput, LayoutSizing, LayoutTree, ListItemSpec, ScrollConfig, Size,
-    SliderConfig, StatusBarSectionSpec, TabSpec, TextWrap, UiColor, UiTree, VirtualListConfig,
-    WidgetBehavior, WidgetPalette, WidgetState, WindowLogicalPx, button, checkbox, label,
-    list_item, radio, slider, status_bar_with_palette, tab_bar, toggle, virtual_list,
+    Axis, ColorSpaceKind, Cx, Easing, Edges, Element, ElementBuilder, ElementId, ElementKind,
+    ElementStyle, LayoutCache, LayoutDirection, LayoutInput, LayoutSizing, LayoutTree,
+    ListItemSpec, PendingRegistrations, ScrollConfig, Size, SliderConfig, StatusBarSectionSpec,
+    TabSpec, TextWrap, ToggleAnimConfig, UiColor, UiTree, VirtualListConfig, WidgetBehavior,
+    WidgetPalette, WidgetState, WindowLogicalPx, button, checkbox, label, list_item, radio, slider,
+    status_bar_with_palette, tab_bar, toggle, virtual_list,
 };
 use glam::Vec2;
+use std::time::Instant;
 use sturdy_engine::{
     DebugOverlay, DebugOverlayRenderer, Engine, EngineApp, InputHub, KeyInput, Result, ShellFrame,
     Surface, SurfaceImage, TextDrawDesc, TextPlacement, TextTypography, WindowConfig,
@@ -50,6 +52,8 @@ struct UiDemo {
     layout_cache: LayoutCache,
     palette: WidgetPalette,
     hub: InputHub,
+    last_frame: Instant,
+    frame_delta: f32,
 
     active_tab: usize,
 
@@ -103,6 +107,8 @@ impl EngineApp for UiDemo {
             layout_cache: LayoutCache::default(),
             palette: WidgetPalette::default(),
             hub,
+            last_frame: Instant::now(),
+            frame_delta: 0.0,
             active_tab: 0,
             click_counts: [0; 3],
             checkboxes: [true, false, true],
@@ -147,13 +153,25 @@ impl EngineApp for UiDemo {
     }
 
     fn render(&mut self, frame: &mut ShellFrame<'_>, surface_image: &SurfaceImage) -> Result<()> {
+        let now = Instant::now();
+        self.frame_delta = (now - self.last_frame).as_secs_f32().min(0.1);
+        self.last_frame = now;
+
         let ext = surface_image.desc().extent;
-        let viewport = Size::new(ext.width as f32, ext.height as f32);
+        let logical_size = frame.window_logical_size().unwrap_or([
+            ext.width as f32 / frame.window_scale_factor(),
+            ext.height as f32 / frame.window_scale_factor(),
+        ]);
+        let viewport = Size::new(logical_size[0].max(1.0), logical_size[1].max(1.0));
+        let scale_x = ext.width as f32 / viewport.width.max(1.0);
+        let scale_y = ext.height as f32 / viewport.height.max(1.0);
+        let draw_scale = [scale_x, scale_y];
 
         // Build tree + layout so the hub can hit-test against real geometry.
-        let tree = self.build_tree(viewport);
+        let (tree, pending) = self.build_tree(viewport);
         let layout = LayoutTree::compute(&tree.roots[0], viewport, &mut self.layout_cache)
             .map_err(|e| sturdy_engine::Error::InvalidInput(format!("layout: {e:?}")))?;
+        pending.apply(self.hub.simulator_mut());
 
         // Update scroll config from the actual laid-out rect each frame.
         if let Some(node) = layout.by_id(&list_scroll_id()) {
@@ -199,6 +217,11 @@ impl EngineApp for UiDemo {
         self.slider_value = self.hub.slider_value(&slider_id());
         self.list_scroll = self.hub.scroll_offset(&list_scroll_id()).y;
 
+        let (render_tree, _) = self.build_tree(viewport);
+        let render_layout =
+            LayoutTree::compute(&render_tree.roots[0], viewport, &mut self.layout_cache)
+                .map_err(|e| sturdy_engine::Error::InvalidInput(format!("layout: {e:?}")))?;
+
         // ── Draw ──────────────────────────────────────────────────────────────
         let swapchain = frame.inner().swapchain_image(surface_image)?;
         let mut overlay = DebugOverlay::new();
@@ -213,8 +236,16 @@ impl EngineApp for UiDemo {
         );
 
         // Widget tree.
-        for root in &tree.roots {
-            render_element(&mut overlay, ext.width, ext.height, root, &layout, None);
+        for root in &render_tree.roots {
+            render_element(
+                &mut overlay,
+                ext.width,
+                ext.height,
+                root,
+                &render_layout,
+                None,
+                draw_scale,
+            );
         }
 
         // Cursor crosshair at the current pointer position (top-left/Y-down).
@@ -223,15 +254,21 @@ impl EngineApp for UiDemo {
         overlay.filled_rect_screen(
             ext.width,
             ext.height,
-            [(cx.x - 8.0).max(0.0), cx.y - 0.5],
-            [16.0, 1.0],
+            [
+                ((cx.x - 8.0).max(0.0)) * draw_scale[0],
+                (cx.y - 0.5) * draw_scale[1],
+            ],
+            [16.0 * draw_scale[0], 1.0 * draw_scale[1]],
             col,
         );
         overlay.filled_rect_screen(
             ext.width,
             ext.height,
-            [cx.x - 0.5, (cx.y - 8.0).max(0.0)],
-            [1.0, 16.0],
+            [
+                (cx.x - 0.5) * draw_scale[0],
+                ((cx.y - 8.0).max(0.0)) * draw_scale[1],
+            ],
+            [1.0 * draw_scale[0], 16.0 * draw_scale[1]],
             col,
         );
 
@@ -249,19 +286,21 @@ impl EngineApp for UiDemo {
 // ── UI tree ───────────────────────────────────────────────────────────────────
 
 impl UiDemo {
-    fn build_tree(&self, viewport: Size) -> UiTree {
+    fn build_tree(&self, viewport: Size) -> (UiTree, PendingRegistrations) {
         let mut tree = UiTree::new();
+        let cx = Cx::new(self.hub.simulator(), self.palette);
 
         let root_id = ElementId::new("root");
         let tab_h = 38.0;
         let sb_h = 24.0;
         let content_h = (viewport.height - tab_h - sb_h).max(1.0);
 
-        let tabs = self.build_tabs(ElementId::local("tabs", 0, &root_id), viewport.width);
+        let tabs = self.build_tabs(ElementId::local("tabs", 0, &root_id), viewport.width, &cx);
         let content = self.build_content(
             ElementId::local("content", 0, &root_id),
             viewport.width,
             content_h,
+            &cx,
         );
         let sb = self.build_status_bar(ElementId::local("sb", 0, &root_id), viewport.width);
 
@@ -282,10 +321,11 @@ impl UiDemo {
             .build();
 
         tree.push_root(root);
-        tree
+        let pending = cx.finish();
+        (tree, pending)
     }
 
-    fn build_tabs(&self, id: ElementId, width: f32) -> Element {
+    fn build_tabs(&self, id: ElementId, width: f32, cx: &Cx<'_>) -> Element {
         let labels = ["Buttons", "Controls", "List"];
         let tabs: Vec<TabSpec> = (0..3)
             .zip(labels)
@@ -315,23 +355,19 @@ impl UiDemo {
                 direction: LayoutDirection::LeftToRight,
                 ..LayoutInput::default()
             })
-            .child(tab_bar(
-                ElementId::local("bar", 0, &id),
-                tabs,
-                &self.palette,
-            ))
+            .child(tab_bar(ElementId::local("bar", 0, &id), tabs, cx))
             .build()
     }
 
-    fn build_content(&self, id: ElementId, width: f32, height: f32) -> Element {
+    fn build_content(&self, id: ElementId, width: f32, height: f32, cx: &Cx<'_>) -> Element {
         let pad = 20.0;
         let inner_w = (width - pad * 2.0).max(1.0);
         let inner_h = (height - pad * 2.0).max(1.0);
 
         let body = match self.active_tab {
-            0 => self.build_buttons_tab(ElementId::local("body", 0, &id), inner_w, inner_h),
-            1 => self.build_controls_tab(ElementId::local("body", 0, &id), inner_w, inner_h),
-            _ => self.build_list_tab(ElementId::local("body", 0, &id), inner_w, inner_h),
+            0 => self.build_buttons_tab(ElementId::local("body", 0, &id), inner_w, inner_h, cx),
+            1 => self.build_controls_tab(ElementId::local("body", 0, &id), inner_w, inner_h, cx),
+            _ => self.build_list_tab(ElementId::local("body", 0, &id), inner_w, inner_h, cx),
         };
 
         ElementBuilder::container(id)
@@ -351,7 +387,7 @@ impl UiDemo {
 
     // ── Tab 0: Buttons ────────────────────────────────────────────────────────
 
-    fn build_buttons_tab(&self, id: ElementId, width: f32, height: f32) -> Element {
+    fn build_buttons_tab(&self, id: ElementId, width: f32, height: f32, cx: &Cx<'_>) -> Element {
         let col_w = ((width - 16.0) * 0.5).max(1.0);
 
         // Left: three big buttons with live click counts.
@@ -376,8 +412,7 @@ impl UiDemo {
 
         for (i, lbl) in btn_labels.iter().enumerate() {
             let bid = btn_id(i);
-            let state = self.hub.widget_state(&bid);
-            btn_col = btn_col.child(button(bid, *lbl, &state));
+            btn_col = btn_col.child(button(bid, *lbl, cx));
         }
 
         // Show click counts.
@@ -452,8 +487,10 @@ impl UiDemo {
 
     // ── Tab 1: Controls ───────────────────────────────────────────────────────
 
-    fn build_controls_tab(&self, id: ElementId, width: f32, height: f32) -> Element {
-        let col_w = ((width - 16.0) * 0.5).max(1.0);
+    fn build_controls_tab(&self, id: ElementId, width: f32, height: f32, cx: &Cx<'_>) -> Element {
+        let gap = 16.0;
+        let col_w = ((width - gap) * 0.5).max(1.0);
+        let slider_w = (col_w * 0.95).clamp(180.0, col_w);
         let left_id = ElementId::local("left", 0, &id);
         let right_id = ElementId::local("right", 0, &id);
 
@@ -477,12 +514,7 @@ impl UiDemo {
         ));
         for (i, lbl) in cb_labels.iter().enumerate() {
             let cid = checkbox_id(i);
-            left = left.child(checkbox(
-                cid.clone(),
-                *lbl,
-                self.checkboxes[i],
-                &self.hub.widget_state(&cid),
-            ));
+            left = left.child(checkbox(cid.clone(), *lbl, self.checkboxes[i], cx));
         }
 
         left = left.child(spacer(ElementId::local("sp", 0, &left_id), 8.0));
@@ -495,8 +527,13 @@ impl UiDemo {
             toggle_id(),
             "Auto-refresh",
             self.toggle_on,
-            clay_ui::ToggleAnimConfig::default(),
-            &self.hub.widget_state(&toggle_id()),
+            ToggleAnimConfig {
+                delta_time: self.frame_delta,
+                duration: 0.18,
+                easing: Easing::CubicInOut,
+                color_space: ColorSpaceKind::Oklab,
+            },
+            cx,
         ));
 
         // Right: radio + slider.
@@ -519,12 +556,7 @@ impl UiDemo {
         ));
         for (i, lbl) in radio_labels.iter().enumerate() {
             let rid = radio_id(i);
-            right = right.child(radio(
-                rid.clone(),
-                *lbl,
-                i == self.radio_choice,
-                &self.hub.widget_state(&rid),
-            ));
+            right = right.child(radio(rid.clone(), *lbl, i == self.radio_choice, cx));
         }
 
         right = right.child(spacer(ElementId::local("sp", 0, &right_id), 8.0));
@@ -536,19 +568,36 @@ impl UiDemo {
             ),
             &WidgetState::default(),
         ));
-        right = right.child(slider(
-            slider_id(),
-            clay_ui::DragBarAxis::Horizontal,
-            self.slider_value,
-            &self.hub.widget_state(&slider_id()),
-        ));
+        right = right.child(
+            ElementBuilder::container(ElementId::local("slider-row", 0, &right_id))
+                .layout(LayoutInput {
+                    width: LayoutSizing::Fixed(col_w),
+                    height: LayoutSizing::Fit {
+                        min: 0.0,
+                        max: f32::INFINITY,
+                    },
+                    direction: LayoutDirection::TopToBottom,
+                    align_x: clay_ui::Align::End,
+                    ..LayoutInput::default()
+                })
+                .child(slider(
+                    slider_id(),
+                    clay_ui::DragBarAxis::Horizontal,
+                    SliderConfig::new(0.0, 1.0)
+                        .initial(self.slider_value)
+                        .step(0.01)
+                        .track_extent(slider_w),
+                    cx,
+                ))
+                .build(),
+        );
 
         ElementBuilder::container(id)
             .layout(LayoutInput {
                 width: LayoutSizing::Fixed(width),
                 height: LayoutSizing::Fixed(height),
                 direction: LayoutDirection::LeftToRight,
-                gap: 16.0,
+                gap,
                 ..LayoutInput::default()
             })
             .child(left.build())
@@ -558,7 +607,7 @@ impl UiDemo {
 
     // ── Tab 2: List ───────────────────────────────────────────────────────────
 
-    fn build_list_tab(&self, id: ElementId, width: f32, height: f32) -> Element {
+    fn build_list_tab(&self, id: ElementId, width: f32, height: f32, cx: &Cx<'_>) -> Element {
         let (selected_id, selected_sub) = LIST_ITEMS[self.list_selected];
         let mut col = ElementBuilder::container(id.clone()).layout(LayoutInput {
             width: LayoutSizing::Fixed(width),
@@ -589,7 +638,7 @@ impl UiDemo {
                         .sublabel(sub)
                         .selected(i == self.list_selected)
                         .state(self.hub.widget_state(&list_item_id(i))),
-                    &self.palette,
+                    cx,
                 )
             })
             .collect();
@@ -643,6 +692,7 @@ fn render_element(
     element: &clay_ui::Element,
     layout: &LayoutTree,
     clip: Option<clay_ui::Rect>,
+    scale: [f32; 2],
 ) {
     let Some(node) = layout.by_id(&element.id) else {
         return;
@@ -655,14 +705,15 @@ fn render_element(
     };
 
     if let Some(visible) = clipped(rect, clip) {
+        let visible_px = scale_rect(visible, scale);
         if element.style.background.is_visible() {
-            let r = element.style.corner_radius.x.max(0.0);
+            let r = element.style.corner_radius.x.max(0.0) * average_scale(scale);
             if r > 0.0 {
                 overlay.filled_rounded_rect_screen(
                     width,
                     height,
-                    [visible.origin.x, visible.origin.y],
-                    [visible.size.width, visible.size.height],
+                    [visible_px.origin.x, visible_px.origin.y],
+                    [visible_px.size.width, visible_px.size.height],
                     r,
                     element.style.background.to_f32_array(),
                 );
@@ -670,30 +721,32 @@ fn render_element(
                 overlay.filled_rect_screen(
                     width,
                     height,
-                    [visible.origin.x, visible.origin.y],
-                    [visible.size.width, visible.size.height],
+                    [visible_px.origin.x, visible_px.origin.y],
+                    [visible_px.size.width, visible_px.size.height],
                     element.style.background.to_f32_array(),
                 );
             }
         }
 
         if let ElementKind::Text(text) = &element.kind {
+            let rect_px = scale_rect(rect, scale);
             let typo = TextTypography::default()
-                .font_size(text.style.font_size)
-                .line_height(text.style.line_height);
+                .font_size(text.style.font_size * average_scale(scale))
+                .line_height(text.style.line_height * average_scale(scale));
             let desc = TextDrawDesc::new(text.text.clone())
                 .placement(TextPlacement::Screen2d {
-                    x: rect.origin.x,
-                    y: rect.origin.y,
+                    x: rect_px.origin.x,
+                    y: rect_px.origin.y,
                 })
                 .typography(typo)
                 .color(text.style.color.to_f32_array());
             let desc = if text.style.wrap == TextWrap::Words {
-                desc.max_width(rect.size.width.max(1.0))
+                desc.max_width(rect_px.size.width.max(1.0))
             } else {
                 desc
             };
             let desc = if let Some(c) = clip {
+                let c = scale_rect(c, scale);
                 desc.clip_rect(c.origin.x, c.origin.y, c.size.width, c.size.height)
             } else {
                 desc
@@ -702,7 +755,7 @@ fn render_element(
         }
 
         for child in &element.children {
-            render_element(overlay, width, height, child, layout, clip);
+            render_element(overlay, width, height, child, layout, clip, scale);
         }
 
         if element.style.outline.is_visible() {
@@ -714,15 +767,28 @@ fn render_element(
                 overlay.rounded_rectangle_outline_screen(
                     width,
                     height,
-                    [visible.origin.x, visible.origin.y],
-                    [visible.size.width, visible.size.height],
-                    element.style.corner_radius.x.max(0.0),
-                    ow,
+                    [visible_px.origin.x, visible_px.origin.y],
+                    [visible_px.size.width, visible_px.size.height],
+                    element.style.corner_radius.x.max(0.0) * average_scale(scale),
+                    ow * average_scale(scale),
                     element.style.outline.to_f32_array(),
                 );
             }
         }
     }
+}
+
+fn scale_rect(rect: clay_ui::Rect, scale: [f32; 2]) -> clay_ui::Rect {
+    clay_ui::Rect::new(
+        rect.origin.x * scale[0],
+        rect.origin.y * scale[1],
+        rect.size.width * scale[0],
+        rect.size.height * scale[1],
+    )
+}
+
+fn average_scale(scale: [f32; 2]) -> f32 {
+    (scale[0].abs() + scale[1].abs()) * 0.5
 }
 
 fn clipped(rect: clay_ui::Rect, clip: Option<clay_ui::Rect>) -> Option<clay_ui::Rect> {

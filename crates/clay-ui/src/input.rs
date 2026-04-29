@@ -704,8 +704,16 @@ pub struct SliderConfig {
     pub step: f32,
     /// Value change for Page Up / Page Down.
     pub large_step: f32,
-    /// Pixel length of the draggable track (used to map drag delta → value).
+    /// Desired visual length of the draggable track in layout pixels.
+    ///
+    /// Pointer input is mapped through the final laid-out rect, not this
+    /// configured value, so parent alignment and responsive layout stay in sync
+    /// with hit testing.
     pub track_extent: f32,
+    /// Radius of the draggable thumb in layout pixels. The pointer travel range
+    /// is inset by this amount on both sides so the thumb stays inside the
+    /// visible track.
+    pub thumb_radius: f32,
 }
 
 impl Default for SliderConfig {
@@ -717,6 +725,7 @@ impl Default for SliderConfig {
             step: 0.01,
             large_step: 0.1,
             track_extent: 100.0,
+            thumb_radius: 8.0,
         }
     }
 }
@@ -749,6 +758,11 @@ impl SliderConfig {
 
     pub fn track_extent(mut self, track_extent: f32) -> Self {
         self.track_extent = track_extent.max(1.0);
+        self
+    }
+
+    pub fn thumb_radius(mut self, thumb_radius: f32) -> Self {
+        self.thumb_radius = thumb_radius.max(0.0);
         self
     }
 
@@ -1497,20 +1511,12 @@ impl InputSimulator {
                                     if let Some(config) =
                                         self.slider_configs.get(&hit.id.hash).copied()
                                     {
-                                        let normalized = match axis {
-                                            Axis::Horizontal => {
-                                                let inner_left = rect.origin.x + 10.0;
-                                                let inner_width =
-                                                    (rect.size.width - 20.0).max(f32::EPSILON);
-                                                (pointer.position.x - inner_left) / inner_width
-                                            }
-                                            Axis::Vertical => {
-                                                let inner_top = rect.origin.y + 10.0;
-                                                let inner_height =
-                                                    (rect.size.height - 20.0).max(f32::EPSILON);
-                                                (pointer.position.y - inner_top) / inner_height
-                                            }
-                                        };
+                                        let normalized = slider_normalized_from_rect(
+                                            axis,
+                                            rect,
+                                            pointer.position,
+                                            config.thumb_radius,
+                                        );
                                         let new_value = config.clamp(
                                             config.min
                                                 + normalized.clamp(0.0, 1.0) * config.range(),
@@ -1576,25 +1582,13 @@ impl InputSimulator {
             .get(&id.hash)
             .copied()
             .unwrap_or_default();
-        // Use the track rect captured on press for absolute-position mapping.
-        // The slider layout has 2 px padding (from control_style) plus an 8 px
-        // thumb radius, so the thumb CENTRE travels from track+10 to track+W−10,
-        // giving inner_left = 10 and inner_width = W − 20.
+        // Use the final displayed track rect captured on press for absolute
+        // mapping. This keeps dragging in the same coordinate space as render
+        // and hit testing regardless of slider width, parent alignment, or DPI.
         let Some(rect) = self.slider_track_rects.get(&id.hash).copied() else {
             return;
         };
-        let normalized = match axis {
-            Axis::Horizontal => {
-                let inner_left = rect.origin.x + 10.0;
-                let inner_width = (rect.size.width - 20.0).max(f32::EPSILON);
-                (pointer_pos.x - inner_left) / inner_width
-            }
-            Axis::Vertical => {
-                let inner_top = rect.origin.y + 10.0;
-                let inner_height = (rect.size.height - 20.0).max(f32::EPSILON);
-                (pointer_pos.y - inner_top) / inner_height
-            }
-        };
+        let normalized = slider_normalized_from_rect(axis, rect, pointer_pos, config.thumb_radius);
         let new_value = config.clamp(config.min + normalized.clamp(0.0, 1.0) * config.range());
         self.slider_values.insert(id.hash, new_value);
     }
@@ -2086,6 +2080,28 @@ fn slider_key_delta(name: &str, axis: Axis, config: &SliderConfig) -> f32 {
         -config.range() // clamp will pin to min
     } else {
         0.0
+    }
+}
+
+fn slider_normalized_from_rect(
+    axis: Axis,
+    rect: Rect,
+    pointer_pos: Vec2,
+    thumb_radius: f32,
+) -> f32 {
+    match axis {
+        Axis::Horizontal => {
+            let radius = thumb_radius.max(0.0).min(rect.size.width * 0.5);
+            let start = rect.origin.x + radius;
+            let travel = (rect.size.width - radius * 2.0).max(f32::EPSILON);
+            (pointer_pos.x - start) / travel
+        }
+        Axis::Vertical => {
+            let radius = thumb_radius.max(0.0).min(rect.size.height * 0.5);
+            let start = rect.origin.y + radius;
+            let travel = (rect.size.height - radius * 2.0).max(f32::EPSILON);
+            (pointer_pos.y - start) / travel
+        }
     }
 }
 
@@ -2883,16 +2899,14 @@ mod tests {
         let layout = layout_for(&element);
         let mut input = InputSimulator::default();
         input.set_widget_behavior(id.clone(), WidgetBehavior::slider(Axis::Horizontal));
-        // Track element is 100×40 at origin (0,0).
-        // inner_left = 10 (padding 2 + thumb_radius 8), inner_width = 100 - 20 = 80.
-        // Pressing at x=50 maps to (50-10)/80 = 0.5 exactly.
+        // Track element is 100×40 at origin (0,0), so x=50 maps to 0.5.
         input.set_slider_config(
             id.clone(),
             SliderConfig::new(0.0, 1.0).step(0.01).track_extent(100.0),
         );
         input.set_slider_value(&id, 0.0);
 
-        // Press at x=50: value snaps to (50-10)/80 = 0.5.
+        // Press at x=50: value snaps to 0.5.
         input.queue(InputEvent::Pointer(PointerState {
             position: Vec2::new(50.0, 20.0),
             phase: InteractionPhase::PressedThisFrame,
@@ -2904,9 +2918,9 @@ mod tests {
             "press snaps to 0.5"
         );
 
-        // Drag to x=90 (inner right edge, 10+80=90): value should be (90-10)/80 = 1.0.
+        // Drag to the rightmost thumb center: x=100-8=92 should be 1.0.
         input.queue(InputEvent::Pointer(PointerState {
-            position: Vec2::new(90.0, 20.0),
+            position: Vec2::new(92.0, 20.0),
             phase: InteractionPhase::Pressed,
             ..PointerState::default()
         }));
@@ -2914,6 +2928,76 @@ mod tests {
         assert!(
             (input.slider_value(&id) - 1.0).abs() < 1e-5,
             "drag to right edge gives 1.0"
+        );
+    }
+
+    #[test]
+    fn pointer_drag_uses_slider_layout_rect_not_config_extent() {
+        let id = ElementId::new("slider");
+        let element = test_element(id.clone());
+        let layout = layout_for(&element);
+        let mut input = InputSimulator::default();
+        input.set_widget_behavior(id.clone(), WidgetBehavior::slider(Axis::Horizontal));
+        input.set_slider_config(
+            id.clone(),
+            SliderConfig::new(0.0, 1.0).step(0.01).track_extent(240.0),
+        );
+        input.set_slider_value(&id, 0.0);
+
+        input.queue(InputEvent::Pointer(PointerState {
+            position: Vec2::new(50.0, 20.0),
+            phase: InteractionPhase::PressedThisFrame,
+            ..PointerState::default()
+        }));
+        input.update(&layout);
+
+        assert!(
+            (input.slider_value(&id) - 0.5).abs() < 1e-5,
+            "drag mapping must use the displayed 100 px layout rect, not the 240 px config extent"
+        );
+    }
+
+    #[test]
+    fn pointer_drag_uses_offset_slider_final_display_rect() {
+        let id = ElementId::new("slider");
+        let layout = LayoutTree {
+            nodes: vec![layout_node(
+                id.clone(),
+                0,
+                Rect::new(300.0, 40.0, 240.0, 20.0),
+                UiLayer::Content,
+                0,
+                false,
+            )],
+        };
+        let mut input = InputSimulator::default();
+        input.set_widget_behavior(id.clone(), WidgetBehavior::slider(Axis::Horizontal));
+        input.set_slider_config(
+            id.clone(),
+            SliderConfig::new(0.0, 1.0).step(0.01).track_extent(120.0),
+        );
+        input.set_slider_value(&id, 0.0);
+
+        input.queue(InputEvent::Pointer(PointerState {
+            position: Vec2::new(420.0, 50.0),
+            phase: InteractionPhase::PressedThisFrame,
+            ..PointerState::default()
+        }));
+        input.update(&layout);
+        assert!(
+            (input.slider_value(&id) - 0.5).abs() < 1e-5,
+            "center of the final displayed rect should map to 0.5"
+        );
+
+        input.queue(InputEvent::Pointer(PointerState {
+            position: Vec2::new(532.0, 50.0),
+            phase: InteractionPhase::Pressed,
+            ..PointerState::default()
+        }));
+        input.update(&layout);
+        assert!(
+            (input.slider_value(&id) - 1.0).abs() < 1e-5,
+            "right edge of the final displayed rect should map to 1.0"
         );
     }
 

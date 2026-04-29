@@ -319,6 +319,13 @@ The UI stack should be designed like an engine subsystem, not like a temporary i
 - [ ] Add a stable action/callback model: `on_pointer_down`, `on_pointer_up`, `on_click`, `on_double_click`, `on_drag_start`, `on_drag`, `on_drag_end`, `on_key_down`, `on_key_up`, `on_text_input`, `on_submit`, `on_cancel`, `on_focus`, `on_blur`, `on_scroll`, and `on_value_changed`.
 - [ ] Add state primitives for hovered, pressed, focused, focus-visible, active, checked, selected, disabled, read-only, invalid, loading, dirty, captured, modal, and consumed.
 - [ ] Add high-level widgets for labels, buttons, icon buttons, toggles, sliders, ranges, progress bars, text fields, combo boxes, menus, context menus, tabs, accordions, split panes, dock panels, trees, tables, property grids, color pickers, file/path pickers, code editors, consoles, graphs, timeline controls, and asset browsers.
+- [ ] Add per-widget style/config structs for standard controls: `CheckboxStyle`, `RadioStyle`, `ToggleStyle`, `SliderStyle`, and related metric structs.
+- [ ] Move hard-coded control metrics into style/config: checkbox/radio indicator size, check mark size, toggle track/knob size, slider track height, thumb radius, fill inset, label gap, padding, and corner radii.
+- [ ] Add widget click-area policy: indicator-only, label-and-indicator, full-row, and custom hit-shape override.
+- [ ] Add per-part widget style hooks for track, fill, thumb, mark, knob, indicator, label, focus ring, disabled overlay, and invalid/error affordance.
+- [ ] Make slider input derive its travel metrics from `SliderStyle`/final geometry instead of hard-coded thumb radius constants, including vertical slider coverage.
+- [ ] Add tests for tiny controls, oversized thumbs/knobs, transparent tracks, alpha fills, shader borders, full-row click policies, label-only pass-through policies, and mismatched config/display sizes.
+- [ ] Add explicit widget visual-overflow policy so shadows, glows, focus rings, and shader effects can be clipped, expanded, or routed through an offscreen pass intentionally.
 - [ ] Add undo/redo and command-history hooks for text editing, inspector/property editing, graph editors, and standalone apps.
 - [ ] Add drag-and-drop with typed payloads, visual previews, accepted/rejected drop feedback, and cross-root support where possible.
 - [ ] Add declarative shortcut/chord registration that resolves conflicts across app, UI root, modal, text input, and game contexts.
@@ -346,6 +353,8 @@ The UI stack should be designed like an engine subsystem, not like a temporary i
 - [ ] Add depth-aware UI effects for game overlays and world UI: depth fade, occlusion policy, soft intersection, outline-through-walls policy, and optional depth-tested labels.
 - [ ] Add animation primitives for transitions, transforms, opacity, color, layout, scroll, shader parameters, and visibility with deterministic frame-time input.
 - [ ] Add timeline/spring/easing utilities that can run on the CPU by default and feed shader parameters when appropriate.
+- [ ] Expand easing into a trait-based animation contract so apps can define reusable custom easing functions, register them by stable ID, and share the same easing between CPU layout/animation and shader parameters.
+- [ ] Add per-widget transition configuration for colors, opacity, transforms, layout metrics, and shader uniforms, including color-space selection and reduced-motion policy.
 - [ ] Add overdraw, pass-count, offscreen allocation, clip-mask cost, text-atlas cost, and widget batching diagnostics.
 
 ### In-game overlay UI
@@ -590,7 +599,7 @@ If a roadmap item is still too large for one prompt, split it again until the pr
 - [x] Convert winit cursor coordinates into engine top-left/Y-down `WindowLogicalPx` and `WindowPhysicalPx` immediately at the platform boundary.
 - [x] Convert Vulkan framebuffer, viewport, scissor, and clip-space details behind renderer helper functions so app/UI code never has to remember Vulkan orientation rules.
 - [x] Audit all UI layout, hit testing, debug drawing, texture blitting, screenshot/export, and readback paths for bottom-left assumptions.
-- [ ] Add tests for edge-inclusive/exclusive rectangle behavior.
+- [x] Add tests for edge-inclusive/exclusive rectangle behavior.
 - [ ] Add debug views for coordinate spaces and DPI scale factor.
 
 ### Robustness and platform-isolation execution chunks

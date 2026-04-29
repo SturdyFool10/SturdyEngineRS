@@ -1,10 +1,10 @@
 use crate::{
-    Axis, CornerSpec, Cx, Easing, Edges, Element, ElementBuilder, ElementId, ElementStyle,
-    FloatingAlign, FloatingAttachConfig, FloatingAttachError, FloatingOptions, FloatingPlacement,
-    LayoutDirection, LayoutInput, LayoutPosition, LayoutSizing, LayoutTree, MosaicLayout, Rect,
-    ScrollAxis, ScrollConfig, Size, SliderConfig, TextAlign, TextStyle, TextWrap, UiColor,
-    UiImageOptions, UiLayer, UiShape, VirtualGridLayout, VirtualListLayout, VirtualTableLayout,
-    VirtualTreeLayout, WidgetBehavior, WidgetState, attached_floating_layer,
+    Axis, ColorSpaceKind, CornerSpec, Cx, Easing, Edges, Element, ElementBuilder, ElementId,
+    ElementStyle, FloatingAlign, FloatingAttachConfig, FloatingAttachError, FloatingOptions,
+    FloatingPlacement, LayoutDirection, LayoutInput, LayoutPosition, LayoutSizing, LayoutTree,
+    MosaicLayout, Rect, ScrollAxis, ScrollConfig, Size, SliderConfig, TextAlign, TextStyle,
+    TextWrap, UiColor, UiImageOptions, UiLayer, UiShape, VirtualGridLayout, VirtualListLayout,
+    VirtualTableLayout, VirtualTreeLayout, WidgetBehavior, WidgetState, attached_floating_layer,
     floating::place_subtree_in_layer, radii_all,
 };
 use glam::Vec2;
@@ -18,6 +18,8 @@ pub struct ToggleAnimConfig {
     pub duration: f32,
     /// Easing function applied to the linear progress before use for rendering.
     pub easing: Easing,
+    /// Color space used when interpolating the track background.
+    pub color_space: ColorSpaceKind,
 }
 
 impl Default for ToggleAnimConfig {
@@ -26,6 +28,7 @@ impl Default for ToggleAnimConfig {
             delta_time: 0.0,
             duration: 0.15,
             easing: Easing::EaseInOut,
+            color_space: ColorSpaceKind::LinearSrgb,
         }
     }
 }
@@ -61,6 +64,84 @@ impl Default for WidgetPalette {
             outline_invalid: UiColor::from_rgba8(248, 113, 113, 255),
             accent: UiColor::from_rgba8(59, 130, 246, 255),
             accent_text: UiColor::WHITE,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CheckboxStyle {
+    pub indicator_size: f32,
+    pub mark_size: f32,
+    pub indicator_radius: f32,
+    pub mark_radius: f32,
+    pub indicator_padding: Edges,
+    pub label_gap: f32,
+}
+
+impl Default for CheckboxStyle {
+    fn default() -> Self {
+        Self {
+            indicator_size: 16.0,
+            mark_size: 10.0,
+            indicator_radius: 4.0,
+            mark_radius: 2.0,
+            indicator_padding: Edges::all(3.0),
+            label_gap: 8.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RadioStyle {
+    pub indicator_size: f32,
+    pub label_gap: f32,
+}
+
+impl Default for RadioStyle {
+    fn default() -> Self {
+        Self {
+            indicator_size: 16.0,
+            label_gap: 8.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToggleStyle {
+    pub track_width: f32,
+    pub track_height: f32,
+    pub knob_size: f32,
+    pub track_padding: f32,
+    pub label_gap: f32,
+}
+
+impl Default for ToggleStyle {
+    fn default() -> Self {
+        Self {
+            track_width: 36.0,
+            track_height: 20.0,
+            knob_size: 16.0,
+            track_padding: 2.0,
+            label_gap: 8.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SliderStyle {
+    pub track_extent: Option<f32>,
+    pub track_cross_extent: f32,
+    pub thumb_size: f32,
+    pub fill_inset: f32,
+}
+
+impl Default for SliderStyle {
+    fn default() -> Self {
+        Self {
+            track_extent: None,
+            track_cross_extent: 20.0,
+            thumb_size: 16.0,
+            fill_inset: 2.0,
         }
     }
 }
@@ -1101,16 +1182,38 @@ pub fn radio<C: WidgetRenderContext + ?Sized>(
     checked: bool,
     cx: &C,
 ) -> Element {
+    radio_styled(id, label, checked, RadioStyle::default(), cx)
+}
+
+pub fn radio_styled<C: WidgetRenderContext + ?Sized>(
+    id: ElementId,
+    label: impl Into<String>,
+    checked: bool,
+    style: RadioStyle,
+    cx: &C,
+) -> Element {
     cx.register_widget_behavior(id.clone(), WidgetBehavior::interactive());
     let state = cx.widget_state(&id);
     let palette = cx.widget_palette();
-    radio_with_palette(id, label, checked, &state, &palette)
+    radio_with_palette_and_style(id, label, checked, &style, &state, &palette)
 }
 
+#[cfg(test)]
 pub(crate) fn radio_with_palette(
     id: ElementId,
     label: impl Into<String>,
     checked: bool,
+    state: &WidgetState,
+    palette: &WidgetPalette,
+) -> Element {
+    radio_with_palette_and_style(id, label, checked, &RadioStyle::default(), state, palette)
+}
+
+pub(crate) fn radio_with_palette_and_style(
+    id: ElementId,
+    label: impl Into<String>,
+    checked: bool,
+    style: &RadioStyle,
     state: &WidgetState,
     palette: &WidgetPalette,
 ) -> Element {
@@ -1136,15 +1239,15 @@ pub(crate) fn radio_with_palette(
                 max: f32::INFINITY,
             },
             direction: LayoutDirection::LeftToRight,
-            gap: 8.0,
+            gap: style.label_gap,
             ..LayoutInput::default()
         })
         .child(
             ElementBuilder::container(id.clone())
                 .style(indicator_style)
                 .layout(LayoutInput {
-                    width: LayoutSizing::Fixed(16.0),
-                    height: LayoutSizing::Fixed(16.0),
+                    width: LayoutSizing::Fixed(style.indicator_size.max(1.0)),
+                    height: LayoutSizing::Fixed(style.indicator_size.max(1.0)),
                     ..LayoutInput::default()
                 })
                 .build(),
@@ -1163,16 +1266,45 @@ pub fn checkbox<C: WidgetRenderContext + ?Sized>(
     checked: bool,
     cx: &C,
 ) -> Element {
+    checkbox_styled(id, label, checked, CheckboxStyle::default(), cx)
+}
+
+pub fn checkbox_styled<C: WidgetRenderContext + ?Sized>(
+    id: ElementId,
+    label: impl Into<String>,
+    checked: bool,
+    style: CheckboxStyle,
+    cx: &C,
+) -> Element {
     cx.register_widget_behavior(id.clone(), WidgetBehavior::interactive());
     let state = cx.widget_state(&id);
     let palette = cx.widget_palette();
-    checkbox_with_palette(id, label, checked, &state, &palette)
+    checkbox_with_palette_and_style(id, label, checked, &style, &state, &palette)
 }
 
+#[cfg(test)]
 pub(crate) fn checkbox_with_palette(
     id: ElementId,
     label: impl Into<String>,
     checked: bool,
+    state: &WidgetState,
+    palette: &WidgetPalette,
+) -> Element {
+    checkbox_with_palette_and_style(
+        id,
+        label,
+        checked,
+        &CheckboxStyle::default(),
+        state,
+        palette,
+    )
+}
+
+pub(crate) fn checkbox_with_palette_and_style(
+    id: ElementId,
+    label: impl Into<String>,
+    checked: bool,
+    style: &CheckboxStyle,
     state: &WidgetState,
     palette: &WidgetPalette,
 ) -> Element {
@@ -1181,7 +1313,13 @@ pub(crate) fn checkbox_with_palette(
     // receive click events.
     let outer_id = ElementId::local("outer", 0, &id);
     let mark_id = ElementId::local("mark", 0, &id);
-    let mut box_style = control_style(state, palette, checked, 4.0, Edges::all(3.0));
+    let mut box_style = control_style(
+        state,
+        palette,
+        checked,
+        style.indicator_radius,
+        style.indicator_padding,
+    );
     box_style.outline_width = Edges::all(if state.focused { 2.0 } else { 1.0 });
     let mark_style = ElementStyle {
         background: if state.disabled {
@@ -1189,15 +1327,16 @@ pub(crate) fn checkbox_with_palette(
         } else {
             palette.accent_text
         },
-        corner_radius: radii_all(2.0),
+        corner_radius: radii_all(style.mark_radius),
+        transparent_to_input: true,
         ..ElementStyle::default()
     };
 
     let mut box_builder = ElementBuilder::container(id.clone())
         .style(box_style)
         .layout(LayoutInput {
-            width: LayoutSizing::Fixed(16.0),
-            height: LayoutSizing::Fixed(16.0),
+            width: LayoutSizing::Fixed(style.indicator_size.max(1.0)),
+            height: LayoutSizing::Fixed(style.indicator_size.max(1.0)),
             ..LayoutInput::default()
         });
     if checked {
@@ -1205,8 +1344,8 @@ pub(crate) fn checkbox_with_palette(
             ElementBuilder::container(mark_id)
                 .style(mark_style)
                 .layout(LayoutInput {
-                    width: LayoutSizing::Fixed(10.0),
-                    height: LayoutSizing::Fixed(10.0),
+                    width: LayoutSizing::Fixed(style.mark_size.max(0.0)),
+                    height: LayoutSizing::Fixed(style.mark_size.max(0.0)),
                     ..LayoutInput::default()
                 })
                 .build(),
@@ -1228,7 +1367,7 @@ pub(crate) fn checkbox_with_palette(
                 max: f32::INFINITY,
             },
             direction: LayoutDirection::LeftToRight,
-            gap: 8.0,
+            gap: style.label_gap,
             ..LayoutInput::default()
         })
         .child(box_builder.build())
@@ -1247,6 +1386,17 @@ pub fn toggle<C: WidgetRenderContext + ?Sized>(
     anim: ToggleAnimConfig,
     cx: &C,
 ) -> Element {
+    toggle_styled(id, label, checked, anim, ToggleStyle::default(), cx)
+}
+
+pub fn toggle_styled<C: WidgetRenderContext + ?Sized>(
+    id: ElementId,
+    label: impl Into<String>,
+    checked: bool,
+    anim: ToggleAnimConfig,
+    style: ToggleStyle,
+    cx: &C,
+) -> Element {
     // The pill indicator uses the user's `id` so that activation events are
     // associated with the registered id.
     cx.register_widget_behavior(id.clone(), WidgetBehavior::interactive());
@@ -1254,13 +1404,42 @@ pub fn toggle<C: WidgetRenderContext + ?Sized>(
     let palette = cx.widget_palette();
     let target = if checked { 1.0 } else { 0.0 };
     let progress = cx.advance_toggle_animation(&id, target, anim);
-    toggle_with_palette(id, label, progress, &state, &palette)
+    toggle_with_palette_in_space_and_style(
+        id,
+        label,
+        progress,
+        anim.color_space,
+        &style,
+        &state,
+        &palette,
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn toggle_with_palette(
     id: ElementId,
     label: impl Into<String>,
     progress: f32,
+    state: &WidgetState,
+    palette: &WidgetPalette,
+) -> Element {
+    toggle_with_palette_in_space_and_style(
+        id,
+        label,
+        progress,
+        ColorSpaceKind::LinearSrgb,
+        &ToggleStyle::default(),
+        state,
+        palette,
+    )
+}
+
+pub(crate) fn toggle_with_palette_in_space_and_style(
+    id: ElementId,
+    label: impl Into<String>,
+    progress: f32,
+    color_space: ColorSpaceKind,
+    style: &ToggleStyle,
     state: &WidgetState,
     palette: &WidgetPalette,
 ) -> Element {
@@ -1270,11 +1449,27 @@ pub(crate) fn toggle_with_palette(
     let knob_id = ElementId::local("knob", 0, &id);
     let progress = progress.clamp(0.0, 1.0);
 
-    // Track: Fixed 36×20, padding 2px all sides → inner 32×16.
-    // Knob: Fixed 16×16, travel range = inner_width - knob_width = 16 px.
-    let knob_offset_x = progress * 16.0;
+    let track_width = style.track_width.max(1.0);
+    let track_height = style.track_height.max(1.0);
+    let knob_size = style.knob_size.max(1.0);
+    let track_padding = style
+        .track_padding
+        .max(0.0)
+        .min((track_width.min(track_height) - knob_size).max(0.0) * 0.5);
+    let knob_travel = (track_width - track_padding * 2.0 - knob_size).max(0.0);
+    // The knob is positioned with `LayoutPosition::Absolute`, whose offset is
+    // relative to the *content rect* of the track (i.e. already inset by the
+    // track's padding).  Adding `track_padding` here would double-count it,
+    // leaving a visible gap at the top and clipping the knob on the far side.
+    let knob_offset_x = progress * knob_travel;
 
-    let mut track_style = control_style(state, palette, progress >= 0.5, 999.0, Edges::all(2.0));
+    let off_style = control_style(state, palette, false, 999.0, Edges::all(track_padding));
+    let on_style = control_style(state, palette, true, 999.0, Edges::all(track_padding));
+    let mut track_style = off_style.clone();
+    track_style.background =
+        off_style
+            .background
+            .mix_in_space(on_style.background, progress as f64, color_space);
     track_style.outline_width = Edges::all(if state.focused { 2.0 } else { 1.0 });
     let knob_style = ElementStyle {
         background: if state.disabled {
@@ -1302,15 +1497,15 @@ pub(crate) fn toggle_with_palette(
                 max: f32::INFINITY,
             },
             direction: LayoutDirection::LeftToRight,
-            gap: 8.0,
+            gap: style.label_gap,
             ..LayoutInput::default()
         })
         .child(
             ElementBuilder::container(id.clone())
                 .style(track_style)
                 .layout(LayoutInput {
-                    width: LayoutSizing::Fixed(36.0),
-                    height: LayoutSizing::Fixed(20.0),
+                    width: LayoutSizing::Fixed(track_width),
+                    height: LayoutSizing::Fixed(track_height),
                     clip_x: true,
                     clip_y: true,
                     ..LayoutInput::default()
@@ -1319,8 +1514,8 @@ pub(crate) fn toggle_with_palette(
                     ElementBuilder::container(knob_id)
                         .style(knob_style)
                         .layout(LayoutInput {
-                            width: LayoutSizing::Fixed(16.0),
-                            height: LayoutSizing::Fixed(16.0),
+                            width: LayoutSizing::Fixed(knob_size),
+                            height: LayoutSizing::Fixed(knob_size),
                             position: LayoutPosition::Absolute {
                                 offset: Vec2::new(knob_offset_x, 0.0),
                             },
@@ -1457,40 +1652,78 @@ where
     C: WidgetRenderContext + ?Sized,
     S: Into<SliderConfig>,
 {
+    slider_styled(id, axis, config, SliderStyle::default(), cx)
+}
+
+pub fn slider_styled<C, S>(
+    id: ElementId,
+    axis: impl Into<DragBarAxis>,
+    config: S,
+    style: SliderStyle,
+    cx: &C,
+) -> Element
+where
+    C: WidgetRenderContext + ?Sized,
+    S: Into<SliderConfig>,
+{
     let axis_enum: DragBarAxis = axis.into();
     let crate_axis = match axis_enum {
         DragBarAxis::Horizontal => Axis::Horizontal,
         DragBarAxis::Vertical => Axis::Vertical,
     };
-    let config = config.into();
+    let mut config = config.into();
+    let track_extent = style.track_extent.unwrap_or(config.track_extent).max(20.0);
+    let thumb_radius = style.thumb_size.max(1.0) * 0.5;
+    config = config.track_extent(track_extent).thumb_radius(thumb_radius);
     cx.register_slider_widget(id.clone(), crate_axis, config);
     let value = cx.slider_display_value(&id, config);
     let state = cx.widget_state(&id);
     let palette = cx.widget_palette();
-    slider_with_palette(id, axis_enum, value, &state, &palette)
+    slider_with_palette_and_style(id, axis_enum, value, track_extent, &style, &state, &palette)
 }
 
+#[cfg(test)]
 pub(crate) fn slider_with_palette(
     id: ElementId,
     axis: impl Into<DragBarAxis>,
     value: f32,
+    track_extent: f32,
+    state: &WidgetState,
+    palette: &WidgetPalette,
+) -> Element {
+    slider_with_palette_and_style(
+        id,
+        axis,
+        value,
+        track_extent,
+        &SliderStyle::default(),
+        state,
+        palette,
+    )
+}
+
+pub(crate) fn slider_with_palette_and_style(
+    id: ElementId,
+    axis: impl Into<DragBarAxis>,
+    value: f32,
+    track_extent: f32,
+    style: &SliderStyle,
     state: &WidgetState,
     palette: &WidgetPalette,
 ) -> Element {
     let axis = axis.into();
     let value = value.clamp(0.0, 1.0);
+    let track_extent = track_extent.max(20.0);
+    let thumb_size = style.thumb_size.max(1.0);
+    let thumb_radius = thumb_size * 0.5;
+    let track_cross_extent = style.track_cross_extent.max(thumb_size);
+    let fill_inset = style.fill_inset.max(0.0).min(track_cross_extent * 0.5);
     let fill_id = ElementId::local("fill", 0, &id);
     let thumb_id = ElementId::local("thumb", 0, &id);
 
-    // Layout uses the original fill+thumb flow so the track keeps its 2 px
-    // padding and the fill extends Percent(value) of the content area.  Both
-    // children are transparent_to_input so hit-testing always reaches the
-    // track element (which carries the slider behaviour).
-    //
-    // The drag-to-value mapping in input.rs uses inner_left = padding(2) +
-    // thumb_radius(8) = 10 px and inner_width = track_width − 20 so that
-    // dragging to the thumb centre gives the exact value.
-    let mut track_style = control_style(state, palette, false, 999.0, Edges::all(2.0));
+    // Fill and thumb are absolute so their displayed position is tied directly
+    // to the same final track rect used by input.rs.
+    let mut track_style = control_style(state, palette, false, 999.0, Edges::ZERO);
     track_style.outline_width = Edges::all(if state.focused { 2.0 } else { 1.0 });
 
     let fill_style = ElementStyle {
@@ -1516,32 +1749,40 @@ pub(crate) fn slider_with_palette(
         ..ElementStyle::default()
     };
 
-    let (width, height, direction, fill_width, fill_height) = match axis {
+    let travel = (track_extent - thumb_radius * 2.0).max(0.0);
+    let thumb_center = thumb_radius + value * travel;
+    let (width, height, direction, fill_width, fill_height, fill_pos, thumb_pos) = match axis {
         DragBarAxis::Horizontal => (
-            LayoutSizing::Grow {
-                min: 64.0,
-                max: f32::INFINITY,
-            },
-            LayoutSizing::Fixed(20.0),
+            LayoutSizing::Fixed(track_extent),
+            LayoutSizing::Fixed(track_cross_extent),
             LayoutDirection::LeftToRight,
-            LayoutSizing::Percent(value),
-            LayoutSizing::Grow {
-                min: 0.0,
-                max: f32::INFINITY,
+            LayoutSizing::Fixed((thumb_center - fill_inset).max(0.0)),
+            LayoutSizing::Fixed((track_cross_extent - fill_inset * 2.0).max(0.0)),
+            LayoutPosition::Absolute {
+                offset: Vec2::new(fill_inset, fill_inset),
+            },
+            LayoutPosition::Absolute {
+                offset: Vec2::new(
+                    thumb_center - thumb_radius,
+                    (track_cross_extent - thumb_size) * 0.5,
+                ),
             },
         ),
         DragBarAxis::Vertical => (
-            LayoutSizing::Fixed(20.0),
-            LayoutSizing::Grow {
-                min: 64.0,
-                max: f32::INFINITY,
-            },
+            LayoutSizing::Fixed(track_cross_extent),
+            LayoutSizing::Fixed(track_extent),
             LayoutDirection::TopToBottom,
-            LayoutSizing::Grow {
-                min: 0.0,
-                max: f32::INFINITY,
+            LayoutSizing::Fixed((track_cross_extent - fill_inset * 2.0).max(0.0)),
+            LayoutSizing::Fixed((thumb_center - fill_inset).max(0.0)),
+            LayoutPosition::Absolute {
+                offset: Vec2::new(fill_inset, fill_inset),
             },
-            LayoutSizing::Percent(value),
+            LayoutPosition::Absolute {
+                offset: Vec2::new(
+                    (track_cross_extent - thumb_size) * 0.5,
+                    thumb_center - thumb_radius,
+                ),
+            },
         ),
     };
 
@@ -1561,6 +1802,7 @@ pub(crate) fn slider_with_palette(
                 .layout(LayoutInput {
                     width: fill_width,
                     height: fill_height,
+                    position: fill_pos,
                     ..LayoutInput::default()
                 })
                 .build(),
@@ -1569,8 +1811,9 @@ pub(crate) fn slider_with_palette(
             ElementBuilder::container(thumb_id)
                 .style(thumb_style)
                 .layout(LayoutInput {
-                    width: LayoutSizing::Fixed(16.0),
-                    height: LayoutSizing::Fixed(16.0),
+                    width: LayoutSizing::Fixed(thumb_size),
+                    height: LayoutSizing::Fixed(thumb_size),
+                    position: thumb_pos,
                     ..LayoutInput::default()
                 })
                 .build(),
@@ -5078,12 +5321,6 @@ mod tests {
     fn test_cx_and_sim() -> (InputSimulator, WidgetPalette) {
         (InputSimulator::default(), WidgetPalette::default())
     }
-    macro_rules! cx {
-        ($sim:expr, $palette:expr) => {
-            Cx::new(&$sim, $palette)
-        };
-    }
-
     #[test]
     fn button_builder_marks_label_as_nowrap() {
         let id = ElementId::new("button");
@@ -5118,7 +5355,7 @@ mod tests {
     #[test]
     fn checked_toggle_places_knob_at_end() {
         let id = ElementId::new("toggle");
-        // progress=1.0 → knob_offset_x = 1.0 * 16.0 = 16.0
+        // progress=1.0 -> padding + full travel.
         let element = toggle_with_palette(
             id,
             "Enabled",
@@ -5133,6 +5370,8 @@ mod tests {
         assert_eq!(
             knob.layout.position,
             crate::LayoutPosition::Absolute {
+                // offset is relative to the content rect (already inset by
+                // track_padding=2); knob_travel = 36-4-16 = 16, progress=1.
                 offset: Vec2::new(16.0, 0.0)
             },
         );
@@ -5141,7 +5380,7 @@ mod tests {
     #[test]
     fn unchecked_toggle_places_knob_at_start() {
         let id = ElementId::new("toggle");
-        // progress=0.0 → knob_offset_x = 0.0
+        // progress=0.0 -> track padding.
         let element = toggle_with_palette(
             id,
             "Enabled",
@@ -5155,8 +5394,44 @@ mod tests {
         assert_eq!(
             knob.layout.position,
             crate::LayoutPosition::Absolute {
+                // offset is relative to content rect; progress=0 so knob_offset_x=0.
                 offset: Vec2::new(0.0, 0.0)
             },
+        );
+    }
+
+    #[test]
+    fn custom_toggle_style_controls_track_and_knob_metrics() {
+        let id = ElementId::new("toggle");
+        let style = ToggleStyle {
+            track_width: 48.0,
+            track_height: 24.0,
+            knob_size: 20.0,
+            track_padding: 2.0,
+            label_gap: 12.0,
+        };
+        let element = toggle_with_palette_in_space_and_style(
+            id,
+            "Enabled",
+            1.0,
+            ColorSpaceKind::Oklab,
+            &style,
+            &WidgetState::default(),
+            &WidgetPalette::default(),
+        );
+        let track = &element.children[0];
+        let knob = &track.children[0];
+
+        assert_eq!(element.layout.gap, 12.0);
+        assert_eq!(track.layout.width, LayoutSizing::Fixed(48.0));
+        assert_eq!(track.layout.height, LayoutSizing::Fixed(24.0));
+        assert_eq!(knob.layout.width, LayoutSizing::Fixed(20.0));
+        assert_eq!(
+            knob.layout.position,
+            LayoutPosition::Absolute {
+                // offset relative to content rect; knob_travel = 48-4-20 = 24, progress=1.
+                offset: Vec2::new(24.0, 0.0)
+            }
         );
     }
 
@@ -5174,10 +5449,53 @@ mod tests {
 
         assert_eq!(box_element.children.len(), 1);
         assert_eq!(box_element.layout.width, LayoutSizing::Fixed(16.0));
+        assert!(box_element.children[0].style.transparent_to_input);
         assert_eq!(
             box_element.children[0].layout.width,
             LayoutSizing::Fixed(10.0)
         );
+    }
+
+    #[test]
+    fn custom_checkbox_and_radio_styles_control_indicator_metrics() {
+        let checkbox_id = ElementId::new("checkbox");
+        let checkbox = checkbox_with_palette_and_style(
+            checkbox_id,
+            "Accept",
+            true,
+            &CheckboxStyle {
+                indicator_size: 22.0,
+                mark_size: 12.0,
+                indicator_radius: 6.0,
+                mark_radius: 3.0,
+                indicator_padding: Edges::all(5.0),
+                label_gap: 10.0,
+            },
+            &WidgetState::default(),
+            &WidgetPalette::default(),
+        );
+        assert_eq!(checkbox.layout.gap, 10.0);
+        assert_eq!(checkbox.children[0].layout.width, LayoutSizing::Fixed(22.0));
+        assert_eq!(
+            checkbox.children[0].children[0].layout.width,
+            LayoutSizing::Fixed(12.0)
+        );
+
+        let radio_id = ElementId::new("radio");
+        let radio = radio_with_palette_and_style(
+            radio_id,
+            "Choice",
+            true,
+            &RadioStyle {
+                indicator_size: 18.0,
+                label_gap: 11.0,
+            },
+            &WidgetState::default(),
+            &WidgetPalette::default(),
+        );
+        assert_eq!(radio.layout.gap, 11.0);
+        assert_eq!(radio.children[0].layout.width, LayoutSizing::Fixed(18.0));
+        assert_eq!(radio.children[0].layout.height, LayoutSizing::Fixed(18.0));
     }
 
     #[test]
@@ -5221,19 +5539,63 @@ mod tests {
     }
 
     #[test]
-    fn slider_clamps_value_into_fill_percent() {
+    fn slider_clamps_value_into_fill_and_thumb_travel() {
         let id = ElementId::new("slider");
         let element = slider_with_palette(
             id,
             DragBarAxis::Horizontal,
             2.0,
+            240.0,
             &WidgetState::default(),
             &WidgetPalette::default(),
         );
 
-        assert_eq!(element.children[0].layout.width, LayoutSizing::Percent(1.0));
+        assert_eq!(element.layout.width, LayoutSizing::Fixed(240.0));
+        assert_eq!(element.children[0].layout.width, LayoutSizing::Fixed(230.0));
+        assert_eq!(
+            element.children[0].layout.position,
+            LayoutPosition::Absolute {
+                offset: Vec2::new(2.0, 2.0)
+            }
+        );
+        assert_eq!(
+            element.children[1].layout.position,
+            LayoutPosition::Absolute {
+                offset: Vec2::new(224.0, 2.0)
+            }
+        );
         assert!(element.layout.clip_x);
         assert!(element.layout.clip_y);
+    }
+
+    #[test]
+    fn custom_slider_style_controls_visual_metrics() {
+        let id = ElementId::new("slider");
+        let element = slider_with_palette_and_style(
+            id,
+            DragBarAxis::Horizontal,
+            1.0,
+            300.0,
+            &SliderStyle {
+                track_extent: Some(300.0),
+                track_cross_extent: 28.0,
+                thumb_size: 24.0,
+                fill_inset: 3.0,
+            },
+            &WidgetState::default(),
+            &WidgetPalette::default(),
+        );
+
+        assert_eq!(element.layout.width, LayoutSizing::Fixed(300.0));
+        assert_eq!(element.layout.height, LayoutSizing::Fixed(28.0));
+        assert_eq!(element.children[0].layout.width, LayoutSizing::Fixed(285.0));
+        assert_eq!(element.children[0].layout.height, LayoutSizing::Fixed(22.0));
+        assert_eq!(
+            element.children[1].layout.position,
+            LayoutPosition::Absolute {
+                offset: Vec2::new(276.0, 2.0)
+            }
+        );
     }
 
     #[test]
