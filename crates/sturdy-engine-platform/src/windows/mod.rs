@@ -54,6 +54,7 @@ pub fn window_appearance_caps() -> WindowAppearanceCaps {
             },
         ],
         custom_regions: Some(PlatformCapabilityState::Unsupported),
+        corner_style: Some(PlatformCapabilityState::RuntimeReconfigureSupported),
         live_reconfiguration: Some(PlatformCapabilityState::RuntimeReconfigureSupported),
     }
 }

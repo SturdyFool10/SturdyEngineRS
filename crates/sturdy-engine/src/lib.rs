@@ -43,6 +43,7 @@ mod text_overlay;
 mod text_tiling;
 mod texture;
 mod upload_arena;
+mod window_registry;
 
 pub use anti_aliasing_pass::{AntiAliasingPass, taa_jitter_uv, taa_jittered_projection};
 pub use antialiasing::{
@@ -51,7 +52,8 @@ pub use antialiasing::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use application::{
     EngineApp, MotionVectorLayer, MotionVectorSpace, RuntimeMotionVectorDesc,
-    RuntimePostProcessDesc, RuntimePostProcessOutput, ShellFrame, WindowConfig, run, try_run,
+    RuntimePostProcessDesc, RuntimePostProcessOutput, ShellFrame, WindowConfig, WindowDesc, run,
+    try_run,
 };
 pub use bloom_pass::{
     BloomCompositeConstants, BloomConfig, BloomPass, BrightPassConstants, DownsampleConstants,
@@ -147,14 +149,17 @@ pub use sturdy_engine_core::{
 pub use sturdy_engine_macros::push_constants;
 pub use sturdy_engine_platform as platform;
 pub use sturdy_engine_platform::{
-    NativeWindowAppearanceError, PlatformCapabilityState, PlatformKind, SurfaceTransparency,
-    WindowAppearance, WindowAppearanceCaps, WindowAppearancePreset, WindowBackdrop, WindowBlurDesc,
+    NativeWindowAppearanceApplyReport, NativeWindowAppearanceError, NativeWindowAppearanceStatus,
+    PlatformCapabilityState, PlatformKind, SurfaceTransparency, WindowAppearance,
+    WindowAppearanceCaps, WindowAppearancePreset, WindowBackdrop, WindowBlurDesc,
     WindowCornerStyle, WindowEffectQuality, WindowEffectRegion, WindowMaterialKind,
-    WindowMaterialSupport, WindowShadowMode, WindowTransparencyDesc,
-    apply_native_window_appearance, apply_native_window_appearance_for_window, current_platform,
-    current_window_appearance_caps,
+    WindowMaterialSupport, WindowShadowMode, WindowTransparencyDesc, appearance_wants_native_blur,
+    apply_native_window_appearance, apply_native_window_appearance_for_window,
+    apply_native_window_appearance_report_for_window, current_platform,
+    current_window_appearance_caps, native_window_appearance_protocol, requested_backdrop_name,
 };
 pub use texture::{ImageCopyRegion, TextureUploadDesc};
+pub use window_registry::{WindowHandle, WindowId, WindowRegistry};
 
 use sturdy_engine_core as core;
 use upload_arena::UploadArena;

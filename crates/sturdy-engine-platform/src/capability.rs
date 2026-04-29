@@ -19,5 +19,6 @@ pub struct WindowAppearanceCaps {
     pub blur: Option<PlatformCapabilityState>,
     pub materials: Vec<WindowMaterialSupport>,
     pub custom_regions: Option<PlatformCapabilityState>,
+    pub corner_style: Option<PlatformCapabilityState>,
     pub live_reconfiguration: Option<PlatformCapabilityState>,
 }

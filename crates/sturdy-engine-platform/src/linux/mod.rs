@@ -24,6 +24,7 @@ pub fn window_appearance_caps() -> WindowAppearanceCaps {
         blur: Some(PlatformCapabilityState::RuntimeReconfigureSupported),
         materials: Vec::new(),
         custom_regions: Some(PlatformCapabilityState::Unsupported),
+        corner_style: Some(PlatformCapabilityState::Unsupported),
         live_reconfiguration: Some(PlatformCapabilityState::RuntimeReconfigureSupported),
     }
 }

@@ -610,17 +610,17 @@ If a roadmap item is still too large for one prompt, split it again until the pr
 - [x] `P0.R4` Convert Linux Wayland background-effect state insertion and protocol fallback paths to non-panicking apply/degrade results.
 - [x] `P0.R5` Move Linux Wayland background-effect internals under `platform/linux/wayland/background_effect` and keep `linux/mod.rs` as a thin adapter.
 - [x] `P0.R6` Add KDE/KWin blur fallback support behind the Linux platform adapter, with ext-background-effect-v1 preferred when available.
-- [ ] `P0.R7` Add platform capability queries and degraded apply results so engine/runtime code never matches on Linux/Windows/macOS compositor details directly.
+- [x] `P0.R7` Add platform capability queries and degraded apply results so engine/runtime code never matches on Linux/Windows/macOS compositor details directly.
 - [x] `P0.R8` Add tests or validation harnesses for no-protocol, ext-only, KDE-only, ext-to-KDE fallback, and no-blur fallback paths.
 
 
 
 ### Multi-window shell foundation
 
-- [ ] Replace single-window app shell assumptions with a `WindowRegistry` keyed by engine `WindowId`.
-- [ ] Add `WindowHandle` with generation checks so stale handles cannot silently target a newly-created window.
-- [ ] Add `WindowDesc` and route window creation through the runtime/event-loop command queue.
-- [ ] Create a default primary window through the same code path used for every later spawned window.
+- [x] Replace single-window app shell assumptions with a `WindowRegistry` keyed by engine `WindowId`.
+- [x] Add `WindowHandle` with generation checks so stale handles cannot silently target a newly-created window.
+- [x] Add `WindowDesc` and route window creation through the runtime/event-loop command queue.
+- [x] Create a default primary window through the same code path used for every later spawned window.
 - [ ] Route native `WindowEvent`s into per-window engine events before input/UI/app dispatch.
 - [ ] Store per-window DPI scale, surface size, safe area, cursor state, focus state, and compositor-effect state.
 - [ ] Update the app shell so closing one non-primary window tears down only that window's UI/surface/swapchain state.

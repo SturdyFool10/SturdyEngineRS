@@ -1062,13 +1062,10 @@ impl RuntimeShared {
         if let Some(entry) = self.setting_entries.get_mut(&RuntimeSettingId::from(
             RuntimeSettingKey::WindowCornerStyle,
         )) {
-            entry.support = if matches!(crate::current_platform(), crate::PlatformKind::Windows) {
-                RuntimeSettingSupport::supported()
-            } else {
-                RuntimeSettingSupport::unsupported(
-                    "window corner style changes are unavailable on this platform".to_string(),
-                )
-            };
+            entry.support = capability_state_to_support(
+                appearance_caps.corner_style,
+                "window corner style changes are unavailable on this platform",
+            );
         }
 
         self.set_unsupported(

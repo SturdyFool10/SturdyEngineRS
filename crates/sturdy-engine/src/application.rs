@@ -48,19 +48,21 @@
 //! }
 //! ```
 
-use std::time::Instant;
+use std::{collections::VecDeque, time::Instant};
 
 use sturdy_engine_core::SurfaceSize;
 
 use crate::{
     AntiAliasingMode, AntiAliasingPass, AppRuntime, BloomConfig, BloomPass, DebugImageRegistry,
     DefaultSceneTargetConfig, DiagnosticLevel, Engine, GraphImage, KeyInput, KeyModifiers,
-    MotionVectorDebugPass, NativeWindowAppearanceError, Result as EngineResult, RuntimeController,
-    RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimeSettingChange, RuntimeSettingId,
-    RuntimeSettingKey, RuntimeUserDiagnostic, ShaderProgram, Surface, SurfaceHdrPreference,
-    SurfaceImage, SurfacePresentMode, SurfaceRecreateDesc, SurfaceTransparency, WindowAppearance,
-    WindowAppearancePreset, WindowBackdrop, WindowCornerStyle, WindowMaterialKind, WindowMode,
-    WindowTransparencyDesc, apply_native_window_appearance_for_window, current_platform,
+    MotionVectorDebugPass, NativeWindowAppearanceApplyReport, Result as EngineResult,
+    RuntimeController, RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimeSettingChange,
+    RuntimeSettingId, RuntimeSettingKey, RuntimeUserDiagnostic, ShaderProgram, Surface,
+    SurfaceHdrPreference, SurfaceImage, SurfacePresentMode, SurfaceRecreateDesc,
+    SurfaceTransparency, WindowAppearance, WindowAppearancePreset, WindowBackdrop,
+    WindowCornerStyle, WindowHandle, WindowMaterialKind, WindowMode, WindowRegistry,
+    WindowTransparencyDesc, appearance_wants_native_blur,
+    apply_native_window_appearance_report_for_window, current_platform,
 };
 
 #[cfg(target_os = "macos")]
@@ -82,6 +84,75 @@ pub struct WindowConfig {
     window_mode: WindowMode,
     prefer_hdr: bool,
     appearance: WindowAppearance,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowDesc {
+    pub title: String,
+    pub width: u32,
+    pub height: u32,
+    pub position: Option<(i32, i32)>,
+    pub resizable: bool,
+    pub decorations: bool,
+    pub maximized: bool,
+    pub always_on_top: bool,
+    pub window_mode: WindowMode,
+    pub prefer_hdr: bool,
+    pub appearance: WindowAppearance,
+}
+
+impl WindowDesc {
+    pub fn from_config(config: &WindowConfig) -> Self {
+        Self {
+            title: config.title.clone(),
+            width: config.width,
+            height: config.height,
+            position: config.position,
+            resizable: config.resizable,
+            decorations: config.decorations,
+            maximized: config.maximized,
+            always_on_top: config.always_on_top,
+            window_mode: config.window_mode,
+            prefer_hdr: config.prefer_hdr,
+            appearance: config.appearance,
+        }
+    }
+}
+
+impl From<&WindowConfig> for WindowDesc {
+    fn from(config: &WindowConfig) -> Self {
+        Self::from_config(config)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ShellEventLoopCommand {
+    CreateWindow(WindowDesc),
+}
+
+#[derive(Default)]
+struct ShellEventLoopCommandQueue {
+    pending: VecDeque<ShellEventLoopCommand>,
+}
+
+impl ShellEventLoopCommandQueue {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn create_window(&mut self, desc: WindowDesc) {
+        self.pending
+            .push_back(ShellEventLoopCommand::CreateWindow(desc));
+    }
+
+    fn pop_front(&mut self) -> Option<ShellEventLoopCommand> {
+        self.pending.pop_front()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.pending.len()
+    }
 }
 
 impl WindowConfig {
@@ -835,11 +906,7 @@ pub fn try_run<App: EngineApp>(config: WindowConfig) -> std::result::Result<(), 
 where
     App::Error: std::fmt::Debug,
 {
-    use winit::{
-        dpi::{LogicalPosition, LogicalSize},
-        event_loop::{ControlFlow, EventLoop},
-        window::{Window, WindowLevel},
-    };
+    use winit::event_loop::{ControlFlow, EventLoop};
 
     // Create the engine
     let engine = Engine::new().map_err(|error| format!("failed to create engine: {error}"))?;
@@ -849,42 +916,27 @@ where
         EventLoop::new().map_err(|error| format!("failed to create event loop: {error}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    // Create window
-    let mut attributes = Window::default_attributes()
-        .with_title(&config.title)
-        .with_inner_size(LogicalSize::new(config.width as f64, config.height as f64))
-        .with_resizable(config.resizable)
-        .with_decorations(config.decorations)
-        .with_maximized(config.maximized)
-        .with_window_level(if config.always_on_top {
-            WindowLevel::AlwaysOnTop
-        } else {
-            WindowLevel::Normal
-        })
-        .with_fullscreen(fullscreen_for_mode(config.window_mode));
-    if let Some((x, y)) = config.position {
-        attributes = attributes.with_position(LogicalPosition::new(x as f64, y as f64));
-    }
+    let primary_desc = WindowDesc::from_config(&config);
+    let mut shell_commands = ShellEventLoopCommandQueue::new();
+    shell_commands.create_window(primary_desc);
+    let created_window = drain_initial_window_commands(&event_loop, &mut shell_commands)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "primary window command did not create a window".to_string())?;
+    let created_desc = created_window.desc.clone();
+    let window = created_window.window;
+    let native_appearance_report = created_window.native_appearance_report;
 
-    #[allow(deprecated)]
-    let window = event_loop
-        .create_window(apply_window_appearance_to_attributes(
-            attributes,
-            config.appearance,
-        ))
-        .map_err(|error| format!("failed to create window: {error}"))?;
-
-    let native_appearance_result = apply_native_window_appearance_for_window(
-        &window,
-        Some((window.inner_size().width, window.inner_size().height)),
-        config.appearance,
-    );
-    if let Err(err) = &native_appearance_result {
-        if err.is_degraded() {
-            eprintln!("native window appearance setup degraded: {err}");
-        } else {
-            eprintln!("native window appearance setup fell back to winit: {err}");
-        }
+    if native_appearance_report.is_degraded() {
+        eprintln!(
+            "native window appearance setup degraded: {}",
+            native_appearance_report.diagnostic_string()
+        );
+    } else if native_appearance_report.is_failed() {
+        eprintln!(
+            "native window appearance setup fell back to winit: {}",
+            native_appearance_report.diagnostic_string()
+        );
     }
 
     // Create surface from window
@@ -892,10 +944,10 @@ where
         .create_surface_for_window_with_hdr(
             &window,
             SurfaceSize {
-                width: config.width.max(1),
-                height: config.height.max(1),
+                width: created_desc.width.max(1),
+                height: created_desc.height.max(1),
             },
-            if config.prefer_hdr {
+            if created_desc.prefer_hdr {
                 SurfaceHdrPreference::ScRgb
             } else {
                 SurfaceHdrPreference::Sdr
@@ -911,10 +963,7 @@ where
     seed_window_settings(runtime.controller_mut(), &config)
         .map_err(|error| format!("failed to seed runtime window settings: {error}"))?;
     runtime.controller().update_diagnostics(|diagnostics| {
-        diagnostics.native_window_appearance = Some(native_window_appearance_diagnostic(
-            config.appearance,
-            &native_appearance_result,
-        ));
+        diagnostics.native_window_appearance = Some(native_appearance_report.diagnostic_string());
     });
     runtime.controller().set_settings(window_settings_snapshot(
         &window,
@@ -922,11 +971,15 @@ where
         runtime.controller(),
     ));
 
+    let mut windows = WindowRegistry::new();
+    let primary_window = windows.insert(window);
+
     // Run event loop
     event_loop
         .run_app(&mut ShellApp {
             runtime,
-            window: Some(window),
+            windows,
+            primary_window,
             app_state,
             modifiers: KeyModifiers::default(),
             applied_settings_revision: 0,
@@ -942,7 +995,8 @@ where
 #[cfg(not(target_arch = "wasm32"))]
 struct ShellApp<App: EngineApp> {
     runtime: AppRuntime,
-    window: Option<winit::window::Window>,
+    windows: WindowRegistry<winit::window::Window>,
+    primary_window: WindowHandle,
     app_state: App,
     modifiers: KeyModifiers,
     applied_settings_revision: u64,
@@ -971,7 +1025,7 @@ where
 
     fn resumed(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
         // Window already created
-        if let Some(window) = self.window.as_ref() {
+        if let Some(window) = self.primary_window() {
             window.request_redraw();
         }
     }
@@ -998,7 +1052,7 @@ where
                     }) {
                         eprintln!("surface resize failed: {e:?}");
                     }
-                    if let Some(window) = self.window.as_ref() {
+                    if let Some(window) = self.primary_window() {
                         let snapshot = window_settings_snapshot(
                             window,
                             &self._config,
@@ -1011,7 +1065,7 @@ where
                 }
             }
             winit::event::WindowEvent::Moved(position) => {
-                if let Some(window) = self.window.as_ref() {
+                if let Some(window) = self.primary_window() {
                     let mut snapshot =
                         window_settings_snapshot(window, &self._config, self.runtime.controller());
                     snapshot.window_position = Some((position.x, position.y));
@@ -1104,6 +1158,16 @@ where
                 }
             }
             winit::event::WindowEvent::RedrawRequested => {
+                let (window_scale_factor, window_logical_size) =
+                    if let Some(window) = self.primary_window() {
+                        let size = window.inner_size();
+                        (
+                            window.scale_factor() as f32,
+                            Some([size.width as f32, size.height as f32]),
+                        )
+                    } else {
+                        (1.0, None)
+                    };
                 let mut runtime_frame = match self.runtime.acquire_frame() {
                     Ok(frame) => frame,
                     Err(e) => {
@@ -1113,15 +1177,9 @@ where
                 };
 
                 let mut render_frame = runtime_frame.shell_frame();
-                let scale = self
-                    .window
-                    .as_ref()
-                    .map(|w| w.scale_factor() as f32)
-                    .unwrap_or(1.0);
-                render_frame.set_window_scale_factor(scale);
-                if let Some(window) = self.window.as_ref() {
-                    let size = window.inner_size();
-                    render_frame.set_window_logical_size([size.width as f32, size.height as f32]);
+                render_frame.set_window_scale_factor(window_scale_factor);
+                if let Some(size) = window_logical_size {
+                    render_frame.set_window_logical_size(size);
                 }
 
                 if let Err(e) = self
@@ -1138,7 +1196,7 @@ where
                     std::process::exit(1);
                 }
 
-                if let Some(window) = self.window.as_ref() {
+                if let Some(window) = self.primary_window() {
                     window.request_redraw();
                 }
             }
@@ -1147,7 +1205,7 @@ where
     }
 
     fn about_to_wait(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
-        if let Some(window) = self.window.as_ref() {
+        if let Some(window) = self.primary_window() {
             window.request_redraw();
         }
     }
@@ -1158,6 +1216,10 @@ impl<App: EngineApp> ShellApp<App>
 where
     App::Error: std::fmt::Debug,
 {
+    fn primary_window(&self) -> Option<&winit::window::Window> {
+        self.windows.get(self.primary_window)
+    }
+
     fn apply_pending_runtime_settings(&mut self) -> Result<(), App::Error> {
         let controller = self.runtime.controller().clone();
         let changes = controller.setting_changes_since(self.applied_settings_revision);
@@ -1181,7 +1243,7 @@ where
         controller: &RuntimeController,
         changes: &[RuntimeSettingChange],
     ) {
-        if let Some(window) = self.window.as_ref() {
+        if let Some(window) = self.primary_window() {
             apply_window_runtime_settings(window, controller, changes);
             let snapshot =
                 window_settings_snapshot(window, &self._config, self.runtime.controller());
@@ -1197,7 +1259,7 @@ where
             )
         });
         if affects_native_window {
-            if let Some(window) = self.window.as_ref() {
+            if let Some(window) = self.primary_window() {
                 apply_window_appearance_from_settings(window, controller);
                 let snapshot =
                     window_settings_snapshot(window, &self._config, self.runtime.controller());
@@ -1270,7 +1332,7 @@ where
             diagnostics.runtime_setting_apply = Some(context);
         });
         self.runtime.refresh_controller_state();
-        if let Some(window) = self.window.as_ref() {
+        if let Some(window) = self.primary_window() {
             let snapshot =
                 window_settings_snapshot(window, &self._config, self.runtime.controller());
             self.runtime.controller().set_settings(snapshot);
@@ -1312,6 +1374,75 @@ fn parse_present_mode_setting(value: &str) -> Option<SurfacePresentMode> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+struct CreatedShellWindow {
+    desc: WindowDesc,
+    window: winit::window::Window,
+    native_appearance_report: NativeWindowAppearanceApplyReport,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn drain_initial_window_commands(
+    event_loop: &winit::event_loop::EventLoop<()>,
+    commands: &mut ShellEventLoopCommandQueue,
+) -> std::result::Result<Vec<CreatedShellWindow>, String> {
+    let mut created = Vec::new();
+    while let Some(command) = commands.pop_front() {
+        match command {
+            ShellEventLoopCommand::CreateWindow(desc) => {
+                created.push(create_shell_window(event_loop, desc)?);
+            }
+        }
+    }
+    Ok(created)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn create_shell_window(
+    event_loop: &winit::event_loop::EventLoop<()>,
+    desc: WindowDesc,
+) -> std::result::Result<CreatedShellWindow, String> {
+    #[allow(deprecated)]
+    let window = event_loop
+        .create_window(window_attributes_from_desc(&desc))
+        .map_err(|error| format!("failed to create window: {error}"))?;
+    let native_appearance_report = apply_native_window_appearance_report_for_window(
+        &window,
+        Some((window.inner_size().width, window.inner_size().height)),
+        desc.appearance,
+    );
+    Ok(CreatedShellWindow {
+        desc,
+        window,
+        native_appearance_report,
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn window_attributes_from_desc(desc: &WindowDesc) -> winit::window::WindowAttributes {
+    use winit::{
+        dpi::{LogicalPosition, LogicalSize},
+        window::{Window, WindowLevel},
+    };
+
+    let mut attributes = Window::default_attributes()
+        .with_title(&desc.title)
+        .with_inner_size(LogicalSize::new(desc.width as f64, desc.height as f64))
+        .with_resizable(desc.resizable)
+        .with_decorations(desc.decorations)
+        .with_maximized(desc.maximized)
+        .with_window_level(if desc.always_on_top {
+            WindowLevel::AlwaysOnTop
+        } else {
+            WindowLevel::Normal
+        })
+        .with_fullscreen(fullscreen_for_mode(desc.window_mode));
+    if let Some((x, y)) = desc.position {
+        attributes = attributes.with_position(LogicalPosition::new(x as f64, y as f64));
+    }
+    apply_window_appearance_to_attributes(attributes, desc.appearance)
+}
+
 fn apply_window_appearance_to_attributes(
     mut attributes: winit::window::WindowAttributes,
     appearance: WindowAppearance,
@@ -1321,10 +1452,7 @@ fn apply_window_appearance_to_attributes(
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        attributes = attributes.with_blur(matches!(
-            appearance.backdrop,
-            WindowBackdrop::Blurred(_) | WindowBackdrop::Material(_)
-        ));
+        attributes = attributes.with_blur(appearance_wants_native_blur(appearance));
     }
 
     #[cfg(target_os = "windows")]
@@ -1396,16 +1524,22 @@ fn apply_window_appearance_from_settings(
 
     window.set_transparent(wants_transparency);
 
-    let native_result = apply_native_window_appearance_for_window(
+    let native_report = apply_native_window_appearance_report_for_window(
         window,
         Some((window.inner_size().width, window.inner_size().height)),
         appearance,
     );
-    if let Err(err) = &native_result {
-        if err.is_degraded() {
-            eprintln!("native window appearance apply degraded: {err}");
+    if native_report.is_degraded() || native_report.is_failed() {
+        if native_report.is_degraded() {
+            eprintln!(
+                "native window appearance apply degraded: {}",
+                native_report.diagnostic_string()
+            );
         } else {
-            eprintln!("native window appearance apply fell back to winit: {err}");
+            eprintln!(
+                "native window appearance apply fell back to winit: {}",
+                native_report.diagnostic_string()
+            );
         }
 
         #[cfg(target_os = "windows")]
@@ -1415,72 +1549,13 @@ fn apply_window_appearance_from_settings(
 
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            window.set_blur(matches!(
-                appearance.backdrop,
-                WindowBackdrop::Blurred(_) | WindowBackdrop::Material(_)
-            ));
+            window.set_blur(appearance_wants_native_blur(appearance));
         }
     }
 
     controller.update_diagnostics(|diagnostics| {
-        diagnostics.native_window_appearance = Some(native_window_appearance_diagnostic(
-            appearance,
-            &native_result,
-        ));
+        diagnostics.native_window_appearance = Some(native_report.diagnostic_string());
     });
-}
-
-fn native_window_appearance_diagnostic(
-    appearance: WindowAppearance,
-    result: &std::result::Result<(), NativeWindowAppearanceError>,
-) -> String {
-    let requested = match appearance.backdrop {
-        WindowBackdrop::None => "none",
-        WindowBackdrop::Transparent(_) => "transparent",
-        WindowBackdrop::Blurred(_) => "blur",
-        WindowBackdrop::Material(_) => "material",
-    };
-    let protocol = native_window_appearance_protocol(appearance);
-    match result {
-        Ok(()) => format!("protocol={protocol} requested={requested} status=applied"),
-        Err(error) if error.is_degraded() => {
-            format!(
-                "protocol={protocol} requested={requested} status=degraded fallback=winit reason={error}"
-            )
-        }
-        Err(error) => {
-            format!(
-                "protocol={protocol} requested={requested} status=failed fallback=winit reason={error}"
-            )
-        }
-    }
-}
-
-fn native_window_appearance_protocol(appearance: WindowAppearance) -> &'static str {
-    let wants_backdrop = matches!(
-        appearance.backdrop,
-        WindowBackdrop::Blurred(_) | WindowBackdrop::Material(_)
-    );
-    if !wants_backdrop {
-        return "none";
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        "wayland/ext-background-effect-v1"
-    }
-    #[cfg(target_os = "windows")]
-    {
-        "windows/system-backdrop"
-    }
-    #[cfg(target_os = "macos")]
-    {
-        "macos/native-visual-effect"
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-    {
-        "unsupported"
-    }
 }
 
 fn window_appearance_from_settings(controller: &RuntimeController) -> WindowAppearance {
@@ -1726,5 +1801,61 @@ fn windows_backdrop_for_appearance(appearance: WindowAppearance) -> BackdropType
             }
         },
         _ => BackdropType::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_desc_captures_window_config() {
+        let config = WindowConfig::new("primary", 1280, 720)
+            .with_position(10, 20)
+            .with_resizable(true)
+            .with_decorations(false)
+            .with_maximized(true)
+            .with_always_on_top(true)
+            .with_borderless_fullscreen(true)
+            .with_hdr(true)
+            .with_window_appearance_preset(WindowAppearancePreset::Blur);
+
+        let desc = WindowDesc::from_config(&config);
+
+        assert_eq!(desc.title, "primary");
+        assert_eq!(desc.width, 1280);
+        assert_eq!(desc.height, 720);
+        assert_eq!(desc.position, Some((10, 20)));
+        assert!(desc.resizable);
+        assert!(!desc.decorations);
+        assert!(desc.maximized);
+        assert!(desc.always_on_top);
+        assert_eq!(desc.window_mode, WindowMode::BorderlessFullscreen);
+        assert!(desc.prefer_hdr);
+        assert_eq!(
+            desc.appearance,
+            WindowAppearance::from_preset(WindowAppearancePreset::Blur)
+        );
+    }
+
+    #[test]
+    fn shell_event_loop_command_queue_preserves_create_window_order() {
+        let first = WindowDesc::from_config(&WindowConfig::new("first", 100, 100));
+        let second = WindowDesc::from_config(&WindowConfig::new("second", 200, 200));
+        let mut queue = ShellEventLoopCommandQueue::new();
+
+        queue.create_window(first.clone());
+        queue.create_window(second.clone());
+
+        assert_eq!(queue.len(), 2);
+        assert_eq!(
+            queue.pop_front(),
+            Some(ShellEventLoopCommand::CreateWindow(first))
+        );
+        assert_eq!(
+            queue.pop_front(),
+            Some(ShellEventLoopCommand::CreateWindow(second))
+        );
+        assert_eq!(queue.pop_front(), None);
     }
 }
