@@ -7,7 +7,7 @@ use super::{
     object::{InstanceData, MeshId, ObjectId, ObjectKind, SceneObject},
 };
 use crate::{
-    Engine, Format, GraphImage, ImageDesc, ImageDimension, ImageUsage, Mesh, MeshProgram,
+    Engine, Error, Format, GraphImage, ImageDesc, ImageDimension, ImageUsage, Mesh, MeshProgram,
     RenderFrame, Result, push_constants,
 };
 use sturdy_engine_core::Extent3d;
@@ -220,11 +220,28 @@ impl Scene {
         output: &GraphImage,
         frame: &RenderFrame,
     ) -> Result<()> {
+        let out_desc = output.desc();
+
+        if matches!(out_desc.format, Format::Depth32Float | Format::Depth24Stencil8) {
+            return Err(Error::InvalidInput(format!(
+                "Scene::draw output '{}' has depth format {:?}; use a colour-renderable format",
+                output.name(),
+                out_desc.format,
+            )));
+        }
+        if !out_desc.usage.contains(ImageUsage::RENDER_TARGET) {
+            return Err(Error::InvalidInput(format!(
+                "Scene::draw output '{}' requires ImageUsage::RENDER_TARGET but was created with {:?}",
+                output.name(),
+                out_desc.usage,
+            )));
+        }
+
         let constants = CameraConstants {
             view_proj: (proj * view).to_cols_array_2d(),
             previous_view_proj: (proj * view).to_cols_array_2d(),
         };
-        let ext = output.desc().extent;
+        let ext = out_desc.extent;
         let depth = frame.image(
             "_scene_depth",
             ImageDesc {

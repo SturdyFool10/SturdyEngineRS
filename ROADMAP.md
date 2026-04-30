@@ -151,6 +151,9 @@ The engine should not crash for recoverable runtime, compositor, asset, input, a
 - [x] Add in-process shader compilation cache keyed by `(source_hash, entry_point, stage, backend_target)` — eliminates recompilation of identical inline/memory Slang sources across multiple `create_shader` calls; file sources excluded so hot reload always reads fresh disk content.
 - [ ] Add diagnostics for accidental synchronization: blocking upload, immediate readback, pipeline compile stall, queue idle, fence wait, swapchain acquire/present wait, and graph-finalization cost.
   - [x] Report explicit frame flush/wait/present synchronization reason, submission token, and whether the frame submitted, waited, or presented.
+- [x] Validate `swapchain_image()` rejects images without `ImageUsage::PRESENT` — catches wrong image passed at registration time rather than silently at present.
+- [x] Validate `Scene::draw()` output format (rejects depth formats) and usage flags (requires `RENDER_TARGET`) at draw declaration time.
+- [x] Extend `GraphPassInfo` with `queue: QueueType`, `buffer_reads: Vec<String>`, `buffer_writes: Vec<String>` so `frame.describe()` exposes full pass I/O for diagnostics and tooling.
 - [ ] Keep engine samples and testbeds on the deferred path so examples teach queue-and-finalize behavior instead of immediate-mode flushing.
 
 ### Vulkan backend performance
@@ -232,7 +235,7 @@ Slang should be a library dependency of the engine/game build, not an end-user m
 - [ ] Bundle or statically/dynamically ship the required Slang compiler libraries according to target packaging rules, and validate startup diagnostics clearly report missing bundled compiler components as packaging bugs.
 - [ ] For the Vulkan backend, compile Slang to SPIR-V with Vulkan-appropriate profile, target, matrix layout, binding, and capability settings owned by the engine.
 - [ ] Keep future browser/WebGPU shader support behind the same source/entry-point/effect API, but allow the backend adapter to choose WGSL/SPIR-V-cross/Slang target strategy later.
-- [ ] Cache shader compilation results by source hash, include graph hash, compiler version, target backend, target profile, feature/capability set, preprocessor defines, specialization constants, and debug/optimization mode.
+- [x] Cache shader compilation results by source hash + entry point + stage + target for inline/memory sources; file sources excluded so hot reload always reads from disk.
 - [ ] Compile and reflect shaders asynchronously where possible, then make the resulting pipeline/binding changes visible during graph finalization or a graph rebuild transaction.
 - [ ] Use reflection to derive or validate descriptor/bind group layouts, push constants, specialization constants, vertex inputs, render-target formats, storage image usage, and resource access declarations.
   - [x] Derive descriptor/bind group layouts from Slang reflection for graphics and compute pipelines.

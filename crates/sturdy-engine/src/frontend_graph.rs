@@ -122,8 +122,13 @@ pub enum PassKind {
 struct PassRecord {
     name: String,
     kind: PassKind,
+    queue: core::QueueType,
     reads: Vec<crate::ImageUse>,
     writes: Vec<crate::ImageUse>,
+    /// Named buffers read by this pass (for diagnostics / describe()).
+    buffer_read_names: Vec<String>,
+    /// Named buffers written by this pass (for diagnostics / describe()).
+    buffer_write_names: Vec<String>,
     /// Deferred read names for passes whose bind groups are resolved at flush time.
     /// Resolved lazily by `validate()` and `describe()` against `images_by_name`.
     deferred_read_names: Vec<String>,
@@ -175,10 +180,16 @@ struct PendingPass {
 pub struct GraphPassInfo {
     pub name: String,
     pub kind: PassKind,
+    /// GPU queue this pass executes on.
+    pub queue: core::QueueType,
     /// Names of frame images read by this pass.
     pub reads: Vec<String>,
     /// Names of frame images written by this pass.
     pub writes: Vec<String>,
+    /// Names of buffers read by this pass.
+    pub buffer_reads: Vec<String>,
+    /// Names of buffers written by this pass.
+    pub buffer_writes: Vec<String>,
 }
 
 /// Per-image information returned by [`RenderFrame::describe`].
@@ -704,6 +715,12 @@ impl RenderFrame {
     }
 
     pub fn swapchain_image(&self, image: &SurfaceImage) -> Result<GraphImage> {
+        if !image.desc().usage.contains(crate::ImageUsage::PRESENT) {
+            return Err(Error::InvalidInput(format!(
+                "swapchain_image requires ImageUsage::PRESENT but image was created with {:?}",
+                image.desc().usage
+            )));
+        }
         let name = "swapchain".to_owned();
         let mut inner = self.inner.borrow_mut();
         inner.frame.import_surface_image(image)?;
@@ -932,12 +949,15 @@ impl RenderFrame {
             .map(|rec| GraphPassInfo {
                 name: rec.name.clone(),
                 kind: rec.kind,
+                queue: rec.queue,
                 reads: effective_read_names(rec),
                 writes: rec
                     .writes
                     .iter()
                     .filter_map(|use_| handle_to_name(use_.image))
                     .collect(),
+                buffer_reads: rec.buffer_read_names.clone(),
+                buffer_writes: rec.buffer_write_names.clone(),
             })
             .collect();
 
@@ -2014,8 +2034,11 @@ impl GraphImage {
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
             kind: PassKind::Mesh,
+            queue: core::QueueType::Graphics,
             reads: eager_uses.clone(),
             writes: writes.clone(),
+            buffer_read_names: Vec::new(),
+            buffer_write_names: Vec::new(),
             deferred_read_names: unresolved_read_names.clone(),
             skip_read_name: self.name.clone(),
         });
@@ -2141,8 +2164,11 @@ impl GraphImage {
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
             kind: PassKind::Resolve,
+            queue: core::QueueType::Graphics,
             reads: vec![src_use],
             writes: vec![dst_use],
+            buffer_read_names: Vec::new(),
+            buffer_write_names: Vec::new(),
             deferred_read_names: Vec::new(),
             skip_read_name: self.name.clone(),
         });
@@ -2315,8 +2341,11 @@ fn record_fullscreen_shader_pass(
     inner.pass_records.push(PassRecord {
         name: pass_name.clone(),
         kind: PassKind::Fullscreen,
+        queue: core::QueueType::Graphics,
         reads: eager_uses.clone(),
         writes: vec![target_use],
+        buffer_read_names: reflected_buffer_read_names(shader.reflection()),
+        buffer_write_names: Vec::new(),
         deferred_read_names: unresolved_read_names.clone(),
         skip_read_name: target.name.clone(),
     });
@@ -2407,8 +2436,11 @@ fn record_compute_shader_pass(
     inner.pass_records.push(PassRecord {
         name: pass_name.clone(),
         kind: PassKind::Compute,
+        queue: core::QueueType::Compute,
         reads: eager_uses.clone(),
         writes: vec![target_use],
+        buffer_read_names: reflected_buffer_read_names(program.reflection()),
+        buffer_write_names: reflected_buffer_write_names(program.reflection()),
         deferred_read_names: unresolved_read_names.clone(),
         skip_read_name: target.name.clone(),
     });
@@ -2998,6 +3030,14 @@ fn reflected_image_reads(reflection: &ShaderReflection) -> Vec<String> {
 
 fn reflected_storage_image_reads(reflection: &ShaderReflection) -> Vec<String> {
     reflected_bindings_of_kind(reflection, core::BindingKind::StorageImage)
+}
+
+fn reflected_buffer_read_names(reflection: &ShaderReflection) -> Vec<String> {
+    reflected_bindings_of_kind(reflection, core::BindingKind::UniformBuffer)
+}
+
+fn reflected_buffer_write_names(reflection: &ShaderReflection) -> Vec<String> {
+    reflected_bindings_of_kind(reflection, core::BindingKind::StorageBuffer)
 }
 
 fn reflected_push_constant_stages(reflection: &ShaderReflection, fallback: StageMask) -> StageMask {

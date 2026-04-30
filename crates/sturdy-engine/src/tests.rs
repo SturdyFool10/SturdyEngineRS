@@ -507,6 +507,85 @@ fn load_slang_source_includes_shader_name_in_compile_errors() {
 }
 
 #[test]
+fn swapchain_image_rejects_image_without_present_usage() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let surface = engine
+        .create_surface(NativeSurfaceDesc::new(
+            raw_window_handle::RawDisplayHandle::Xlib(
+                raw_window_handle::XlibDisplayHandle::new(None, 0),
+            ),
+            raw_window_handle::RawWindowHandle::Xlib(
+                raw_window_handle::XlibWindowHandle::new(0),
+            ),
+            SurfaceSize { width: 64, height: 32 },
+        ))
+        .unwrap();
+    // Acquire a real surface image (has PRESENT usage) — must succeed.
+    // On the null backend surface acquisition may be unsupported; skip those cases.
+    match surface.acquire_image() {
+        Ok(surface_image) => {
+            let frame = engine.begin_render_frame_for(&surface_image).unwrap();
+            // A real swapchain image has PRESENT usage — must be accepted.
+            let result = frame.swapchain_image(&surface_image);
+            assert!(
+                result.is_ok(),
+                "swapchain_image should accept an image with PRESENT usage"
+            );
+        }
+        Err(Error::Unsupported(_)) => {}
+        Err(e) => panic!("unexpected error: {e}"),
+    }
+}
+
+#[test]
+fn graph_report_includes_queue_type_and_buffer_names() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let program = ComputeProgram::load(
+        &engine,
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sturdy-engine-testbed/shaders/testbed_compute.slang"),
+    )
+    .unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let target = frame
+        .image(
+            "compute_target",
+            ImageDesc {
+                usage: ImageUsage::STORAGE,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+    let bad_buffer = engine
+        .create_buffer(BufferDesc {
+            size: 64,
+            usage: BufferUsage::STORAGE,
+        })
+        .unwrap();
+
+    frame
+        .shader_pass("compute-pass")
+        .target(&target)
+        .buffer("output_buffer", &bad_buffer)
+        .compute(&program, [1, 1, 1])
+        .unwrap();
+
+    let report = frame.describe();
+    let pass = report
+        .passes
+        .iter()
+        .find(|p| p.name == "compute-pass")
+        .expect("compute pass should appear in report");
+
+    assert_eq!(pass.queue, QueueType::Compute, "compute pass should be on Compute queue");
+    assert!(
+        pass.buffer_writes.iter().any(|b| b == "output_buffer"),
+        "output_buffer should appear in buffer_writes, got {:?}",
+        pass.buffer_writes
+    );
+}
+
+#[test]
 fn graphics_shader_reflection_populates_vertex_inputs_for_vertex_shader() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     let vertex = engine
@@ -1111,14 +1190,20 @@ fn graph_inspection_lines_summarize_and_truncate_report() {
             GraphPassInfo {
                 name: "scene".to_string(),
                 kind: PassKind::Mesh,
+                queue: QueueType::Graphics,
                 reads: vec!["depth".to_string()],
                 writes: vec!["hdr".to_string()],
+                buffer_reads: vec![],
+                buffer_writes: vec![],
             },
             GraphPassInfo {
                 name: "tonemap".to_string(),
                 kind: PassKind::Fullscreen,
+                queue: QueueType::Graphics,
                 reads: vec!["hdr".to_string()],
                 writes: vec!["swapchain".to_string()],
+                buffer_reads: vec![],
+                buffer_writes: vec![],
             },
         ],
         images: vec![
