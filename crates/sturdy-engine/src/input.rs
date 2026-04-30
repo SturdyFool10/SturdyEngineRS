@@ -218,6 +218,63 @@ pub struct KeyInput {
     pub text: Option<String>,
 }
 
+/// Stable runtime gamepad identifier.
+///
+/// Backend adapters map their native gamepad/device id to this compact value.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct GamepadId(pub u32);
+
+/// Gamepad buttons recognized by the runtime input layer.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum GamepadButton {
+    South,
+    East,
+    West,
+    North,
+    LeftBumper,
+    RightBumper,
+    LeftTrigger,
+    RightTrigger,
+    Select,
+    Start,
+    Guide,
+    LeftStick,
+    RightStick,
+    DPadUp,
+    DPadDown,
+    DPadLeft,
+    DPadRight,
+    Other(u16),
+}
+
+/// Gamepad analog axes recognized by the runtime input layer.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum GamepadAxis {
+    LeftStickX,
+    LeftStickY,
+    RightStickX,
+    RightStickY,
+    LeftTrigger,
+    RightTrigger,
+    Other(u16),
+}
+
+/// A runtime gamepad button event suitable for polling and action dispatch.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct GamepadButtonInput {
+    pub gamepad: GamepadId,
+    pub button: GamepadButton,
+    pub state: KeyInputState,
+}
+
+/// A runtime gamepad axis event suitable for polling and action dispatch.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct GamepadAxisInput {
+    pub gamepad: GamepadId,
+    pub axis: GamepadAxis,
+    pub value: f32,
+}
+
 /// Captures a keybind from a sequence of key events.
 pub struct KeybindCapture {
     held_modifiers: BTreeSet<KeyModifier>,
@@ -569,6 +626,12 @@ pub struct InputHub {
     mouse_button_just_released: HashSet<u8>,
     pending_mouse_button_pressed: HashSet<u8>,
     pending_mouse_button_released: HashSet<u8>,
+    held_gamepad_buttons: HashSet<(GamepadId, GamepadButton)>,
+    gamepad_button_just_pressed: HashSet<(GamepadId, GamepadButton)>,
+    gamepad_button_just_released: HashSet<(GamepadId, GamepadButton)>,
+    pending_gamepad_button_pressed: HashSet<(GamepadId, GamepadButton)>,
+    pending_gamepad_button_released: HashSet<(GamepadId, GamepadButton)>,
+    gamepad_axes: HashMap<(GamepadId, GamepadAxis), f32>,
     primary_held: bool,
     /// `KeyInput` events received since the last `update()`, drained into
     /// `ActionMap` after the simulator has run (so UI priority is respected).
@@ -600,6 +663,12 @@ impl InputHub {
             mouse_button_just_released: HashSet::new(),
             pending_mouse_button_pressed: HashSet::new(),
             pending_mouse_button_released: HashSet::new(),
+            held_gamepad_buttons: HashSet::new(),
+            gamepad_button_just_pressed: HashSet::new(),
+            gamepad_button_just_released: HashSet::new(),
+            pending_gamepad_button_pressed: HashSet::new(),
+            pending_gamepad_button_released: HashSet::new(),
+            gamepad_axes: HashMap::new(),
             primary_held: false,
             pending_key_inputs: Vec::new(),
         }
@@ -725,6 +794,48 @@ impl InputHub {
         self.pending_key_inputs.push(input.clone());
     }
 
+    /// Call from a gamepad backend when a button is pressed or released.
+    pub fn on_gamepad_button(
+        &mut self,
+        gamepad: GamepadId,
+        button: GamepadButton,
+        pressed: bool,
+    ) {
+        let key = (gamepad, button);
+        if pressed {
+            if self.held_gamepad_buttons.insert(key) {
+                self.pending_gamepad_button_pressed.insert(key);
+            }
+            self.pending_gamepad_button_released.remove(&key);
+        } else {
+            if self.held_gamepad_buttons.remove(&key) {
+                self.pending_gamepad_button_released.insert(key);
+            }
+            self.pending_gamepad_button_pressed.remove(&key);
+        }
+    }
+
+    /// Call from a gamepad backend when an analog axis changes.
+    pub fn on_gamepad_axis(&mut self, gamepad: GamepadId, axis: GamepadAxis, value: f32) {
+        self.gamepad_axes.insert((gamepad, axis), value.clamp(-1.0, 1.0));
+    }
+
+    /// Feed a gamepad button input through the same path as
+    /// [`InputHub::on_gamepad_button`]. Use in tests or replay.
+    pub fn simulate_gamepad_button(&mut self, input: GamepadButtonInput) {
+        self.on_gamepad_button(
+            input.gamepad,
+            input.button,
+            input.state == KeyInputState::Pressed,
+        );
+    }
+
+    /// Feed a gamepad axis input through the same path as
+    /// [`InputHub::on_gamepad_axis`]. Use in tests or replay.
+    pub fn simulate_gamepad_axis(&mut self, input: GamepadAxisInput) {
+        self.on_gamepad_axis(input.gamepad, input.axis, input.value);
+    }
+
     // ── Simulation / testing ──────────────────────────────────────────────────
 
     /// Queue a low-level UI event directly into the simulator.
@@ -776,6 +887,10 @@ impl InputHub {
         self.key_just_released = std::mem::take(&mut self.pending_key_released);
         self.mouse_button_just_pressed = std::mem::take(&mut self.pending_mouse_button_pressed);
         self.mouse_button_just_released = std::mem::take(&mut self.pending_mouse_button_released);
+        self.gamepad_button_just_pressed =
+            std::mem::take(&mut self.pending_gamepad_button_pressed);
+        self.gamepad_button_just_released =
+            std::mem::take(&mut self.pending_gamepad_button_released);
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────────
@@ -844,6 +959,41 @@ impl InputHub {
     /// `true` on the frame the raw mouse button was released.
     pub fn is_mouse_button_just_released(&self, button: u8) -> bool {
         self.mouse_button_just_released.contains(&button)
+    }
+
+    /// `true` while the gamepad button is held down.
+    pub fn is_gamepad_button_pressed(&self, gamepad: GamepadId, button: GamepadButton) -> bool {
+        self.held_gamepad_buttons.contains(&(gamepad, button))
+    }
+
+    /// `true` on the first frame the gamepad button was pressed.
+    pub fn is_gamepad_button_just_pressed(
+        &self,
+        gamepad: GamepadId,
+        button: GamepadButton,
+    ) -> bool {
+        self.gamepad_button_just_pressed
+            .contains(&(gamepad, button))
+    }
+
+    /// `true` on the frame the gamepad button was released.
+    pub fn is_gamepad_button_just_released(
+        &self,
+        gamepad: GamepadId,
+        button: GamepadButton,
+    ) -> bool {
+        self.gamepad_button_just_released
+            .contains(&(gamepad, button))
+    }
+
+    /// Current value for a gamepad axis in the normalized `[-1, 1]` range.
+    ///
+    /// Returns `0.0` if the axis has not been seen yet.
+    pub fn gamepad_axis(&self, gamepad: GamepadId, axis: GamepadAxis) -> f32 {
+        self.gamepad_axes
+            .get(&(gamepad, axis))
+            .copied()
+            .unwrap_or(0.0)
     }
 
     // ── Simulator convenience forwards ────────────────────────────────────────
@@ -1215,5 +1365,42 @@ mod tests {
         hub.update(&clay_ui::LayoutTree::default());
         assert!(!hub.is_mouse_button_pressed(0));
         assert!(hub.is_mouse_button_just_released(0));
+    }
+
+    #[test]
+    fn input_hub_publishes_gamepad_button_state_per_update() {
+        let mut hub = InputHub::new();
+        let gamepad = GamepadId(2);
+
+        hub.on_gamepad_button(gamepad, GamepadButton::South, true);
+        assert!(hub.is_gamepad_button_pressed(gamepad, GamepadButton::South));
+        assert!(!hub.is_gamepad_button_just_pressed(gamepad, GamepadButton::South));
+
+        hub.update(&clay_ui::LayoutTree::default());
+        assert!(hub.is_gamepad_button_pressed(gamepad, GamepadButton::South));
+        assert!(hub.is_gamepad_button_just_pressed(gamepad, GamepadButton::South));
+        assert!(!hub.is_gamepad_button_just_released(gamepad, GamepadButton::South));
+
+        hub.update(&clay_ui::LayoutTree::default());
+        assert!(hub.is_gamepad_button_pressed(gamepad, GamepadButton::South));
+        assert!(!hub.is_gamepad_button_just_pressed(gamepad, GamepadButton::South));
+
+        hub.on_gamepad_button(gamepad, GamepadButton::South, false);
+        hub.update(&clay_ui::LayoutTree::default());
+        assert!(!hub.is_gamepad_button_pressed(gamepad, GamepadButton::South));
+        assert!(hub.is_gamepad_button_just_released(gamepad, GamepadButton::South));
+    }
+
+    #[test]
+    fn input_hub_tracks_gamepad_axis_values() {
+        let mut hub = InputHub::new();
+        let gamepad = GamepadId(1);
+
+        assert_eq!(hub.gamepad_axis(gamepad, GamepadAxis::LeftStickX), 0.0);
+        hub.on_gamepad_axis(gamepad, GamepadAxis::LeftStickX, 0.5);
+        hub.on_gamepad_axis(gamepad, GamepadAxis::RightTrigger, 3.0);
+
+        assert_eq!(hub.gamepad_axis(gamepad, GamepadAxis::LeftStickX), 0.5);
+        assert_eq!(hub.gamepad_axis(gamepad, GamepadAxis::RightTrigger), 1.0);
     }
 }
