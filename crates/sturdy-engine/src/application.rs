@@ -435,8 +435,6 @@ pub trait EngineApp {
 /// A render frame wrapper that provides the frame API and surface image.
 pub struct ShellFrame<'a> {
     inner: crate::RenderFrame,
-    #[allow(dead_code)]
-    surface_image: &'a SurfaceImage,
     default_scene_target: DefaultSceneTargetConfig,
     debug_images: DebugImageRegistry,
     controller: RuntimeController,
@@ -485,7 +483,6 @@ pub struct RuntimePostProcessOutput {
 impl<'a> ShellFrame<'a> {
     pub(crate) fn new(
         inner: crate::RenderFrame,
-        surface_image: &'a SurfaceImage,
         default_scene_target: DefaultSceneTargetConfig,
         debug_images: DebugImageRegistry,
         controller: RuntimeController,
@@ -493,7 +490,6 @@ impl<'a> ShellFrame<'a> {
     ) -> Self {
         Self {
             inner,
-            surface_image,
             default_scene_target,
             debug_images,
             controller,

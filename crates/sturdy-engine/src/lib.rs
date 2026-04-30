@@ -376,6 +376,21 @@ impl Engine {
         RenderFrame::new(self.clone(), 0)
     }
 
+    /// Render into `image` using a closure, then block until the GPU finishes.
+    ///
+    /// This is a synchronous blocking convenience for offline rendering, screenshots,
+    /// thumbnails, and test fixtures — not for the real-time render loop. The closure
+    /// receives a `&RenderFrame` for recording passes; the frame is flushed and
+    /// GPU-waited before `render_image` returns.
+    pub fn render_image(&self, image: &Image, render: impl FnOnce(&RenderFrame) -> Result<()>) -> Result<()> {
+        let mut frame = self.begin_render_frame()?;
+        frame.import_image("render_target", image)?;
+        render(&frame)?;
+        frame.flush()?;
+        frame.wait()?;
+        Ok(())
+    }
+
     /// Begin a render frame whose per-frame graph image cache is keyed by the
     /// given swapchain image. Use this instead of `begin_render_frame` when
     /// rendering to a swapchain so that intermediate images (e.g. `scene_color`)

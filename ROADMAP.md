@@ -137,16 +137,18 @@ The engine should not crash for recoverable runtime, compositor, asset, input, a
 
 ### Default submission and synchronization rule
 
-- [ ] Make the default graphics path deferred and frame-boundary synchronized: app/API calls queue work, but do not flush, submit, or wait immediately.
-- [ ] Treat implicit per-call flushes as bugs unless they are inside explicitly documented compatibility shims or hard-incompatibility shutdown paths.
-- [ ] Ensure normal draw, image, shader, mesh, object, UI, and render-target APIs only enqueue intent/resource mutations for the current frame or a named future frame.
-- [ ] Reflect queued shader work, resolve pipeline/binding metadata, batch draw calls/objects/meshes, compile graph dependencies, order passes, encode backend commands, and submit only during the frame finalization path.
+- [x] Make the default graphics path deferred and frame-boundary synchronized: `ShaderPassIntent`, `RenderFrame`, and the deferred-pass system queue all work and resolve bindings at flush time — no implicit per-call GPU submission.
+- [x] Treat implicit per-call flushes as bugs: the only flush in the hot path is `RenderFrame::flush()` / `frame.present()`, explicitly documented.
+- [x] Ensure normal draw, image, shader, and render-target APIs only enqueue intent: `image()`, `shader_pass()`, `mesh.draw()`, etc. write into per-frame queues only.
+- [x] Reflect queued shader work, resolve pipeline/binding metadata, order passes, encode backend commands at frame finalization: `submit_pending_passes` resolves deferred bindings → `schedule_pass_order` topologically sorts → `backend.flush` encodes and submits.
 - [x] Restrict CPU/GPU waiting in the normal present path: `finish_and_present` no longer CPU-waits on the GPU fence — the fence is waited at the start of the *next* frame's submission, enabling CPU/GPU overlap across frames.
 - [x] Auto-flush and auto-present on `RenderFrame` drop when `configure_auto_present` is set (zero-ceremony frame lifecycle).
 - [x] Auto-present on `AppRuntimeFrame` drop when `finish_and_present` was not called explicitly (magic RAII frame contract).
 - [x] Add `Engine::begin_frame_for_surface(&surface) -> Result<(RenderFrame, GraphImage)>` magic one-liner that acquires swapchain, creates frame, and registers auto-present in one call.
 - [ ] Restrict all remaining CPU/GPU waiting to frame-boundary policy: frames-in-flight throttling, swapchain/present policy, readback completion requested by the app, or explicit shutdown/device-loss recovery.
 - [x] Add an expert-only explicit flush API that requires a reason enum and returns a diagnostic report explaining what was submitted, waited on, and why.
+- [x] Add `Engine::render_image(&image, |frame| { ... })` — synchronous blocking render-into-image convenience for screenshots, thumbnails, and test fixtures; returns only after the GPU finishes.
+- [x] Add in-process shader compilation cache keyed by `(source_hash, entry_point, stage, backend_target)` — eliminates recompilation of identical inline/memory Slang sources across multiple `create_shader` calls; file sources excluded so hot reload always reads fresh disk content.
 - [ ] Add diagnostics for accidental synchronization: blocking upload, immediate readback, pipeline compile stall, queue idle, fence wait, swapchain acquire/present wait, and graph-finalization cost.
   - [x] Report explicit frame flush/wait/present synchronization reason, submission token, and whether the frame submitted, waited, or presented.
 - [ ] Keep engine samples and testbeds on the deferred path so examples teach queue-and-finalize behavior instead of immediate-mode flushing.

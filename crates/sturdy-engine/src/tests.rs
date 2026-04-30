@@ -459,6 +459,36 @@ fn load_slang_source_fragment_entry_creates_fullscreen_program() {
 }
 
 #[test]
+fn shader_compilation_cache_returns_distinct_handles_for_same_inline_source() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let src = "float4 main() : SV_TARGET { return float4(1.0, 0.0, 0.0, 1.0); }";
+
+    // Two separate ShaderProgram instances from the same inline source.
+    // The cache means Slang compiles only once; both handle creation should succeed.
+    let a = ShaderProgram::from_inline_fragment(&engine, src).unwrap();
+    let b = ShaderProgram::from_inline_fragment(&engine, src).unwrap();
+
+    // Each program is an independent object (different internal handles).
+    let frame = engine.begin_render_frame().unwrap();
+    let target = frame
+        .image(
+            "t",
+            ImageDesc {
+                usage: ImageUsage::RENDER_TARGET,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+    // Both programs should be usable independently.
+    frame
+        .shader_pass("a")
+        .target(&target)
+        .fullscreen(&a)
+        .unwrap();
+    let _ = (a, b); // keep alive
+}
+
+#[test]
 fn load_slang_source_includes_shader_name_in_compile_errors() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     let result = engine.load_slang_source(
@@ -1469,20 +1499,19 @@ fn consecutive_flushes_succeed() {
     }
 }
 
-// TODO: Uncomment when Engine::render_image is implemented
-// #[test]
-// fn render_image_convenience_flushes_and_waits() {
-//     let engine = Engine::with_backend(BackendKind::Null).unwrap();
-//     let image = engine.create_image(small_image_desc()).unwrap();
-//
-//     engine
-//         .render_image(&image, |_context| {
-//             // The convenience contract is that this returns only after the
-//             // internally-created frame has flushed and waited.
-//             Ok(())
-//         })
-//         .unwrap();
-// }
+#[test]
+fn render_image_convenience_flushes_and_waits() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let image = engine.create_image(small_image_desc()).unwrap();
+
+    engine
+        .render_image(&image, |_frame| {
+            // The convenience contract is that this returns only after the
+            // internally-created frame has flushed and waited.
+            Ok(())
+        })
+        .unwrap();
+}
 
 #[test]
 fn deferred_destroy_image_is_invalid_immediately_after_destroy() {

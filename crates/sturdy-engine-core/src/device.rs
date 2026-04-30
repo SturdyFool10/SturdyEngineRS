@@ -13,7 +13,8 @@ use crate::{
     ExternalImageDesc, Format, FormatCapabilities, FrameHandle, GpuCaptureDesc, GpuCaptureTool,
     GraphicsPipelineDesc, ImageDesc, ImageHandle, ImageStateKey, NativeHandleCapabilities,
     PipelineHandle, PipelineLayoutHandle, RenderGraph, ResourceBinding, Result, RgState,
-    SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection, StageMask,
+    SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection, ShaderSource,
+    StageMask,
     SubmissionHandle, SurfaceCapabilities, SurfaceEvent, SurfaceHandle, SurfaceHdrCaps,
     SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
 };
@@ -113,6 +114,13 @@ struct DeviceInner {
     bind_groups: HashMap<BindGroupHandle, BindGroupDesc>,
     surfaces: HashMap<SurfaceHandle, SurfaceState>,
     frames: HashMap<FrameHandle, RenderGraph>,
+    /// In-process SPIR-V compilation cache keyed by a hash of the shader source
+    /// content, entry point, stage, and backend IR target.
+    ///
+    /// Only caches sources whose content is fixed at program startup (Inline,
+    /// MemoryUtf8, MemoryBytes).  File sources are intentionally excluded so hot
+    /// reload always sees the updated content on disk.
+    shader_compile_cache: HashMap<u64, (ShaderDesc, ShaderReflection)>,
     /// Resources queued for deferred destruction.  Drained at the start of
     /// every `Frame::flush` after the previous frame's fence is waited —
     /// guaranteeing the GPU is no longer accessing them.
@@ -156,6 +164,7 @@ impl Device {
                 bind_groups: HashMap::new(),
                 surfaces: HashMap::new(),
                 frames: HashMap::new(),
+                shader_compile_cache: HashMap::new(),
                 deferred_destroys: Vec::new(),
                 pending_transient_destroys: Vec::new(),
                 image_handles: HandleAllocator::default(),
@@ -426,12 +435,32 @@ impl Device {
 
     pub fn create_shader(&self, desc: ShaderDesc) -> Result<ShaderHandle> {
         desc.validate()?;
-        let target = {
+        // Phase 1: acquire target and check in-process compilation cache.
+        let (target, cache_key, cached) = {
             //panic allowed, reason = "poisoned mutex is unrecoverable"
             let inner = self.inner.lock().expect("device mutex poisoned");
-            inner.backend.preferred_shader_ir()
+            let target = inner.backend.preferred_shader_ir();
+            let key = shader_compile_cache_key(&desc, target);
+            let cached = key.and_then(|k| inner.shader_compile_cache.get(&k).cloned());
+            (target, key, cached)
         };
-        let (compiled_desc, reflection) = crate::slang::compile_and_reflect(&desc, target)?;
+
+        // Phase 2: compile without holding the lock (Slang compilation is expensive).
+        let (compiled_desc, reflection) = if let Some(hit) = cached {
+            hit
+        } else {
+            let result = crate::slang::compile_and_reflect(&desc, target)?;
+            // Store in cache if this source type is cache-eligible.
+            if let Some(key) = cache_key {
+                //panic allowed, reason = "poisoned mutex is unrecoverable"
+                let mut inner = self.inner.lock().expect("device mutex poisoned");
+                // Use or_insert_with to avoid overwriting a concurrent insertion.
+                inner.shader_compile_cache.entry(key).or_insert_with(|| result.clone());
+            }
+            result
+        };
+
+        // Phase 3: register the compiled shader with the backend.
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let handle = ShaderHandle(inner.shader_handles.alloc());
@@ -997,6 +1026,32 @@ impl PipelineDesc {
             PipelineDesc::Graphics { owned_layout, .. } => *owned_layout,
         }
     }
+}
+
+/// Compute a stable cache key for a shader compilation request.
+///
+/// Returns `None` for sources that must not be cached (file sources, pre-compiled
+/// IR) so that hot reload always reads fresh disk content.
+fn shader_compile_cache_key(desc: &ShaderDesc, target: crate::ShaderTarget) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match &desc.source {
+        ShaderSource::Inline(s) => s.hash(&mut h),
+        ShaderSource::MemoryUtf8(s) => s.hash(&mut h),
+        ShaderSource::MemoryBytes(b) => b.hash(&mut h),
+        // File/path sources may change during hot reload — exclude from cache.
+        // Pre-compiled IR has no compilation cost to begin with.
+        ShaderSource::File(_)
+        | ShaderSource::FilePath(_)
+        | ShaderSource::VirtualAssetPath(_)
+        | ShaderSource::Spirv(_)
+        | ShaderSource::Dxil(_)
+        | ShaderSource::Msl(_) => return None,
+    }
+    desc.entry_point.hash(&mut h);
+    (desc.stage as u8).hash(&mut h);
+    (target as u8).hash(&mut h);
+    Some(h.finish())
 }
 
 fn merge_shader_reflection<const N: usize>(

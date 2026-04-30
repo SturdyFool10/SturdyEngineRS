@@ -877,7 +877,7 @@ impl FramedCommands {
     ) -> Result<SubmissionHandle> {
         let slot = self.next_slot;
         self.total_submissions += 1;
-        let handle = self.contexts[slot].submit_graph(
+        let _handle = self.contexts[slot].submit_graph(
             device,
             queues,
             queue_families,

@@ -389,7 +389,6 @@ impl<'a> AppRuntimeFrame<'a> {
     pub(crate) fn shell_frame(&self) -> crate::application::ShellFrame<'_> {
         crate::application::ShellFrame::new(
             self.render_frame.clone(),
-            &self.surface_image,
             self.default_scene_target().clone(),
             self.debug_images().clone(),
             self.runtime.controller.clone(),

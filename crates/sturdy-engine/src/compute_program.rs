@@ -6,7 +6,6 @@ use crate::{
 };
 
 pub struct ComputeProgram {
-    #[allow(dead_code)]
     pub(crate) engine: Engine,
     pub(crate) pipeline: Pipeline,
     pub(crate) pipeline_layout: PipelineLayout,
