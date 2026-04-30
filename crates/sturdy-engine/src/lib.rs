@@ -145,7 +145,7 @@ pub use sturdy_engine_core::{
     SubresourceRange, SurfaceCapabilities, SurfaceColorSpace, SurfaceEvent, SurfaceFormatInfo,
     SurfaceHdrCaps, SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc,
     UpdateRate, VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout, VertexFormat,
-    VertexInputRate, VulkanExternalBuffer, VulkanExternalImage, VulkanRawCapabilities,
+    VertexInputRate, VertexInputReflection, VulkanExternalBuffer, VulkanExternalImage, VulkanRawCapabilities,
     compile_slang, compile_slang_to_file, compile_slang_to_spirv,
     native_handle_capabilities_for_backend, spirv_words_from_bytes,
 };

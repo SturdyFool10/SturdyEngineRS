@@ -477,6 +477,41 @@ fn load_slang_source_includes_shader_name_in_compile_errors() {
 }
 
 #[test]
+fn graphics_shader_reflection_populates_vertex_inputs_for_vertex_shader() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let vertex = engine
+        .create_shader(ShaderDesc {
+            source: ShaderSource::File(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../sturdy-engine-testbed/shaders/textured_vertex.slang"),
+            ),
+            entry_point: "vs_main".into(),
+            stage: ShaderStage::Vertex,
+        })
+        .unwrap();
+    let reflection = engine.graphics_shader_reflection(&vertex, None).unwrap();
+
+    // The merged graphics reflection must carry vertex input data from the vertex stage.
+    // Locations must be sorted and formats must be float vectors.
+    let locs: Vec<u32> = reflection.vertex_inputs.iter().map(|i| i.location).collect();
+    assert!(
+        locs.windows(2).all(|w| w[0] < w[1]),
+        "vertex inputs should be sorted by location, got {locs:?}"
+    );
+    for input in &reflection.vertex_inputs {
+        assert!(
+            matches!(
+                input.format,
+                VertexFormat::Float32x2 | VertexFormat::Float32x3 | VertexFormat::Float32x4
+            ),
+            "unexpected format {:?} for '{}'",
+            input.format,
+            input.name
+        );
+    }
+}
+
+#[test]
 fn begin_frame_for_surface_returns_frame_and_swapchain_image() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     let surface = engine

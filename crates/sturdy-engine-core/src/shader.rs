@@ -62,6 +62,17 @@ pub struct ShaderReflection {
     pub layout: CanonicalPipelineLayout,
     pub entry_points: Vec<String>,
     pub parameters: Vec<ShaderParameterReflection>,
+    /// Vertex input attributes reflected from a vertex shader's SPIR-V.
+    /// Empty for fragment and compute shaders.
+    pub vertex_inputs: Vec<VertexInputReflection>,
+}
+
+/// One vertex shader input attribute as reflected from SPIR-V.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VertexInputReflection {
+    pub name: String,
+    pub location: u32,
+    pub format: crate::VertexFormat,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

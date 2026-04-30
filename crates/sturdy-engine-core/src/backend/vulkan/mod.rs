@@ -46,7 +46,7 @@ pub struct VulkanBackend {
     queues: VulkanQueues,
     caps: Caps,
     debug: debug::DebugUtils,
-    commands: Mutex<commands::CommandContext>,
+    commands: Mutex<commands::FramedCommands>,
     descriptors: RwLock<descriptors::DescriptorRegistry>,
     pipelines: Mutex<pipelines::PipelineRegistry>,
     resources: RwLock<resources::ResourceRegistry>,
@@ -77,7 +77,7 @@ impl VulkanBackend {
         let memory_properties =
             unsafe { instance.get_physical_device_memory_properties(selection.physical_device) };
         let resource_registry = resources::ResourceRegistry::new(memory_properties);
-        let commands = commands::CommandContext::create(&logical.device, logical.queue_families)?;
+        let commands = commands::FramedCommands::create(&logical.device, logical.queue_families)?;
         let cache_data = load_pipeline_cache_file();
         let pipeline_registry =
             pipelines::PipelineRegistry::create(&logical.device, cache_data.as_deref())?;
@@ -368,11 +368,12 @@ impl Backend for VulkanBackend {
     }
 
     fn resize_surface(&self, handle: SurfaceHandle, size: SurfaceSize) -> Result<SurfaceInfo> {
-        unsafe {
-            self.device
-                .device_wait_idle()
-                .map_err(|error| Error::Backend(format!("vkDeviceWaitIdle failed: {error:?}")))?;
-        }
+        // Wait only on submitted frames, not all GPU work — avoids vkDeviceWaitIdle stall.
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.commands
+            .lock()
+            .expect("vulkan command context mutex poisoned")
+            .wait_all(&self.device)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
@@ -391,11 +392,11 @@ impl Backend for VulkanBackend {
         desc: SurfaceRecreateDesc,
         _current: SurfaceInfo,
     ) -> Result<SurfaceInfo> {
-        unsafe {
-            self.device
-                .device_wait_idle()
-                .map_err(|error| Error::Backend(format!("vkDeviceWaitIdle failed: {error:?}")))?;
-        }
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.commands
+            .lock()
+            .expect("vulkan command context mutex poisoned")
+            .wait_all(&self.device)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
@@ -409,11 +410,11 @@ impl Backend for VulkanBackend {
     }
 
     fn destroy_surface(&self, handle: SurfaceHandle) -> Result<()> {
-        unsafe {
-            self.device
-                .device_wait_idle()
-                .map_err(|error| Error::Backend(format!("vkDeviceWaitIdle failed: {error:?}")))?;
-        }
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.commands
+            .lock()
+            .expect("vulkan command context mutex poisoned")
+            .wait_all(&self.device)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         *self
             .active_surface
@@ -573,7 +574,7 @@ impl Backend for VulkanBackend {
             .commands
             .lock()
             .expect("vulkan command context mutex poisoned");
-        commands.submit_graph(
+        let handle = commands.submit(
             &self.device,
             self.queues,
             self.queue_families,
@@ -584,7 +585,17 @@ impl Backend for VulkanBackend {
             &self.debug,
             wait_sem,
             signal_sem,
-        )
+        )?;
+
+        // Incrementally save the pipeline cache after enough new pipelines have
+        // been compiled, so data is not lost if the process is killed before shutdown.
+        let checkpoint = pipelines.maybe_checkpoint(&self.device);
+        drop(pipelines); // release lock before disk I/O
+        if let Some(data) = checkpoint {
+            save_pipeline_cache_file(&data);
+        }
+
+        Ok(handle)
     }
 
     fn wait_submission(&self, token: SubmissionHandle) -> Result<()> {
@@ -594,6 +605,7 @@ impl Backend for VulkanBackend {
             .expect("vulkan command context mutex poisoned")
             .wait_for_submission(&self.device, token)
     }
+
 
     fn present(&self) -> Result<()> {
         Err(Error::Unsupported(

@@ -1027,10 +1027,22 @@ fn merge_shader_reflection<const N: usize>(
             }
         }
     }
+    // Collect vertex inputs from the vertex shader reflection (if any).
+    let vertex_inputs = reflections
+        .iter()
+        .find_map(|(_, r)| {
+            if r.vertex_inputs.is_empty() {
+                None
+            } else {
+                Some(r.vertex_inputs.clone())
+            }
+        })
+        .unwrap_or_default();
     ShaderReflection {
         layout,
         entry_points,
         parameters,
+        vertex_inputs,
     }
 }
 

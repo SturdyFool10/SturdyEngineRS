@@ -80,7 +80,7 @@ pub use sampler::{AddressMode, BorderColor, CompareOp, FilterMode, MipmapMode, S
 pub use shader::{
     CompiledShaderArtifact, ShaderDesc, ShaderModule, ShaderParameterKind,
     ShaderParameterReflection, ShaderReflection, ShaderResourceAccess, ShaderSource, ShaderStage,
-    ShaderTarget,
+    ShaderTarget, VertexInputReflection,
 };
 pub use slang::{
     SlangCompileDesc, compile_and_reflect, compile_slang, compile_slang_to_file,

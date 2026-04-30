@@ -825,3 +825,121 @@ fn mip_extent(extent: Extent3d, base_mip: u16) -> Extent3d {
         depth: (extent.depth >> shift).max(1),
     }
 }
+
+// ── Multi-frame command context ───────────────────────────────────────────────
+
+/// Number of independent frame slots.  Each slot has its own command pools and
+/// fence so the CPU can record frame N+1 while the GPU is still executing frame N.
+pub const FRAMES_IN_FLIGHT: usize = 2;
+
+/// Manages `FRAMES_IN_FLIGHT` independent [`CommandContext`]s.
+///
+/// Consecutive flushes rotate through the slots.  A slot's fence is only waited
+/// when that slot is selected again, meaning the CPU is never blocked for the
+/// current frame's GPU work — only for work that is `FRAMES_IN_FLIGHT` frames old.
+pub struct FramedCommands {
+    contexts: Vec<CommandContext>,
+    /// Slot that will be used on the next submission (cycles 0..FRAMES_IN_FLIGHT).
+    next_slot: usize,
+    /// Monotonically-increasing counter.  The `n`-th submission used slot `(n-1) % N`.
+    total_submissions: u64,
+}
+
+impl FramedCommands {
+    pub fn create(device: &Device, queue_families: QueueFamilyMap) -> Result<Self> {
+        let mut contexts = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        for _ in 0..FRAMES_IN_FLIGHT {
+            contexts.push(CommandContext::create(device, queue_families)?);
+        }
+        Ok(Self {
+            contexts,
+            next_slot: 0,
+            total_submissions: 0,
+        })
+    }
+
+    /// Record and submit one frame of GPU work, cycling to the next slot.
+    ///
+    /// Blocks only when the slot's previous submission (up to `FRAMES_IN_FLIGHT`
+    /// frames ago) has not yet completed — never for the immediately preceding frame.
+    pub fn submit(
+        &mut self,
+        device: &Device,
+        queues: VulkanQueues,
+        queue_families: QueueFamilyMap,
+        graph: &CompiledGraph,
+        resources: &ResourceRegistry,
+        descriptors: &DescriptorRegistry,
+        pipelines: &mut PipelineRegistry,
+        debug: &DebugUtils,
+        wait_semaphore: Option<vk::Semaphore>,
+        signal_semaphore: Option<vk::Semaphore>,
+    ) -> Result<SubmissionHandle> {
+        let slot = self.next_slot;
+        self.total_submissions += 1;
+        let handle = self.contexts[slot].submit_graph(
+            device,
+            queues,
+            queue_families,
+            graph,
+            resources,
+            descriptors,
+            pipelines,
+            debug,
+            wait_semaphore,
+            signal_semaphore,
+        )?;
+        self.next_slot = (slot + 1) % self.contexts.len();
+        // Override the per-context submission handle with the global counter so
+        // callers can correlate handles across slots.
+        Ok(SubmissionHandle(self.total_submissions))
+    }
+
+    /// Wait for a specific submission.  Uses `handle % N` to identify the slot,
+    /// then waits on that slot's fence if it holds that submission.
+    /// Falls back to waiting all submitted slots, which is always safe.
+    pub fn wait_for_submission(&self, device: &Device, handle: SubmissionHandle) -> Result<()> {
+        // Identify the slot: submission N used slot (N-1) % FRAMES_IN_FLIGHT.
+        let n = self.contexts.len();
+        let slot = if handle.0 > 0 {
+            ((handle.0 - 1) as usize) % n
+        } else {
+            return Ok(());
+        };
+        let ctx = &self.contexts[slot];
+        if ctx.frame_submitted {
+            unsafe {
+                device
+                    .wait_for_fences(&[ctx.frame_fence], true, u64::MAX)
+                    .map_err(|e| Error::Backend(format!("vkWaitForFences failed: {e:?}")))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Wait on every slot that has submitted but not yet been waited on.
+    /// Used before surface recreation or shutdown to drain the GPU safely
+    /// without resorting to `vkDeviceWaitIdle`.
+    pub fn wait_all(&self, device: &Device) -> Result<()> {
+        let fences: Vec<vk::Fence> = self
+            .contexts
+            .iter()
+            .filter(|c| c.frame_submitted)
+            .map(|c| c.frame_fence)
+            .collect();
+        if !fences.is_empty() {
+            unsafe {
+                device
+                    .wait_for_fences(&fences, true, u64::MAX)
+                    .map_err(|e| Error::Backend(format!("vkWaitForFences failed: {e:?}")))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn destroy(&self, device: &Device) {
+        for ctx in &self.contexts {
+            ctx.destroy(device);
+        }
+    }
+}

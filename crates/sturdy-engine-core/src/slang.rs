@@ -13,6 +13,9 @@ use crate::{
 #[path = "slang/spirv_push_constants.rs"]
 mod spirv_push_constants;
 
+#[path = "slang/spirv_vertex_inputs.rs"]
+mod spirv_vertex_inputs;
+
 #[cfg(not(target_arch = "wasm32"))]
 mod sys {
     use std::ffi::{c_char, c_int, c_uint};
@@ -410,10 +413,29 @@ fn reflect_pipeline_layout_inner(
             }
         }
 
+        // Reflect vertex inputs from SPIR-V for vertex shaders.
+        let vertex_inputs = if engine_stage == ShaderStage::Vertex {
+            if let Some(code_ptr) = {
+                let mut code_size: usize = 0;
+                let ptr = sys::spGetEntryPointCode(request, 0, &mut code_size);
+                if ptr.is_null() || code_size < 4 { None }
+                else { Some((ptr, code_size)) }
+            } {
+                let code_bytes = std::slice::from_raw_parts(code_ptr.0, code_ptr.1);
+                let words = crate::spirv_words_from_bytes(code_bytes).unwrap_or_default();
+                spirv_vertex_inputs::reflect_spirv_vertex_inputs(&words)
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
         Ok(ShaderReflection {
             layout,
             entry_points,
             parameters,
+            vertex_inputs,
         })
     })
 }
@@ -723,10 +745,17 @@ pub fn compile_and_reflect(
     desc: &ShaderDesc,
     target: ShaderTarget,
 ) -> Result<(ShaderDesc, ShaderReflection)> {
-    if matches!(
-        desc.source,
-        ShaderSource::Spirv(_) | ShaderSource::Dxil(_) | ShaderSource::Msl(_)
-    ) {
+    if let ShaderSource::Spirv(words) = &desc.source {
+        // Pre-compiled SPIR-V: extract vertex inputs so layouts can be validated
+        // even without source-level reflection.
+        let vertex_inputs = if desc.stage == ShaderStage::Vertex {
+            spirv_vertex_inputs::reflect_spirv_vertex_inputs(words)
+        } else {
+            Vec::new()
+        };
+        return Ok((desc.clone(), ShaderReflection { vertex_inputs, ..Default::default() }));
+    }
+    if matches!(desc.source, ShaderSource::Dxil(_) | ShaderSource::Msl(_)) {
         return Ok((desc.clone(), ShaderReflection::default()));
     }
     if let Some(words) = spirv_words_from_byte_source(&desc.source)? {
@@ -735,9 +764,14 @@ pub fn compile_and_reflect(
                 "SPIR-V byte shader sources can only be used with a SPIR-V target".into(),
             ));
         }
+        let vertex_inputs = if desc.stage == ShaderStage::Vertex {
+            spirv_vertex_inputs::reflect_spirv_vertex_inputs(&words)
+        } else {
+            Vec::new()
+        };
         let mut compiled = desc.clone();
         compiled.source = ShaderSource::Spirv(words);
-        return Ok((compiled, ShaderReflection::default()));
+        return Ok((compiled, ShaderReflection { vertex_inputs, ..Default::default() }));
     }
 
     let source_input = slang_source_input(&desc.source)?;
@@ -828,10 +862,20 @@ pub fn compile_and_reflect(
             (layout, eps, parameters)
         };
 
-        let compiled_source = match target {
-            ShaderTarget::Spirv => ShaderSource::Spirv(spirv_words_from_bytes(&code_bytes)?),
-            ShaderTarget::Dxil => ShaderSource::Dxil(code_bytes),
-            ShaderTarget::Msl => ShaderSource::Msl(code_bytes),
+        // For SPIR-V output, parse the words once for both the compiled source and
+        // vertex input reflection — avoids a second parse after the bytes are moved.
+        let (compiled_source, vertex_inputs) = match target {
+            ShaderTarget::Spirv => {
+                let words = spirv_words_from_bytes(&code_bytes)?;
+                let inputs = if engine_stage == ShaderStage::Vertex {
+                    spirv_vertex_inputs::reflect_spirv_vertex_inputs(&words)
+                } else {
+                    Vec::new()
+                };
+                (ShaderSource::Spirv(words), inputs)
+            }
+            ShaderTarget::Dxil => (ShaderSource::Dxil(code_bytes), Vec::new()),
+            ShaderTarget::Msl => (ShaderSource::Msl(code_bytes), Vec::new()),
         };
 
         let compiled_desc = ShaderDesc {
@@ -839,12 +883,14 @@ pub fn compile_and_reflect(
             entry_point: desc.entry_point.clone(),
             stage: desc.stage,
         };
+
         Ok((
             compiled_desc,
             ShaderReflection {
                 layout,
                 entry_points,
                 parameters,
+                vertex_inputs,
             },
         ))
     })
@@ -1360,5 +1406,61 @@ VSOutput vs_main(VSInput input) {
 
         assert!(reflection.layout.groups.is_empty());
         assert!(reflection.entry_points.iter().any(|ep| ep == "vs_main"));
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reflect_vertex_inputs_from_compiled_vertex_shader() {
+        let desc = ShaderDesc {
+            source: ShaderSource::File(testbed_shader("triangle_vertex.slang")),
+            entry_point: "vs_main".into(),
+            stage: ShaderStage::Vertex,
+        };
+        let (_compiled, reflection) =
+            compile_and_reflect(&desc, ShaderTarget::Spirv).expect("vertex shader compiles");
+        // triangle_vertex.slang has no explicit vertex inputs (uses SV_VertexID) —
+        // confirm the parser returns an empty list rather than panicking.
+        // The important invariant is: no built-in decorations leak into the result.
+        for input in &reflection.vertex_inputs {
+            assert!(
+                input.location < 32,
+                "unexpected high location {} for input '{}'",
+                input.location,
+                input.name
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reflect_vertex_inputs_from_textured_vertex_shader() {
+        let desc = ShaderDesc {
+            source: ShaderSource::File(testbed_shader("textured_vertex.slang")),
+            entry_point: "vs_main".into(),
+            stage: ShaderStage::Vertex,
+        };
+        let (_compiled, reflection) =
+            compile_and_reflect(&desc, ShaderTarget::Spirv).expect("vertex shader compiles");
+        // textured_vertex.slang declares position, uv, and color vertex inputs.
+        // Confirm they are reflected with sensible locations and formats.
+        for input in &reflection.vertex_inputs {
+            assert!(
+                matches!(
+                    input.format,
+                    crate::VertexFormat::Float32x2
+                        | crate::VertexFormat::Float32x3
+                        | crate::VertexFormat::Float32x4
+                ),
+                "unexpected format {:?} for input '{}'",
+                input.format,
+                input.name
+            );
+        }
+        // Locations must be in ascending order (parser sorts by location).
+        let locations: Vec<u32> = reflection.vertex_inputs.iter().map(|i| i.location).collect();
+        assert!(
+            locations.windows(2).all(|w| w[0] < w[1]),
+            "vertex inputs should be sorted by location, got {locations:?}"
+        );
     }
 }

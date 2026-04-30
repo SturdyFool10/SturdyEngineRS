@@ -9,7 +9,7 @@ use sturdy_engine_core as core;
 use crate::{
     ColorTargetDesc, CullMode, Engine, Error, Format, FrontFace, GraphicsPipelineDesc, Pipeline,
     PipelineLayout, PrimitiveTopology, RasterState, Result, Shader, ShaderDesc, ShaderReflection,
-    ShaderSource, ShaderStage, VertexBufferLayout, VertexInputRate,
+    ShaderSource, ShaderStage, VertexAttributeDesc, VertexBufferLayout, VertexInputRate,
     mesh::{Vertex2d, Vertex3d, vertex2d_attributes, vertex3d_attributes},
 };
 
@@ -172,6 +172,11 @@ impl MeshProgram {
         let vertex = engine.create_shader(vertex_desc)?;
         let fragment = engine.create_shader(desc.fragment)?;
         let reflection = engine.graphics_shader_reflection(&vertex, Some(&fragment))?;
+        let expected_attributes = match desc.vertex_kind {
+            MeshVertexKind::V2d => vertex2d_attributes(),
+            MeshVertexKind::V3d => vertex3d_attributes(),
+        };
+        validate_vertex_inputs_match_layout(&reflection, &expected_attributes)?;
         let pipeline_layout =
             engine.create_reflected_graphics_pipeline_layout(&vertex, Some(&fragment))?;
         Ok(Self {
@@ -322,4 +327,38 @@ impl MeshProgram {
             .map(Pipeline::handle)
             .ok_or_else(|| Error::Unknown("mesh program pipeline cache miss".into()))
     }
+}
+
+/// Validate that every reflected vertex input attribute in `reflection` has a
+/// matching entry in `layout` with the same location and format.
+///
+/// Only runs when the shader actually exposes vertex input reflection (non-empty
+/// `vertex_inputs`). Skips silently if the vertex shader did not produce inputs
+/// (e.g. built-in fullscreen triangle vertex shaders).
+fn validate_vertex_inputs_match_layout(
+    reflection: &ShaderReflection,
+    layout: &[VertexAttributeDesc],
+) -> Result<()> {
+    if reflection.vertex_inputs.is_empty() {
+        return Ok(());
+    }
+    for input in &reflection.vertex_inputs {
+        let declared = layout.iter().find(|a| a.location == input.location);
+        match declared {
+            None => {
+                return Err(Error::InvalidInput(format!(
+                    "vertex shader input '{}' at location {} has no matching attribute in the declared vertex layout",
+                    input.name, input.location
+                )));
+            }
+            Some(attr) if attr.format != input.format => {
+                return Err(Error::InvalidInput(format!(
+                    "vertex shader input '{}' at location {} expects {:?} but the declared layout has {:?}",
+                    input.name, input.location, input.format, attr.format
+                )));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }

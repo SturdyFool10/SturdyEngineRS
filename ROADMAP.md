@@ -151,6 +151,16 @@ The engine should not crash for recoverable runtime, compositor, asset, input, a
   - [x] Report explicit frame flush/wait/present synchronization reason, submission token, and whether the frame submitted, waited, or presented.
 - [ ] Keep engine samples and testbeds on the deferred path so examples teach queue-and-finalize behavior instead of immediate-mode flushing.
 
+### Vulkan backend performance
+
+- [x] Replace blanket `ALL_COMMANDS` pipeline barrier stage masks with precise per-state masks derived from `RgState` — eliminates full-GPU serialisation on every pass boundary.
+- [x] Fix swapchain-acquire semaphore wait stage from `ALL_COMMANDS` to `COLOR_ATTACHMENT_OUTPUT` — vertex shading and pre-raster work can now run before the image is available.
+- [x] Replace per-bind-group `VkDescriptorPool` create/destroy with a per-layout pool slab (`POOL_PAGE_CAPACITY = 64`): pool pages are reused across frames via `vkFreeDescriptorSets`, eliminating per-frame `vkCreateDescriptorPool` / `vkDestroyDescriptorPool` overhead.
+- [x] Replace O(n²) pass dependency graph construction with an O(n) resource-indexed build: group passes by image/buffer handle, then emit RAW/WAW/WAR edges from per-resource access lists instead of checking every (i,j) pair.
+- [x] Replace single `CommandContext` with `FramedCommands` holding `FRAMES_IN_FLIGHT=2` independent slots — each slot has its own fence and command pools, enabling true CPU/GPU overlap: the CPU blocks only for work `N` frames old, not the immediately preceding frame.
+- [x] Replace `vkDeviceWaitIdle` in surface resize/recreate paths with `FramedCommands::wait_all` (waits only on submitted fences) — eliminates full GPU pipeline stall on window resize.
+- [x] Add incremental pipeline cache save: serialize and write to disk every `PIPELINE_CACHE_CHECKPOINT_THRESHOLD=8` new pipeline compilations, not only on shutdown.
+
 ### Runtime asset, texture, and shader compilation rules
 
 Runtime content should behave like the rest of the engine: app code queues intent, worker systems prepare it, frame finalization makes it visible to the GPU, and the CPU does not stall unless the app explicitly asks for a blocking operation.
@@ -232,7 +242,8 @@ Slang should be a library dependency of the engine/game build, not an end-user m
   - [x] Validate pass target image usage: fullscreen passes require RENDER_TARGET, compute passes require STORAGE.
   - [x] Warn at frame.validate() time when a shader declares push constants but the pass provides none.
   - [ ] Reflect specialization constants.
-  - [ ] Reflect or validate vertex inputs.
+  - [x] Reflect vertex inputs from SPIR-V for vertex shaders: parse `OpDecorate Location` on `StorageClass::Input` variables, derive `VertexFormat` from the type, populate `ShaderReflection::vertex_inputs`.
+  - [x] Validate reflected vertex inputs against declared `MeshVertexKind` layout in `MeshProgram::new` — catches format mismatches between a custom vertex shader and the supplied vertex buffer at program creation time.
 - [ ] Make shader diagnostics first-class engine errors: source file/module name, include path, entry point, stage, line/column where available, compiler output, target backend, and suggested capability/settings mismatch.
 - [ ] Support hot reload for development without changing the runtime distribution model: loose-file reload in dev, embedded/packed stable assets in release.
 - [ ] Add policy for failed shader hot reload: keep using the last known-good pipeline, show diagnostics, and retry on the next source change.

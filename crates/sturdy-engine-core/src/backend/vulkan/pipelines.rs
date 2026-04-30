@@ -90,10 +90,17 @@ impl FramebufferCache {
     }
 }
 
+/// Save the pipeline cache after this many new pipelines have been created since
+/// the last save.  Keeps startup fast (no stale cache flush) while ensuring the
+/// cache is written out during a long session even if the process is killed.
+const PIPELINE_CACHE_CHECKPOINT_THRESHOLD: u32 = 8;
+
 pub struct PipelineRegistry {
     pipeline_cache: vk::PipelineCache,
     pipelines: HashMap<PipelineHandle, VulkanPipeline>,
     framebuffer_cache: FramebufferCache,
+    /// Pipelines created since the last incremental cache save.
+    pipelines_since_checkpoint: u32,
 }
 
 impl PipelineRegistry {
@@ -111,6 +118,7 @@ impl PipelineRegistry {
             pipeline_cache,
             pipelines: HashMap::new(),
             framebuffer_cache: FramebufferCache::default(),
+            pipelines_since_checkpoint: 0,
         })
     }
 
@@ -120,6 +128,22 @@ impl PipelineRegistry {
                 .get_pipeline_cache_data(self.pipeline_cache)
                 .map_err(|e| Error::Backend(format!("vkGetPipelineCacheData failed: {e:?}")))
         }
+    }
+
+    /// If enough new pipelines have been created since the last save, serialize
+    /// the cache and return the bytes.  The caller should write them to disk.
+    /// Returns `None` if the threshold has not yet been reached.
+    pub fn maybe_checkpoint(&mut self, device: &Device) -> Option<Vec<u8>> {
+        if self.pipelines_since_checkpoint >= PIPELINE_CACHE_CHECKPOINT_THRESHOLD {
+            self.pipelines_since_checkpoint = 0;
+            self.serialize_cache(device).ok()
+        } else {
+            None
+        }
+    }
+
+    fn note_pipeline_created(&mut self) {
+        self.pipelines_since_checkpoint += 1;
     }
 }
 
@@ -181,6 +205,7 @@ impl PipelineRegistry {
                 push_constant_stages,
             },
         );
+        self.note_pipeline_created();
         Ok(())
     }
 
@@ -361,6 +386,7 @@ impl PipelineRegistry {
                 push_constant_stages,
             },
         );
+        self.note_pipeline_created();
         Ok(())
     }
 
