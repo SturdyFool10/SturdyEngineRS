@@ -83,7 +83,7 @@ pub use input::{
 pub use mesh::{Mesh, Vertex2d, Vertex3d};
 pub use scene::{
     CameraConstants, CameraId, CameraOutput, InstanceData, MeshId, ObjectId, ObjectKind,
-    RenderTarget, Scene, SceneCamera,
+    OrbitCamera, RenderTarget, Scene, SceneCamera,
 };
 pub use mesh_program::{MeshProgram, MeshProgramDesc, MeshVertexKind};
 pub use mip_pyramid::MipPyramid;

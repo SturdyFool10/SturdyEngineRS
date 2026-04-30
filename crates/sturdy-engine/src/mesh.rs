@@ -86,6 +86,113 @@ impl Mesh {
     }
 }
 
+impl Mesh {
+    /// Unit cube centered at the origin with hard per-face normals and per-face UVs.
+    ///
+    /// `size` is the side length (half-extent = `size / 2`). Each face is a
+    /// separate quad so normals are sharp at edges. UVs tile 0→1 per face.
+    pub fn cube(engine: &Engine, size: f32) -> Result<Self> {
+        let s = size * 0.5;
+        let verts: &[Vertex3d] = &[
+            // +Z front
+            Vertex3d { position: [-s, -s,  s], normal: [0., 0., 1.], uv: [0., 1.] },
+            Vertex3d { position: [ s, -s,  s], normal: [0., 0., 1.], uv: [1., 1.] },
+            Vertex3d { position: [ s,  s,  s], normal: [0., 0., 1.], uv: [1., 0.] },
+            Vertex3d { position: [-s,  s,  s], normal: [0., 0., 1.], uv: [0., 0.] },
+            // -Z back
+            Vertex3d { position: [ s, -s, -s], normal: [0., 0., -1.], uv: [0., 1.] },
+            Vertex3d { position: [-s, -s, -s], normal: [0., 0., -1.], uv: [1., 1.] },
+            Vertex3d { position: [-s,  s, -s], normal: [0., 0., -1.], uv: [1., 0.] },
+            Vertex3d { position: [ s,  s, -s], normal: [0., 0., -1.], uv: [0., 0.] },
+            // +X right
+            Vertex3d { position: [s, -s, -s], normal: [1., 0., 0.], uv: [0., 1.] },
+            Vertex3d { position: [s, -s,  s], normal: [1., 0., 0.], uv: [1., 1.] },
+            Vertex3d { position: [s,  s,  s], normal: [1., 0., 0.], uv: [1., 0.] },
+            Vertex3d { position: [s,  s, -s], normal: [1., 0., 0.], uv: [0., 0.] },
+            // -X left
+            Vertex3d { position: [-s, -s,  s], normal: [-1., 0., 0.], uv: [0., 1.] },
+            Vertex3d { position: [-s, -s, -s], normal: [-1., 0., 0.], uv: [1., 1.] },
+            Vertex3d { position: [-s,  s, -s], normal: [-1., 0., 0.], uv: [1., 0.] },
+            Vertex3d { position: [-s,  s,  s], normal: [-1., 0., 0.], uv: [0., 0.] },
+            // +Y top
+            Vertex3d { position: [-s, s, -s], normal: [0., 1., 0.], uv: [0., 0.] },
+            Vertex3d { position: [ s, s, -s], normal: [0., 1., 0.], uv: [1., 0.] },
+            Vertex3d { position: [ s, s,  s], normal: [0., 1., 0.], uv: [1., 1.] },
+            Vertex3d { position: [-s, s,  s], normal: [0., 1., 0.], uv: [0., 1.] },
+            // -Y bottom
+            Vertex3d { position: [-s, -s,  s], normal: [0., -1., 0.], uv: [0., 0.] },
+            Vertex3d { position: [ s, -s,  s], normal: [0., -1., 0.], uv: [1., 0.] },
+            Vertex3d { position: [ s, -s, -s], normal: [0., -1., 0.], uv: [1., 1.] },
+            Vertex3d { position: [-s, -s, -s], normal: [0., -1., 0.], uv: [0., 1.] },
+        ];
+        #[rustfmt::skip]
+        let idx: &[u32] = &[
+             0, 1, 2,  0, 2, 3,
+             4, 5, 6,  4, 6, 7,
+             8, 9,10,  8,10,11,
+            12,13,14, 12,14,15,
+            16,17,18, 16,18,19,
+            20,21,22, 20,22,23,
+        ];
+        Self::indexed_3d(engine, verts, idx)
+    }
+
+    /// Flat horizontal plane (in the XZ plane, normal pointing +Y) centered at the origin.
+    ///
+    /// `width` extends along X, `depth` along Z. UVs run 0→1 across the full quad.
+    pub fn plane(engine: &Engine, width: f32, depth: f32) -> Result<Self> {
+        let hw = width * 0.5;
+        let hd = depth * 0.5;
+        let verts: &[Vertex3d] = &[
+            Vertex3d { position: [-hw, 0., -hd], normal: [0., 1., 0.], uv: [0., 0.] },
+            Vertex3d { position: [ hw, 0., -hd], normal: [0., 1., 0.], uv: [1., 0.] },
+            Vertex3d { position: [ hw, 0.,  hd], normal: [0., 1., 0.], uv: [1., 1.] },
+            Vertex3d { position: [-hw, 0.,  hd], normal: [0., 1., 0.], uv: [0., 1.] },
+        ];
+        let idx: &[u32] = &[0, 1, 2, 0, 2, 3];
+        Self::indexed_3d(engine, verts, idx)
+    }
+
+    /// UV sphere centered at the origin.
+    ///
+    /// `rings` controls horizontal latitude bands (minimum 2), `segments` controls
+    /// longitudinal slices (minimum 3). Normals point outward. UVs wrap once around.
+    pub fn uv_sphere(engine: &Engine, radius: f32, rings: u32, segments: u32) -> Result<Self> {
+        let rings = rings.max(2);
+        let segments = segments.max(3);
+        let mut verts: Vec<Vertex3d> = Vec::new();
+        let mut idx: Vec<u32> = Vec::new();
+
+        for ring in 0..=rings {
+            let phi = std::f32::consts::PI * ring as f32 / rings as f32;
+            let (sin_phi, cos_phi) = phi.sin_cos();
+            for seg in 0..=segments {
+                let theta = 2.0 * std::f32::consts::PI * seg as f32 / segments as f32;
+                let (sin_theta, cos_theta) = theta.sin_cos();
+                let nx = sin_phi * cos_theta;
+                let ny = cos_phi;
+                let nz = sin_phi * sin_theta;
+                verts.push(Vertex3d {
+                    position: [nx * radius, ny * radius, nz * radius],
+                    normal: [nx, ny, nz],
+                    uv: [seg as f32 / segments as f32, ring as f32 / rings as f32],
+                });
+            }
+        }
+
+        let stride = segments + 1;
+        for ring in 0..rings {
+            for seg in 0..segments {
+                let a = ring * stride + seg;
+                let b = a + stride;
+                idx.extend_from_slice(&[a, b, a + 1, b, b + 1, a + 1]);
+            }
+        }
+
+        Self::indexed_3d(engine, &verts, &idx)
+    }
+}
+
 fn upload_slice<T>(engine: &Engine, data: &[T], usage: BufferUsage) -> Result<Buffer> {
     let buffer = engine.create_buffer(BufferDesc {
         size: std::mem::size_of_val(data) as u64,

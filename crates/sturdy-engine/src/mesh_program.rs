@@ -23,6 +23,11 @@ const DEFAULT_VERTEX_3D: &str = include_str!(concat!(
     "/shaders/mesh_vertex_3d.slang"
 ));
 
+const UNLIT_FRAGMENT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/unlit_fragment.slang"
+));
+
 pub struct MeshProgramDesc {
     pub fragment: ShaderDesc,
     /// Custom vertex shader. None uses the built-in for the chosen kind.
@@ -84,6 +89,27 @@ impl MeshProgram {
                 vertex: None,
                 vertex_kind: MeshVertexKind::V2d,
                 alpha_blend: true,
+            },
+        )
+    }
+
+    /// Built-in 3D program that colours each fragment by its world-space normal
+    /// (remapped to [0, 1]).
+    ///
+    /// No shader files or push constants are needed — call this to get something
+    /// visible on screen while iterating on geometry, camera, or scene setup.
+    pub fn unlit(engine: &Engine) -> Result<Self> {
+        Self::new(
+            engine,
+            MeshProgramDesc {
+                fragment: ShaderDesc {
+                    source: ShaderSource::Inline(UNLIT_FRAGMENT.to_owned()),
+                    entry_point: "main".to_owned(),
+                    stage: ShaderStage::Fragment,
+                },
+                vertex: None,
+                vertex_kind: MeshVertexKind::V3d,
+                alpha_blend: false,
             },
         )
     }

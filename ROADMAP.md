@@ -853,7 +853,7 @@ This track must make the engine viable for full games without forcing every proj
 
 - [ ] Add fixed-timestep and interpolation helpers.
 - [ ] Add input action/binding helpers above raw key events.
-- [ ] Add simple camera controllers for common 2D and 3D cases.
+- [x] Add simple camera controllers for common 2D and 3D cases.
 - [ ] Add a default game runtime shell that reuses the same renderer/debug/runtime-settings systems as apps and tools.
 - [ ] Split the app shell into explicit input drain, update/simulation, render preparation, command recording, submit, and present phases.
 - [ ] Add `FrameClock` and `FramePacer` helpers with monotonic timing, frame index, delta, fixed-step state, and pacing error.
@@ -935,6 +935,19 @@ This track must make the engine viable for full games without forcing every proj
 - [ ] Add shader worker jobs so Slang compilation/reflection does not block input, simulation, or normal draw-call collection.
 - [ ] Add a last-known-good shader/pipeline fallback for hot reload and runtime shader compile failures.
 - [ ] Add examples for a small 2D game, a small 3D game, a streamed-texture scene, and an embedded-`include_str!` shader sample.
+
+### 3D rendering foundations
+
+- [x] Wire scene module into the public API (`mod scene` declared, types exported).
+- [x] Fix default 3D vertex shader to apply instance model matrix and camera `view_proj`.
+- [x] Add mesh primitive generators: `Mesh::cube`, `Mesh::plane`, `Mesh::uv_sphere`.
+- [x] Add `MeshProgram::unlit()` built-in normal-visualisation shader (no shader file required).
+- [x] Simplify `Scene::add_object` to default transform to identity; add `add_object_at` for explicit placement.
+
+### Tonemapping
+
+- [x] Add Khronos PBR Neutral tonemapper (`ToneMappingOp::PbrNeutral`).
+- [x] Add AgX tonemapper (`ToneMappingOp::AgX`) — Blender/Sobotka log-sigmoid implementation.
 
 ### 2D and gameplay-oriented rendering
 
