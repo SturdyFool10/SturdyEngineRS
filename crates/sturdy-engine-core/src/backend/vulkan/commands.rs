@@ -174,10 +174,17 @@ impl CommandContext {
             } else {
                 signal_sems.extend(signal_semaphore);
             }
-            let wait_stages = wait_sems
-                .iter()
-                .map(|_| vk::PipelineStageFlags::ALL_COMMANDS)
-                .collect::<Vec<_>>();
+            // The swapchain-acquire semaphore (batch 0) only needs to block at the
+            // colour-attachment-output stage — vertex shading and earlier work can
+            // run freely before the image is available.  Inter-batch chain semaphores
+            // (batch N+1) just need TOP_OF_PIPE; the signalling submit already
+            // provides full execution + memory visibility through the semaphore.
+            let wait_stage = if batch_index == 0 {
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+            } else {
+                vk::PipelineStageFlags::TOP_OF_PIPE
+            };
+            let wait_stages = wait_sems.iter().map(|_| wait_stage).collect::<Vec<_>>();
             let cmd_bufs = [self.batch_pools[batch_index].command_buffer];
             let submit_info = vk::SubmitInfo::default()
                 .command_buffers(&cmd_bufs)
@@ -620,11 +627,38 @@ impl CommandContext {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        // Compute the tightest src/dst stage masks across all barriers in this batch.
+        // Taking the union means every barrier in the call is covered while avoiding
+        // the ALL_COMMANDS over-synchronisation that would otherwise stall the whole GPU.
+        let src_stages = image_barriers
+            .iter()
+            .map(|b| stage_mask(b.before))
+            .chain(buffer_barriers.iter().map(|b| stage_mask(b.before)))
+            .fold(vk::PipelineStageFlags::empty(), |acc, s| acc | s);
+        let dst_stages = image_barriers
+            .iter()
+            .map(|b| stage_mask(b.after))
+            .chain(buffer_barriers.iter().map(|b| stage_mask(b.after)))
+            .fold(vk::PipelineStageFlags::empty(), |acc, s| acc | s);
+
+        // Fall back to TOP_OF_PIPE / BOTTOM_OF_PIPE if somehow empty (defensive only —
+        // the early return above ensures at least one barrier exists at this point).
+        let src_stages = if src_stages.is_empty() {
+            vk::PipelineStageFlags::TOP_OF_PIPE
+        } else {
+            src_stages
+        };
+        let dst_stages = if dst_stages.is_empty() {
+            vk::PipelineStageFlags::BOTTOM_OF_PIPE
+        } else {
+            dst_stages
+        };
+
         unsafe {
             device.cmd_pipeline_barrier(
                 command_buffer,
-                vk::PipelineStageFlags::ALL_COMMANDS,
-                vk::PipelineStageFlags::ALL_COMMANDS,
+                src_stages,
+                dst_stages,
                 vk::DependencyFlags::empty(),
                 &[],
                 &vk_buffer_barriers,
@@ -645,11 +679,49 @@ fn access_mask(state: RgState) -> vk::AccessFlags {
         RgState::DepthWrite => vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
         RgState::CopySrc => vk::AccessFlags::TRANSFER_READ,
         RgState::CopyDst => vk::AccessFlags::TRANSFER_WRITE,
-        RgState::Present => vk::AccessFlags::MEMORY_READ,
+        // Present uses semaphore-based GPU sync; the access mask is empty because
+        // the presentation engine's visibility is guaranteed by the semaphore chain.
+        RgState::Present => vk::AccessFlags::empty(),
         RgState::UniformRead => vk::AccessFlags::UNIFORM_READ,
         RgState::VertexRead => vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
         RgState::IndexRead => vk::AccessFlags::INDEX_READ,
         RgState::IndirectRead => vk::AccessFlags::INDIRECT_COMMAND_READ,
+    }
+}
+
+/// Map a resource state to the tightest pipeline stage(s) that produce or consume it.
+///
+/// Used to build precise `srcStageMask` / `dstStageMask` for pipeline barriers
+/// instead of blanket `ALL_COMMANDS`, which unnecessarily serialises the whole GPU.
+fn stage_mask(state: RgState) -> vk::PipelineStageFlags {
+    match state {
+        // No real predecessor — barrier is just an initialisation transition.
+        RgState::Undefined => vk::PipelineStageFlags::TOP_OF_PIPE,
+        // Sampled images and storage reads can occur in any shader stage.
+        RgState::ShaderRead => {
+            vk::PipelineStageFlags::VERTEX_SHADER
+                | vk::PipelineStageFlags::FRAGMENT_SHADER
+                | vk::PipelineStageFlags::COMPUTE_SHADER
+        }
+        // Storage writes happen exclusively in compute shaders in this engine.
+        RgState::ShaderWrite => vk::PipelineStageFlags::COMPUTE_SHADER,
+        RgState::RenderTarget => vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+        RgState::DepthRead | RgState::DepthWrite => {
+            vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
+        }
+        RgState::CopySrc | RgState::CopyDst => vk::PipelineStageFlags::TRANSFER,
+        // Presentation: semaphore handles the actual memory visibility.
+        // BOTTOM_OF_PIPE ensures the transition is recorded before present.
+        RgState::Present => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+        // Uniform buffers bound in any shader stage.
+        RgState::UniformRead => {
+            vk::PipelineStageFlags::VERTEX_SHADER
+                | vk::PipelineStageFlags::FRAGMENT_SHADER
+                | vk::PipelineStageFlags::COMPUTE_SHADER
+        }
+        RgState::VertexRead | RgState::IndexRead => vk::PipelineStageFlags::VERTEX_INPUT,
+        RgState::IndirectRead => vk::PipelineStageFlags::DRAW_INDIRECT,
     }
 }
 

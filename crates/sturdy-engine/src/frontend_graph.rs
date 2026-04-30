@@ -2763,6 +2763,16 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
 ///
 /// RAW dependencies are directional regardless of declaration order: a pass
 /// that reads a resource must run after the pass that writes that resource.
+/// Add a directed edge i→j to the scheduler's adjacency list.
+/// Deduplicates edges so duplicate resource accesses don't inflate in-degree.
+fn sched_add_edge(adj: &mut Vec<Vec<usize>>, in_degree: &mut Vec<usize>, i: usize, j: usize) {
+    if !adj[i].contains(&j) {
+        adj[i].push(j);
+        in_degree[j] += 1;
+    }
+}
+
+#[cfg(test)]
 fn has_read_after_write_dependency(writer: &PassDesc, reader: &PassDesc) -> bool {
     for write in &writer.writes {
         if reader
@@ -2791,6 +2801,7 @@ fn has_read_after_write_dependency(writer: &PassDesc, reader: &PassDesc) -> bool
 /// WAW and WAR hazards do not express data flow, but they still need a stable
 /// ordering. Adding these edges in both directions creates cycles, so callers
 /// only check this for declaration-ordered pass pairs.
+#[cfg(test)]
 fn has_declaration_order_hazard(earlier: &PassDesc, later: &PassDesc) -> bool {
     // WAW
     for earlier_write in &earlier.writes {
@@ -2843,6 +2854,10 @@ fn image_uses_overlap(a: &crate::ImageUse, b: &crate::ImageUse) -> bool {
 /// processed in declaration order (their original index) as a deterministic
 /// tie-breaker, preserving the user's intent for truly independent passes.
 ///
+/// Dependency edges are derived from an inverted resource index (image/buffer
+/// handle → accessing passes) rather than the O(n²) all-pairs check, reducing
+/// graph construction from O(n²·k) to O(n·k) where k is bindings per pass.
+///
 /// `ordering_constraints` is a list of `(before_image, after_image)` pairs declared
 /// via [`RenderFrame::order_before`]: any pass writing `before_image` is forced to
 /// precede any pass writing `after_image`, regardless of resource dependency inference.
@@ -2858,41 +2873,82 @@ fn schedule_pass_order(
         return (0..n).collect();
     }
 
-    // Build forward adjacency: adj[i] lists every j that depends on i.
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut in_degree: Vec<usize> = vec![0; n];
 
-    let add_edge = |adj: &mut Vec<Vec<usize>>, in_degree: &mut Vec<usize>, i: usize, j: usize| {
-        if !adj[i].contains(&j) {
-            adj[i].push(j);
-            in_degree[j] += 1;
-        }
-    };
+    // --- Build inverted resource index ---
+    // Each entry is (pass_index, subresource, is_write).
+    let mut image_access: HashMap<ImageHandle, Vec<(usize, SubresourceRange, bool)>> =
+        HashMap::new();
+    // Buffer accesses: (pass_index, is_write).
+    let mut buffer_access: HashMap<core::BufferHandle, Vec<(usize, bool)>> = HashMap::new();
 
-    for i in 0..n {
-        for j in 0..n {
-            if i == j {
-                continue;
-            }
-            if has_read_after_write_dependency(&passes[i], &passes[j]) {
-                add_edge(&mut adj, &mut in_degree, i, j);
+    for (i, pass) in passes.iter().enumerate() {
+        for u in &pass.writes {
+            image_access
+                .entry(u.image)
+                .or_default()
+                .push((i, u.subresource, true));
+        }
+        for u in &pass.reads {
+            image_access
+                .entry(u.image)
+                .or_default()
+                .push((i, u.subresource, false));
+        }
+        for u in &pass.buffer_writes {
+            buffer_access.entry(u.buffer).or_default().push((i, true));
+        }
+        for u in &pass.buffer_reads {
+            buffer_access.entry(u.buffer).or_default().push((i, false));
+        }
+    }
+
+    // --- Emit edges from resource conflicts ---
+    // For each resource, iterate its accesses once and add edges for RAW / WAW / WAR.
+    // This is O(|accesses_per_resource|²) per resource, but each resource
+    // typically has 1–3 accesses, making the total cost O(n) in practice.
+    for accesses in image_access.values() {
+        for a in 0..accesses.len() {
+            for b in (a + 1)..accesses.len() {
+                let (ai, a_sub, a_write) = accesses[a];
+                let (bi, b_sub, b_write) = accesses[b];
+                if !a_sub.overlaps(b_sub) {
+                    continue;
+                }
+                match (a_write, b_write) {
+                    // RAW: writer → reader
+                    (true, false) => sched_add_edge(&mut adj, &mut in_degree, ai, bi),
+                    (false, true) => sched_add_edge(&mut adj, &mut in_degree, bi, ai),
+                    // WAW / WAR: preserve declaration order
+                    _ => {
+                        let (earlier, later) = if ai < bi { (ai, bi) } else { (bi, ai) };
+                        sched_add_edge(&mut adj, &mut in_degree, earlier, later);
+                    }
+                }
             }
         }
     }
 
-    for i in 0..n {
-        for j in i + 1..n {
-            if has_declaration_order_hazard(&passes[i], &passes[j])
-                && !has_read_after_write_dependency(&passes[j], &passes[i])
-            {
-                add_edge(&mut adj, &mut in_degree, i, j);
+    for accesses in buffer_access.values() {
+        for a in 0..accesses.len() {
+            for b in (a + 1)..accesses.len() {
+                let (ai, a_write) = accesses[a];
+                let (bi, b_write) = accesses[b];
+                match (a_write, b_write) {
+                    (true, false) => sched_add_edge(&mut adj, &mut in_degree, ai, bi),
+                    (false, true) => sched_add_edge(&mut adj, &mut in_degree, bi, ai),
+                    _ => {
+                        let (earlier, later) = if ai < bi { (ai, bi) } else { (bi, ai) };
+                        sched_add_edge(&mut adj, &mut in_degree, earlier, later);
+                    }
+                }
             }
         }
     }
 
-    // Apply user-declared ordering constraints.
+    // User-declared ordering constraints.
     for (before_img, after_img) in ordering_constraints {
-        // Find the pass that writes before_img and the pass that writes after_img.
         let before_pass = passes
             .iter()
             .position(|p| p.writes.iter().any(|u| u.image == *before_img));
@@ -2901,7 +2957,7 @@ fn schedule_pass_order(
             .position(|p| p.writes.iter().any(|u| u.image == *after_img));
         if let (Some(i), Some(j)) = (before_pass, after_pass) {
             if i != j {
-                add_edge(&mut adj, &mut in_degree, i, j);
+                sched_add_edge(&mut adj, &mut in_degree, i, j);
             }
         }
     }

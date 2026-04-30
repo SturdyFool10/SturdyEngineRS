@@ -9,17 +9,24 @@ use crate::{
 
 use super::resources::ResourceRegistry;
 
+/// How many bind groups each pool page can hold before a new page is appended.
+const POOL_PAGE_CAPACITY: u32 = 64;
+
 #[derive(Default)]
 pub struct DescriptorRegistry {
     layouts: HashMap<PipelineLayoutHandle, VulkanPipelineLayout>,
     bind_groups: HashMap<BindGroupHandle, VulkanBindGroup>,
+    /// Per-layout pool slabs. One slab per unique pipeline layout; each slab
+    /// holds pages of VkDescriptorPool that are reused across many bind groups.
+    pool_slabs: HashMap<PipelineLayoutHandle, LayoutPoolSlab>,
 }
 
 struct VulkanPipelineLayout {
     pipeline_layout: vk::PipelineLayout,
     set_layouts: Vec<vk::DescriptorSetLayout>,
     bindings: HashMap<String, VulkanBinding>,
-    pool_sizes: Vec<vk::DescriptorPoolSize>,
+    /// Per-bind-group pool sizes (counts for one allocation, not for a full page).
+    pool_sizes_per_bg: Vec<vk::DescriptorPoolSize>,
     push_constants_bytes: u32,
     push_constant_stages: vk::ShaderStageFlags,
 }
@@ -33,8 +40,134 @@ struct VulkanBinding {
 
 struct VulkanBindGroup {
     layout: PipelineLayoutHandle,
+    /// Pool this bind group's sets were allocated from — needed for freeing.
     pool: vk::DescriptorPool,
     sets: Vec<vk::DescriptorSet>,
+}
+
+/// A growable list of `VkDescriptorPool` pages for one pipeline layout.
+///
+/// Each page has capacity for `POOL_PAGE_CAPACITY` bind groups.  Sets are freed
+/// individually (the pools carry `FREE_DESCRIPTOR_SET`), so pages are never
+/// destroyed until the layout itself is destroyed.
+struct LayoutPoolSlab {
+    pages: Vec<PoolPage>,
+    /// Pool sizes scaled for a single bind-group allocation.
+    pool_sizes_per_bg: Vec<vk::DescriptorPoolSize>,
+    /// Number of descriptor sets in one bind group (= number of set_layouts).
+    sets_per_bg: u32,
+}
+
+struct PoolPage {
+    pool: vk::DescriptorPool,
+    /// How many more bind-group allocations this page can satisfy.
+    remaining: u32,
+}
+
+impl LayoutPoolSlab {
+    fn new(pool_sizes_per_bg: Vec<vk::DescriptorPoolSize>, sets_per_bg: u32) -> Self {
+        Self {
+            pages: Vec::new(),
+            pool_sizes_per_bg,
+            sets_per_bg,
+        }
+    }
+
+    fn allocate(
+        &mut self,
+        device: &Device,
+        set_layouts: &[vk::DescriptorSetLayout],
+    ) -> Result<(vk::DescriptorPool, Vec<vk::DescriptorSet>)> {
+        // Find a page with enough remaining capacity.
+        let page_idx = self
+            .pages
+            .iter()
+            .position(|p| p.remaining >= self.sets_per_bg.max(1));
+
+        let pool = if let Some(idx) = page_idx {
+            self.pages[idx].remaining -= self.sets_per_bg.max(1);
+            self.pages[idx].pool
+        } else {
+            let pool = create_pool(device, &self.pool_sizes_per_bg, POOL_PAGE_CAPACITY)?;
+            let remaining = POOL_PAGE_CAPACITY - self.sets_per_bg.max(1);
+            self.pages.push(PoolPage { pool, remaining });
+            pool
+        };
+
+        if set_layouts.is_empty() {
+            return Ok((pool, Vec::new()));
+        }
+
+        let allocate_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(pool)
+            .set_layouts(set_layouts);
+        let sets = unsafe {
+            device
+                .allocate_descriptor_sets(&allocate_info)
+                .map_err(|error| {
+                    Error::Backend(format!("vkAllocateDescriptorSets failed: {error:?}"))
+                })?
+        };
+        Ok((pool, sets))
+    }
+
+    fn free(&mut self, device: &Device, pool: vk::DescriptorPool, sets: &[vk::DescriptorSet]) {
+        if !sets.is_empty() {
+            unsafe {
+                // FREE_DESCRIPTOR_SET flag was set at pool creation — individual frees are valid.
+                let _ = device.free_descriptor_sets(pool, sets);
+            }
+        }
+        // Return capacity to the page.
+        if let Some(page) = self.pages.iter_mut().find(|p| p.pool == pool) {
+            page.remaining += self.sets_per_bg.max(1);
+        }
+    }
+
+    fn destroy_all(&mut self, device: &Device) {
+        for page in self.pages.drain(..) {
+            unsafe {
+                device.destroy_descriptor_pool(page.pool, None);
+            }
+        }
+    }
+}
+
+/// Create a descriptor pool that can hold `capacity` bind-group allocations.
+///
+/// The `FREE_DESCRIPTOR_SET` flag is always set so individual sets can be freed
+/// without destroying the whole pool.
+fn create_pool(
+    device: &Device,
+    sizes_per_bg: &[vk::DescriptorPoolSize],
+    capacity: u32,
+) -> Result<vk::DescriptorPool> {
+    let scaled: Vec<vk::DescriptorPoolSize> = sizes_per_bg
+        .iter()
+        .map(|s| vk::DescriptorPoolSize {
+            ty: s.ty,
+            descriptor_count: s.descriptor_count * capacity,
+        })
+        .collect();
+    let fallback;
+    let pool_sizes: &[vk::DescriptorPoolSize] = if scaled.is_empty() {
+        fallback = [vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: capacity,
+        }];
+        &fallback
+    } else {
+        &scaled
+    };
+    let info = vk::DescriptorPoolCreateInfo::default()
+        .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
+        .max_sets(capacity)
+        .pool_sizes(pool_sizes);
+    unsafe {
+        device
+            .create_descriptor_pool(&info, None)
+            .map_err(|error| Error::Backend(format!("vkCreateDescriptorPool failed: {error:?}")))
+    }
 }
 
 impl DescriptorRegistry {
@@ -90,12 +223,10 @@ impl DescriptorRegistry {
         let push_ranges = if layout.push_constants_bytes == 0 {
             Vec::new()
         } else {
-            vec![
-                vk::PushConstantRange::default()
-                    .stage_flags(push_constant_stages)
-                    .offset(0)
-                    .size(layout.push_constants_bytes),
-            ]
+            vec![vk::PushConstantRange::default()
+                .stage_flags(push_constant_stages)
+                .offset(0)
+                .size(layout.push_constants_bytes)]
         };
         let info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&set_layouts)
@@ -112,22 +243,31 @@ impl DescriptorRegistry {
             }
         };
 
+        let pool_sizes_per_bg = pool_counts
+            .into_iter()
+            .map(|(ty, descriptor_count)| vk::DescriptorPoolSize {
+                ty,
+                descriptor_count,
+            })
+            .collect::<Vec<_>>();
+        let sets_per_bg = set_layouts.len() as u32;
+
         self.layouts.insert(
             handle,
             VulkanPipelineLayout {
                 pipeline_layout,
                 set_layouts,
                 bindings: binding_map,
-                pool_sizes: pool_counts
-                    .into_iter()
-                    .map(|(ty, descriptor_count)| vk::DescriptorPoolSize {
-                        ty,
-                        descriptor_count,
-                    })
-                    .collect(),
+                pool_sizes_per_bg,
                 push_constants_bytes: layout.push_constants_bytes,
                 push_constant_stages,
             },
+        );
+        // Pre-register the pool slab so it's ready on first bind-group creation.
+        let layout = self.layouts.get(&handle).unwrap();
+        self.pool_slabs.insert(
+            handle,
+            LayoutPoolSlab::new(layout.pool_sizes_per_bg.clone(), sets_per_bg),
         );
         Ok(())
     }
@@ -152,15 +292,18 @@ impl DescriptorRegistry {
         }
         let mut set_layouts = layout.set_layouts;
         destroy_set_layouts(device, &mut set_layouts);
+        // Destroy all pool pages for this layout.
+        if let Some(mut slab) = self.pool_slabs.remove(&handle) {
+            slab.destroy_all(device);
+        }
         Ok(())
     }
 
     pub fn destroy_all(&mut self, device: &Device) {
-        for (_, bind_group) in self.bind_groups.drain() {
-            unsafe {
-                device.destroy_descriptor_pool(bind_group.pool, None);
-            }
+        for (_, mut slab) in self.pool_slabs.drain() {
+            slab.destroy_all(device);
         }
+        self.bind_groups.clear(); // pools already gone, drop handles
         for (_, layout) in self.layouts.drain() {
             unsafe {
                 device.destroy_pipeline_layout(layout.pipeline_layout, None);
@@ -178,43 +321,13 @@ impl DescriptorRegistry {
         resources: &ResourceRegistry,
     ) -> Result<()> {
         let layout = self.layouts.get(&desc.layout).ok_or(Error::InvalidHandle)?;
-        let pool_sizes = if layout.pool_sizes.is_empty() {
-            vec![vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: 1,
-            }]
-        } else {
-            layout.pool_sizes.clone()
-        };
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(layout.set_layouts.len().max(1) as u32)
-            .pool_sizes(&pool_sizes);
-        let pool = unsafe {
-            device
-                .create_descriptor_pool(&pool_info, None)
-                .map_err(|error| {
-                    Error::Backend(format!("vkCreateDescriptorPool failed: {error:?}"))
-                })?
-        };
+        let set_layouts = layout.set_layouts.clone();
 
-        let sets = if layout.set_layouts.is_empty() {
-            Vec::new()
-        } else {
-            let allocate_info = vk::DescriptorSetAllocateInfo::default()
-                .descriptor_pool(pool)
-                .set_layouts(&layout.set_layouts);
-            unsafe {
-                match device.allocate_descriptor_sets(&allocate_info) {
-                    Ok(sets) => sets,
-                    Err(error) => {
-                        device.destroy_descriptor_pool(pool, None);
-                        return Err(Error::Backend(format!(
-                            "vkAllocateDescriptorSets failed: {error:?}"
-                        )));
-                    }
-                }
-            }
-        };
+        let slab = self
+            .pool_slabs
+            .get_mut(&desc.layout)
+            .ok_or(Error::InvalidHandle)?;
+        let (pool, sets) = slab.allocate(device, &set_layouts)?;
 
         for entry in &desc.entries {
             let binding = layout.bindings.get(&entry.path).ok_or_else(|| {
@@ -246,8 +359,9 @@ impl DescriptorRegistry {
             .bind_groups
             .remove(&handle)
             .ok_or(Error::InvalidHandle)?;
-        unsafe {
-            device.destroy_descriptor_pool(bind_group.pool, None);
+        // Return the sets to the layout's pool slab rather than destroying the pool.
+        if let Some(slab) = self.pool_slabs.get_mut(&bind_group.layout) {
+            slab.free(device, bind_group.pool, &bind_group.sets);
         }
         Ok(())
     }
@@ -435,7 +549,8 @@ fn write_descriptor(
                     "sampler resource can only be bound to sampler descriptors".into(),
                 ));
             }
-            let info = [vk::DescriptorImageInfo::default().sampler(resources.sampler(sampler)?)];
+            let info =
+                [vk::DescriptorImageInfo::default().sampler(resources.sampler(sampler)?)];
             let write = [vk::WriteDescriptorSet::default()
                 .dst_set(set)
                 .dst_binding(binding.binding_index)
