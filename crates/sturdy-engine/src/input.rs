@@ -410,10 +410,93 @@ pub struct BindingChange {
     pub binding: Keybind,
 }
 
+/// Directional interpretation for an analog action binding.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ActionAxisDirection {
+    /// Use positive axis values only.
+    Positive,
+    /// Use negative axis values as positive action values.
+    Negative,
+    /// Use the full signed axis value.
+    Full,
+}
+
+/// A single input binding for an [`ActionMap`] action.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ActionBinding {
+    Key(Keybind),
+    MouseButton(u8),
+    GamepadButton {
+        gamepad: Option<GamepadId>,
+        button: GamepadButton,
+    },
+    GamepadAxis {
+        gamepad: Option<GamepadId>,
+        axis: GamepadAxis,
+        direction: ActionAxisDirection,
+        threshold: f32,
+    },
+}
+
+impl From<Keybind> for ActionBinding {
+    fn from(value: Keybind) -> Self {
+        Self::Key(value)
+    }
+}
+
+impl ActionBinding {
+    pub fn mouse_button(button: u8) -> Self {
+        Self::MouseButton(button)
+    }
+
+    pub fn gamepad_button(button: GamepadButton) -> Self {
+        Self::GamepadButton {
+            gamepad: None,
+            button,
+        }
+    }
+
+    pub fn gamepad_button_for(gamepad: GamepadId, button: GamepadButton) -> Self {
+        Self::GamepadButton {
+            gamepad: Some(gamepad),
+            button,
+        }
+    }
+
+    pub fn gamepad_axis(axis: GamepadAxis, direction: ActionAxisDirection) -> Self {
+        Self::GamepadAxis {
+            gamepad: None,
+            axis,
+            direction,
+            threshold: 0.5,
+        }
+    }
+
+    pub fn gamepad_axis_for(
+        gamepad: GamepadId,
+        axis: GamepadAxis,
+        direction: ActionAxisDirection,
+    ) -> Self {
+        Self::GamepadAxis {
+            gamepad: Some(gamepad),
+            axis,
+            direction,
+            threshold: 0.5,
+        }
+    }
+
+    pub fn with_threshold(mut self, threshold: f32) -> Self {
+        if let Self::GamepadAxis { threshold: t, .. } = &mut self {
+            *t = threshold.abs().clamp(0.0, 1.0);
+        }
+        self
+    }
+}
+
 /// Frame-level action dispatcher.
 ///
-/// Maps logical action names to one or more [`Keybind`]s and tracks per-frame
-/// press / hold / release state.
+/// Maps logical action names to one or more input bindings and tracks
+/// per-frame digital state plus analog values.
 ///
 /// Integrates with `clay_ui::UiEventResult`: pass `ui_result.key_consumed` to
 /// [`process`](Self::process) so the UI layer always takes priority over game
@@ -434,10 +517,11 @@ pub struct BindingChange {
 /// ```
 #[derive(Default)]
 pub struct ActionMap {
-    bindings: HashMap<String, Vec<Keybind>>,
+    bindings: HashMap<String, Vec<ActionBinding>>,
     held: HashSet<String>,
     just_pressed: HashSet<String>,
     just_released: HashSet<String>,
+    analog_values: HashMap<String, f32>,
 }
 
 impl ActionMap {
@@ -448,10 +532,15 @@ impl ActionMap {
     /// Add a binding for an action. Multiple bindings per action are supported
     /// (e.g. both `Space` and `KeyW` for "Jump").
     pub fn bind(&mut self, action: impl Into<String>, binding: Keybind) {
+        self.bind_input(action, binding);
+    }
+
+    /// Add any supported input binding for an action.
+    pub fn bind_input(&mut self, action: impl Into<String>, binding: impl Into<ActionBinding>) {
         self.bindings
             .entry(action.into())
             .or_default()
-            .push(binding);
+            .push(binding.into());
     }
 
     /// Remove all bindings for an action.
@@ -467,9 +556,10 @@ impl ActionMap {
     pub fn load_config(&mut self, config: &BTreeMap<String, String>) {
         self.bindings.clear();
         for (action, value) in config {
-            let bindings: Vec<Keybind> = value
+            let bindings: Vec<ActionBinding> = value
                 .split(';')
                 .filter_map(|s| s.trim().parse().ok())
+                .map(ActionBinding::Key)
                 .collect();
             if !bindings.is_empty() {
                 self.bindings.insert(action.clone(), bindings);
@@ -485,17 +575,33 @@ impl ActionMap {
         for (action, binds) in &self.bindings {
             let value = binds
                 .iter()
-                .map(|b| b.to_string())
+                .filter_map(|b| match b {
+                    ActionBinding::Key(keybind) => Some(keybind.to_string()),
+                    _ => None,
+                })
                 .collect::<Vec<_>>()
                 .join(";");
-            out.insert(action.clone(), value);
+            if !value.is_empty() {
+                out.insert(action.clone(), value);
+            }
         }
         out
     }
 
     /// Return all registered bindings for an action (empty slice if none).
-    pub fn bindings_for(&self, action: &str) -> &[Keybind] {
+    pub fn bindings_for(&self, action: &str) -> &[ActionBinding] {
         self.bindings.get(action).map_or(&[], Vec::as_slice)
+    }
+
+    /// Return keyboard bindings for an action.
+    pub fn keybinds_for(&self, action: &str) -> Vec<&Keybind> {
+        self.bindings_for(action)
+            .iter()
+            .filter_map(|binding| match binding {
+                ActionBinding::Key(keybind) => Some(keybind),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Process one [`KeyInput`] event against all registered bindings.
@@ -518,7 +624,12 @@ impl ActionMap {
             let matches = self
                 .bindings
                 .get(&action)
-                .is_some_and(|binds| binds.iter().any(|b| keybind_matches(b, input)));
+                .is_some_and(|binds| {
+                    binds.iter().any(|b| match b {
+                        ActionBinding::Key(keybind) => keybind_matches(keybind, input),
+                        _ => false,
+                    })
+                });
             if !matches {
                 continue;
             }
@@ -546,6 +657,93 @@ impl ActionMap {
     pub fn end_frame(&mut self) {
         self.just_pressed.clear();
         self.just_released.clear();
+        self.analog_values.clear();
+    }
+
+    fn sync_digital_action(&mut self, action: &str, pressed: bool) {
+        if pressed {
+            if self.held.insert(action.to_string()) {
+                self.just_pressed.insert(action.to_string());
+            }
+        } else if self.held.remove(action) {
+            self.just_released.insert(action.to_string());
+        }
+    }
+
+    fn set_analog_value(&mut self, action: &str, value: f32) {
+        let entry = self.analog_values.entry(action.to_string()).or_insert(0.0);
+        if value.abs() > entry.abs() {
+            *entry = value;
+        }
+    }
+
+    fn process_polling(
+        &mut self,
+        mouse_buttons: &HashSet<u8>,
+        gamepad_buttons: &HashSet<(GamepadId, GamepadButton)>,
+        gamepad_axes: &HashMap<(GamepadId, GamepadAxis), f32>,
+    ) {
+        let actions: Vec<(String, Vec<ActionBinding>)> = self
+            .bindings
+            .iter()
+            .map(|(action, bindings)| (action.clone(), bindings.clone()))
+            .collect();
+        for (action, bindings) in actions {
+            let mut digital_pressed = false;
+            let mut analog_value = 0.0f32;
+            let mut has_polling_binding = false;
+            let mut has_analog_binding = false;
+            for binding in bindings {
+                match binding {
+                    ActionBinding::MouseButton(button) => {
+                        has_polling_binding = true;
+                        if mouse_buttons.contains(&button) {
+                            digital_pressed = true;
+                        }
+                    }
+                    ActionBinding::GamepadButton { gamepad, button } => {
+                        has_polling_binding = true;
+                        if gamepad_buttons.iter().any(|(id, b)| {
+                            *b == button && gamepad.is_none_or(|expected| expected == *id)
+                        }) {
+                            digital_pressed = true;
+                        }
+                    }
+                    ActionBinding::GamepadAxis {
+                        gamepad,
+                        axis,
+                        direction,
+                        threshold,
+                    } => {
+                        has_polling_binding = true;
+                        has_analog_binding = true;
+                        for ((id, a), value) in gamepad_axes {
+                            if *a != axis || gamepad.is_some_and(|expected| expected != *id) {
+                                continue;
+                            }
+                            let mapped = match direction {
+                                ActionAxisDirection::Positive => value.max(0.0),
+                                ActionAxisDirection::Negative => (-value).max(0.0),
+                                ActionAxisDirection::Full => *value,
+                            };
+                            if mapped.abs() > analog_value.abs() {
+                                analog_value = mapped;
+                            }
+                            if mapped.abs() >= threshold {
+                                digital_pressed = true;
+                            }
+                        }
+                    }
+                    ActionBinding::Key(_) => {}
+                }
+            }
+            if has_polling_binding {
+                self.sync_digital_action(&action, digital_pressed);
+                if has_analog_binding {
+                    self.set_analog_value(&action, analog_value);
+                }
+            }
+        }
     }
 
     /// `true` while the action's key is held down.
@@ -561,6 +759,16 @@ impl ActionMap {
     /// `true` on the frame the action's key was released.
     pub fn just_released(&self, action: &str) -> bool {
         self.just_released.contains(action)
+    }
+
+    /// Analog value for an action this frame.
+    ///
+    /// Digital held actions return `1.0`; inactive actions return `0.0`.
+    pub fn value(&self, action: &str) -> f32 {
+        self.analog_values
+            .get(action)
+            .copied()
+            .unwrap_or_else(|| self.is_held(action).then_some(1.0).unwrap_or(0.0))
     }
 }
 
@@ -887,6 +1095,11 @@ impl InputHub {
             let this_key_consumed = self.simulator.key_input_consumed(key_name);
             self.actions.process(ki, this_key_consumed);
         }
+        self.actions.process_polling(
+            &self.held_mouse_buttons,
+            &self.held_gamepad_buttons,
+            &self.gamepad_axes,
+        );
         hit
     }
 
@@ -1325,6 +1538,100 @@ mod tests {
         // New "KeyW" binding works.
         map.process(&press("KeyW"), false);
         assert!(map.just_pressed("Jump"));
+    }
+
+    #[test]
+    fn action_map_config_saves_only_keybinds() {
+        let mut map = ActionMap::new();
+        map.bind("Jump", "Space".parse().unwrap());
+        map.bind_input("Jump", ActionBinding::mouse_button(0));
+
+        let config = map.save_config();
+
+        assert_eq!(config.get("Jump").map(String::as_str), Some("Space"));
+        assert_eq!(map.bindings_for("Jump").len(), 2);
+        assert_eq!(map.keybinds_for("Jump").len(), 1);
+    }
+
+    #[test]
+    fn input_hub_routes_mouse_button_to_action_map() {
+        let mut hub = InputHub::new();
+        hub.actions_mut()
+            .bind_input("Fire", ActionBinding::mouse_button(0));
+
+        hub.on_pointer_button(clay_ui::WindowLogicalPx::ZERO, 0, true);
+        hub.update(&clay_ui::LayoutTree::default());
+        assert!(hub.actions().is_held("Fire"));
+        assert!(hub.actions().just_pressed("Fire"));
+        assert_eq!(hub.actions().value("Fire"), 1.0);
+
+        hub.update(&clay_ui::LayoutTree::default());
+        assert!(hub.actions().is_held("Fire"));
+        assert!(!hub.actions().just_pressed("Fire"));
+
+        hub.on_pointer_button(clay_ui::WindowLogicalPx::ZERO, 0, false);
+        hub.update(&clay_ui::LayoutTree::default());
+        assert!(!hub.actions().is_held("Fire"));
+        assert!(hub.actions().just_released("Fire"));
+        assert_eq!(hub.actions().value("Fire"), 0.0);
+    }
+
+    #[test]
+    fn input_hub_routes_gamepad_button_to_action_map() {
+        let mut hub = InputHub::new();
+        let gamepad = GamepadId(7);
+        hub.actions_mut().bind_input(
+            "Jump",
+            ActionBinding::gamepad_button_for(gamepad, GamepadButton::South),
+        );
+
+        hub.on_gamepad_button(gamepad, GamepadButton::South, true);
+        hub.update(&clay_ui::LayoutTree::default());
+        assert!(hub.actions().is_held("Jump"));
+        assert!(hub.actions().just_pressed("Jump"));
+
+        hub.on_gamepad_button(gamepad, GamepadButton::South, false);
+        hub.update(&clay_ui::LayoutTree::default());
+        assert!(!hub.actions().is_held("Jump"));
+        assert!(hub.actions().just_released("Jump"));
+    }
+
+    #[test]
+    fn input_hub_routes_gamepad_axis_to_analog_action_value() {
+        let mut hub = InputHub::new();
+        let gamepad = GamepadId(4);
+        hub.actions_mut().bind_input(
+            "MoveRight",
+            ActionBinding::gamepad_axis_for(
+                gamepad,
+                GamepadAxis::LeftStickX,
+                ActionAxisDirection::Positive,
+            )
+            .with_threshold(0.25),
+        );
+        hub.actions_mut().bind_input(
+            "MoveLeft",
+            ActionBinding::gamepad_axis_for(
+                gamepad,
+                GamepadAxis::LeftStickX,
+                ActionAxisDirection::Negative,
+            )
+            .with_threshold(0.25),
+        );
+
+        hub.on_gamepad_axis(gamepad, GamepadAxis::LeftStickX, 0.6);
+        hub.update(&clay_ui::LayoutTree::default());
+        assert_eq!(hub.actions().value("MoveRight"), 0.6);
+        assert_eq!(hub.actions().value("MoveLeft"), 0.0);
+        assert!(hub.actions().is_held("MoveRight"));
+        assert!(!hub.actions().is_held("MoveLeft"));
+
+        hub.on_gamepad_axis(gamepad, GamepadAxis::LeftStickX, -0.75);
+        hub.update(&clay_ui::LayoutTree::default());
+        assert_eq!(hub.actions().value("MoveRight"), 0.0);
+        assert_eq!(hub.actions().value("MoveLeft"), 0.75);
+        assert!(!hub.actions().is_held("MoveRight"));
+        assert!(hub.actions().is_held("MoveLeft"));
     }
 
     #[test]
