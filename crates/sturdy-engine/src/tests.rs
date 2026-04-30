@@ -67,6 +67,120 @@ fn creates_sampled_image_and_sampler_bind_group() {
 }
 
 #[test]
+fn bind_group_can_bind_by_reflected_binding_slots() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let image = engine.create_image(small_image_desc()).unwrap();
+    let sampler = engine.create_sampler(SamplerDesc::default()).unwrap();
+    let layout = engine
+        .create_pipeline_layout(sampled_image_sampler_layout())
+        .unwrap();
+
+    let bind_group = engine
+        .bind_group(&layout)
+        .image_binding(0, 0, &image)
+        .unwrap()
+        .sampler_binding(0, 1, &sampler)
+        .unwrap()
+        .build()
+        .unwrap();
+
+    assert_eq!(bind_group.desc().entries[0].path, "base_color");
+    assert_eq!(bind_group.desc().entries[1].path, "base_sampler");
+}
+
+#[test]
+fn bind_group_can_auto_bind_unambiguous_resources() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let image = engine.create_image(small_image_desc()).unwrap();
+    let sampler = engine.create_sampler(SamplerDesc::default()).unwrap();
+    let layout = engine
+        .create_pipeline_layout(sampled_image_sampler_layout())
+        .unwrap();
+
+    let bind_group = engine
+        .bind_group(&layout)
+        .image_auto(&image)
+        .unwrap()
+        .sampler_auto(&sampler)
+        .unwrap()
+        .build()
+        .unwrap();
+
+    assert_eq!(bind_group.desc().entries[0].path, "base_color");
+    assert_eq!(bind_group.desc().entries[1].path, "base_sampler");
+}
+
+#[test]
+fn shader_pass_intent_records_reflected_fullscreen_resources() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let program = ShaderProgram::passthrough(&engine).unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let desc = ImageDesc {
+        usage: ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET,
+        ..small_image_desc()
+    };
+    let source = frame.image("intent_source", desc).unwrap();
+    let target = frame.image("intent_target", desc).unwrap();
+
+    frame
+        .shader_pass("intent-copy")
+        .target(&target)
+        .image("source", &source)
+        .fullscreen(&program)
+        .unwrap();
+
+    let report = frame.describe();
+    let pass = report
+        .passes
+        .iter()
+        .find(|pass| pass.name == "intent-copy")
+        .expect("intent pass should be recorded");
+    assert_eq!(pass.reads, vec!["intent_source".to_string()]);
+    assert_eq!(pass.writes, vec!["intent_target".to_string()]);
+}
+
+#[test]
+fn shader_pass_intent_rejects_incompatible_reflected_image_usage() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let program = ShaderProgram::passthrough(&engine).unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let source = frame
+        .image(
+            "bad_source",
+            ImageDesc {
+                usage: ImageUsage::RENDER_TARGET,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+    let target = frame
+        .image(
+            "intent_target",
+            ImageDesc {
+                usage: ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+
+    frame
+        .shader_pass("intent-copy")
+        .target(&target)
+        .image("source", &source)
+        .fullscreen(&program)
+        .unwrap();
+
+    let err = frame
+        .flush()
+        .expect_err("flush should reject sampled binding without sampled usage");
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(
+        err.to_string().contains("source"),
+        "diagnostic should name the reflected parameter, got {err}"
+    );
+}
+
+#[test]
 fn anti_aliasing_pass_constructs_builtin_shader() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     AntiAliasingPass::new(&engine).unwrap();

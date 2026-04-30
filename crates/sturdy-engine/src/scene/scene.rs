@@ -1,12 +1,16 @@
-use std::collections::HashMap;
 use glam::Mat4;
+use std::collections::HashMap;
 
-use crate::{Engine, GraphImage, Mesh, MeshProgram, RenderFrame, Result, push_constants};
 use super::{
     batch::InstanceBatch,
     camera::{CameraId, CameraOutput, SceneCamera},
     object::{InstanceData, MeshId, ObjectId, ObjectKind, SceneObject},
 };
+use crate::{
+    Engine, Format, GraphImage, ImageDesc, ImageDimension, ImageUsage, Mesh, MeshProgram,
+    RenderFrame, Result, push_constants,
+};
+use sturdy_engine_core::Extent3d;
 
 /// Push constants sent to the vertex shader for each camera draw call.
 ///
@@ -38,17 +42,14 @@ impl CameraConstants {
 ///
 /// # Workflow
 ///
-/// ```rust
+/// ```ignore
 /// // At init:
-/// let mesh_id = scene.add_mesh(mesh, program);
-/// let obj_id  = scene.add_object(mesh_id, ObjectKind::Static);
-/// let crt_cam = scene.add_camera(SceneCamera::offscreen(view, proj, crt_target));
+/// let mesh_id = scene.add_mesh(Mesh::cube(&engine, 1.0)?, MeshProgram::unlit(&engine)?);
+/// let _obj    = scene.add_object(mesh_id, ObjectKind::Static);
 ///
 /// // Each frame:
-/// scene.set_transform(dynamic_obj, new_transform);
-/// scene.prepare(engine)?;                         // upload dirty instance data
-/// scene.render(frame)?;                           // draw all offscreen cameras
-/// scene.render_camera_to(main_cam, &hdr_out, frame)?;  // draw main camera
+/// scene.prepare(&engine)?;
+/// scene.draw(cam.view_matrix(), cam.projection_matrix(aspect), &hdr_out, &frame)?;
 /// ```
 ///
 /// # Instance buffer convention
@@ -93,10 +94,16 @@ impl Scene {
     }
 
     /// Add an object instance with an explicit initial transform.
-    pub fn add_object_at(&mut self, mesh_id: MeshId, transform: Mat4, kind: ObjectKind) -> ObjectId {
+    pub fn add_object_at(
+        &mut self,
+        mesh_id: MeshId,
+        transform: Mat4,
+        kind: ObjectKind,
+    ) -> ObjectId {
         let id = ObjectId(self.next_object_id);
         self.next_object_id += 1;
-        self.objects.push(SceneObject::new(mesh_id, transform, kind));
+        self.objects
+            .push(SceneObject::new(mesh_id, transform, kind));
         id
     }
 
@@ -152,17 +159,22 @@ impl Scene {
 
         // Second pass: fill instance lists.
         for obj in &self.objects {
-            let batch = self.batches.entry(obj.mesh_id.0).or_insert_with(|| {
-                InstanceBatch::new(obj.mesh_id.0)
-            });
+            let batch = self
+                .batches
+                .entry(obj.mesh_id.0)
+                .or_insert_with(|| InstanceBatch::new(obj.mesh_id.0));
             match obj.kind {
                 ObjectKind::Static => {
                     if batch.static_dirty || batch.static_instances.is_empty() {
-                        batch.static_instances.push(InstanceData::from_transform(obj.transform));
+                        batch
+                            .static_instances
+                            .push(InstanceData::from_transform(obj.transform));
                     }
                 }
                 ObjectKind::Dynamic => {
-                    batch.dynamic_instances.push(InstanceData::from_transform(obj.transform));
+                    batch
+                        .dynamic_instances
+                        .push(InstanceData::from_transform(obj.transform));
                 }
             }
         }
@@ -182,15 +194,64 @@ impl Scene {
         for camera in &self.cameras {
             let CameraOutput::Offscreen(rt) = &camera.output;
             let target = rt.as_frame_image(frame)?;
-            self.draw_batches(camera, &target, frame)?;
+            self.draw_batches_for_camera(camera, &target, frame)?;
         }
         Ok(())
     }
 
-    /// Draw a single camera into an explicit output image.
+    /// Draw the scene into `output` using the given view and projection matrices.
     ///
-    /// Use this for the main camera whose output is a frame-managed image
-    /// (e.g. `frame.hdr_color_image("scene_color")?`).
+    /// This is the primary render path for a main camera. No camera object needs
+    /// to be registered first — pass the matrices directly.
+    ///
+    /// A depth buffer matching `output`'s extent and sample count is allocated
+    /// automatically as a frame-managed image and cleared to 1.0 before drawing.
+    ///
+    /// ```ignore
+    /// let view = cam.view_matrix();
+    /// let proj = cam.projection_matrix(width as f32 / height as f32);
+    /// scene.prepare(&engine)?;
+    /// scene.draw(view, proj, &hdr_output, &frame)?;
+    /// ```
+    pub fn draw(
+        &self,
+        view: Mat4,
+        proj: Mat4,
+        output: &GraphImage,
+        frame: &RenderFrame,
+    ) -> Result<()> {
+        let constants = CameraConstants {
+            view_proj: (proj * view).to_cols_array_2d(),
+            previous_view_proj: (proj * view).to_cols_array_2d(),
+        };
+        let ext = output.desc().extent;
+        let depth = frame.image(
+            "_scene_depth",
+            ImageDesc {
+                dimension: ImageDimension::D2,
+                extent: Extent3d {
+                    width: ext.width,
+                    height: ext.height,
+                    depth: 1,
+                },
+                mip_levels: 1,
+                layers: 1,
+                samples: output.desc().samples,
+                format: Format::Depth32Float,
+                usage: ImageUsage::DEPTH_STENCIL,
+                transient: false,
+                clear_value: None,
+                debug_name: None,
+            },
+        )?;
+        self.draw_batches(&constants, output, Some(&depth), frame)
+    }
+
+    /// Draw a single registered camera into an explicit output image.
+    ///
+    /// Use this for offscreen cameras (portal cameras, reflection probes, etc.)
+    /// where the camera was registered with `add_camera`. For the main camera,
+    /// prefer `Scene::draw`.
     pub fn render_camera_to(
         &self,
         camera_id: CameraId,
@@ -200,17 +261,17 @@ impl Scene {
         let camera = self.cameras.get(camera_id.0 as usize).ok_or_else(|| {
             crate::Error::InvalidInput(format!("camera {:?} not found in scene", camera_id))
         })?;
-        self.draw_batches(camera, output, frame)
+        let constants = CameraConstants::from_camera(camera);
+        self.draw_batches(&constants, output, None, frame)
     }
 
     fn draw_batches(
         &self,
-        camera: &SceneCamera,
+        constants: &CameraConstants,
         output: &GraphImage,
+        depth: Option<&GraphImage>,
         frame: &RenderFrame,
     ) -> Result<()> {
-        let constants = CameraConstants::from_camera(camera);
-
         for batch in self.batches.values() {
             let buf = match &batch.gpu_buffer {
                 Some(b) => b,
@@ -223,10 +284,28 @@ impl Scene {
 
             let (mesh, program) = &self.meshes[batch.mesh_idx as usize];
             frame.bind_buffer("instances", buf);
-            output.draw_mesh_instanced_with_push_constants(mesh, program, buf, total, &constants)?;
+            let effective_depth = if program.uses_depth { depth } else { None };
+            output.draw_mesh_instanced_with_push_constants_and_depth(
+                mesh,
+                program,
+                buf,
+                total,
+                constants,
+                effective_depth,
+            )?;
         }
 
         Ok(())
+    }
+
+    fn draw_batches_for_camera(
+        &self,
+        camera: &SceneCamera,
+        output: &GraphImage,
+        frame: &RenderFrame,
+    ) -> Result<()> {
+        let constants = CameraConstants::from_camera(camera);
+        self.draw_batches(&constants, output, None, frame)
     }
 }
 

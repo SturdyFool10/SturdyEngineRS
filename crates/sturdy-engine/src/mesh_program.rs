@@ -34,6 +34,9 @@ pub struct MeshProgramDesc {
     pub vertex: Option<ShaderDesc>,
     pub vertex_kind: MeshVertexKind,
     pub alpha_blend: bool,
+    /// Enable depth testing and writing with `D32Float`. Should be true for
+    /// all 3D programs. The draw call must supply a matching depth attachment.
+    pub uses_depth: bool,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -44,12 +47,13 @@ pub enum MeshVertexKind {
 
 pub struct MeshProgram {
     pub(crate) engine: Engine,
-    pub(crate) pipelines: Mutex<HashMap<(Format, u8), Pipeline>>,
+    pub(crate) pipelines: Mutex<HashMap<(Format, u8, bool), Pipeline>>,
     pub(crate) pipeline_layout: PipelineLayout,
     pub(crate) vertex: Shader,
     pub(crate) fragment: Shader,
     pub(crate) vertex_kind: MeshVertexKind,
     pub(crate) alpha_blend: bool,
+    pub(crate) uses_depth: bool,
     pub(crate) reflection: ShaderReflection,
     fragment_path: Option<PathBuf>,
     vertex_path: Option<PathBuf>,
@@ -72,6 +76,7 @@ impl MeshProgram {
                 vertex: None,
                 vertex_kind: MeshVertexKind::V2d,
                 alpha_blend: false,
+                uses_depth: false,
             },
         )
     }
@@ -89,6 +94,7 @@ impl MeshProgram {
                 vertex: None,
                 vertex_kind: MeshVertexKind::V2d,
                 alpha_blend: true,
+                uses_depth: false,
             },
         )
     }
@@ -98,6 +104,7 @@ impl MeshProgram {
     ///
     /// No shader files or push constants are needed — call this to get something
     /// visible on screen while iterating on geometry, camera, or scene setup.
+    /// Depth testing is enabled; use with `Scene::draw` or supply a depth image.
     pub fn unlit(engine: &Engine) -> Result<Self> {
         Self::new(
             engine,
@@ -110,6 +117,7 @@ impl MeshProgram {
                 vertex: None,
                 vertex_kind: MeshVertexKind::V3d,
                 alpha_blend: false,
+                uses_depth: true,
             },
         )
     }
@@ -138,6 +146,7 @@ impl MeshProgram {
                 }),
                 vertex_kind: MeshVertexKind::V3d,
                 alpha_blend: false,
+                uses_depth: true,
             },
         )
     }
@@ -162,8 +171,9 @@ impl MeshProgram {
         });
         let vertex = engine.create_shader(vertex_desc)?;
         let fragment = engine.create_shader(desc.fragment)?;
-        let reflection = engine.shader_reflection(&fragment)?;
-        let pipeline_layout = engine.create_pipeline_layout(reflection.layout.clone())?;
+        let reflection = engine.graphics_shader_reflection(&vertex, Some(&fragment))?;
+        let pipeline_layout =
+            engine.create_reflected_graphics_pipeline_layout(&vertex, Some(&fragment))?;
         Ok(Self {
             engine: engine.clone(),
             pipelines: Mutex::new(HashMap::new()),
@@ -172,6 +182,7 @@ impl MeshProgram {
             fragment,
             vertex_kind: desc.vertex_kind,
             alpha_blend: desc.alpha_blend,
+            uses_depth: desc.uses_depth,
             reflection,
             fragment_path,
             vertex_path,
@@ -206,10 +217,12 @@ impl MeshProgram {
             entry_point: "main".to_owned(),
             stage: ShaderStage::Fragment,
         })?;
-        let reflection = self.engine.shader_reflection(&fragment)?;
+        let reflection = self
+            .engine
+            .graphics_shader_reflection(&self.vertex, Some(&fragment))?;
         let pipeline_layout = self
             .engine
-            .create_pipeline_layout(reflection.layout.clone())?;
+            .create_reflected_graphics_pipeline_layout(&self.vertex, Some(&fragment))?;
         self.fragment = fragment;
         self.reflection = reflection;
         self.pipeline_layout = pipeline_layout;
@@ -235,7 +248,15 @@ impl MeshProgram {
             entry_point: "main".to_owned(),
             stage: ShaderStage::Vertex,
         })?;
+        let reflection = self
+            .engine
+            .graphics_shader_reflection(&vertex, Some(&self.fragment))?;
+        let pipeline_layout = self
+            .engine
+            .create_reflected_graphics_pipeline_layout(&vertex, Some(&self.fragment))?;
         self.vertex = vertex;
+        self.reflection = reflection;
+        self.pipeline_layout = pipeline_layout;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
@@ -254,7 +275,7 @@ impl MeshProgram {
             .pipelines
             .lock()
             .expect("mesh program pipeline mutex poisoned");
-        let key = (format, samples.max(1));
+        let key = (format, samples.max(1), self.uses_depth);
         if !pipelines.contains_key(&key) {
             let (vertex_stride, attributes) = match self.vertex_kind {
                 MeshVertexKind::V2d => (
@@ -281,7 +302,11 @@ impl MeshProgram {
                 } else {
                     ColorTargetDesc::opaque(format)
                 }],
-                depth_format: None,
+                depth_format: if self.uses_depth {
+                    Some(Format::Depth32Float)
+                } else {
+                    None
+                },
                 samples: key.1,
                 topology: PrimitiveTopology::TriangleList,
                 raster: RasterState {

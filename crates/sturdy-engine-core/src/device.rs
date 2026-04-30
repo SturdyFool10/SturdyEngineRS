@@ -474,6 +474,58 @@ impl Device {
         Ok(handle)
     }
 
+    pub fn reflected_compute_pipeline_layout(
+        &self,
+        shader: ShaderHandle,
+    ) -> Result<CanonicalPipelineLayout> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.shaders.contains_key(&shader) {
+            return Err(Error::InvalidHandle);
+        }
+        Ok(inner
+            .shader_reflections
+            .get(&shader)
+            .map(|reflection| reflection.layout.clone())
+            .unwrap_or_default())
+    }
+
+    pub fn reflected_graphics_pipeline_layout(
+        &self,
+        vertex_shader: ShaderHandle,
+        fragment_shader: Option<ShaderHandle>,
+    ) -> Result<CanonicalPipelineLayout> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.shaders.contains_key(&vertex_shader)
+            || fragment_shader.is_some_and(|shader| !inner.shaders.contains_key(&shader))
+        {
+            return Err(Error::InvalidHandle);
+        }
+        Ok(merge_shader_layouts(
+            &inner.shader_reflections,
+            [Some(vertex_shader), fragment_shader],
+        ))
+    }
+
+    pub fn reflected_graphics_pipeline_reflection(
+        &self,
+        vertex_shader: ShaderHandle,
+        fragment_shader: Option<ShaderHandle>,
+    ) -> Result<ShaderReflection> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.shaders.contains_key(&vertex_shader)
+            || fragment_shader.is_some_and(|shader| !inner.shaders.contains_key(&shader))
+        {
+            return Err(Error::InvalidHandle);
+        }
+        Ok(merge_shader_reflection(
+            &inner.shader_reflections,
+            [Some(vertex_shader), fragment_shader],
+        ))
+    }
+
     pub fn destroy_pipeline_layout(&self, handle: PipelineLayoutHandle) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self.inner.lock().expect("device mutex poisoned");
@@ -580,7 +632,10 @@ impl Device {
                 (h, false)
             }
             None => {
-                let layout = merge_shader_reflections(&inner.shader_reflections, &desc);
+                let layout = merge_shader_layouts(
+                    &inner.shader_reflections,
+                    [Some(desc.vertex_shader), desc.fragment_shader],
+                );
                 let lh = PipelineLayoutHandle(inner.pipeline_layout_handles.alloc());
                 inner.backend.create_pipeline_layout(lh, &layout)?;
                 inner.pipeline_layouts.insert(lh, layout);
@@ -944,9 +999,44 @@ impl PipelineDesc {
     }
 }
 
-fn merge_shader_reflections(
+fn merge_shader_reflection<const N: usize>(
     reflections: &HashMap<ShaderHandle, ShaderReflection>,
-    desc: &GraphicsPipelineDesc,
+    shaders: [Option<ShaderHandle>; N],
+) -> ShaderReflection {
+    let layout = merge_shader_layouts(reflections, shaders);
+    let mut entry_points = Vec::new();
+    let mut parameters: Vec<crate::ShaderParameterReflection> = Vec::new();
+    for shader in shaders.into_iter().flatten() {
+        if let Some(reflection) = reflections.get(&shader) {
+            for entry_point in &reflection.entry_points {
+                if !entry_points.contains(entry_point) {
+                    entry_points.push(entry_point.clone());
+                }
+            }
+            for parameter in &reflection.parameters {
+                if let Some(existing) = parameters.iter_mut().find(|existing| {
+                    existing.name == parameter.name
+                        && existing.set == parameter.set
+                        && existing.binding == parameter.binding
+                        && existing.kind == parameter.kind
+                }) {
+                    existing.stage_mask |= parameter.stage_mask;
+                } else {
+                    parameters.push(parameter.clone());
+                }
+            }
+        }
+    }
+    ShaderReflection {
+        layout,
+        entry_points,
+        parameters,
+    }
+}
+
+fn merge_shader_layouts<const N: usize>(
+    reflections: &HashMap<ShaderHandle, ShaderReflection>,
+    shaders: [Option<ShaderHandle>; N],
 ) -> CanonicalPipelineLayout {
     use crate::CanonicalBinding;
     use std::collections::BTreeMap;
@@ -955,12 +1045,7 @@ fn merge_shader_reflections(
     let mut push_constants_bytes = 0;
     let mut push_constants_stage_mask = StageMask::default();
 
-    let shaders: Vec<ShaderHandle> = [Some(desc.vertex_shader), desc.fragment_shader]
-        .into_iter()
-        .flatten()
-        .collect();
-
-    for shader in shaders {
+    for shader in shaders.into_iter().flatten() {
         let Some(reflection) = reflections.get(&shader) else {
             continue;
         };

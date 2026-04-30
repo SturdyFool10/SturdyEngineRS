@@ -1,4 +1,6 @@
-use crate::{Engine, Format, GraphImage, Image, ImageDesc, ImageDimension, ImageUsage, RenderFrame, Result};
+use crate::{
+    Engine, Format, GraphImage, Image, ImageDesc, ImageDimension, ImageUsage, RenderFrame, Result,
+};
 use sturdy_engine_core::Extent3d;
 
 /// A persistent GPU image that a [`SceneCamera`](super::SceneCamera) renders into.
@@ -39,10 +41,16 @@ impl RenderTarget {
         samples: u8,
     ) -> Result<Self> {
         let name = name.into();
-        let samples = samples.clamp(1, engine.caps().max_color_sample_count.max(1)).min(16);
+        let samples = samples
+            .clamp(1, engine.caps().max_color_sample_count.max(1))
+            .min(16);
         let desc = ImageDesc {
             dimension: ImageDimension::D2,
-            extent: Extent3d { width, height, depth: 1 },
+            extent: Extent3d {
+                width,
+                height,
+                depth: 1,
+            },
             mip_levels: 1,
             layers: 1,
             samples,
@@ -54,7 +62,13 @@ impl RenderTarget {
         };
         let image = engine.create_image(desc)?;
         let _ = image.set_debug_name(&format!("render-target-{name}"));
-        Ok(Self { image, name, width, height, samples })
+        Ok(Self {
+            image,
+            name,
+            width,
+            height,
+            samples,
+        })
     }
 
     /// Register this target as a writable frame image and return it.

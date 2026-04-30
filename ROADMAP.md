@@ -91,13 +91,13 @@ The engine should not crash for recoverable runtime, compositor, asset, input, a
 
 ### Panic and unwrap policy
 
-- [ ] Audit production crates for `.unwrap()`, `.expect()`, `panic!`, `todo!`, `unimplemented!`, unchecked indexing, and unchecked arithmetic in runtime paths.
-- [ ] Treat production `.unwrap()` / `.expect()` as bugs unless the surrounding code proves the only failure mode is a hard engine incompatibility.
-- [ ] Convert recoverable failures into typed errors, degraded runtime setting results, capability rejections, or visible diagnostics.
-- [ ] Add a small number of explicit panic-allowed escape hatches with justification comments for impossible internal invariants.
-- [ ] Keep test-only `.unwrap()` / `.expect()` allowed when they express fixture setup or expected test invariants, but avoid copying that style into samples, examples, app shell code, platform code, or backend code.
-- [ ] Add a CI or local-tooling panic audit that reports new runtime `.unwrap()`, `.expect()`, and `panic!` call sites by crate and module.
-- [ ] Consider enabling Clippy `unwrap_used` / `expect_used` as warn-by-default for engine crates after the first cleanup pass, with targeted `allow` annotations only where justified.
+- [X] Audit production crates for `.unwrap()`, `.expect()`, `panic!`, `todo!`, `unimplemented!`, unchecked indexing, and unchecked arithmetic in runtime paths.
+- [X] Treat production `.unwrap()` / `.expect()` as bugs unless the surrounding code proves the only failure mode is a hard engine incompatibility.
+- [X] Convert recoverable failures into typed errors, degraded runtime setting results, capability rejections, or visible diagnostics.
+- [X] Add a small number of explicit panic-allowed escape hatches with justification comments for impossible internal invariants.
+- [X] Keep test-only `.unwrap()` / `.expect()` allowed when they express fixture setup or expected test invariants, but avoid copying that style into samples, examples, app shell code, platform code, or backend code.
+- [X] Add a CI or local-tooling panic audit that reports new runtime `.unwrap()`, `.expect()`, and `panic!` call sites by crate and module.
+- [X] Consider enabling Clippy `unwrap_used` / `expect_used` as warn-by-default for engine crates after the first cleanup pass, with targeted `allow` annotations only where justified. - considered but not done
 
 ### Findings from the current scan
 

@@ -144,6 +144,10 @@ struct DeferredPassResolve {
     /// Binding names captured with their correct handles at declaration time.
     /// Preferred over `images_by_name` when building the bind group at flush time.
     eager_bindings: HashMap<String, ImageBinding>,
+    /// Per-pass sampler overrides captured by a shader intent.
+    eager_samplers: HashMap<String, core::SamplerHandle>,
+    /// Per-pass buffer overrides captured by a shader intent.
+    eager_buffers: HashMap<String, (core::BufferHandle, crate::BufferDesc)>,
     /// Binding names that could not be resolved at declaration time.
     /// Appended to `PassDesc.reads` and the bind group at flush time.
     unresolved_read_names: Vec<String>,
@@ -151,6 +155,13 @@ struct DeferredPassResolve {
     skip_name: String,
     /// For compute passes: the storage-image output bound explicitly.
     storage_output: Option<(String, ImageHandle)>,
+}
+
+#[derive(Clone, Default)]
+struct ExplicitPassResources {
+    images: HashMap<String, ImageBinding>,
+    samplers: HashMap<String, core::SamplerHandle>,
+    buffers: HashMap<String, (core::BufferHandle, crate::BufferDesc)>,
 }
 
 /// A pass queued for deferred scheduling and submission.
@@ -201,6 +212,47 @@ pub struct GraphDiagnostic {
 pub struct ShaderProgramDesc {
     pub fragment: ShaderDesc,
     pub vertex: Option<ShaderDesc>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ShaderName(String);
+
+impl ShaderName {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SlangEntryPoints {
+    Graphics { vertex: String, fragment: String },
+    Fragment { fragment: String },
+    Compute { compute: String },
+}
+
+impl SlangEntryPoints {
+    pub fn graphics(vertex: impl Into<String>, fragment: impl Into<String>) -> Self {
+        Self::Graphics {
+            vertex: vertex.into(),
+            fragment: fragment.into(),
+        }
+    }
+
+    pub fn fragment(fragment: impl Into<String>) -> Self {
+        Self::Fragment {
+            fragment: fragment.into(),
+        }
+    }
+
+    pub fn compute(compute: impl Into<String>) -> Self {
+        Self::Compute {
+            compute: compute.into(),
+        }
+    }
 }
 
 pub struct ShaderProgram {
@@ -333,8 +385,17 @@ impl ShaderProgram {
         let vertex = engine.create_shader(desc.vertex.unwrap_or_else(default_vertex_desc))?;
         let fragment_stage = desc.fragment.stage;
         let fragment = engine.create_shader(desc.fragment)?;
-        let reflection = engine.shader_reflection(&fragment)?;
-        let pipeline_layout = engine.create_pipeline_layout(reflection.layout.clone())?;
+        let (reflection, pipeline_layout) = if fragment_stage == ShaderStage::Compute {
+            (
+                engine.shader_reflection(&fragment)?,
+                engine.create_reflected_compute_pipeline_layout(&fragment)?,
+            )
+        } else {
+            (
+                engine.graphics_shader_reflection(&vertex, Some(&fragment))?,
+                engine.create_reflected_graphics_pipeline_layout(&vertex, Some(&fragment))?,
+            )
+        };
         let fullscreen_triangle = create_fullscreen_triangle(engine)?;
         Ok(Self {
             engine: engine.clone(),
@@ -372,10 +433,20 @@ impl ShaderProgram {
             entry_point: "main".to_owned(),
             stage: self.stage,
         })?;
-        let reflection = self.engine.shader_reflection(&fragment)?;
-        let pipeline_layout = self
-            .engine
-            .create_pipeline_layout(reflection.layout.clone())?;
+        let (reflection, pipeline_layout) = if self.stage == ShaderStage::Compute {
+            (
+                self.engine.shader_reflection(&fragment)?,
+                self.engine
+                    .create_reflected_compute_pipeline_layout(&fragment)?,
+            )
+        } else {
+            (
+                self.engine
+                    .graphics_shader_reflection(&self.vertex, Some(&fragment))?,
+                self.engine
+                    .create_reflected_graphics_pipeline_layout(&self.vertex, Some(&fragment))?,
+            )
+        };
         self.fragment = fragment;
         self.reflection = reflection;
         self.pipeline_layout = pipeline_layout;
@@ -752,6 +823,15 @@ impl RenderFrame {
             .buffers_by_name
             .insert(name.into(), (buffer.handle(), buffer.desc()));
         self
+    }
+
+    /// Start a reflected shader pass intent.
+    ///
+    /// The intent builder records a fullscreen or compute pass while deriving
+    /// queue choice, bind groups, resource reads/writes, and push-constant
+    /// stages from shader reflection where possible.
+    pub fn shader_pass(&self, name: impl Into<String>) -> ShaderPassIntent<'_> {
+        ShaderPassIntent::new(self, name.into())
     }
 
     /// Declare that the pass writing `before` must execute before the pass writing `after`.
@@ -1369,6 +1449,138 @@ impl Drop for RenderFrame {
     }
 }
 
+pub struct ShaderPassIntent<'a> {
+    frame: &'a RenderFrame,
+    name: String,
+    target: Option<GraphImage>,
+    resources: ExplicitPassResources,
+    push_constants: Option<PushConstants>,
+}
+
+impl<'a> ShaderPassIntent<'a> {
+    fn new(frame: &'a RenderFrame, name: String) -> Self {
+        Self {
+            frame,
+            name,
+            target: None,
+            resources: ExplicitPassResources::default(),
+            push_constants: None,
+        }
+    }
+
+    pub fn target(mut self, image: &GraphImage) -> Self {
+        self.target = Some(image.clone());
+        self
+    }
+
+    pub fn image(mut self, name: impl Into<String>, image: &GraphImage) -> Self {
+        self.resources.images.insert(
+            name.into(),
+            ImageBinding {
+                handle: image.handle,
+                subresource: single_subresource(),
+            },
+        );
+        self
+    }
+
+    pub fn image_view(mut self, name: impl Into<String>, image: &GraphImageView) -> Self {
+        self.resources.images.insert(
+            name.into(),
+            ImageBinding {
+                handle: image.handle,
+                subresource: image.subresource,
+            },
+        );
+        self
+    }
+
+    pub fn sampler(mut self, name: impl Into<String>, preset: SamplerPreset) -> Self {
+        let handle = self.frame.inner.borrow().engine.sampler_handle(preset);
+        self.resources.samplers.insert(name.into(), handle);
+        self
+    }
+
+    pub fn buffer(mut self, name: impl Into<String>, buffer: &crate::Buffer) -> Self {
+        self.resources
+            .buffers
+            .insert(name.into(), (buffer.handle(), buffer.desc()));
+        self
+    }
+
+    pub fn push_constants(mut self, stages: StageMask, bytes: &[u8]) -> Self {
+        self.push_constants = Some(PushConstants {
+            offset: 0,
+            stages,
+            bytes: bytes.to_vec(),
+        });
+        self
+    }
+
+    pub fn constants<T: bytemuck::Pod>(self, stages: StageMask, constants: &T) -> Self {
+        self.push_constants(stages, bytemuck::bytes_of(constants))
+    }
+
+    pub fn fullscreen(self, program: &ShaderProgram) -> Result<()> {
+        let target = self.target.ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "shader pass '{}' needs a target image before fullscreen()",
+                self.name
+            ))
+        })?;
+        let push_constants = self.push_constants.map(|mut pc| {
+            if pc.stages.0 == 0 {
+                pc.stages =
+                    reflected_push_constant_stages(program.reflection(), program.stage_mask());
+            }
+            pc
+        });
+        record_fullscreen_shader_pass(
+            &self.frame.inner,
+            Some(self.name),
+            &target,
+            program,
+            push_constants,
+            single_subresource(),
+            self.resources,
+        )
+    }
+
+    pub fn compute(self, program: &ComputeProgram, groups: [u32; 3]) -> Result<()> {
+        let target = self.target.ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "shader pass '{}' needs a target image before compute()",
+                self.name
+            ))
+        })?;
+        let push_constants = self.push_constants.map(|mut pc| {
+            if pc.stages.0 == 0 {
+                pc.stages =
+                    reflected_push_constant_stages(program.reflection(), StageMask::COMPUTE);
+            }
+            pc
+        });
+        record_compute_shader_pass(
+            &self.frame.inner,
+            Some(self.name),
+            &target,
+            program,
+            push_constants,
+            groups,
+            self.resources,
+        )
+    }
+
+    pub fn constants_auto<T: bytemuck::Pod>(mut self, constants: &T) -> Self {
+        self.push_constants = Some(PushConstants {
+            offset: 0,
+            stages: StageMask::default(),
+            bytes: bytemuck::bytes_of(constants).to_vec(),
+        });
+        self
+    }
+}
+
 #[derive(Clone)]
 pub struct GraphImage {
     frame: Rc<RefCell<RenderFrameInner>>,
@@ -1495,11 +1707,7 @@ impl GraphImage {
         shader: &ShaderProgram,
         constants: &T,
     ) -> Result<()> {
-        let stages = if shader.reflection().entry_points.is_empty() {
-            StageMask::FRAGMENT
-        } else {
-            shader.stage_mask()
-        };
+        let stages = reflected_push_constant_stages(shader.reflection(), shader.stage_mask());
         self.execute_shader_with_push_constants(shader, stages, bytemuck::bytes_of(constants))
     }
 
@@ -1509,89 +1717,19 @@ impl GraphImage {
         push_constants: Option<PushConstants>,
         target_subresource: SubresourceRange,
     ) -> Result<()> {
-        let mut inner = self.frame.borrow_mut();
-        let declaration_index = inner.declaration_index;
-        inner.declaration_index = inner.declaration_index.saturating_add(1);
-
-        inner
-            .frame
-            .inner
-            .graph_mut(|graph| graph.import_image(self.handle, self.desc))?;
-        inner.frame.inner.graph_mut(|graph| {
-            graph.import_buffer(
-                shader.fullscreen_triangle.handle(),
-                shader.fullscreen_triangle.desc(),
-            )
-        })?;
-
-        let pipeline = shader.pipeline_handle(self.desc.format, self.desc.samples)?;
-        let read_names = reflected_image_reads(shader.reflection());
-        let (eager_bindings, unresolved_read_names, eager_uses) =
-            split_read_names(&read_names, &self.name, &inner.images_by_name);
-
-        let pass_name = format!("{declaration_index:04}-execute-{}", self.name);
-        let target_use = crate::ImageUse {
-            image: self.handle,
-            access: Access::Write,
-            state: RgState::RenderTarget,
-            subresource: target_subresource,
-        };
-        inner.pass_records.push(PassRecord {
-            name: pass_name.clone(),
-            kind: PassKind::Fullscreen,
-            reads: eager_uses.clone(),
-            writes: vec![target_use],
-            deferred_read_names: unresolved_read_names.clone(),
-            skip_read_name: self.name.clone(),
-        });
-
-        inner.pending_passes.push(PendingPass {
-            desc: PassDesc {
-                name: pass_name,
-                queue: QueueType::Graphics,
-                shader: Some(shader.fragment.handle()),
-                pipeline: Some(pipeline),
-                bind_groups: Vec::new(), // filled at flush time
-                push_constants,
-                work: PassWork::Draw(DrawDesc {
-                    vertex_count: 3,
-                    instance_count: 1,
-                    first_vertex: 0,
-                    first_instance: 0,
-                    vertex_buffer: Some(VertexBufferBinding {
-                        buffer: shader.fullscreen_triangle.handle(),
-                        binding: 0,
-                        offset: 0,
-                    }),
-                    index_buffer: None,
-                }),
-                reads: eager_uses,
-                writes: vec![target_use],
-                buffer_reads: vec![crate::BufferUse {
-                    buffer: shader.fullscreen_triangle.handle(),
-                    access: Access::Read,
-                    state: RgState::VertexRead,
-                    offset: 0,
-                    size: shader.fullscreen_triangle.desc().size,
-                }],
-                buffer_writes: Vec::new(),
-                clear_colors: Vec::new(),
-                clear_depth: None,
-            },
-            deferred: Some(DeferredPassResolve {
-                layout_handle: shader.pipeline_layout.handle(),
-                reflection: shader.reflection().clone(),
-                eager_bindings,
-                unresolved_read_names,
-                skip_name: self.name.clone(),
-                storage_output: None,
-            }),
-        });
-        Ok(())
+        record_fullscreen_shader_pass(
+            &self.frame,
+            None,
+            self,
+            shader,
+            push_constants,
+            target_subresource,
+            ExplicitPassResources::default(),
+        )
     }
 
     pub fn draw_mesh(&self, mesh: &Mesh, program: &MeshProgram) -> Result<()> {
-        self.draw_mesh_inner(mesh, program, None, None, 1)
+        self.draw_mesh_inner(mesh, program, None, None, 1, None)
     }
 
     pub fn draw_mesh_with_push_constants(
@@ -1611,6 +1749,7 @@ impl GraphImage {
             }),
             None,
             1,
+            None,
         )
     }
 
@@ -1633,6 +1772,7 @@ impl GraphImage {
             None,
             Some((instances, instance_count)),
             instance_count,
+            None,
         )
     }
 
@@ -1645,14 +1785,34 @@ impl GraphImage {
         instance_count: u32,
         constants: &T,
     ) -> Result<()> {
-        let stage = {
-            let mask = program.reflection().layout.push_constants_stage_mask;
-            if mask == StageMask::default() {
-                StageMask::VERTEX | StageMask::FRAGMENT
-            } else {
-                mask
-            }
-        };
+        self.draw_mesh_instanced_with_push_constants_and_depth(
+            mesh,
+            program,
+            instances,
+            instance_count,
+            constants,
+            None,
+        )
+    }
+
+    /// Like `draw_mesh_instanced_with_push_constants` but with an explicit depth buffer.
+    ///
+    /// Required when the `MeshProgram` was created with `uses_depth: true` (e.g. `MeshProgram::unlit`
+    /// or `MeshProgram::load_3d`). The depth image must have the same extent and sample count as
+    /// `self` and use `Format::Depth32Float`.
+    pub fn draw_mesh_instanced_with_push_constants_and_depth<T: bytemuck::Pod>(
+        &self,
+        mesh: &Mesh,
+        program: &MeshProgram,
+        instances: &crate::Buffer,
+        instance_count: u32,
+        constants: &T,
+        depth: Option<&GraphImage>,
+    ) -> Result<()> {
+        let stage = reflected_push_constant_stages(
+            program.reflection(),
+            StageMask::VERTEX | StageMask::FRAGMENT,
+        );
         self.draw_mesh_inner(
             mesh,
             program,
@@ -1663,6 +1823,7 @@ impl GraphImage {
             }),
             Some((instances, instance_count)),
             instance_count,
+            depth,
         )
     }
 
@@ -1673,6 +1834,7 @@ impl GraphImage {
         push_constants: Option<PushConstants>,
         instance_buf: Option<(&crate::Buffer, u32)>,
         instance_count: u32,
+        depth: Option<&GraphImage>,
     ) -> Result<()> {
         let mut inner = self.frame.borrow_mut();
         let declaration_index = inner.declaration_index;
@@ -1746,6 +1908,14 @@ impl GraphImage {
             });
         }
 
+        // Import and register depth image if present.
+        if let Some(d) = depth {
+            inner
+                .frame
+                .inner
+                .graph_mut(|g| g.import_image(d.handle, d.desc))?;
+        }
+
         let pass_name = format!("{declaration_index:04}-draw-mesh-{}", self.name);
         let mesh_read_names = reflected_image_reads(program.reflection());
         let (eager_bindings, unresolved_read_names, mut eager_uses) =
@@ -1765,12 +1935,24 @@ impl GraphImage {
             state: RgState::RenderTarget,
             subresource: single_subresource(),
         };
+        let depth_write = depth.map(|d| crate::ImageUse {
+            image: d.handle,
+            access: Access::Write,
+            state: RgState::DepthWrite,
+            subresource: single_subresource(),
+        });
+        let clear_depth = depth.map(|d| (d.handle, 1.0f32.to_bits(), 0u8));
+
+        let mut writes = vec![target_use];
+        if let Some(dw) = depth_write {
+            writes.push(dw);
+        }
 
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
             kind: PassKind::Mesh,
             reads: eager_uses.clone(),
-            writes: vec![target_use],
+            writes: writes.clone(),
             deferred_read_names: unresolved_read_names.clone(),
             skip_read_name: self.name.clone(),
         });
@@ -1792,16 +1974,18 @@ impl GraphImage {
                     index_buffer,
                 }),
                 reads: eager_uses,
-                writes: vec![target_use],
+                writes,
                 buffer_reads,
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
-                clear_depth: None,
+                clear_depth,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
                 reflection: program.reflection().clone(),
                 eager_bindings,
+                eager_samplers: HashMap::new(),
+                eager_buffers: HashMap::new(),
                 unresolved_read_names,
                 skip_name: self.name.clone(),
                 storage_output: None,
@@ -1962,72 +2146,267 @@ impl GraphImage {
         )
     }
 
+    pub fn execute_compute_with_push_constants_auto(
+        &self,
+        program: &ComputeProgram,
+        bytes: &[u8],
+        groups: [u32; 3],
+    ) -> Result<()> {
+        self.execute_compute_with_push_constants(
+            program,
+            reflected_push_constant_stages(program.reflection(), StageMask::COMPUTE),
+            bytes,
+            groups,
+        )
+    }
+
+    pub fn execute_compute_with_constants<T: bytemuck::Pod>(
+        &self,
+        program: &ComputeProgram,
+        stages: StageMask,
+        constants: &T,
+        groups: [u32; 3],
+    ) -> Result<()> {
+        self.execute_compute_with_push_constants(
+            program,
+            stages,
+            bytemuck::bytes_of(constants),
+            groups,
+        )
+    }
+
+    pub fn execute_compute_with_constants_auto<T: bytemuck::Pod>(
+        &self,
+        program: &ComputeProgram,
+        constants: &T,
+        groups: [u32; 3],
+    ) -> Result<()> {
+        self.execute_compute_with_push_constants_auto(
+            program,
+            bytemuck::bytes_of(constants),
+            groups,
+        )
+    }
+
     fn execute_compute_inner(
         &self,
         program: &ComputeProgram,
         push_constants: Option<PushConstants>,
         groups: [u32; 3],
     ) -> Result<()> {
-        let mut inner = self.frame.borrow_mut();
-        let declaration_index = inner.declaration_index;
-        inner.declaration_index = inner.declaration_index.saturating_add(1);
+        record_compute_shader_pass(
+            &self.frame,
+            None,
+            self,
+            program,
+            push_constants,
+            groups,
+            ExplicitPassResources::default(),
+        )
+    }
+}
 
+fn record_fullscreen_shader_pass(
+    frame: &Rc<RefCell<RenderFrameInner>>,
+    pass_name_override: Option<String>,
+    target: &GraphImage,
+    shader: &ShaderProgram,
+    push_constants: Option<PushConstants>,
+    target_subresource: SubresourceRange,
+    explicit: ExplicitPassResources,
+) -> Result<()> {
+    let mut inner = frame.borrow_mut();
+    let declaration_index = inner.declaration_index;
+    inner.declaration_index = inner.declaration_index.saturating_add(1);
+
+    inner
+        .frame
+        .inner
+        .graph_mut(|graph| graph.import_image(target.handle, target.desc))?;
+    inner.frame.inner.graph_mut(|graph| {
+        graph.import_buffer(
+            shader.fullscreen_triangle.handle(),
+            shader.fullscreen_triangle.desc(),
+        )
+    })?;
+    import_explicit_resources(&mut inner, &explicit)?;
+
+    let pipeline = shader.pipeline_handle(target.desc.format, target.desc.samples)?;
+    let read_names = reflected_image_reads(shader.reflection());
+    let (eager_bindings, unresolved_read_names, eager_uses) = split_read_names_with_explicit(
+        &read_names,
+        &target.name,
+        &inner.images_by_name,
+        &explicit.images,
+    );
+
+    let pass_name = pass_name_override
+        .unwrap_or_else(|| format!("{declaration_index:04}-execute-{}", target.name));
+    let target_use = crate::ImageUse {
+        image: target.handle,
+        access: Access::Write,
+        state: RgState::RenderTarget,
+        subresource: target_subresource,
+    };
+    inner.pass_records.push(PassRecord {
+        name: pass_name.clone(),
+        kind: PassKind::Fullscreen,
+        reads: eager_uses.clone(),
+        writes: vec![target_use],
+        deferred_read_names: unresolved_read_names.clone(),
+        skip_read_name: target.name.clone(),
+    });
+
+    inner.pending_passes.push(PendingPass {
+        desc: PassDesc {
+            name: pass_name,
+            queue: QueueType::Graphics,
+            shader: Some(shader.fragment.handle()),
+            pipeline: Some(pipeline),
+            bind_groups: Vec::new(),
+            push_constants,
+            work: PassWork::Draw(DrawDesc {
+                vertex_count: 3,
+                instance_count: 1,
+                first_vertex: 0,
+                first_instance: 0,
+                vertex_buffer: Some(VertexBufferBinding {
+                    buffer: shader.fullscreen_triangle.handle(),
+                    binding: 0,
+                    offset: 0,
+                }),
+                index_buffer: None,
+            }),
+            reads: eager_uses,
+            writes: vec![target_use],
+            buffer_reads: vec![crate::BufferUse {
+                buffer: shader.fullscreen_triangle.handle(),
+                access: Access::Read,
+                state: RgState::VertexRead,
+                offset: 0,
+                size: shader.fullscreen_triangle.desc().size,
+            }],
+            buffer_writes: Vec::new(),
+            clear_colors: Vec::new(),
+            clear_depth: None,
+        },
+        deferred: Some(DeferredPassResolve {
+            layout_handle: shader.pipeline_layout.handle(),
+            reflection: shader.reflection().clone(),
+            eager_bindings,
+            eager_samplers: explicit.samplers,
+            eager_buffers: explicit.buffers,
+            unresolved_read_names,
+            skip_name: target.name.clone(),
+            storage_output: None,
+        }),
+    });
+    Ok(())
+}
+
+fn record_compute_shader_pass(
+    frame: &Rc<RefCell<RenderFrameInner>>,
+    pass_name_override: Option<String>,
+    target: &GraphImage,
+    program: &ComputeProgram,
+    push_constants: Option<PushConstants>,
+    groups: [u32; 3],
+    explicit: ExplicitPassResources,
+) -> Result<()> {
+    let mut inner = frame.borrow_mut();
+    let declaration_index = inner.declaration_index;
+    inner.declaration_index = inner.declaration_index.saturating_add(1);
+
+    inner
+        .frame
+        .inner
+        .graph_mut(|graph| graph.import_image(target.handle, target.desc))?;
+    import_explicit_resources(&mut inner, &explicit)?;
+
+    let read_names = reflected_storage_image_reads(program.reflection());
+    let (eager_bindings, unresolved_read_names, eager_uses) = split_read_names_with_explicit(
+        &read_names,
+        &target.name,
+        &inner.images_by_name,
+        &explicit.images,
+    );
+
+    let pass_name = pass_name_override
+        .unwrap_or_else(|| format!("{declaration_index:04}-compute-{}", target.name));
+    let target_use = crate::ImageUse {
+        image: target.handle,
+        access: Access::Write,
+        state: RgState::ShaderWrite,
+        subresource: single_subresource(),
+    };
+    inner.pass_records.push(PassRecord {
+        name: pass_name.clone(),
+        kind: PassKind::Compute,
+        reads: eager_uses.clone(),
+        writes: vec![target_use],
+        deferred_read_names: unresolved_read_names.clone(),
+        skip_read_name: target.name.clone(),
+    });
+
+    inner.pending_passes.push(PendingPass {
+        desc: PassDesc {
+            name: pass_name,
+            queue: QueueType::Compute,
+            shader: Some(program.shader.handle()),
+            pipeline: Some(program.pipeline.handle()),
+            bind_groups: Vec::new(),
+            push_constants,
+            work: PassWork::Dispatch(DispatchDesc {
+                x: groups[0],
+                y: groups[1],
+                z: groups[2],
+            }),
+            reads: eager_uses,
+            writes: vec![target_use],
+            buffer_reads: Vec::new(),
+            buffer_writes: Vec::new(),
+            clear_colors: Vec::new(),
+            clear_depth: None,
+        },
+        deferred: Some(DeferredPassResolve {
+            layout_handle: program.pipeline_layout.handle(),
+            reflection: program.reflection().clone(),
+            eager_bindings,
+            eager_samplers: explicit.samplers,
+            eager_buffers: explicit.buffers,
+            unresolved_read_names,
+            skip_name: target.name.clone(),
+            storage_output: Some((target.name.clone(), target.handle)),
+        }),
+    });
+    Ok(())
+}
+
+fn import_explicit_resources(
+    inner: &mut RenderFrameInner,
+    explicit: &ExplicitPassResources,
+) -> Result<()> {
+    for image in explicit.images.values() {
+        let Some(record) = inner
+            .images_by_name
+            .values()
+            .find(|record| record.handle == image.handle)
+            .copied()
+        else {
+            continue;
+        };
         inner
             .frame
             .inner
-            .graph_mut(|graph| graph.import_image(self.handle, self.desc))?;
-
-        let read_names = reflected_storage_image_reads(program.reflection());
-        let (eager_bindings, unresolved_read_names, eager_uses) =
-            split_read_names(&read_names, &self.name, &inner.images_by_name);
-
-        let pass_name = format!("{declaration_index:04}-compute-{}", self.name);
-        let target_use = crate::ImageUse {
-            image: self.handle,
-            access: Access::Write,
-            state: RgState::ShaderWrite,
-            subresource: single_subresource(),
-        };
-        inner.pass_records.push(PassRecord {
-            name: pass_name.clone(),
-            kind: PassKind::Compute,
-            reads: eager_uses.clone(),
-            writes: vec![target_use],
-            deferred_read_names: unresolved_read_names.clone(),
-            skip_read_name: self.name.clone(),
-        });
-
-        inner.pending_passes.push(PendingPass {
-            desc: PassDesc {
-                name: pass_name,
-                queue: QueueType::Compute,
-                shader: Some(program.shader.handle()),
-                pipeline: Some(program.pipeline.handle()),
-                bind_groups: Vec::new(), // filled at flush time
-                push_constants,
-                work: PassWork::Dispatch(DispatchDesc {
-                    x: groups[0],
-                    y: groups[1],
-                    z: groups[2],
-                }),
-                reads: eager_uses,
-                writes: vec![target_use],
-                buffer_reads: Vec::new(),
-                buffer_writes: Vec::new(),
-                clear_colors: Vec::new(),
-                clear_depth: None,
-            },
-            deferred: Some(DeferredPassResolve {
-                layout_handle: program.pipeline_layout.handle(),
-                reflection: program.reflection().clone(),
-                eager_bindings,
-                unresolved_read_names,
-                skip_name: self.name.clone(),
-                storage_output: Some((self.name.clone(), self.handle)),
-            }),
-        });
-        Ok(())
+            .graph_mut(|g| g.import_image(record.handle, record.desc))?;
     }
+    for (buffer, desc) in explicit.buffers.values() {
+        inner
+            .frame
+            .inner
+            .graph_mut(|g| g.import_buffer(*buffer, *desc))?;
+    }
+    Ok(())
 }
 
 impl GraphImageView {
@@ -2096,11 +2475,7 @@ impl GraphImageView {
         shader: &ShaderProgram,
         constants: &T,
     ) -> Result<()> {
-        let stages = if shader.reflection().entry_points.is_empty() {
-            StageMask::FRAGMENT
-        } else {
-            shader.stage_mask()
-        };
+        let stages = reflected_push_constant_stages(shader.reflection(), shader.stage_mask());
         self.execute_shader_with_push_constants(shader, stages, bytemuck::bytes_of(constants))
     }
 
@@ -2187,6 +2562,19 @@ fn split_read_names(
     Vec<String>,
     Vec<crate::ImageUse>,
 ) {
+    split_read_names_with_explicit(read_names, skip_name, images_by_name, &HashMap::new())
+}
+
+fn split_read_names_with_explicit(
+    read_names: &[String],
+    skip_name: &str,
+    images_by_name: &HashMap<String, GraphImageRecord>,
+    explicit_images: &HashMap<String, ImageBinding>,
+) -> (
+    HashMap<String, ImageBinding>,
+    Vec<String>,
+    Vec<crate::ImageUse>,
+) {
     let mut eager: HashMap<String, ImageBinding> = HashMap::new();
     let mut unresolved: Vec<String> = Vec::new();
     let mut uses: Vec<crate::ImageUse> = Vec::new();
@@ -2195,19 +2583,25 @@ fn split_read_names(
         if name == skip_name {
             continue;
         }
-        if let Some(rec) = images_by_name.get(name.as_str()) {
-            eager.insert(
-                name.clone(),
-                ImageBinding {
-                    handle: rec.handle,
-                    subresource: rec.subresource,
-                },
-            );
+        if let Some(binding) = explicit_images.get(name.as_str()).copied() {
+            eager.insert(name.clone(), binding);
             uses.push(crate::ImageUse {
-                image: rec.handle,
+                image: binding.handle,
                 access: Access::Read,
                 state: RgState::ShaderRead,
+                subresource: binding.subresource,
+            });
+        } else if let Some(rec) = images_by_name.get(name.as_str()) {
+            let binding = ImageBinding {
+                handle: rec.handle,
                 subresource: rec.subresource,
+            };
+            eager.insert(name.clone(), binding);
+            uses.push(crate::ImageUse {
+                image: binding.handle,
+                access: Access::Read,
+                state: RgState::ShaderRead,
+                subresource: binding.subresource,
             });
         } else {
             unresolved.push(name.clone());
@@ -2265,6 +2659,8 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
                 &inner.images_by_name,
                 &inner.samplers_by_name,
                 &inner.buffers_by_name,
+                &deferred.eager_samplers,
+                &deferred.eager_buffers,
                 deferred
                     .storage_output
                     .as_ref()
@@ -2476,10 +2872,24 @@ fn reflected_storage_image_reads(reflection: &ShaderReflection) -> Vec<String> {
     reflected_bindings_of_kind(reflection, core::BindingKind::StorageImage)
 }
 
+fn reflected_push_constant_stages(reflection: &ShaderReflection, fallback: StageMask) -> StageMask {
+    let mask = reflection.layout.push_constants_stage_mask;
+    if mask.0 == 0 { fallback } else { mask }
+}
+
 fn reflected_bindings_of_kind(
     reflection: &ShaderReflection,
     kind: core::BindingKind,
 ) -> Vec<String> {
+    if !reflection.parameters.is_empty() {
+        return reflection
+            .parameters
+            .iter()
+            .filter(|parameter| parameter.kind == crate::ShaderParameterKind::Resource(kind))
+            .map(|parameter| parameter.name.clone())
+            .collect();
+    }
+
     reflection
         .layout
         .groups
@@ -2506,6 +2916,8 @@ fn build_reflected_bind_group(
     images_by_name: &HashMap<String, GraphImageRecord>,
     samplers_by_name: &HashMap<String, core::SamplerHandle>,
     buffers_by_name: &HashMap<String, (core::BufferHandle, crate::BufferDesc)>,
+    eager_samplers: &HashMap<String, core::SamplerHandle>,
+    eager_buffers: &HashMap<String, (core::BufferHandle, crate::BufferDesc)>,
     output_image: Option<(&str, ImageHandle)>,
 ) -> Result<Vec<BindGroup>> {
     let has_bindings = reflection
@@ -2527,6 +2939,14 @@ fn build_reflected_bind_group(
             })
         })
     };
+    let image_desc = |handle: ImageHandle| -> Option<ImageDesc> {
+        images_by_name
+            .values()
+            .find(|record| record.handle == handle)
+            .map(|record| record.desc)
+    };
+
+    let mut missing = Vec::new();
 
     let mut entries = Vec::new();
     for group in &reflection.layout.groups {
@@ -2534,6 +2954,9 @@ fn build_reflected_bind_group(
             match binding.kind {
                 BindingKind::SampledImage => {
                     if let Some(image) = resolve_image(&binding.path) {
+                        if let Some(desc) = image_desc(image.handle) {
+                            validate_reflected_image_usage(&binding.path, binding.kind, desc)?;
+                        }
                         entries.push(BindGroupEntry {
                             path: binding.path.clone(),
                             resource: ResourceBinding::ImageView {
@@ -2541,6 +2964,11 @@ fn build_reflected_bind_group(
                                 subresource: image.subresource,
                             },
                         });
+                    } else {
+                        missing.push(format!(
+                            "{} ({:?} set binding {})",
+                            binding.path, binding.kind, binding.binding
+                        ));
                     }
                 }
                 BindingKind::StorageImage => {
@@ -2557,6 +2985,9 @@ fn build_reflected_bind_group(
                         resolve_image(&binding.path)
                     };
                     if let Some(image) = image {
+                        if let Some(desc) = image_desc(image.handle) {
+                            validate_reflected_image_usage(&binding.path, binding.kind, desc)?;
+                        }
                         entries.push(BindGroupEntry {
                             path: binding.path.clone(),
                             resource: ResourceBinding::ImageView {
@@ -2564,11 +2995,17 @@ fn build_reflected_bind_group(
                                 subresource: image.subresource,
                             },
                         });
+                    } else {
+                        missing.push(format!(
+                            "{} ({:?} set binding {})",
+                            binding.path, binding.kind, binding.binding
+                        ));
                     }
                 }
                 BindingKind::Sampler => {
-                    let handle = samplers_by_name
+                    let handle = eager_samplers
                         .get(&binding.path)
+                        .or_else(|| samplers_by_name.get(&binding.path))
                         .copied()
                         .unwrap_or_else(|| engine.default_sampler());
                     entries.push(BindGroupEntry {
@@ -2577,16 +3014,31 @@ fn build_reflected_bind_group(
                     });
                 }
                 BindingKind::StorageBuffer | BindingKind::UniformBuffer => {
-                    if let Some((handle, _)) = buffers_by_name.get(&binding.path) {
+                    if let Some((handle, _)) = eager_buffers
+                        .get(&binding.path)
+                        .or_else(|| buffers_by_name.get(&binding.path))
+                    {
                         entries.push(BindGroupEntry {
                             path: binding.path.clone(),
                             resource: ResourceBinding::Buffer(*handle),
                         });
+                    } else {
+                        missing.push(format!(
+                            "{} ({:?} set binding {})",
+                            binding.path, binding.kind, binding.binding
+                        ));
                     }
                 }
                 _ => {}
             }
         }
+    }
+
+    if !missing.is_empty() {
+        return Err(Error::InvalidInput(format!(
+            "shader reflection requires unbound resources: {}",
+            missing.join(", ")
+        )));
     }
 
     if entries.is_empty() {
@@ -2598,6 +3050,21 @@ fn build_reflected_bind_group(
         entries,
     })?;
     Ok(vec![bind_group])
+}
+
+fn validate_reflected_image_usage(path: &str, kind: BindingKind, desc: ImageDesc) -> Result<()> {
+    let required = match kind {
+        BindingKind::SampledImage => crate::ImageUsage::SAMPLED,
+        BindingKind::StorageImage => crate::ImageUsage::STORAGE,
+        _ => return Ok(()),
+    };
+    if desc.usage.contains(required) {
+        return Ok(());
+    }
+    Err(Error::InvalidInput(format!(
+        "shader parameter '{path}' reflected as {kind:?}, but bound image usage {:?} does not include {:?}",
+        desc.usage, required
+    )))
 }
 
 #[cfg(test)]

@@ -9,7 +9,6 @@ use std::{
 };
 
 mod anti_aliasing_pass;
-mod scene;
 mod antialiasing;
 mod application;
 mod bind_group;
@@ -34,6 +33,7 @@ mod procedural_texture;
 mod quad_batch;
 mod runtime;
 mod sampler_catalog;
+mod scene;
 mod screenshot;
 mod shader_watcher;
 #[cfg(test)]
@@ -81,10 +81,6 @@ pub use input::{
     KeyModifier, KeyModifiers, KeyToken, Keybind, KeybindCapture,
 };
 pub use mesh::{Mesh, Vertex2d, Vertex3d};
-pub use scene::{
-    CameraConstants, CameraId, CameraOutput, InstanceData, MeshId, ObjectId, ObjectKind,
-    OrbitCamera, RenderTarget, Scene, SceneCamera,
-};
 pub use mesh_program::{MeshProgram, MeshProgramDesc, MeshVertexKind};
 pub use mip_pyramid::MipPyramid;
 pub use motion_vector_debug::MotionVectorDebugPass;
@@ -104,6 +100,10 @@ pub use runtime::{
     RuntimeWindowDiagnostics, SceneRenderContext, ShaderCompileError, UiContext, WindowMode,
 };
 pub use sampler_catalog::SamplerPreset;
+pub use scene::{
+    CameraConstants, CameraId, CameraOutput, InstanceData, MeshId, ObjectId, ObjectKind,
+    OrbitCamera, RenderTarget, Scene, SceneCamera,
+};
 pub use screenshot::{ScreenshotCapture, ScreenshotExportReport};
 pub use shader_watcher::ShaderWatcher;
 pub use text_draw::{
@@ -119,8 +119,8 @@ pub use text_tiling::{TiledTextAtlasPage, TiledTextEngineFrame};
 pub use bind_group::BindGroupBuilder;
 pub use frontend_graph::{
     DiagnosticLevel, GraphDiagnostic, GraphImage, GraphImageCacheKey, GraphImageInfo,
-    GraphImageView, GraphPassInfo, GraphReport, PassKind, RenderFrame, ShaderProgram,
-    ShaderProgramDesc,
+    GraphImageView, GraphPassInfo, GraphReport, PassKind, RenderFrame, ShaderName,
+    ShaderPassIntent, ShaderProgram, ShaderProgramDesc, SlangEntryPoints,
 };
 pub use glam::{Vec2, Vec3};
 pub use pipeline_layout::PipelineLayoutBuilder;
@@ -140,12 +140,13 @@ pub use sturdy_engine_core::{
     IndexFormat, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
     NativeHandleCapability, NativeHandleKind, NativeHandleOwnership, PassDesc, PassWork,
     PrimitiveTopology, PushConstants, QueueType, RasterState, ResolveImageDesc, ResourceBinding,
-    Result, RgState, SamplerDesc, ShaderDesc, ShaderSource, ShaderStage, ShaderTarget,
-    SlangCompileDesc, StageMask, SubresourceRange, SurfaceCapabilities, SurfaceColorSpace,
-    SurfaceEvent, SurfaceFormatInfo, SurfaceHdrCaps, SurfaceHdrPreference, SurfaceInfo,
-    SurfacePresentMode, SurfaceRecreateDesc, UpdateRate, VertexAttributeDesc, VertexBufferBinding,
-    VertexBufferLayout, VertexFormat, VertexInputRate, VulkanExternalBuffer, VulkanExternalImage,
-    VulkanRawCapabilities, compile_slang, compile_slang_to_file, compile_slang_to_spirv,
+    Result, RgState, SamplerDesc, ShaderDesc, ShaderParameterKind, ShaderParameterReflection,
+    ShaderResourceAccess, ShaderSource, ShaderStage, ShaderTarget, SlangCompileDesc, StageMask,
+    SubresourceRange, SurfaceCapabilities, SurfaceColorSpace, SurfaceEvent, SurfaceFormatInfo,
+    SurfaceHdrCaps, SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc,
+    UpdateRate, VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout, VertexFormat,
+    VertexInputRate, VulkanExternalBuffer, VulkanExternalImage, VulkanRawCapabilities,
+    compile_slang, compile_slang_to_file, compile_slang_to_spirv,
     native_handle_capabilities_for_backend, spirv_words_from_bytes,
 };
 pub use sturdy_engine_core::{
@@ -320,6 +321,57 @@ impl Engine {
         ShaderProgram::new(self, desc)
     }
 
+    pub fn load_slang_source(
+        &self,
+        name: ShaderName,
+        source: &'static str,
+        entry_points: SlangEntryPoints,
+    ) -> Result<ShaderProgram> {
+        let source = ShaderSource::MemoryUtf8(source);
+        match entry_points {
+            SlangEntryPoints::Graphics { vertex, fragment } => {
+                self.create_shader_program(ShaderProgramDesc {
+                    vertex: Some(ShaderDesc {
+                        source: source.clone(),
+                        entry_point: vertex,
+                        stage: ShaderStage::Vertex,
+                    }),
+                    fragment: ShaderDesc {
+                        source,
+                        entry_point: fragment,
+                        stage: ShaderStage::Fragment,
+                    },
+                })
+            }
+            SlangEntryPoints::Fragment { fragment } => {
+                self.create_shader_program(ShaderProgramDesc {
+                    vertex: None,
+                    fragment: ShaderDesc {
+                        source,
+                        entry_point: fragment,
+                        stage: ShaderStage::Fragment,
+                    },
+                })
+            }
+            SlangEntryPoints::Compute { compute } => {
+                self.create_shader_program(ShaderProgramDesc {
+                    vertex: None,
+                    fragment: ShaderDesc {
+                        source,
+                        entry_point: compute,
+                        stage: ShaderStage::Compute,
+                    },
+                })
+            }
+        }
+        .map_err(|error| {
+            Error::Unknown(format!(
+                "failed to load shader '{}': {error}",
+                name.as_str()
+            ))
+        })
+    }
+
     pub fn begin_render_frame(&self) -> Result<RenderFrame> {
         RenderFrame::new(self.clone(), 0)
     }
@@ -363,6 +415,39 @@ impl Engine {
 
     pub fn shader_reflection(&self, shader: &Shader) -> Result<ShaderReflection> {
         self.device.shader_reflection(shader.handle())
+    }
+
+    pub fn create_reflected_compute_pipeline_layout(
+        &self,
+        shader: &Shader,
+    ) -> Result<PipelineLayout> {
+        let layout = self
+            .device
+            .reflected_compute_pipeline_layout(shader.handle())?;
+        self.create_pipeline_layout(layout)
+    }
+
+    pub fn create_reflected_graphics_pipeline_layout(
+        &self,
+        vertex_shader: &Shader,
+        fragment_shader: Option<&Shader>,
+    ) -> Result<PipelineLayout> {
+        let layout = self.device.reflected_graphics_pipeline_layout(
+            vertex_shader.handle(),
+            fragment_shader.map(Shader::handle),
+        )?;
+        self.create_pipeline_layout(layout)
+    }
+
+    pub fn graphics_shader_reflection(
+        &self,
+        vertex_shader: &Shader,
+        fragment_shader: Option<&Shader>,
+    ) -> Result<ShaderReflection> {
+        self.device.reflected_graphics_pipeline_reflection(
+            vertex_shader.handle(),
+            fragment_shader.map(Shader::handle),
+        )
     }
 
     pub fn create_bind_group(&self, desc: BindGroupDesc) -> Result<BindGroup> {

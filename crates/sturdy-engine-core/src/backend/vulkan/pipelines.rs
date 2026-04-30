@@ -428,7 +428,7 @@ impl PipelineRegistry {
 }
 
 fn create_render_pass(device: &Device, desc: &GraphicsPipelineDesc) -> Result<vk::RenderPass> {
-    let color_attachments = desc
+    let mut all_attachments: Vec<vk::AttachmentDescription> = desc
         .color_targets
         .iter()
         .map(|target| {
@@ -446,19 +446,49 @@ fn create_render_pass(device: &Device, desc: &GraphicsPipelineDesc) -> Result<vk
                 .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL))
         })
         .collect::<Result<Vec<_>>>()?;
-    let color_refs = (0..desc.color_targets.len())
-        .map(|index| {
+
+    let color_refs: Vec<vk::AttachmentReference> = (0..desc.color_targets.len())
+        .map(|i| {
             vk::AttachmentReference::default()
-                .attachment(index as u32)
+                .attachment(i as u32)
                 .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
         })
-        .collect::<Vec<_>>();
-    let subpass = [vk::SubpassDescription::default()
+        .collect();
+
+    // Depth attachment, if requested — appended after all colour attachments.
+    let depth_ref = if let Some(depth_fmt) = desc.depth_format {
+        let depth_idx = all_attachments.len() as u32;
+        all_attachments.push(
+            vk::AttachmentDescription::default()
+                .format(vk_format(depth_fmt)?)
+                .samples(vk_samples(desc.samples)?)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+        );
+        Some(
+            vk::AttachmentReference::default()
+                .attachment(depth_idx)
+                .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+        )
+    } else {
+        None
+    };
+
+    let mut subpass = vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .color_attachments(&color_refs)];
+        .color_attachments(&color_refs);
+    if let Some(ref d) = depth_ref {
+        subpass = subpass.depth_stencil_attachment(d);
+    }
+    let subpasses = [subpass];
+
     let info = vk::RenderPassCreateInfo::default()
-        .attachments(&color_attachments)
-        .subpasses(&subpass);
+        .attachments(&all_attachments)
+        .subpasses(&subpasses);
     unsafe {
         device
             .create_render_pass(&info, None)

@@ -81,8 +81,10 @@ impl OrbitCamera {
     /// them to radians — `0.005` is a reasonable default.
     pub fn on_drag(&mut self, dx: f32, dy: f32, sensitivity: f32) {
         self.yaw += dx * sensitivity;
-        self.pitch = (self.pitch - dy * sensitivity)
-            .clamp(-std::f32::consts::FRAC_PI_2 + 0.01, std::f32::consts::FRAC_PI_2 - 0.01);
+        self.pitch = (self.pitch - dy * sensitivity).clamp(
+            -std::f32::consts::FRAC_PI_2 + 0.01,
+            std::f32::consts::FRAC_PI_2 - 0.01,
+        );
     }
 
     /// Zoom by adjusting distance.

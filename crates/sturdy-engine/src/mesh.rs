@@ -95,35 +95,131 @@ impl Mesh {
         let s = size * 0.5;
         let verts: &[Vertex3d] = &[
             // +Z front
-            Vertex3d { position: [-s, -s,  s], normal: [0., 0., 1.], uv: [0., 1.] },
-            Vertex3d { position: [ s, -s,  s], normal: [0., 0., 1.], uv: [1., 1.] },
-            Vertex3d { position: [ s,  s,  s], normal: [0., 0., 1.], uv: [1., 0.] },
-            Vertex3d { position: [-s,  s,  s], normal: [0., 0., 1.], uv: [0., 0.] },
+            Vertex3d {
+                position: [-s, -s, s],
+                normal: [0., 0., 1.],
+                uv: [0., 1.],
+            },
+            Vertex3d {
+                position: [s, -s, s],
+                normal: [0., 0., 1.],
+                uv: [1., 1.],
+            },
+            Vertex3d {
+                position: [s, s, s],
+                normal: [0., 0., 1.],
+                uv: [1., 0.],
+            },
+            Vertex3d {
+                position: [-s, s, s],
+                normal: [0., 0., 1.],
+                uv: [0., 0.],
+            },
             // -Z back
-            Vertex3d { position: [ s, -s, -s], normal: [0., 0., -1.], uv: [0., 1.] },
-            Vertex3d { position: [-s, -s, -s], normal: [0., 0., -1.], uv: [1., 1.] },
-            Vertex3d { position: [-s,  s, -s], normal: [0., 0., -1.], uv: [1., 0.] },
-            Vertex3d { position: [ s,  s, -s], normal: [0., 0., -1.], uv: [0., 0.] },
+            Vertex3d {
+                position: [s, -s, -s],
+                normal: [0., 0., -1.],
+                uv: [0., 1.],
+            },
+            Vertex3d {
+                position: [-s, -s, -s],
+                normal: [0., 0., -1.],
+                uv: [1., 1.],
+            },
+            Vertex3d {
+                position: [-s, s, -s],
+                normal: [0., 0., -1.],
+                uv: [1., 0.],
+            },
+            Vertex3d {
+                position: [s, s, -s],
+                normal: [0., 0., -1.],
+                uv: [0., 0.],
+            },
             // +X right
-            Vertex3d { position: [s, -s, -s], normal: [1., 0., 0.], uv: [0., 1.] },
-            Vertex3d { position: [s, -s,  s], normal: [1., 0., 0.], uv: [1., 1.] },
-            Vertex3d { position: [s,  s,  s], normal: [1., 0., 0.], uv: [1., 0.] },
-            Vertex3d { position: [s,  s, -s], normal: [1., 0., 0.], uv: [0., 0.] },
+            Vertex3d {
+                position: [s, -s, -s],
+                normal: [1., 0., 0.],
+                uv: [0., 1.],
+            },
+            Vertex3d {
+                position: [s, -s, s],
+                normal: [1., 0., 0.],
+                uv: [1., 1.],
+            },
+            Vertex3d {
+                position: [s, s, s],
+                normal: [1., 0., 0.],
+                uv: [1., 0.],
+            },
+            Vertex3d {
+                position: [s, s, -s],
+                normal: [1., 0., 0.],
+                uv: [0., 0.],
+            },
             // -X left
-            Vertex3d { position: [-s, -s,  s], normal: [-1., 0., 0.], uv: [0., 1.] },
-            Vertex3d { position: [-s, -s, -s], normal: [-1., 0., 0.], uv: [1., 1.] },
-            Vertex3d { position: [-s,  s, -s], normal: [-1., 0., 0.], uv: [1., 0.] },
-            Vertex3d { position: [-s,  s,  s], normal: [-1., 0., 0.], uv: [0., 0.] },
+            Vertex3d {
+                position: [-s, -s, s],
+                normal: [-1., 0., 0.],
+                uv: [0., 1.],
+            },
+            Vertex3d {
+                position: [-s, -s, -s],
+                normal: [-1., 0., 0.],
+                uv: [1., 1.],
+            },
+            Vertex3d {
+                position: [-s, s, -s],
+                normal: [-1., 0., 0.],
+                uv: [1., 0.],
+            },
+            Vertex3d {
+                position: [-s, s, s],
+                normal: [-1., 0., 0.],
+                uv: [0., 0.],
+            },
             // +Y top
-            Vertex3d { position: [-s, s, -s], normal: [0., 1., 0.], uv: [0., 0.] },
-            Vertex3d { position: [ s, s, -s], normal: [0., 1., 0.], uv: [1., 0.] },
-            Vertex3d { position: [ s, s,  s], normal: [0., 1., 0.], uv: [1., 1.] },
-            Vertex3d { position: [-s, s,  s], normal: [0., 1., 0.], uv: [0., 1.] },
+            Vertex3d {
+                position: [-s, s, -s],
+                normal: [0., 1., 0.],
+                uv: [0., 0.],
+            },
+            Vertex3d {
+                position: [s, s, -s],
+                normal: [0., 1., 0.],
+                uv: [1., 0.],
+            },
+            Vertex3d {
+                position: [s, s, s],
+                normal: [0., 1., 0.],
+                uv: [1., 1.],
+            },
+            Vertex3d {
+                position: [-s, s, s],
+                normal: [0., 1., 0.],
+                uv: [0., 1.],
+            },
             // -Y bottom
-            Vertex3d { position: [-s, -s,  s], normal: [0., -1., 0.], uv: [0., 0.] },
-            Vertex3d { position: [ s, -s,  s], normal: [0., -1., 0.], uv: [1., 0.] },
-            Vertex3d { position: [ s, -s, -s], normal: [0., -1., 0.], uv: [1., 1.] },
-            Vertex3d { position: [-s, -s, -s], normal: [0., -1., 0.], uv: [0., 1.] },
+            Vertex3d {
+                position: [-s, -s, s],
+                normal: [0., -1., 0.],
+                uv: [0., 0.],
+            },
+            Vertex3d {
+                position: [s, -s, s],
+                normal: [0., -1., 0.],
+                uv: [1., 0.],
+            },
+            Vertex3d {
+                position: [s, -s, -s],
+                normal: [0., -1., 0.],
+                uv: [1., 1.],
+            },
+            Vertex3d {
+                position: [-s, -s, -s],
+                normal: [0., -1., 0.],
+                uv: [0., 1.],
+            },
         ];
         #[rustfmt::skip]
         let idx: &[u32] = &[
@@ -144,10 +240,26 @@ impl Mesh {
         let hw = width * 0.5;
         let hd = depth * 0.5;
         let verts: &[Vertex3d] = &[
-            Vertex3d { position: [-hw, 0., -hd], normal: [0., 1., 0.], uv: [0., 0.] },
-            Vertex3d { position: [ hw, 0., -hd], normal: [0., 1., 0.], uv: [1., 0.] },
-            Vertex3d { position: [ hw, 0.,  hd], normal: [0., 1., 0.], uv: [1., 1.] },
-            Vertex3d { position: [-hw, 0.,  hd], normal: [0., 1., 0.], uv: [0., 1.] },
+            Vertex3d {
+                position: [-hw, 0., -hd],
+                normal: [0., 1., 0.],
+                uv: [0., 0.],
+            },
+            Vertex3d {
+                position: [hw, 0., -hd],
+                normal: [0., 1., 0.],
+                uv: [1., 0.],
+            },
+            Vertex3d {
+                position: [hw, 0., hd],
+                normal: [0., 1., 0.],
+                uv: [1., 1.],
+            },
+            Vertex3d {
+                position: [-hw, 0., hd],
+                normal: [0., 1., 0.],
+                uv: [0., 1.],
+            },
         ];
         let idx: &[u32] = &[0, 1, 2, 0, 2, 3];
         Self::indexed_3d(engine, verts, idx)

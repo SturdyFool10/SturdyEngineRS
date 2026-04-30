@@ -24,7 +24,7 @@ impl ComputeProgram {
             stage: ShaderStage::Compute,
         })?;
         let reflection = engine.shader_reflection(&shader)?;
-        let pipeline_layout = engine.create_pipeline_layout(reflection.layout.clone())?;
+        let pipeline_layout = engine.create_reflected_compute_pipeline_layout(&shader)?;
         let pipeline = engine.create_compute_pipeline(ComputePipelineDesc {
             shader: shader.handle(),
             layout: Some(pipeline_layout.handle()),
@@ -66,7 +66,7 @@ impl ComputeProgram {
         let reflection = self.engine.shader_reflection(&shader)?;
         let pipeline_layout = self
             .engine
-            .create_pipeline_layout(reflection.layout.clone())?;
+            .create_reflected_compute_pipeline_layout(&shader)?;
         let pipeline = self.engine.create_compute_pipeline(ComputePipelineDesc {
             shader: shader.handle(),
             layout: Some(pipeline_layout.handle()),

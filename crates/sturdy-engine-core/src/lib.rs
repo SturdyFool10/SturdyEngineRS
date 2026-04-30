@@ -78,7 +78,8 @@ pub use render_graph::{
 };
 pub use sampler::{AddressMode, BorderColor, CompareOp, FilterMode, MipmapMode, SamplerDesc};
 pub use shader::{
-    CompiledShaderArtifact, ShaderDesc, ShaderModule, ShaderReflection, ShaderSource, ShaderStage,
+    CompiledShaderArtifact, ShaderDesc, ShaderModule, ShaderParameterKind,
+    ShaderParameterReflection, ShaderReflection, ShaderResourceAccess, ShaderSource, ShaderStage,
     ShaderTarget,
 };
 pub use slang::{

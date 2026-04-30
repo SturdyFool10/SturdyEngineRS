@@ -258,6 +258,7 @@ fn text_program(engine: &Engine, fragment: &str) -> Result<MeshProgram> {
             vertex: None,
             vertex_kind: MeshVertexKind::V2d,
             alpha_blend: true,
+            uses_depth: false,
         },
     )
 }

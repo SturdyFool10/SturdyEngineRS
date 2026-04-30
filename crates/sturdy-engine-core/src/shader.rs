@@ -1,6 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::{CanonicalPipelineLayout, Error, Result};
+use crate::{BindingKind, CanonicalPipelineLayout, Error, Result, StageMask, UpdateRate};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ShaderStage {
@@ -16,8 +16,20 @@ pub enum ShaderStage {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ShaderSource {
+    /// Slang source stored in memory. Kept as the ergonomic default for generated shaders.
     Inline(String),
+    /// Slang source loaded from a native development file path.
     File(PathBuf),
+    /// Slang source loaded from a borrowed native development file path.
+    FilePath(&'static Path),
+    /// Slang source addressed through the engine asset system. Runtime compilation
+    /// requires an asset resolver; direct device creation rejects unresolved virtual paths.
+    VirtualAssetPath(&'static Path),
+    /// Borrowed UTF-8 Slang source, including `include_str!` output.
+    MemoryUtf8(&'static str),
+    /// Borrowed bytes, including `include_bytes!` output. UTF-8 bytes are compiled
+    /// as Slang source; SPIR-V bytes are accepted for SPIR-V targets.
+    MemoryBytes(&'static [u8]),
     Spirv(Vec<u32>),
     /// Pre-compiled DXIL bytecode for D3D12 backends.
     Dxil(Vec<u8>),
@@ -49,6 +61,33 @@ pub struct CompiledShaderArtifact {
 pub struct ShaderReflection {
     pub layout: CanonicalPipelineLayout,
     pub entry_points: Vec<String>,
+    pub parameters: Vec<ShaderParameterReflection>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ShaderResourceAccess {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ShaderParameterKind {
+    Resource(BindingKind),
+    PushConstant,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShaderParameterReflection {
+    pub name: String,
+    pub kind: ShaderParameterKind,
+    pub stage_mask: StageMask,
+    pub access: ShaderResourceAccess,
+    pub set: Option<u32>,
+    pub binding: Option<u32>,
+    pub count: u32,
+    pub update_rate: Option<UpdateRate>,
+    pub size_bytes: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,8 +108,20 @@ impl ShaderDesc {
             ShaderSource::Inline(source) if source.trim().is_empty() => Err(Error::InvalidInput(
                 "shader source must be non-empty".into(),
             )),
+            ShaderSource::MemoryUtf8(source) if source.trim().is_empty() => Err(
+                Error::InvalidInput("shader source must be non-empty".into()),
+            ),
             ShaderSource::File(path) if path.as_os_str().is_empty() => Err(Error::InvalidInput(
                 "shader file path must be non-empty".into(),
+            )),
+            ShaderSource::FilePath(path) if path.as_os_str().is_empty() => Err(
+                Error::InvalidInput("shader file path must be non-empty".into()),
+            ),
+            ShaderSource::VirtualAssetPath(path) if path.as_os_str().is_empty() => Err(
+                Error::InvalidInput("shader virtual asset path must be non-empty".into()),
+            ),
+            ShaderSource::MemoryBytes(bytes) if bytes.is_empty() => Err(Error::InvalidInput(
+                "shader byte source must be non-empty".into(),
             )),
             ShaderSource::Spirv(words) if words.is_empty() => Err(Error::InvalidInput(
                 "SPIR-V shader source must be non-empty".into(),

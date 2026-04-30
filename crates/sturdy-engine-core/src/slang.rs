@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::sync::OnceLock;
-use std::{path::PathBuf, process::Command};
+use std::{borrow::Cow, path::PathBuf, process::Command};
 
 use crate::{
     BindingKind, CanonicalBinding, CanonicalGroupLayout, CanonicalPipelineLayout,
-    CompiledShaderArtifact, Error, Result, ShaderDesc, ShaderReflection, ShaderSource, ShaderStage,
+    CompiledShaderArtifact, Error, Result, ShaderDesc, ShaderParameterKind,
+    ShaderParameterReflection, ShaderReflection, ShaderResourceAccess, ShaderSource, ShaderStage,
     ShaderTarget, StageMask, UpdateRate,
 };
 
@@ -235,6 +236,70 @@ impl Drop for CompileRequestGuard {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+enum SlangSourceInput<'a> {
+    File(&'a std::path::Path),
+    Source(Cow<'a, str>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl SlangSourceInput<'_> {
+    fn is_file(&self) -> bool {
+        matches!(self, Self::File(_))
+    }
+
+    fn to_cstring(&self) -> Result<CString> {
+        match self {
+            Self::File(path) => {
+                let s = path.to_str().ok_or_else(|| {
+                    Error::InvalidInput("shader file path contains non-UTF-8 characters".into())
+                })?;
+                CString::new(s)
+                    .map_err(|_| Error::InvalidInput("shader file path contains null bytes".into()))
+            }
+            Self::Source(source) => CString::new(source.as_ref())
+                .map_err(|_| Error::InvalidInput("shader source contains null bytes".into())),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn slang_source_input(source: &ShaderSource) -> Result<SlangSourceInput<'_>> {
+    match source {
+        ShaderSource::File(path) => Ok(SlangSourceInput::File(path)),
+        ShaderSource::FilePath(path) => Ok(SlangSourceInput::File(path)),
+        ShaderSource::Inline(source) => {
+            Ok(SlangSourceInput::Source(Cow::Borrowed(source.as_str())))
+        }
+        ShaderSource::MemoryUtf8(source) => Ok(SlangSourceInput::Source(Cow::Borrowed(source))),
+        ShaderSource::MemoryBytes(bytes) => Ok(SlangSourceInput::Source(Cow::Borrowed(
+            std::str::from_utf8(bytes).map_err(|_| {
+                Error::InvalidInput(
+                    "shader MemoryBytes must contain UTF-8 Slang source or SPIR-V bytecode".into(),
+                )
+            })?,
+        ))),
+        ShaderSource::VirtualAssetPath(path) => Err(Error::InvalidInput(format!(
+            "shader virtual asset path '{}' must be resolved by the asset system before device compilation",
+            path.display()
+        ))),
+        ShaderSource::Spirv(_) | ShaderSource::Dxil(_) | ShaderSource::Msl(_) => Err(
+            Error::InvalidInput("precompiled shader source is not Slang source".into()),
+        ),
+    }
+}
+
+fn spirv_words_from_byte_source(source: &ShaderSource) -> Result<Option<Vec<u32>>> {
+    let bytes = match source {
+        ShaderSource::MemoryBytes(bytes) => *bytes,
+        _ => return Ok(None),
+    };
+    if bytes.len() >= 4 && bytes[..4] == 0x0723_0203u32.to_le_bytes() {
+        return spirv_words_from_bytes(bytes).map(Some);
+    }
+    Ok(None)
+}
+
 /// Reflect the pipeline layout of a Slang shader source.
 ///
 /// Returns an empty layout for `ShaderSource::Spirv` (no source available to reflect).
@@ -257,28 +322,21 @@ fn reflect_pipeline_layout_inner(
     desc: &ShaderDesc,
     ray_tracing_enabled: bool,
 ) -> Result<ShaderReflection> {
-    if matches!(desc.source, ShaderSource::Spirv(_)) {
+    if matches!(
+        desc.source,
+        ShaderSource::Spirv(_) | ShaderSource::Dxil(_) | ShaderSource::Msl(_)
+    ) {
         return Ok(ShaderReflection::default());
     }
 
     // Prepare CStrings before acquiring the session lock
-    let path_or_source_cstr = match &desc.source {
-        ShaderSource::File(path) => {
-            let s = path.to_str().ok_or_else(|| {
-                Error::InvalidInput("shader file path contains non-UTF-8 characters".into())
-            })?;
-            CString::new(s)
-                .map_err(|_| Error::InvalidInput("shader file path contains null bytes".into()))?
-        }
-        ShaderSource::Inline(src) => CString::new(src.as_str())
-            .map_err(|_| Error::InvalidInput("shader source contains null bytes".into()))?,
-        ShaderSource::Spirv(_) | ShaderSource::Dxil(_) | ShaderSource::Msl(_) => unreachable!(),
-    };
+    let source_input = slang_source_input(&desc.source)?;
+    let path_or_source_cstr = source_input.to_cstring()?;
     let entry_cstr = CString::new(desc.entry_point.as_str())
         .map_err(|_| Error::InvalidInput("entry point contains null bytes".into()))?;
     let stage = shader_stage_to_slang(desc.stage);
     let engine_stage = desc.stage;
-    let is_file = matches!(desc.source, ShaderSource::File(_));
+    let is_file = source_input.is_file();
 
     // Hold the session lock for the entire compile request lifetime
     with_session(|session| unsafe {
@@ -325,12 +383,18 @@ fn reflect_pipeline_layout_inner(
             return Ok(ShaderReflection::default());
         }
 
-        let mut layout = extract_layout(reflection, engine_stage, ray_tracing_enabled)?;
+        let (mut layout, mut parameters) =
+            extract_reflection(reflection, engine_stage, ray_tracing_enabled)?;
         let mut code_size: usize = 0;
         let code_ptr = sys::spGetEntryPointCode(request, 0, &mut code_size);
         if !code_ptr.is_null() && code_size != 0 {
             let code_bytes = std::slice::from_raw_parts(code_ptr, code_size);
-            merge_spirv_push_constant_reflection(&mut layout, code_bytes, engine_stage)?;
+            merge_spirv_push_constant_reflection(
+                &mut layout,
+                &mut parameters,
+                code_bytes,
+                engine_stage,
+            )?;
         }
 
         let ep_count = sys::spReflection_getEntryPointCount(reflection);
@@ -349,6 +413,7 @@ fn reflect_pipeline_layout_inner(
         Ok(ShaderReflection {
             layout,
             entry_points,
+            parameters,
         })
     })
 }
@@ -359,17 +424,18 @@ pub fn reflect_pipeline_layout(_desc: &ShaderDesc) -> Result<ShaderReflection> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-unsafe fn extract_layout(
+unsafe fn extract_reflection(
     reflection: *mut sys::SlangReflection,
     stage: ShaderStage,
     ray_tracing_enabled: bool,
-) -> Result<CanonicalPipelineLayout> {
+) -> Result<(CanonicalPipelineLayout, Vec<ShaderParameterReflection>)> {
     let param_count = unsafe { sys::spReflection_GetParameterCount(reflection) };
     let stage_mask = shader_stage_to_mask(stage);
 
     // BTreeMap keeps groups sorted by set index
     let mut groups: BTreeMap<u32, (String, Vec<CanonicalBinding>)> = BTreeMap::new();
     let mut push_constants_bytes = 0;
+    let mut parameters = Vec::new();
 
     for i in 0..param_count {
         let param = unsafe { sys::spReflection_GetParameterByIndex(reflection, i) };
@@ -411,6 +477,17 @@ unsafe fn extract_layout(
         } {
             let size = unsafe { push_constant_size_for_type_layout(type_layout) }?;
             push_constants_bytes = push_constants_bytes.max(size);
+            parameters.push(ShaderParameterReflection {
+                name: name.clone(),
+                kind: ShaderParameterKind::PushConstant,
+                stage_mask,
+                access: ShaderResourceAccess::Read,
+                set: None,
+                binding: None,
+                count: 1,
+                update_rate: None,
+                size_bytes: Some(size),
+            });
         }
 
         let range_count = unsafe { sys::spReflectionTypeLayout_getBindingRangeCount(type_layout) };
@@ -423,6 +500,17 @@ unsafe fn extract_layout(
             {
                 let size = unsafe { push_constant_size_for_type_layout(type_layout) }?;
                 push_constants_bytes = push_constants_bytes.max(size);
+                parameters.push(ShaderParameterReflection {
+                    name: name.clone(),
+                    kind: ShaderParameterKind::PushConstant,
+                    stage_mask,
+                    access: ShaderResourceAccess::Read,
+                    set: None,
+                    binding: None,
+                    count: 1,
+                    update_rate: None,
+                    size_bytes: Some(size),
+                });
                 continue;
             }
             let set_offset = unsafe {
@@ -454,6 +542,7 @@ unsafe fn extract_layout(
             } else {
                 format!("{name}.{r}")
             };
+            let update_rate = binding_space_to_update_rate(set_index);
 
             let group = groups
                 .entry(set_index)
@@ -465,28 +554,52 @@ unsafe fn extract_layout(
                 count.max(1)
             };
             group.1.push(CanonicalBinding {
-                path: binding_name,
+                path: binding_name.clone(),
                 kind,
                 count: resolved_count,
                 stage_mask,
-                update_rate: binding_space_to_update_rate(set_index),
+                update_rate,
                 binding: binding_slot,
+            });
+            parameters.push(ShaderParameterReflection {
+                name: binding_name,
+                kind: ShaderParameterKind::Resource(kind),
+                stage_mask,
+                access: binding_kind_to_access(kind),
+                set: Some(set_index),
+                binding: Some(binding_slot),
+                count: resolved_count,
+                update_rate: Some(update_rate),
+                size_bytes: None,
             });
         }
     }
 
-    Ok(CanonicalPipelineLayout {
-        groups: groups
-            .into_values()
-            .map(|(name, bindings)| CanonicalGroupLayout { name, bindings })
-            .collect(),
-        push_constants_bytes,
-        push_constants_stage_mask: if push_constants_bytes == 0 {
-            StageMask::default()
-        } else {
-            stage_mask
+    Ok((
+        CanonicalPipelineLayout {
+            groups: groups
+                .into_values()
+                .map(|(name, bindings)| CanonicalGroupLayout { name, bindings })
+                .collect(),
+            push_constants_bytes,
+            push_constants_stage_mask: if push_constants_bytes == 0 {
+                StageMask::default()
+            } else {
+                stage_mask
+            },
         },
-    })
+        parameters,
+    ))
+}
+
+fn binding_kind_to_access(kind: BindingKind) -> ShaderResourceAccess {
+    match kind {
+        BindingKind::SampledImage
+        | BindingKind::UniformBuffer
+        | BindingKind::Sampler
+        | BindingKind::AccelerationStructure => ShaderResourceAccess::Read,
+        BindingKind::StorageImage | BindingKind::StorageBuffer => ShaderResourceAccess::ReadWrite,
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -562,6 +675,7 @@ unsafe fn push_constant_size_for_type_layout_inner(
 #[cfg(not(target_arch = "wasm32"))]
 fn merge_spirv_push_constant_reflection(
     layout: &mut CanonicalPipelineLayout,
+    parameters: &mut Vec<ShaderParameterReflection>,
     code_bytes: &[u8],
     stage: ShaderStage,
 ) -> Result<()> {
@@ -579,6 +693,23 @@ fn merge_spirv_push_constant_reflection(
             .retain(|binding| !push_constants.names.contains(&binding.path));
     }
     layout.groups.retain(|group| !group.bindings.is_empty());
+    parameters.retain(|parameter| !push_constants.names.contains(&parameter.name));
+    parameters.push(ShaderParameterReflection {
+        name: push_constants
+            .names
+            .iter()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "push_constants".to_owned()),
+        kind: ShaderParameterKind::PushConstant,
+        stage_mask: shader_stage_to_mask(stage),
+        access: ShaderResourceAccess::Read,
+        set: None,
+        binding: None,
+        count: 1,
+        update_rate: None,
+        size_bytes: Some(push_constants.bytes),
+    });
     Ok(())
 }
 
@@ -598,24 +729,24 @@ pub fn compile_and_reflect(
     ) {
         return Ok((desc.clone(), ShaderReflection::default()));
     }
-
-    let path_or_source_cstr = match &desc.source {
-        ShaderSource::File(path) => {
-            let s = path.to_str().ok_or_else(|| {
-                Error::InvalidInput("shader file path contains non-UTF-8 characters".into())
-            })?;
-            CString::new(s)
-                .map_err(|_| Error::InvalidInput("shader file path contains null bytes".into()))?
+    if let Some(words) = spirv_words_from_byte_source(&desc.source)? {
+        if target != ShaderTarget::Spirv {
+            return Err(Error::InvalidInput(
+                "SPIR-V byte shader sources can only be used with a SPIR-V target".into(),
+            ));
         }
-        ShaderSource::Inline(src) => CString::new(src.as_str())
-            .map_err(|_| Error::InvalidInput("shader source contains null bytes".into()))?,
-        ShaderSource::Spirv(_) | ShaderSource::Dxil(_) | ShaderSource::Msl(_) => unreachable!(),
-    };
+        let mut compiled = desc.clone();
+        compiled.source = ShaderSource::Spirv(words);
+        return Ok((compiled, ShaderReflection::default()));
+    }
+
+    let source_input = slang_source_input(&desc.source)?;
+    let path_or_source_cstr = source_input.to_cstring()?;
     let entry_cstr = CString::new(desc.entry_point.as_str())
         .map_err(|_| Error::InvalidInput("entry point contains null bytes".into()))?;
     let stage = shader_stage_to_slang(desc.stage);
     let engine_stage = desc.stage;
-    let is_file = matches!(desc.source, ShaderSource::File(_));
+    let is_file = source_input.is_file();
     let slang_target = shader_target_to_slang(target);
 
     with_session(|session| unsafe {
@@ -669,12 +800,18 @@ pub fn compile_and_reflect(
 
         // Reflect pipeline layout (works regardless of output target)
         let reflection_ptr = sys::spGetReflection(request);
-        let (layout, entry_points) = if reflection_ptr.is_null() {
-            (CanonicalPipelineLayout::default(), Vec::new())
+        let (layout, entry_points, parameters) = if reflection_ptr.is_null() {
+            (CanonicalPipelineLayout::default(), Vec::new(), Vec::new())
         } else {
-            let mut layout = extract_layout(reflection_ptr, engine_stage, true)?;
+            let (mut layout, mut parameters) =
+                extract_reflection(reflection_ptr, engine_stage, true)?;
             if target == ShaderTarget::Spirv {
-                merge_spirv_push_constant_reflection(&mut layout, &code_bytes, engine_stage)?;
+                merge_spirv_push_constant_reflection(
+                    &mut layout,
+                    &mut parameters,
+                    &code_bytes,
+                    engine_stage,
+                )?;
             }
             let ep_count = sys::spReflection_getEntryPointCount(reflection_ptr);
             let mut eps = Vec::with_capacity(ep_count as usize);
@@ -688,7 +825,7 @@ pub fn compile_and_reflect(
                     eps.push(CStr::from_ptr(name_ptr).to_string_lossy().into_owned());
                 }
             }
-            (layout, eps)
+            (layout, eps, parameters)
         };
 
         let compiled_source = match target {
@@ -707,6 +844,7 @@ pub fn compile_and_reflect(
             ShaderReflection {
                 layout,
                 entry_points,
+                parameters,
             },
         ))
     })
@@ -1030,6 +1168,18 @@ mod tests {
             "RWStructuredBuffer should reflect as StorageBuffer"
         );
         assert_eq!(binding.stage_mask, StageMask::COMPUTE);
+        let parameter = reflection
+            .parameters
+            .iter()
+            .find(|parameter| parameter.name == "output_buffer")
+            .expect("storage buffer should have parameter metadata");
+        assert_eq!(
+            parameter.kind,
+            ShaderParameterKind::Resource(BindingKind::StorageBuffer)
+        );
+        assert_eq!(parameter.access, ShaderResourceAccess::ReadWrite);
+        assert_eq!(parameter.set, Some(0));
+        assert_eq!(parameter.binding, Some(0));
         // Binding index should be populated from Slang reflection (not always 0 from array position)
         // For a single binding in set 0, Slang assigns binding=0
         assert_eq!(binding.binding, 0, "first binding should have slot 0");
@@ -1091,6 +1241,14 @@ mod tests {
             reflection.layout.push_constants_stage_mask,
             StageMask::VERTEX
         );
+        let parameter = reflection
+            .parameters
+            .iter()
+            .find(|parameter| parameter.kind == ShaderParameterKind::PushConstant)
+            .expect("push constant should have parameter metadata");
+        assert_eq!(parameter.stage_mask, StageMask::VERTEX);
+        assert_eq!(parameter.access, ShaderResourceAccess::Read);
+        assert_eq!(parameter.size_bytes, Some(32));
     }
 
     #[test]
@@ -1117,6 +1275,26 @@ mod tests {
             kinds.contains(&BindingKind::Sampler),
             "should reflect SamplerState as Sampler, got {kinds:?}"
         );
+        let diffuse_map = reflection
+            .parameters
+            .iter()
+            .find(|parameter| parameter.name == "diffuseMap")
+            .expect("texture should have parameter metadata");
+        assert_eq!(
+            diffuse_map.kind,
+            ShaderParameterKind::Resource(BindingKind::SampledImage)
+        );
+        assert_eq!(diffuse_map.access, ShaderResourceAccess::Read);
+        let diffuse_sampler = reflection
+            .parameters
+            .iter()
+            .find(|parameter| parameter.name == "diffuseSampler")
+            .expect("sampler should have parameter metadata");
+        assert_eq!(
+            diffuse_sampler.kind,
+            ShaderParameterKind::Resource(BindingKind::Sampler)
+        );
+        assert_eq!(diffuse_sampler.access, ShaderResourceAccess::Read);
     }
 
     #[test]
@@ -1128,5 +1306,59 @@ mod tests {
         };
         let reflection = reflect_pipeline_layout(&desc).expect("should not error for SPIRV source");
         assert_eq!(reflection, ShaderReflection::default());
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn embedded_str_source_compiles_and_reflects() {
+        static SOURCE: &str = r#"
+RWStructuredBuffer<float4> output_buffer : register(u0, space0);
+
+[numthreads(8, 8, 1)]
+void main(uint3 dispatch_id : SV_DispatchThreadID) {
+  output_buffer[dispatch_id.x] = float4(dispatch_id, 1.0);
+}
+"#;
+        let desc = ShaderDesc {
+            source: ShaderSource::MemoryUtf8(SOURCE),
+            entry_point: "main".into(),
+            stage: ShaderStage::Compute,
+        };
+
+        let (_compiled, reflection) =
+            compile_and_reflect(&desc, ShaderTarget::Spirv).expect("embedded source compiles");
+
+        let group = reflection
+            .layout
+            .groups
+            .first()
+            .expect("embedded source should reflect bindings");
+        assert_eq!(group.bindings[0].kind, BindingKind::StorageBuffer);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn memory_bytes_source_compiles_as_utf8_slang() {
+        let desc = ShaderDesc {
+            source: ShaderSource::MemoryBytes(
+                b"
+struct VSInput { float3 position : POSITION; };
+struct VSOutput { float4 position : SV_POSITION; };
+VSOutput vs_main(VSInput input) {
+  VSOutput output;
+  output.position = float4(input.position, 1.0);
+  return output;
+}
+",
+            ),
+            entry_point: "vs_main".into(),
+            stage: ShaderStage::Vertex,
+        };
+
+        let (_compiled, reflection) =
+            compile_and_reflect(&desc, ShaderTarget::Spirv).expect("memory source compiles");
+
+        assert!(reflection.layout.groups.is_empty());
+        assert!(reflection.entry_points.iter().any(|ep| ep == "vs_main"));
     }
 }

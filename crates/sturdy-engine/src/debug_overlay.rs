@@ -370,6 +370,7 @@ impl DebugOverlayRenderer {
                     vertex: None,
                     vertex_kind: MeshVertexKind::V2d,
                     alpha_blend: true,
+                    uses_depth: false,
                 },
             )?,
             ui_shape_program: MeshProgram::new(
@@ -383,6 +384,7 @@ impl DebugOverlayRenderer {
                     vertex: None,
                     vertex_kind: MeshVertexKind::V2d,
                     alpha_blend: true,
+                    uses_depth: false,
                 },
             )?,
         })

@@ -482,7 +482,7 @@ impl CommandContext {
             ));
         }
 
-        let attachments = color_uses
+        let mut attachments = color_uses
             .iter()
             .map(|usage| {
                 resources.image_view_for_subresource(device, usage.image, usage.subresource)
@@ -492,6 +492,15 @@ impl CommandContext {
         let first_extent = mip_extent(first_desc.extent, color_uses[0].subresource.base_mip);
         let framebuffer_layers =
             subresource_layer_count(first_desc.layers, color_uses[0].subresource);
+
+        // Depth attachment — appended after colour views to match render-pass order.
+        let depth_use = pass.writes.iter().find(|u| u.state == RgState::DepthWrite);
+        if let Some(du) = depth_use {
+            let depth_view =
+                resources.image_view_for_subresource(device, du.image, du.subresource)?;
+            attachments.push(depth_view);
+        }
+
         let framebuffer = pipelines.get_or_create_framebuffer(
             device,
             render_pass,
@@ -501,14 +510,22 @@ impl CommandContext {
             framebuffer_layers,
         )?;
 
-        let clear_values = attachments
+        let mut clear_values: Vec<vk::ClearValue> = color_uses
             .iter()
             .map(|_| vk::ClearValue {
                 color: vk::ClearColorValue {
                     float32: [0.05, 0.07, 0.10, 1.0],
                 },
             })
-            .collect::<Vec<_>>();
+            .collect();
+        if depth_use.is_some() {
+            clear_values.push(vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            });
+        }
         let render_area = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent: vk::Extent2D {
