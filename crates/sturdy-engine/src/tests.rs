@@ -181,6 +181,391 @@ fn shader_pass_intent_rejects_incompatible_reflected_image_usage() {
 }
 
 #[test]
+fn shader_pass_intent_rejects_incompatible_reflected_buffer_usage() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let program = ComputeProgram::load(
+        &engine,
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sturdy-engine-testbed/shaders/testbed_compute.slang"),
+    )
+    .unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let target = frame
+        .image(
+            "compute_target",
+            ImageDesc {
+                usage: ImageUsage::STORAGE,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+    let bad_buffer = engine
+        .create_buffer(BufferDesc {
+            size: 64,
+            usage: BufferUsage::UNIFORM,
+        })
+        .unwrap();
+
+    frame
+        .shader_pass("compute-buffer-usage")
+        .target(&target)
+        .buffer("output_buffer", &bad_buffer)
+        .compute(&program, [1, 1, 1])
+        .unwrap();
+
+    let err = frame
+        .flush()
+        .expect_err("flush should reject storage buffer without storage usage");
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(
+        err.to_string().contains("output_buffer"),
+        "diagnostic should name the reflected buffer, got {err}"
+    );
+}
+
+#[test]
+fn shader_pass_intent_rejects_missing_reflected_buffer() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let program = ComputeProgram::load(
+        &engine,
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sturdy-engine-testbed/shaders/testbed_compute.slang"),
+    )
+    .unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let target = frame
+        .image(
+            "compute_target",
+            ImageDesc {
+                usage: ImageUsage::STORAGE,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+
+    frame
+        .shader_pass("compute-missing-buffer")
+        .target(&target)
+        .compute(&program, [1, 1, 1])
+        .unwrap();
+
+    let err = frame
+        .flush()
+        .expect_err("flush should reject missing reflected storage buffer");
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(
+        err.to_string().contains("output_buffer"),
+        "diagnostic should name the missing reflected buffer, got {err}"
+    );
+}
+
+#[test]
+fn shader_pass_intent_validate_reports_reflected_resource_errors_before_flush() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let compute = ComputeProgram::load(
+        &engine,
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sturdy-engine-testbed/shaders/testbed_compute.slang"),
+    )
+    .unwrap();
+    let fullscreen = ShaderProgram::passthrough(&engine).unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let bad_source = frame
+        .image(
+            "bad_source",
+            ImageDesc {
+                usage: ImageUsage::RENDER_TARGET,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+    let fullscreen_target = frame
+        .image(
+            "fullscreen_target",
+            ImageDesc {
+                usage: ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+    let compute_target = frame
+        .image(
+            "compute_target",
+            ImageDesc {
+                usage: ImageUsage::STORAGE,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+
+    frame
+        .shader_pass("validate-image-reflection")
+        .target(&fullscreen_target)
+        .image("source", &bad_source)
+        .fullscreen(&fullscreen)
+        .unwrap();
+    frame
+        .shader_pass("validate-buffer-reflection")
+        .target(&compute_target)
+        .compute(&compute, [1, 1, 1])
+        .unwrap();
+
+    let diagnostics = frame.validate();
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.level == DiagnosticLevel::Error
+                && diagnostic.message.contains("source")
+        }),
+        "validate should report sampled image usage errors, got {:?}",
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.level == DiagnosticLevel::Error
+                && diagnostic.message.contains("output_buffer")
+        }),
+        "validate should report missing reflected buffers, got {:?}",
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shader_pass_intent_validate_warns_when_push_constants_declared_but_not_provided() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let program = ShaderProgram::from_inline_fragment(
+        &engine,
+        "struct Pc { float brightness; }; float4 main(uniform Pc pc) : SV_TARGET { return float4(pc.brightness, 0.0, 0.0, 1.0); }",
+    )
+    .unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let target = frame
+        .image(
+            "target",
+            ImageDesc {
+                usage: ImageUsage::RENDER_TARGET,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+
+    frame
+        .shader_pass("push-const-pass")
+        .target(&target)
+        .fullscreen(&program)
+        .unwrap();
+
+    let diagnostics = frame.validate();
+    assert!(
+        diagnostics.iter().any(|d| {
+            d.level == DiagnosticLevel::Warning && d.message.contains("push-const-pass")
+        }),
+        "validate should warn about missing push constants, got {:?}",
+        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shader_pass_intent_rejects_fullscreen_target_without_render_target_usage() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let program = ShaderProgram::passthrough(&engine).unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let bad_target = frame
+        .image(
+            "bad_target",
+            ImageDesc {
+                usage: ImageUsage::SAMPLED,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+
+    let err = frame
+        .shader_pass("bad-fullscreen")
+        .target(&bad_target)
+        .fullscreen(&program)
+        .expect_err("fullscreen should reject target without RENDER_TARGET usage");
+
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(
+        err.to_string().contains("bad_target"),
+        "error should name the target, got {err}"
+    );
+}
+
+#[test]
+fn shader_pass_intent_rejects_compute_target_without_storage_usage() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let program = ComputeProgram::load(
+        &engine,
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sturdy-engine-testbed/shaders/testbed_compute.slang"),
+    )
+    .unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let bad_target = frame
+        .image(
+            "bad_target",
+            ImageDesc {
+                usage: ImageUsage::RENDER_TARGET,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+
+    let err = frame
+        .shader_pass("bad-compute")
+        .target(&bad_target)
+        .compute(&program, [1, 1, 1])
+        .expect_err("compute should reject target without STORAGE usage");
+
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(
+        err.to_string().contains("bad_target"),
+        "error should name the target, got {err}"
+    );
+}
+
+#[test]
+fn load_slang_source_fragment_entry_creates_fullscreen_program() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let program = engine
+        .load_slang_source(
+            ShaderName::new("test/constant-red"),
+            "float4 main() : SV_TARGET { return float4(1.0, 0.0, 0.0, 1.0); }",
+            SlangEntryPoints::fragment("main"),
+        )
+        .unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let target = frame
+        .image(
+            "target",
+            ImageDesc {
+                usage: ImageUsage::RENDER_TARGET,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+    frame
+        .shader_pass("red-pass")
+        .target(&target)
+        .fullscreen(&program)
+        .unwrap();
+}
+
+#[test]
+fn load_slang_source_includes_shader_name_in_compile_errors() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let result = engine.load_slang_source(
+        ShaderName::new("test/broken-shader"),
+        "this is not valid slang source;;;;;",
+        SlangEntryPoints::fragment("main"),
+    );
+    let err = match result {
+        Ok(_) => panic!("compilation of invalid source should fail"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("test/broken-shader"),
+        "error should include shader name, got: {err}"
+    );
+}
+
+#[test]
+fn begin_frame_for_surface_returns_frame_and_swapchain_image() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let surface = engine
+        .create_surface(NativeSurfaceDesc::new(
+            raw_window_handle::RawDisplayHandle::Xlib(
+                raw_window_handle::XlibDisplayHandle::new(None, 0),
+            ),
+            raw_window_handle::RawWindowHandle::Xlib(
+                raw_window_handle::XlibWindowHandle::new(0),
+            ),
+            SurfaceSize {
+                width: 64,
+                height: 32,
+            },
+        ))
+        .unwrap();
+
+    let result = engine.begin_frame_for_surface(&surface);
+    // Null backend surfaces don't support image acquire, so this either succeeds
+    // (returning frame + swapchain) or fails with Unsupported — both are valid.
+    match result {
+        Ok((frame, swapchain)) => {
+            assert_eq!(swapchain.name(), "swapchain");
+            // Drop frame — should auto-flush and auto-present without panicking.
+            drop(frame);
+        }
+        Err(Error::Unsupported(_)) => {
+            // Null backend does not support swapchain acquire — expected on headless.
+        }
+        Err(e) => panic!("unexpected error from begin_frame_for_surface: {e}"),
+    }
+}
+
+#[test]
+fn render_frame_auto_flushes_without_explicit_flush_call() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let program = ShaderProgram::passthrough(&engine).unwrap();
+
+    // Create frame, record a pass, then drop without calling flush().
+    // The Drop impl should auto-flush and not panic.
+    let frame = engine.begin_render_frame().unwrap();
+    let target = frame
+        .image(
+            "target",
+            ImageDesc {
+                usage: ImageUsage::RENDER_TARGET,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+    frame
+        .shader_pass("auto-flush-test")
+        .target(&target)
+        .fullscreen(&program)
+        .unwrap();
+    drop(frame);
+}
+
+#[test]
+fn app_runtime_frame_auto_presents_on_drop() {
+    use crate::*;
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let surface = engine
+        .create_surface(NativeSurfaceDesc::new(
+            raw_window_handle::RawDisplayHandle::Xlib(
+                raw_window_handle::XlibDisplayHandle::new(None, 0),
+            ),
+            raw_window_handle::RawWindowHandle::Xlib(
+                raw_window_handle::XlibWindowHandle::new(0),
+            ),
+            SurfaceSize {
+                width: 64,
+                height: 32,
+            },
+        ))
+        .unwrap();
+    let mut runtime = AppRuntime::new(engine, surface);
+
+    // acquire_frame may fail on the null backend if swapchain acquire is unsupported.
+    let frame = match runtime.acquire_frame() {
+        Ok(frame) => frame,
+        Err(Error::Unsupported(_)) => return,
+        Err(e) => panic!("unexpected error: {e}"),
+    };
+    // Drop without calling finish_and_present — should auto-present.
+    drop(frame);
+}
+
+#[test]
 fn anti_aliasing_pass_constructs_builtin_shader() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     AntiAliasingPass::new(&engine).unwrap();

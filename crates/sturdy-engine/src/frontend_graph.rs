@@ -592,6 +592,15 @@ struct RenderFrameInner {
     declaration_index: u32,
     swapchain_slot: u64,
     flushed: bool,
+    /// Set when this frame has been presented (either via auto-present or explicit call).
+    /// Prevents the `Drop` impl from double-presenting.
+    presented: bool,
+    /// If set, `Drop` will call `device.present_surface(handle)` automatically after flushing.
+    /// Configured by `Engine::begin_frame_for_surface` so the caller doesn't have to.
+    auto_present: Option<(core::Device, core::SurfaceHandle)>,
+    /// Keeps a swapchain-acquired image alive for the duration of the frame.
+    /// Needed when `Engine::begin_frame_for_surface` acquires the image internally.
+    held_surface_image: Option<crate::SurfaceImage>,
     swapchain_extent: core::Extent3d,
 }
 
@@ -635,6 +644,9 @@ impl RenderFrame {
                 declaration_index: 0,
                 swapchain_slot,
                 flushed: false,
+                presented: false,
+                auto_present: None,
+                held_surface_image: None,
                 swapchain_extent: core::Extent3d::default(),
             })),
         })
@@ -642,6 +654,27 @@ impl RenderFrame {
 
     pub fn engine(&self) -> Engine {
         self.inner.borrow().engine.clone()
+    }
+
+    /// Configure this frame to call `device.present_surface(handle)` automatically
+    /// when it is dropped, after flushing all queued passes.
+    pub(crate) fn configure_auto_present(
+        &self,
+        device: core::Device,
+        handle: core::SurfaceHandle,
+    ) {
+        self.inner.borrow_mut().auto_present = Some((device, handle));
+    }
+
+    /// Mark this frame as already presented so `Drop` will not attempt a second present.
+    pub(crate) fn mark_presented(&self) {
+        self.inner.borrow_mut().presented = true;
+    }
+
+    /// Hold a surface image for the duration of this frame, ensuring it is not
+    /// destroyed before the frame is flushed and presented.
+    pub(crate) fn hold_surface_image(&self, image: crate::SurfaceImage) {
+        self.inner.borrow_mut().held_surface_image = Some(image);
     }
 
     pub fn image(&self, name: impl Into<String>, desc: ImageDesc) -> Result<GraphImage> {
@@ -1125,6 +1158,29 @@ impl RenderFrame {
                 }
             }
         }
+        for pending in &inner.pending_passes {
+            let Some(deferred) = &pending.deferred else {
+                continue;
+            };
+            diagnostics.extend(validate_deferred_reflected_resources(
+                &pending.desc.name,
+                deferred,
+                &inner.images_by_name,
+                &inner.buffers_by_name,
+            ));
+            if deferred.reflection.layout.push_constants_bytes > 0
+                && pending.desc.push_constants.is_none()
+            {
+                diagnostics.push(GraphDiagnostic {
+                    level: DiagnosticLevel::Warning,
+                    message: format!(
+                        "pass '{}' shader declares {} push constant bytes but no push constants were provided",
+                        pending.desc.name,
+                        deferred.reflection.layout.push_constants_bytes,
+                    ),
+                });
+            }
+        }
 
         diagnostics
     }
@@ -1441,11 +1497,18 @@ impl Drop for RenderFrame {
             return;
         }
         let mut inner = self.inner.borrow_mut();
-        if inner.flushed {
+        if inner.presented {
             return;
         }
-        let _ = submit_pending_passes(&mut inner);
-        let _ = inner.frame.flush();
+        if !inner.flushed {
+            let _ = submit_pending_passes(&mut inner);
+            let _ = inner.frame.flush();
+            inner.flushed = true;
+        }
+        if let Some((ref device, handle)) = inner.auto_present {
+            let _ = device.present_surface(handle);
+            inner.presented = true;
+        }
     }
 }
 
@@ -2215,6 +2278,7 @@ fn record_fullscreen_shader_pass(
     target_subresource: SubresourceRange,
     explicit: ExplicitPassResources,
 ) -> Result<()> {
+    validate_pass_target_usage(&target.name, target.desc, crate::ImageUsage::RENDER_TARGET)?;
     let mut inner = frame.borrow_mut();
     let declaration_index = inner.declaration_index;
     inner.declaration_index = inner.declaration_index.saturating_add(1);
@@ -2313,6 +2377,7 @@ fn record_compute_shader_pass(
     groups: [u32; 3],
     explicit: ExplicitPassResources,
 ) -> Result<()> {
+    validate_pass_target_usage(&target.name, target.desc, crate::ImageUsage::STORAGE)?;
     let mut inner = frame.borrow_mut();
     let declaration_index = inner.declaration_index;
     inner.declaration_index = inner.declaration_index.saturating_add(1);
@@ -2649,6 +2714,13 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
                     subresource: record.subresource,
                 });
             }
+            let (buffer_reads, buffer_writes) = reflected_buffer_uses(
+                &deferred.reflection,
+                &inner.buffers_by_name,
+                &deferred.eager_buffers,
+            )?;
+            append_unique_buffer_uses(&mut desc.buffer_reads, buffer_reads);
+            append_unique_buffer_uses(&mut desc.buffer_writes, buffer_writes);
 
             // Build the bind group now that all images are known.
             let bind_groups = build_reflected_bind_group(
@@ -3018,6 +3090,11 @@ fn build_reflected_bind_group(
                         .get(&binding.path)
                         .or_else(|| buffers_by_name.get(&binding.path))
                     {
+                        let (_, desc) = eager_buffers
+                            .get(&binding.path)
+                            .or_else(|| buffers_by_name.get(&binding.path))
+                            .expect("buffer desc present with buffer handle");
+                        validate_reflected_buffer_usage(&binding.path, binding.kind, *desc)?;
                         entries.push(BindGroupEntry {
                             path: binding.path.clone(),
                             resource: ResourceBinding::Buffer(*handle),
@@ -3052,6 +3129,16 @@ fn build_reflected_bind_group(
     Ok(vec![bind_group])
 }
 
+fn validate_pass_target_usage(name: &str, desc: ImageDesc, required: crate::ImageUsage) -> Result<()> {
+    if desc.usage.contains(required) {
+        return Ok(());
+    }
+    Err(Error::InvalidInput(format!(
+        "pass target '{name}' requires {required:?} but image was created with {:?}",
+        desc.usage
+    )))
+}
+
 fn validate_reflected_image_usage(path: &str, kind: BindingKind, desc: ImageDesc) -> Result<()> {
     let required = match kind {
         BindingKind::SampledImage => crate::ImageUsage::SAMPLED,
@@ -3065,6 +3152,185 @@ fn validate_reflected_image_usage(path: &str, kind: BindingKind, desc: ImageDesc
         "shader parameter '{path}' reflected as {kind:?}, but bound image usage {:?} does not include {:?}",
         desc.usage, required
     )))
+}
+
+fn validate_reflected_buffer_usage(path: &str, kind: BindingKind, desc: BufferDesc) -> Result<()> {
+    let required = match kind {
+        BindingKind::UniformBuffer => BufferUsage::UNIFORM,
+        BindingKind::StorageBuffer => BufferUsage::STORAGE,
+        _ => return Ok(()),
+    };
+    if desc.usage.contains(required) {
+        return Ok(());
+    }
+    Err(Error::InvalidInput(format!(
+        "shader parameter '{path}' reflected as {kind:?}, but bound buffer usage {:?} does not include {:?}",
+        desc.usage, required
+    )))
+}
+
+fn validate_deferred_reflected_resources(
+    pass_name: &str,
+    deferred: &DeferredPassResolve,
+    images_by_name: &HashMap<String, GraphImageRecord>,
+    buffers_by_name: &HashMap<String, (core::BufferHandle, BufferDesc)>,
+) -> Vec<GraphDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let image_desc_for = |binding: ImageBinding| -> Option<ImageDesc> {
+        images_by_name
+            .values()
+            .find(|record| record.handle == binding.handle)
+            .map(|record| record.desc)
+    };
+    let image_desc_for_output = |handle: ImageHandle| -> Option<ImageDesc> {
+        images_by_name
+            .values()
+            .find(|record| record.handle == handle)
+            .map(|record| record.desc)
+    };
+
+    for parameter in &deferred.reflection.parameters {
+        let crate::ShaderParameterKind::Resource(kind) = parameter.kind else {
+            continue;
+        };
+        match kind {
+            BindingKind::SampledImage | BindingKind::StorageImage => {
+                let binding = deferred
+                    .eager_bindings
+                    .get(&parameter.name)
+                    .copied()
+                    .or_else(|| {
+                        images_by_name
+                            .get(&parameter.name)
+                            .map(|record| ImageBinding {
+                                handle: record.handle,
+                                subresource: record.subresource,
+                            })
+                    });
+                let desc = binding.and_then(image_desc_for).or_else(|| {
+                    deferred.storage_output.as_ref().and_then(|(name, handle)| {
+                        (name == &parameter.name)
+                            .then_some(*handle)
+                            .and_then(image_desc_for_output)
+                    })
+                });
+                let Some(desc) = desc else {
+                    diagnostics.push(GraphDiagnostic {
+                        level: DiagnosticLevel::Error,
+                        message: format!(
+                            "pass '{pass_name}' requires reflected image '{}' but no image with that name was bound",
+                            parameter.name
+                        ),
+                    });
+                    continue;
+                };
+                if let Err(error) = validate_reflected_image_usage(&parameter.name, kind, desc) {
+                    diagnostics.push(GraphDiagnostic {
+                        level: DiagnosticLevel::Error,
+                        message: format!("pass '{pass_name}': {error}"),
+                    });
+                }
+            }
+            BindingKind::UniformBuffer | BindingKind::StorageBuffer => {
+                let desc = deferred
+                    .eager_buffers
+                    .get(&parameter.name)
+                    .or_else(|| buffers_by_name.get(&parameter.name))
+                    .map(|(_, desc)| *desc);
+                let Some(desc) = desc else {
+                    diagnostics.push(GraphDiagnostic {
+                        level: DiagnosticLevel::Error,
+                        message: format!(
+                            "pass '{pass_name}' requires reflected buffer '{}' but no buffer with that name was bound",
+                            parameter.name
+                        ),
+                    });
+                    continue;
+                };
+                if let Err(error) = validate_reflected_buffer_usage(&parameter.name, kind, desc) {
+                    diagnostics.push(GraphDiagnostic {
+                        level: DiagnosticLevel::Error,
+                        message: format!("pass '{pass_name}': {error}"),
+                    });
+                }
+            }
+            BindingKind::Sampler | BindingKind::AccelerationStructure => {}
+        }
+    }
+    diagnostics
+}
+
+fn reflected_buffer_uses(
+    reflection: &ShaderReflection,
+    buffers_by_name: &HashMap<String, (core::BufferHandle, BufferDesc)>,
+    eager_buffers: &HashMap<String, (core::BufferHandle, BufferDesc)>,
+) -> Result<(Vec<crate::BufferUse>, Vec<crate::BufferUse>)> {
+    let mut reads = Vec::new();
+    let mut writes = Vec::new();
+    for parameter in &reflection.parameters {
+        let crate::ShaderParameterKind::Resource(kind) = parameter.kind else {
+            continue;
+        };
+        if !matches!(
+            kind,
+            BindingKind::UniformBuffer | BindingKind::StorageBuffer
+        ) {
+            continue;
+        }
+        let Some((handle, desc)) = eager_buffers
+            .get(&parameter.name)
+            .or_else(|| buffers_by_name.get(&parameter.name))
+            .copied()
+        else {
+            return Err(Error::InvalidInput(format!(
+                "shader reflection requires buffer '{}', but no buffer with that name was bound",
+                parameter.name
+            )));
+        };
+        validate_reflected_buffer_usage(&parameter.name, kind, desc)?;
+        let read_state = match kind {
+            BindingKind::UniformBuffer => RgState::UniformRead,
+            BindingKind::StorageBuffer => RgState::ShaderRead,
+            _ => RgState::ShaderRead,
+        };
+        let use_ = crate::BufferUse {
+            buffer: handle,
+            access: Access::Read,
+            state: read_state,
+            offset: 0,
+            size: desc.size,
+        };
+        match parameter.access {
+            crate::ShaderResourceAccess::Read => reads.push(use_),
+            crate::ShaderResourceAccess::Write => writes.push(crate::BufferUse {
+                access: Access::Write,
+                state: RgState::ShaderWrite,
+                ..use_
+            }),
+            crate::ShaderResourceAccess::ReadWrite => {
+                reads.push(use_);
+                writes.push(crate::BufferUse {
+                    access: Access::Write,
+                    state: RgState::ShaderWrite,
+                    ..use_
+                });
+            }
+        }
+    }
+    Ok((reads, writes))
+}
+
+fn append_unique_buffer_uses(target: &mut Vec<crate::BufferUse>, uses: Vec<crate::BufferUse>) {
+    for use_ in uses {
+        if !target.iter().any(|existing| {
+            existing.buffer == use_.buffer
+                && existing.offset == use_.offset
+                && existing.size == use_.size
+                && existing.access == use_.access
+        }) {
+            target.push(use_);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -260,6 +260,7 @@ impl AppRuntime {
             runtime: self,
             surface_image,
             render_frame,
+            finished: false,
         })
     }
 
@@ -321,6 +322,9 @@ pub struct AppRuntimeFrame<'a> {
     runtime: &'a mut AppRuntime,
     surface_image: SurfaceImage,
     render_frame: RenderFrame,
+    /// Set to `true` after `finish_and_present` completes to prevent the `Drop`
+    /// impl from double-presenting when the user calls it explicitly.
+    finished: bool,
 }
 
 impl<'a> AppRuntimeFrame<'a> {
@@ -393,23 +397,26 @@ impl<'a> AppRuntimeFrame<'a> {
         )
     }
 
-    /// Flush, wait, and present through the runtime-owned surface.
+    /// Flush and present through the runtime-owned surface.
     ///
-    /// Records CPU-measured frame time into `RuntimeDiagnostics.timings` after presenting.
+    /// Submits all queued GPU work and presents to the display. The CPU does not
+    /// wait for the GPU to finish rendering — synchronisation is handled by the
+    /// GPU's render-complete semaphore. The frames-in-flight fence is waited at
+    /// the start of the *next* frame's submission, enabling CPU/GPU overlap.
+    ///
+    /// Records CPU-measured frame time into `RuntimeDiagnostics.timings`.
     pub fn finish_and_present(&mut self) -> Result<()> {
+        self.finished = true;
         let flush_report = self
             .render_frame
             .flush_with_reason(crate::FrameSyncReason::FrameBoundaryPresent)?;
-        let wait_report = self
-            .render_frame
-            .wait_with_reason(crate::FrameSyncReason::FrameBoundaryPresent)?;
         self.runtime.surface.present()?;
+        self.render_frame.mark_presented();
         self.runtime.controller.update_diagnostics(|d| {
             d.frame_sync = Some(format!(
-                "reason={:?} submitted={} waited={} presented=true submission={:?}",
+                "reason={:?} submitted={} waited=false presented=true submission={:?}",
                 flush_report.reason,
                 flush_report.submitted,
-                wait_report.waited,
                 flush_report.submission
             ));
         });
@@ -421,6 +428,14 @@ impl<'a> AppRuntimeFrame<'a> {
             });
         }
         Ok(())
+    }
+}
+
+impl Drop for AppRuntimeFrame<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.finish_and_present();
+        }
     }
 }
 

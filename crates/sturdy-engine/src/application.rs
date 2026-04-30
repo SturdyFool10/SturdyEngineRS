@@ -858,22 +858,21 @@ impl<'a> ShellFrame<'a> {
 
     /// Finish rendering and present to the surface.
     ///
-    /// This is a convenience method that calls `flush()`, `wait()`, and
-    /// `surface.present()` in sequence.
+    /// Flushes queued passes and presents to the display. The CPU does not wait
+    /// for GPU completion — synchronisation is handled by the GPU's render-complete
+    /// semaphore. The frames-in-flight fence is waited at the start of the next
+    /// frame's submission, enabling CPU/GPU overlap.
     pub fn finish_and_present(&mut self, surface: &Surface) -> EngineResult<()> {
         let flush_report = self
             .inner
             .flush_with_reason(crate::FrameSyncReason::FrameBoundaryPresent)?;
-        let wait_report = self
-            .inner
-            .wait_with_reason(crate::FrameSyncReason::FrameBoundaryPresent)?;
         surface.present()?;
+        self.inner.mark_presented();
         self.controller.update_diagnostics(|diagnostics| {
             diagnostics.frame_sync = Some(format!(
-                "reason={:?} submitted={} waited={} presented=true submission={:?}",
+                "reason={:?} submitted={} waited=false presented=true submission={:?}",
                 flush_report.reason,
                 flush_report.submitted,
-                wait_report.waited,
                 flush_report.submission
             ));
         });
@@ -1518,11 +1517,14 @@ where
                     std::process::exit(1);
                 }
 
-                // Present
+                // Present — explicit call so errors surface here rather than in Drop.
                 if let Err(e) = runtime_frame.finish_and_present() {
                     eprintln!("present failed: {e:?}");
                     std::process::exit(1);
                 }
+                // Drop the frame explicitly to release the `&mut AppRuntime` borrow
+                // before the subsequent `self` accesses below.
+                drop(runtime_frame);
 
                 if let Some(window) = self.window_context_for_handle_mut(window_handle) {
                     window.state_mut().dirty = false;

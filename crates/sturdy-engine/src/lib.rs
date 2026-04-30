@@ -385,6 +385,25 @@ impl Engine {
         RenderFrame::new(self.clone(), surface_image.slot)
     }
 
+    /// Acquire the next swapchain image and begin a render frame tied to it.
+    ///
+    /// The returned frame is configured for zero-wait presentation: when the frame
+    /// is dropped (or `finish_and_present()` is called), it flushes all queued GPU
+    /// work and presents without a CPU fence wait. The fence is waited at the start
+    /// of the *next* frame's submission, allowing CPU/GPU overlap across frames.
+    ///
+    /// Returns the frame and the registered swapchain [`GraphImage`] ready for use
+    /// as a render target.
+    pub fn begin_frame_for_surface(&self, surface: &Surface) -> Result<(RenderFrame, GraphImage)> {
+        let surface_image = surface.acquire_image()?;
+        let frame = self.begin_render_frame_for(&surface_image)?;
+        let (device, handle) = surface.auto_present_info();
+        frame.configure_auto_present(device, handle);
+        let swapchain = frame.swapchain_image(&surface_image)?;
+        frame.hold_surface_image(surface_image);
+        Ok((frame, swapchain))
+    }
+
     pub(crate) fn cached_graph_image(
         &self,
         key: GraphImageCacheKey,
@@ -839,6 +858,10 @@ impl Surface {
 
     pub fn present(&self) -> Result<()> {
         self.device.present_surface(self.handle)
+    }
+
+    pub(crate) fn auto_present_info(&self) -> (core::Device, core::SurfaceHandle) {
+        (self.device.clone(), self.handle)
     }
 }
 
