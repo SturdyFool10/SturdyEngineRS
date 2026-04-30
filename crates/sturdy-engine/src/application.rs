@@ -57,16 +57,16 @@ use sturdy_engine_core::SurfaceSize;
 
 use crate::{
     AntiAliasingMode, AntiAliasingPass, AppRuntime, BloomConfig, BloomPass, DebugImageRegistry,
-    DefaultSceneTargetConfig, DiagnosticLevel, Engine, FrameTime, GraphImage, KeyInput,
-    KeyModifiers, MotionVectorDebugPass, NativeWindowAppearanceApplyReport,
-    NativeWindowAppearanceStatus, Result as EngineResult, RuntimeApplyPath, RuntimeApplyReport,
-    RuntimeChangeResult, RuntimeController, RuntimeDiagnostics, RuntimeGraphDiagnostics,
-    RuntimeSettingChange, RuntimeSettingId, RuntimeSettingKey, RuntimeWindowDiagnostics,
-    ScreenshotCapture, ScreenshotExportReport, ShaderProgram, Surface, SurfaceHdrPreference,
-    SurfaceImage, SurfaceTransparency, WindowAppearance, WindowAppearancePreset, WindowBackdrop,
-    WindowCornerStyle, WindowHandle, WindowMaterialKind, WindowMode, WindowRegistry,
-    WindowTransparencyDesc, appearance_wants_native_blur,
-    apply_native_window_appearance_report_for_window,
+    DefaultSceneTargetConfig, DiagnosticLevel, Engine, FrameTime, GamepadAxis, GamepadButton,
+    GamepadId, GraphImage, InputHub, KeyInput, KeyModifiers, MotionVectorDebugPass,
+    NativeWindowAppearanceApplyReport, NativeWindowAppearanceStatus, Result as EngineResult,
+    RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult, RuntimeController,
+    RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimeSettingChange, RuntimeSettingId,
+    RuntimeSettingKey, RuntimeWindowDiagnostics, ScreenshotCapture, ScreenshotExportReport,
+    ShaderProgram, Surface, SurfaceHdrPreference, SurfaceImage, SurfaceTransparency,
+    WindowAppearance, WindowAppearancePreset, WindowBackdrop, WindowCornerStyle, WindowHandle,
+    WindowMaterialKind, WindowMode, WindowRegistry, WindowTransparencyDesc,
+    appearance_wants_native_blur, apply_native_window_appearance_report_for_window,
 };
 
 #[cfg(target_os = "macos")]
@@ -1051,6 +1051,7 @@ where
             winit_windows,
             primary_window,
             app_state,
+            gamepad_backend: GamepadBackend::new(),
             modifiers: KeyModifiers::default(),
             applied_settings_revision: 0,
             started_at: Instant::now(),
@@ -1067,6 +1068,7 @@ struct ShellApp<App: EngineApp> {
     winit_windows: HashMap<winit::window::WindowId, WindowHandle>,
     primary_window: WindowHandle,
     app_state: App,
+    gamepad_backend: GamepadBackend,
     modifiers: KeyModifiers,
     applied_settings_revision: u64,
     #[allow(dead_code)]
@@ -1084,6 +1086,7 @@ where
         _event_loop: &winit::event_loop::ActiveEventLoop,
         _cause: winit::event::StartCause,
     ) {
+        self.poll_gamepads();
         self.publish_window_diagnostics();
         if let Err(e) = self.apply_pending_runtime_settings() {
             eprintln!("runtime settings apply failed: {e:?}");
@@ -1109,7 +1112,109 @@ where
     }
 
     fn about_to_wait(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
+        self.poll_gamepads();
         self.request_redraw_for_window(self.primary_window);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<App: EngineApp> ShellApp<App>
+where
+    App::Error: std::fmt::Debug,
+{
+    fn poll_gamepads(&mut self) {
+        if let Some(hub) = self.app_state.input_hub() {
+            self.gamepad_backend.poll(hub);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct GamepadBackend {
+    gilrs: Option<gilrs::Gilrs>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl GamepadBackend {
+    fn new() -> Self {
+        match gilrs::Gilrs::new() {
+            Ok(gilrs) => Self { gilrs: Some(gilrs) },
+            Err(gilrs::Error::NotImplemented(gilrs)) => Self { gilrs: Some(gilrs) },
+            Err(error) => {
+                eprintln!("gamepad backend disabled: {error}");
+                Self { gilrs: None }
+            }
+        }
+    }
+
+    fn poll(&mut self, hub: &mut InputHub) {
+        let Some(gilrs) = &mut self.gilrs else {
+            return;
+        };
+        while let Some(event) = gilrs.next_event() {
+            let gamepad = GamepadId(usize::from(event.id) as u32);
+            match event.event {
+                gilrs::EventType::ButtonPressed(button, _) => {
+                    hub.on_gamepad_button(gamepad, map_gilrs_button(button), true);
+                }
+                gilrs::EventType::ButtonReleased(button, _) => {
+                    hub.on_gamepad_button(gamepad, map_gilrs_button(button), false);
+                }
+                gilrs::EventType::ButtonChanged(button, value, _) => {
+                    hub.on_gamepad_button(gamepad, map_gilrs_button(button), value >= 0.5);
+                }
+                gilrs::EventType::AxisChanged(axis, value, _) => {
+                    if let Some(axis) = map_gilrs_axis(axis) {
+                        hub.on_gamepad_axis(gamepad, axis, value);
+                    }
+                }
+                gilrs::EventType::Disconnected => {
+                    hub.clear_gamepad(gamepad);
+                }
+                gilrs::EventType::Connected
+                | gilrs::EventType::ButtonRepeated(_, _)
+                | gilrs::EventType::Dropped
+                | gilrs::EventType::ForceFeedbackEffectCompleted => {}
+                _ => {}
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn map_gilrs_button(button: gilrs::Button) -> GamepadButton {
+    match button {
+        gilrs::Button::South => GamepadButton::South,
+        gilrs::Button::East => GamepadButton::East,
+        gilrs::Button::West => GamepadButton::West,
+        gilrs::Button::North => GamepadButton::North,
+        gilrs::Button::LeftTrigger => GamepadButton::LeftBumper,
+        gilrs::Button::RightTrigger => GamepadButton::RightBumper,
+        gilrs::Button::LeftTrigger2 => GamepadButton::LeftTrigger,
+        gilrs::Button::RightTrigger2 => GamepadButton::RightTrigger,
+        gilrs::Button::Select => GamepadButton::Select,
+        gilrs::Button::Start => GamepadButton::Start,
+        gilrs::Button::Mode => GamepadButton::Guide,
+        gilrs::Button::LeftThumb => GamepadButton::LeftStick,
+        gilrs::Button::RightThumb => GamepadButton::RightStick,
+        gilrs::Button::DPadUp => GamepadButton::DPadUp,
+        gilrs::Button::DPadDown => GamepadButton::DPadDown,
+        gilrs::Button::DPadLeft => GamepadButton::DPadLeft,
+        gilrs::Button::DPadRight => GamepadButton::DPadRight,
+        other => GamepadButton::Other(other as u16),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn map_gilrs_axis(axis: gilrs::Axis) -> Option<GamepadAxis> {
+    match axis {
+        gilrs::Axis::LeftStickX => Some(GamepadAxis::LeftStickX),
+        gilrs::Axis::LeftStickY => Some(GamepadAxis::LeftStickY),
+        gilrs::Axis::RightStickX => Some(GamepadAxis::RightStickX),
+        gilrs::Axis::RightStickY => Some(GamepadAxis::RightStickY),
+        gilrs::Axis::LeftZ => Some(GamepadAxis::LeftTrigger),
+        gilrs::Axis::RightZ => Some(GamepadAxis::RightTrigger),
+        gilrs::Axis::DPadX | gilrs::Axis::DPadY | gilrs::Axis::Unknown => None,
     }
 }
 

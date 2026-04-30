@@ -14,6 +14,7 @@ path = "src/lib.rs"
 bytemuck = "1.20"
 clay-ui = { path = "../clay-ui" }
 glam.workspace = true
+gilrs = { version = "0.11.1", optional = true }
 png = "0.17"
 raw-window-handle = "0.6"
 sturdy-engine-core = { path = "../sturdy-engine-core" }
@@ -24,4 +25,4 @@ winit = { version = "0.30", optional = true }
 
 [features]
 default = ["app-shell"]
-app-shell = ["winit"]
+app-shell = ["winit", "gilrs"]

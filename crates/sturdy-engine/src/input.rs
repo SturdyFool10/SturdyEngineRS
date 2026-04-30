@@ -795,12 +795,7 @@ impl InputHub {
     }
 
     /// Call from a gamepad backend when a button is pressed or released.
-    pub fn on_gamepad_button(
-        &mut self,
-        gamepad: GamepadId,
-        button: GamepadButton,
-        pressed: bool,
-    ) {
+    pub fn on_gamepad_button(&mut self, gamepad: GamepadId, button: GamepadButton, pressed: bool) {
         let key = (gamepad, button);
         if pressed {
             if self.held_gamepad_buttons.insert(key) {
@@ -817,7 +812,22 @@ impl InputHub {
 
     /// Call from a gamepad backend when an analog axis changes.
     pub fn on_gamepad_axis(&mut self, gamepad: GamepadId, axis: GamepadAxis, value: f32) {
-        self.gamepad_axes.insert((gamepad, axis), value.clamp(-1.0, 1.0));
+        self.gamepad_axes
+            .insert((gamepad, axis), value.clamp(-1.0, 1.0));
+    }
+
+    /// Clear all cached state for a disconnected gamepad.
+    pub fn clear_gamepad(&mut self, gamepad: GamepadId) {
+        self.held_gamepad_buttons.retain(|(id, _)| *id != gamepad);
+        self.gamepad_button_just_pressed
+            .retain(|(id, _)| *id != gamepad);
+        self.gamepad_button_just_released
+            .retain(|(id, _)| *id != gamepad);
+        self.pending_gamepad_button_pressed
+            .retain(|(id, _)| *id != gamepad);
+        self.pending_gamepad_button_released
+            .retain(|(id, _)| *id != gamepad);
+        self.gamepad_axes.retain(|(id, _), _| *id != gamepad);
     }
 
     /// Feed a gamepad button input through the same path as
@@ -887,8 +897,7 @@ impl InputHub {
         self.key_just_released = std::mem::take(&mut self.pending_key_released);
         self.mouse_button_just_pressed = std::mem::take(&mut self.pending_mouse_button_pressed);
         self.mouse_button_just_released = std::mem::take(&mut self.pending_mouse_button_released);
-        self.gamepad_button_just_pressed =
-            std::mem::take(&mut self.pending_gamepad_button_pressed);
+        self.gamepad_button_just_pressed = std::mem::take(&mut self.pending_gamepad_button_pressed);
         self.gamepad_button_just_released =
             std::mem::take(&mut self.pending_gamepad_button_released);
     }
@@ -1402,5 +1411,23 @@ mod tests {
 
         assert_eq!(hub.gamepad_axis(gamepad, GamepadAxis::LeftStickX), 0.5);
         assert_eq!(hub.gamepad_axis(gamepad, GamepadAxis::RightTrigger), 1.0);
+    }
+
+    #[test]
+    fn input_hub_clears_disconnected_gamepad_state() {
+        let mut hub = InputHub::new();
+        let gamepad = GamepadId(3);
+
+        hub.on_gamepad_button(gamepad, GamepadButton::East, true);
+        hub.on_gamepad_axis(gamepad, GamepadAxis::LeftStickY, -0.75);
+        hub.update(&clay_ui::LayoutTree::default());
+
+        assert!(hub.is_gamepad_button_pressed(gamepad, GamepadButton::East));
+        assert_eq!(hub.gamepad_axis(gamepad, GamepadAxis::LeftStickY), -0.75);
+
+        hub.clear_gamepad(gamepad);
+        assert!(!hub.is_gamepad_button_pressed(gamepad, GamepadButton::East));
+        assert!(!hub.is_gamepad_button_just_pressed(gamepad, GamepadButton::East));
+        assert_eq!(hub.gamepad_axis(gamepad, GamepadAxis::LeftStickY), 0.0);
     }
 }
