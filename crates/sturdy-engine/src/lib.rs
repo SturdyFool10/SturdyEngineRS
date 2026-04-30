@@ -9,6 +9,7 @@ use std::{
 };
 
 mod anti_aliasing_pass;
+mod scene;
 mod antialiasing;
 mod application;
 mod bind_group;
@@ -80,6 +81,10 @@ pub use input::{
     KeyModifier, KeyModifiers, KeyToken, Keybind, KeybindCapture,
 };
 pub use mesh::{Mesh, Vertex2d, Vertex3d};
+pub use scene::{
+    CameraConstants, CameraId, CameraOutput, InstanceData, MeshId, ObjectId, ObjectKind,
+    RenderTarget, Scene, SceneCamera,
+};
 pub use mesh_program::{MeshProgram, MeshProgramDesc, MeshVertexKind};
 pub use mip_pyramid::MipPyramid;
 pub use motion_vector_debug::MotionVectorDebugPass;
@@ -99,7 +104,7 @@ pub use runtime::{
     RuntimeWindowDiagnostics, SceneRenderContext, ShaderCompileError, UiContext, WindowMode,
 };
 pub use sampler_catalog::SamplerPreset;
-pub use screenshot::ScreenshotCapture;
+pub use screenshot::{ScreenshotCapture, ScreenshotExportReport};
 pub use shader_watcher::ShaderWatcher;
 pub use text_draw::{
     TextAtlasContentMode, TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput,

@@ -1,9 +1,9 @@
-use std::time::Instant;
+use std::{path::PathBuf, time::Instant};
 
 use sturdy_engine::{
     AntiAliasingConfig, AntiAliasingDial, AntiAliasingPass, BloomConfig, BloomPass,
     CpuProceduralTexture2d, DebugOverlay, DebugOverlayRenderer, DebugViewPicker, Engine, EngineApp,
-    Extent3d, Format, GpuProceduralTexture, HdrPipelineDesc, HdrPreference, ImageDesc,
+    Error, Extent3d, Format, GpuProceduralTexture, HdrPipelineDesc, HdrPreference, ImageDesc,
     ImageDimension, ImageUsage, MotionVectorLayer, MotionVectorSpace, ProceduralTextureRecipe,
     ProceduralTextureUpdatePolicy, Result as EngineResult, RuntimeController,
     RuntimeMotionVectorDesc, RuntimePostProcessDesc, RuntimeSettingDescriptor, RuntimeSettingId,
@@ -137,6 +137,7 @@ impl TonemapSettings {
             ToneMappingOp::Reinhard => self.reinhard_white = defaults.reinhard_white,
             ToneMappingOp::Hermite => self.hermite_contrast = defaults.hermite_contrast,
             ToneMappingOp::Linear => self.linear_white = defaults.linear_white,
+            ToneMappingOp::PbrNeutral | ToneMappingOp::AgX => {}
         }
     }
 
@@ -164,7 +165,10 @@ impl TonemapSettings {
         match tone_mapping {
             ToneMappingOp::Reinhard => self.reinhard_white = self.white_point,
             ToneMappingOp::Linear => self.linear_white = self.white_point,
-            ToneMappingOp::Aces | ToneMappingOp::Hermite => {}
+            ToneMappingOp::Aces
+            | ToneMappingOp::Hermite
+            | ToneMappingOp::PbrNeutral
+            | ToneMappingOp::AgX => {}
         }
     }
 }
@@ -281,6 +285,8 @@ struct Testbed {
     runtime_controller: Option<RuntimeController>,
     texture_resolution: TextureResolutionTier,
     show_graph_inspector: bool,
+    pending_debug_image_export: bool,
+    debug_image_export_index: u64,
     started_at: Instant,
     shader_watcher: ShaderWatcher,
 }
@@ -405,6 +411,8 @@ impl EngineApp for Testbed {
             runtime_controller: None,
             texture_resolution: TextureResolutionTier::Medium,
             show_graph_inspector: false,
+            pending_debug_image_export: false,
+            debug_image_export_index: 0,
             started_at: Instant::now(),
             shader_watcher,
         })
@@ -557,11 +565,19 @@ impl EngineApp for Testbed {
                     .selected_name(&runtime_controller)
                     .unwrap_or_else(|| "Off".to_string())
             ));
+            overlay_lines.push(format!(
+                "debug export: {}",
+                if self.pending_debug_image_export {
+                    "queued"
+                } else {
+                    "idle"
+                }
+            ));
             if self.show_graph_inspector {
                 overlay_lines.extend(shell_frame.runtime_graph_inspection_lines(10, 8));
             }
             overlay_lines.push(
-                "keys: [/]=tonemap .=aa R/U reset B/b bloom H hdr V motion O overlay I graph X transparency G effect N/M debug 1/2/3 tex"
+                "keys: [/]=tonemap .=aa R/U reset B/b bloom H hdr V motion O overlay I graph E export X transparency G effect N/M debug 1/2/3 tex"
                     .to_string(),
             );
             // Show any active shader compile errors (cleared automatically on successful hot reload).
@@ -582,6 +598,10 @@ impl EngineApp for Testbed {
             self.draw_hud(shell_frame, frame, target, ext.width, ext.height)
         })?;
         frame.present_image(&swapchain)?;
+        if self.pending_debug_image_export {
+            self.pending_debug_image_export = false;
+            self.export_selected_debug_image(shell_frame)?;
+        }
 
         // In debug builds, validate the recorded graph and print any diagnostics.
         #[cfg(debug_assertions)]
@@ -694,6 +714,9 @@ impl EngineApp for Testbed {
                     "hidden"
                 }
             );
+        } else if key == "E" || key == "e" {
+            self.pending_debug_image_export = true;
+            eprintln!("debug image export queued");
         } else if key == "X" || key == "x" {
             if let Some(controller) = runtime_controller.as_mut() {
                 let enabled = !controller
@@ -972,6 +995,47 @@ impl Testbed {
             .unwrap_or_default()
     }
 
+    fn export_selected_debug_image(&mut self, shell_frame: &ShellFrame<'_>) -> EngineResult<()> {
+        let controller = shell_frame.runtime_controller();
+        let Some(name) = self.debug_view_picker.selected_name(&controller) else {
+            eprintln!("debug image export skipped: debug view is Off");
+            return Ok(());
+        };
+        if !shell_frame
+            .debug_image_names()
+            .iter()
+            .any(|entry| entry == &name)
+        {
+            eprintln!("debug image export skipped: `{name}` is not available this frame");
+            return Ok(());
+        }
+
+        self.debug_image_export_index += 1;
+        let directory = PathBuf::from("debug-exports");
+        std::fs::create_dir_all(&directory).map_err(|error| {
+            Error::Unknown(format!(
+                "failed to create debug export directory {}: {error}",
+                directory.display()
+            ))
+        })?;
+        let path = directory.join(format!(
+            "{:04}-{}.png",
+            self.debug_image_export_index,
+            sanitize_debug_image_name(&name)
+        ));
+        let report = shell_frame.save_named_graph_image_png(&name, &path)?;
+        eprintln!(
+            "exported debug image `{name}` to {} ({}x{} {:?}, submitted={}, waited={})",
+            report.path.display(),
+            report.width,
+            report.height,
+            report.format,
+            report.flush.submitted,
+            report.wait.waited
+        );
+        Ok(())
+    }
+
     fn set_texture_resolution_setting(&mut self, tier: TextureResolutionTier) -> EngineResult<()> {
         if let Some(controller) = self.runtime_controller.as_mut() {
             controller
@@ -1115,7 +1179,9 @@ fn next_tone_mapping(op: ToneMappingOp) -> ToneMappingOp {
         ToneMappingOp::Aces => ToneMappingOp::Reinhard,
         ToneMappingOp::Reinhard => ToneMappingOp::Hermite,
         ToneMappingOp::Hermite => ToneMappingOp::Linear,
-        ToneMappingOp::Linear => ToneMappingOp::Aces,
+        ToneMappingOp::Linear => ToneMappingOp::PbrNeutral,
+        ToneMappingOp::PbrNeutral => ToneMappingOp::AgX,
+        ToneMappingOp::AgX => ToneMappingOp::Aces,
     }
 }
 
@@ -1125,6 +1191,8 @@ fn tone_mapping_id(op: ToneMappingOp) -> u32 {
         ToneMappingOp::Reinhard => 1,
         ToneMappingOp::Hermite => 2,
         ToneMappingOp::Linear => 3,
+        ToneMappingOp::PbrNeutral => 4,
+        ToneMappingOp::AgX => 5,
     }
 }
 
@@ -1134,6 +1202,8 @@ fn tone_mapping_label(op: ToneMappingOp) -> &'static str {
         ToneMappingOp::Reinhard => "Reinhard",
         ToneMappingOp::Hermite => "Hermite",
         ToneMappingOp::Linear => "Linear",
+        ToneMappingOp::PbrNeutral => "PBR Neutral",
+        ToneMappingOp::AgX => "AgX",
     }
 }
 
@@ -1143,6 +1213,8 @@ fn tone_mapping_setting_name(op: ToneMappingOp) -> &'static str {
         ToneMappingOp::Reinhard => "Reinhard",
         ToneMappingOp::Hermite => "Hermite",
         ToneMappingOp::Linear => "Linear",
+        ToneMappingOp::PbrNeutral => "PbrNeutral",
+        ToneMappingOp::AgX => "AgX",
     }
 }
 
@@ -1152,6 +1224,8 @@ fn parse_tone_mapping_setting(value: &str) -> Option<ToneMappingOp> {
         "Reinhard" => Some(ToneMappingOp::Reinhard),
         "Hermite" => Some(ToneMappingOp::Hermite),
         "Linear" => Some(ToneMappingOp::Linear),
+        "PbrNeutral" | "PBR Neutral" => Some(ToneMappingOp::PbrNeutral),
+        "AgX" | "agx" => Some(ToneMappingOp::AgX),
         _ => None,
     }
 }
@@ -1303,10 +1377,43 @@ fn shader_path(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+fn sanitize_debug_image_name(name: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "debug-image".to_string()
+    } else {
+        sanitized
+    }
+}
+
 fn main() {
     sturdy_engine::run::<Testbed>(
         WindowConfig::new("SturdyEngine HDR bloom testbed", 1280, 720)
             .with_resizable(true)
             .with_hdr(true),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_image_export_names_are_filesystem_friendly() {
+        assert_eq!(sanitize_debug_image_name("hdr_composite"), "hdr_composite");
+        assert_eq!(
+            sanitize_debug_image_name("motion/debug view"),
+            "motion_debug_view"
+        );
+        assert_eq!(sanitize_debug_image_name(""), "debug-image");
+    }
 }

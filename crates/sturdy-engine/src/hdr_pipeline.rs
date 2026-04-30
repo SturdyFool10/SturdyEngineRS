@@ -48,11 +48,20 @@ pub enum ToneMappingOp {
     /// Simple Reinhard tone mapping.
     Reinhard,
     /// Hermite spline tone mapping — smooth, perceptually-friendly curve with
-    /// no harsh clipping at highlights.  Commonly used in real-time HDR pipelines
-    /// where ACES is too aggressive.
+    /// no harsh clipping at highlights.
     Hermite,
     /// Pass-through: no tone mapping applied (for HDR displays).
     Linear,
+    /// Khronos PBR Neutral — identity below 0.76 nit, smooth highlight
+    /// compression above, subtle desaturation at peak. Designed to preserve
+    /// PBR material colours without shifting hue in the midtones.
+    /// Reference: <https://github.com/KhronosGroup/ToneMapping>
+    PbrNeutral,
+    /// AgX by Troy Sobotka (Blender default since 3.x). Transforms to a
+    /// log-normalised AgX working space, applies a per-channel sigmoid, then
+    /// maps back. Keeps saturated colours from clipping and avoids the
+    /// over-contrasty shoulder of ACES.
+    AgX,
 }
 
 /// Describes the HDR rendering pipeline configuration for a surface.

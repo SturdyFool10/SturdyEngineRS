@@ -41,7 +41,7 @@ impl CameraConstants {
 /// ```rust
 /// // At init:
 /// let mesh_id = scene.add_mesh(mesh, program);
-/// let obj_id  = scene.add_object(mesh_id, Mat4::IDENTITY, ObjectKind::Static);
+/// let obj_id  = scene.add_object(mesh_id, ObjectKind::Static);
 /// let crt_cam = scene.add_camera(SceneCamera::offscreen(view, proj, crt_target));
 ///
 /// // Each frame:
@@ -86,8 +86,14 @@ impl Scene {
         id
     }
 
-    /// Add an object instance. Returns an `ObjectId` for later transform updates.
-    pub fn add_object(&mut self, mesh_id: MeshId, transform: Mat4, kind: ObjectKind) -> ObjectId {
+    /// Add an object instance at the world origin. Returns an `ObjectId` for later
+    /// transform updates via [`set_transform`](Self::set_transform).
+    pub fn add_object(&mut self, mesh_id: MeshId, kind: ObjectKind) -> ObjectId {
+        self.add_object_at(mesh_id, Mat4::IDENTITY, kind)
+    }
+
+    /// Add an object instance with an explicit initial transform.
+    pub fn add_object_at(&mut self, mesh_id: MeshId, transform: Mat4, kind: ObjectKind) -> ObjectId {
         let id = ObjectId(self.next_object_id);
         self.next_object_id += 1;
         self.objects.push(SceneObject::new(mesh_id, transform, kind));

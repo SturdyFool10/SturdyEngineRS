@@ -710,9 +710,9 @@ If a roadmap item is still too large for one prompt, split it again until the pr
 - [ ] Add shader hot reload for Slang shaders with clear in-app compile errors.
 - [ ] Add asset hot reload for textures, meshes, and other common inputs.
 - [ ] Add stable debug/error reporting for missing or stale assets.
-- [ ] Add screenshot/export helpers.
+- [x] Add screenshot/export helpers.
 - [x] Add frame graph visualization / inspection UI.
-- [ ] Add image inspection for named graph resources.
+- [x] Add image inspection for named graph resources.
 - [ ] Add GPU timing and pass timing summaries.
 - [x] Add a one-file sample that opens a window, uses top-left pixel coordinates, draws a rect at each corner, and displays cursor position.
 

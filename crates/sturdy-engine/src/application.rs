@@ -61,10 +61,11 @@ use crate::{
     MotionVectorDebugPass, NativeWindowAppearanceApplyReport, NativeWindowAppearanceStatus,
     Result as EngineResult, RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult,
     RuntimeController, RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimeSettingChange,
-    RuntimeSettingId, RuntimeSettingKey, RuntimeWindowDiagnostics, ShaderProgram, Surface,
-    SurfaceHdrPreference, SurfaceImage, SurfaceTransparency, WindowAppearance,
-    WindowAppearancePreset, WindowBackdrop, WindowCornerStyle, WindowHandle, WindowMaterialKind,
-    WindowMode, WindowRegistry, WindowTransparencyDesc, appearance_wants_native_blur,
+    RuntimeSettingId, RuntimeSettingKey, RuntimeWindowDiagnostics, ScreenshotCapture,
+    ScreenshotExportReport, ShaderProgram, Surface, SurfaceHdrPreference, SurfaceImage,
+    SurfaceTransparency, WindowAppearance, WindowAppearancePreset, WindowBackdrop,
+    WindowCornerStyle, WindowHandle, WindowMaterialKind, WindowMode, WindowRegistry,
+    WindowTransparencyDesc, appearance_wants_native_blur,
     apply_native_window_appearance_report_for_window,
 };
 
@@ -714,6 +715,22 @@ impl<'a> ShellFrame<'a> {
         max_images: usize,
     ) -> Vec<String> {
         RuntimeController::graph_inspection_lines(&self.inner.describe(), max_passes, max_images)
+    }
+
+    /// Save a named graph image from this frame as a PNG.
+    ///
+    /// This is an explicit blocking screenshot/readback helper. It submits and
+    /// waits for the current render graph with `FrameSyncReason::ReadbackCompletion`.
+    pub fn save_named_graph_image_png(
+        &self,
+        name: &str,
+        path: impl AsRef<std::path::Path>,
+    ) -> EngineResult<ScreenshotExportReport> {
+        let image = self
+            .inner
+            .find_image_by_name(name)
+            .ok_or_else(|| crate::Error::InvalidInput(format!("graph image `{name}` not found")))?;
+        ScreenshotCapture::capture_render_frame_png(&self.inner.engine(), &self.inner, &image, path)
     }
 
     /// Publish per-frame runtime diagnostics gathered from the current render graph and shell state.

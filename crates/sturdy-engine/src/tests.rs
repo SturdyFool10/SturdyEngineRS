@@ -903,6 +903,30 @@ fn screenshot_readback_reports_explicit_blocking_reason() {
 }
 
 #[test]
+fn screenshot_capture_frame_png_reports_sync_and_writes_file() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let image = engine.create_image(small_image_desc()).unwrap();
+    let mut frame = engine.begin_frame().unwrap();
+    frame.import_image(&image).unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "sturdy-engine-screenshot-{}.png",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+
+    let report = ScreenshotCapture::capture_frame_png(&engine, &mut frame, &image, &path).unwrap();
+
+    assert_eq!(report.width, image.desc().extent.width);
+    assert_eq!(report.height, image.desc().extent.height);
+    assert_eq!(report.format, image.desc().format);
+    assert_eq!(report.flush.reason, FrameSyncReason::ReadbackCompletion);
+    assert_eq!(report.wait.reason, FrameSyncReason::ReadbackCompletion);
+    assert!(path.exists());
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn consecutive_flushes_succeed() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     for _ in 0..3 {

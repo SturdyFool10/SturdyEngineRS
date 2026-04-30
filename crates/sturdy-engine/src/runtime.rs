@@ -2399,7 +2399,7 @@ fn default_setting_entries(
             RuntimeSettingKey::ToneMappingOperator.apply_path(),
             "Aces",
         )
-        .with_options(text_options(&["Aces", "Reinhard", "Hermite", "Linear"])),
+        .with_options(text_options(&["Aces", "Reinhard", "Hermite", "Linear", "PbrNeutral", "AgX"])),
         RuntimeSettingDescriptor::new(
             RuntimeSettingKey::ToneMappingDial,
             "Tone Mapping Dial",

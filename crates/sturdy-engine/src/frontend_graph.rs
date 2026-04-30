@@ -10,13 +10,13 @@ use sturdy_engine_core as core;
 
 use crate::{
     Access, BindGroup, BindGroupDesc, BindGroupEntry, BindingKind, Buffer, BufferDesc, BufferUsage,
-    ColorTargetDesc, CullMode, DispatchDesc, DrawDesc, Engine, Error, Format, FrontFace,
-    GraphicsPipelineDesc, ImageDesc, ImageHandle, ImageRef, IndexBufferBinding, PassDesc, PassWork,
-    Pipeline, PipelineLayout, PrimitiveTopology, PushConstants, QueueType, RasterState,
-    ResolveImageDesc, ResourceBinding, Result, RgState, Shader, ShaderDesc, ShaderReflection,
-    ShaderSource, ShaderStage, StageMask, SubresourceRange, SurfaceImage, VertexAttributeDesc,
-    VertexBufferBinding, VertexBufferLayout, VertexFormat, VertexInputRate,
-    compute_program::ComputeProgram, mesh::Mesh, mesh_program::MeshProgram,
+    BufferUse, ColorTargetDesc, CopyImageToBufferDesc, CullMode, DispatchDesc, DrawDesc, Engine,
+    Error, Format, FrontFace, GraphicsPipelineDesc, ImageDesc, ImageHandle, ImageRef, ImageUse,
+    IndexBufferBinding, PassDesc, PassWork, Pipeline, PipelineLayout, PrimitiveTopology,
+    PushConstants, QueueType, RasterState, ResolveImageDesc, ResourceBinding, Result, RgState,
+    Shader, ShaderDesc, ShaderReflection, ShaderSource, ShaderStage, StageMask, SubresourceRange,
+    SurfaceImage, VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout, VertexFormat,
+    VertexInputRate, compute_program::ComputeProgram, mesh::Mesh, mesh_program::MeshProgram,
     sampler_catalog::SamplerPreset,
 };
 
@@ -567,6 +567,10 @@ impl RenderFrame {
                 swapchain_extent: core::Extent3d::default(),
             })),
         })
+    }
+
+    pub fn engine(&self) -> Engine {
+        self.inner.borrow().engine.clone()
     }
 
     pub fn image(&self, name: impl Into<String>, desc: ImageDesc) -> Result<GraphImage> {
@@ -1167,6 +1171,64 @@ impl RenderFrame {
                 writes: Vec::new(),
                 buffer_reads: Vec::new(),
                 buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            },
+            deferred: None,
+        });
+        Ok(())
+    }
+
+    /// Add a readback copy from a graph image into a CPU-readable buffer.
+    pub fn copy_image_to_buffer(
+        &self,
+        name: impl Into<String>,
+        image: &GraphImage,
+        buffer: &Buffer,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        inner
+            .frame
+            .inner
+            .graph_mut(|g| g.import_buffer(buffer.handle(), buffer.desc()))?;
+        let image_handle: ImageHandle = image.handle();
+        let buffer_handle: core::BufferHandle = buffer.handle();
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                name: name.into(),
+                queue: QueueType::Graphics,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                work: PassWork::CopyImageToBuffer(CopyImageToBufferDesc {
+                    image: image_handle,
+                    buffer: buffer_handle,
+                    buffer_offset: 0,
+                    mip_level: 0,
+                    base_layer: 0,
+                    layer_count: 1,
+                    width,
+                    height,
+                    depth: 1,
+                }),
+                reads: vec![ImageUse {
+                    image: image_handle,
+                    access: Access::Read,
+                    state: RgState::CopySrc,
+                    subresource: single_subresource(),
+                }],
+                writes: Vec::new(),
+                buffer_reads: Vec::new(),
+                buffer_writes: vec![BufferUse {
+                    buffer: buffer_handle,
+                    access: Access::Write,
+                    state: RgState::CopyDst,
+                    offset: 0,
+                    size: buffer.desc().size,
+                }],
                 clear_colors: Vec::new(),
                 clear_depth: None,
             },

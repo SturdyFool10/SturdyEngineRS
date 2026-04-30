@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sturdy_engine_core::{
     Access, BufferHandle, BufferUse, CopyImageToBufferDesc, ImageHandle, ImageUse, PassDesc,
@@ -7,7 +7,7 @@ use sturdy_engine_core::{
 
 use crate::{
     Buffer, BufferDesc, BufferUsage, Engine, Format, Frame, FrameSyncReason, FrameSyncReport,
-    ImageRef, Result,
+    ImageRef, RenderFrame, Result,
 };
 
 /// Captures a GPU image to a CPU-readable buffer and optionally saves it to disk.
@@ -29,6 +29,16 @@ pub struct ScreenshotCapture {
     width: u32,
     height: u32,
     format: Format,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScreenshotExportReport {
+    pub path: PathBuf,
+    pub width: u32,
+    pub height: u32,
+    pub format: Format,
+    pub flush: FrameSyncReport,
+    pub wait: FrameSyncReport,
 }
 
 impl ScreenshotCapture {
@@ -56,6 +66,7 @@ impl ScreenshotCapture {
     /// Call this while recording the frame, then
     /// [`finish_readback`](Self::finish_readback) before reading pixels or saving.
     pub fn record_readback(&self, frame: &mut Frame, source: &impl ImageRef) -> Result<()> {
+        frame.import_buffer(&self.buffer)?;
         let image_handle: ImageHandle = source.image_handle();
         let buffer_handle: BufferHandle = self.buffer.handle();
         frame.add_pass(PassDesc {
@@ -96,11 +107,36 @@ impl ScreenshotCapture {
         })
     }
 
+    /// Add a render-graph image-to-buffer copy pass to a [`RenderFrame`].
+    pub fn record_render_frame_readback(
+        &self,
+        frame: &RenderFrame,
+        source: &crate::GraphImage,
+    ) -> Result<()> {
+        frame.copy_image_to_buffer(
+            "screenshot-readback",
+            source,
+            &self.buffer,
+            self.width,
+            self.height,
+        )
+    }
+
     /// Submit the recorded readback work and wait until the CPU buffer is ready.
     ///
     /// This is an explicit blocking API for screenshot/readback use cases and
     /// reports `FrameSyncReason::ReadbackCompletion` for both the submit and wait.
     pub fn finish_readback(&self, frame: &mut Frame) -> Result<(FrameSyncReport, FrameSyncReport)> {
+        let flush = frame.flush_with_reason(FrameSyncReason::ReadbackCompletion)?;
+        let wait = frame.wait_with_reason(FrameSyncReason::ReadbackCompletion)?;
+        Ok((flush, wait))
+    }
+
+    /// Submit render-graph readback work and wait until the CPU buffer is ready.
+    pub fn finish_render_frame_readback(
+        &self,
+        frame: &RenderFrame,
+    ) -> Result<(FrameSyncReport, FrameSyncReport)> {
         let flush = frame.flush_with_reason(FrameSyncReason::ReadbackCompletion)?;
         let wait = frame.wait_with_reason(FrameSyncReason::ReadbackCompletion)?;
         Ok((flush, wait))
@@ -132,6 +168,52 @@ impl ScreenshotCapture {
     pub fn save_png(&self, path: impl AsRef<Path>) -> Result<()> {
         let pixels = self.read_rgba8_pixels()?;
         write_png(path.as_ref(), self.width, self.height, &pixels)
+    }
+
+    /// Record, submit, wait, and save a screenshot from a legacy frame image.
+    pub fn capture_frame_png(
+        engine: &Engine,
+        frame: &mut Frame,
+        source: &impl ImageRef,
+        path: impl AsRef<Path>,
+    ) -> Result<ScreenshotExportReport> {
+        let desc = source.image_desc();
+        let capture = Self::new(engine, desc.extent.width, desc.extent.height, desc.format)?;
+        capture.record_readback(frame, source)?;
+        let (flush, wait) = capture.finish_readback(frame)?;
+        let path = path.as_ref().to_path_buf();
+        capture.save_png(&path)?;
+        Ok(ScreenshotExportReport {
+            path,
+            width: capture.width,
+            height: capture.height,
+            format: capture.format,
+            flush,
+            wait,
+        })
+    }
+
+    /// Record, submit, wait, and save a screenshot from a render-graph image.
+    pub fn capture_render_frame_png(
+        engine: &Engine,
+        frame: &RenderFrame,
+        source: &crate::GraphImage,
+        path: impl AsRef<Path>,
+    ) -> Result<ScreenshotExportReport> {
+        let desc = source.desc();
+        let capture = Self::new(engine, desc.extent.width, desc.extent.height, desc.format)?;
+        capture.record_render_frame_readback(frame, source)?;
+        let (flush, wait) = capture.finish_render_frame_readback(frame)?;
+        let path = path.as_ref().to_path_buf();
+        capture.save_png(&path)?;
+        Ok(ScreenshotExportReport {
+            path,
+            width: capture.width,
+            height: capture.height,
+            format: capture.format,
+            flush,
+            wait,
+        })
     }
 
     pub fn width(&self) -> u32 {
