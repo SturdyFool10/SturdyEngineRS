@@ -280,6 +280,7 @@ struct Testbed {
     debug_view_picker: DebugViewPicker,
     runtime_controller: Option<RuntimeController>,
     texture_resolution: TextureResolutionTier,
+    show_graph_inspector: bool,
     started_at: Instant,
     shader_watcher: ShaderWatcher,
 }
@@ -403,6 +404,7 @@ impl EngineApp for Testbed {
             debug_view_picker: DebugViewPicker::new(engine)?,
             runtime_controller: None,
             texture_resolution: TextureResolutionTier::Medium,
+            show_graph_inspector: false,
             started_at: Instant::now(),
             shader_watcher,
         })
@@ -555,8 +557,11 @@ impl EngineApp for Testbed {
                     .selected_name(&runtime_controller)
                     .unwrap_or_else(|| "Off".to_string())
             ));
+            if self.show_graph_inspector {
+                overlay_lines.extend(shell_frame.runtime_graph_inspection_lines(10, 8));
+            }
             overlay_lines.push(
-                "keys: [/]=tonemap .=aa R/U reset B/b bloom H hdr V motion O overlay X transparency G effect N/M debug 1/2/3 tex"
+                "keys: [/]=tonemap .=aa R/U reset B/b bloom H hdr V motion O overlay I graph X transparency G effect N/M debug 1/2/3 tex"
                     .to_string(),
             );
             // Show any active shader compile errors (cleared automatically on successful hot reload).
@@ -679,6 +684,16 @@ impl EngineApp for Testbed {
                     .apply()?;
                 eprintln!("overlay: {}", if visible { "shown" } else { "hidden" });
             }
+        } else if key == "I" || key == "i" {
+            self.show_graph_inspector = !self.show_graph_inspector;
+            eprintln!(
+                "graph inspector: {}",
+                if self.show_graph_inspector {
+                    "shown"
+                } else {
+                    "hidden"
+                }
+            );
         } else if key == "X" || key == "x" {
             if let Some(controller) = runtime_controller.as_mut() {
                 let enabled = !controller

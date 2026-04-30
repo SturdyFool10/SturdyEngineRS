@@ -58,14 +58,14 @@ use sturdy_engine_core::SurfaceSize;
 use crate::{
     AntiAliasingMode, AntiAliasingPass, AppRuntime, BloomConfig, BloomPass, DebugImageRegistry,
     DefaultSceneTargetConfig, DiagnosticLevel, Engine, GraphImage, KeyInput, KeyModifiers,
-    MotionVectorDebugPass, NativeWindowAppearanceApplyReport, Result as EngineResult,
+    MotionVectorDebugPass, NativeWindowAppearanceApplyReport, NativeWindowAppearanceStatus,
+    Result as EngineResult, RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult,
     RuntimeController, RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimeSettingChange,
-    RuntimeSettingId, RuntimeSettingKey, RuntimeUserDiagnostic, RuntimeWindowDiagnostics,
-    ShaderProgram, Surface, SurfaceHdrPreference, SurfaceImage, SurfacePresentMode,
-    SurfaceRecreateDesc, SurfaceTransparency, WindowAppearance, WindowAppearancePreset,
-    WindowBackdrop, WindowCornerStyle, WindowHandle, WindowMaterialKind, WindowMode,
-    WindowRegistry, WindowTransparencyDesc, appearance_wants_native_blur,
-    apply_native_window_appearance_report_for_window, current_platform,
+    RuntimeSettingId, RuntimeSettingKey, RuntimeWindowDiagnostics, ShaderProgram, Surface,
+    SurfaceHdrPreference, SurfaceImage, SurfaceTransparency, WindowAppearance,
+    WindowAppearancePreset, WindowBackdrop, WindowCornerStyle, WindowHandle, WindowMaterialKind,
+    WindowMode, WindowRegistry, WindowTransparencyDesc, appearance_wants_native_blur,
+    apply_native_window_appearance_report_for_window,
 };
 
 #[cfg(target_os = "macos")]
@@ -705,6 +705,15 @@ impl<'a> ShellFrame<'a> {
             ),
             format!("debug images: {debug_images}"),
         ]
+    }
+
+    /// Return compact render-graph inspection lines for the frame recorded so far.
+    pub fn runtime_graph_inspection_lines(
+        &self,
+        max_passes: usize,
+        max_images: usize,
+    ) -> Vec<String> {
+        RuntimeController::graph_inspection_lines(&self.inner.describe(), max_passes, max_images)
     }
 
     /// Publish per-frame runtime diagnostics gathered from the current render graph and shell state.
@@ -1546,92 +1555,54 @@ where
                     | RuntimeSettingId::Engine(RuntimeSettingKey::WindowBackgroundEffect)
             )
         });
+        let mut native_appearance_report = None;
         if affects_native_window {
             if let Some(window) = self.window_for_handle(self.primary_window) {
-                let native_appearance_report =
-                    apply_window_appearance_from_settings(window, controller);
+                let apply_report = apply_window_appearance_from_settings(window, controller);
                 let appearance = window_appearance_from_settings(controller);
                 let snapshot =
                     window_settings_snapshot(window, &self._config, self.runtime.controller());
                 self.runtime.controller().set_settings(snapshot);
                 if let Some(window) = self.window_context_for_handle_mut(self.primary_window) {
                     window.state_mut().appearance = appearance;
-                    window.state_mut().native_appearance_report = native_appearance_report;
+                    window.state_mut().native_appearance_report = apply_report.clone();
                 }
+                native_appearance_report = Some(apply_report);
             }
         }
+        let window_report =
+            window_reconfigure_apply_report(changes, native_appearance_report.as_ref());
+        self.runtime
+            .controller()
+            .record_runtime_apply_report(window_report);
 
         if !changes.iter().any(|change| {
             matches!(
                 change.setting,
                 RuntimeSettingId::Engine(RuntimeSettingKey::HdrMode)
                     | RuntimeSettingId::Engine(RuntimeSettingKey::PresentMode)
+                    | RuntimeSettingId::Engine(RuntimeSettingKey::PresentPolicy)
                     | RuntimeSettingId::Engine(RuntimeSettingKey::SurfaceTransparency)
             )
         }) {
             return;
         }
 
-        let hdr_preference = if controller
-            .bool_setting(RuntimeSettingKey::HdrMode)
-            .unwrap_or(false)
-        {
-            match self.runtime.surface().hdr_caps() {
-                Ok(caps) if caps.sc_rgb => Some(SurfaceHdrPreference::ScRgb),
-                Ok(caps) if caps.hdr10 => Some(SurfaceHdrPreference::Hdr10),
-                _ => Some(SurfaceHdrPreference::Sdr),
-            }
-        } else {
-            Some(SurfaceHdrPreference::Sdr)
-        };
-
-        let preferred_present_mode = controller
-            .text_setting(RuntimeSettingKey::PresentMode)
-            .and_then(|value| parse_present_mode_setting(&value));
-        let transparent = controller.bool_setting(RuntimeSettingKey::SurfaceTransparency);
-
-        let surface_size = self.runtime.surface().size();
         if let Some(window) = self.window_context_for_handle_mut(self.primary_window) {
             window.state_mut().waiting_for_surface_recreation = true;
         }
-        if let Err(e) = self.runtime.surface_mut().recreate(SurfaceRecreateDesc {
-            size: Some(surface_size),
-            transparent,
-            hdr: hdr_preference,
-            preferred_present_mode,
-            ..SurfaceRecreateDesc::default()
-        }) {
-            let context =
-                runtime_setting_apply_context(controller, changes, surface_size, "failed");
-            self.runtime.controller().update_diagnostics(|diagnostics| {
-                diagnostics.runtime_setting_apply = Some(format!(
-                    "{context} error_category={:?} reason={e}",
-                    e.category()
-                ));
-                diagnostics.user_diagnostics.push(RuntimeUserDiagnostic {
-                    message: "Runtime setting changes could not be applied to the surface."
-                        .to_string(),
-                    detail: Some(format!(
-                        "{context} error_category={:?} reason={e}",
-                        e.category()
-                    )),
-                    setting: None,
-                });
-            });
-            eprintln!(
-                "surface recreation from runtime settings failed: {context} error_category={:?} reason={e}",
-                e.category()
-            );
-            std::process::exit(1);
-        }
+        let surface_report = self.runtime.apply_surface_runtime_settings(changes);
         if let Some(window) = self.window_context_for_handle_mut(self.primary_window) {
             window.state_mut().waiting_for_surface_recreation = false;
         }
-        let context = runtime_setting_apply_context(controller, changes, surface_size, "applied");
-        self.runtime.controller().update_diagnostics(|diagnostics| {
-            diagnostics.runtime_setting_apply = Some(context);
-        });
-        self.runtime.refresh_controller_state();
+        for result in &surface_report.changes {
+            if let RuntimeChangeResult::Failed {
+                setting, reason, ..
+            } = result
+            {
+                eprintln!("surface runtime setting apply failed for {setting}: {reason}");
+            }
+        }
         if let Some(window) = self.primary_window() {
             let snapshot =
                 window_settings_snapshot(window, &self._config, self.runtime.controller());
@@ -1640,36 +1611,17 @@ where
     }
 }
 
-fn runtime_setting_apply_context(
-    controller: &RuntimeController,
-    changes: &[RuntimeSettingChange],
-    surface_size: SurfaceSize,
-    status: &str,
-) -> String {
-    let diagnostics = controller.diagnostics();
-    let settings = changes
-        .iter()
-        .map(|change| format!("{}@{}#{}", change.setting, change.path, change.revision))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(
-        "status={status} platform={:?} backend={:?} adapter={} surface={}x{} settings=[{}]",
-        current_platform(),
-        diagnostics.backend,
-        diagnostics.adapter_name.as_deref().unwrap_or("<unknown>"),
-        surface_size.width,
-        surface_size.height,
-        settings,
-    )
-}
-
-fn parse_present_mode_setting(value: &str) -> Option<SurfacePresentMode> {
+#[cfg(test)]
+fn parse_present_policy_setting(
+    value: &str,
+    explicit_present_mode: Option<crate::SurfacePresentMode>,
+) -> Option<crate::SurfacePresentMode> {
     match value {
         "Auto" => None,
-        "Fifo" => Some(SurfacePresentMode::Fifo),
-        "Mailbox" => Some(SurfacePresentMode::Mailbox),
-        "Immediate" => Some(SurfacePresentMode::Immediate),
-        "RelaxedFifo" => Some(SurfacePresentMode::RelaxedFifo),
+        "NoTear" => Some(crate::SurfacePresentMode::Fifo),
+        "LowLatencyNoTear" => Some(crate::SurfacePresentMode::Mailbox),
+        "LowLatencyAllowTear" => Some(crate::SurfacePresentMode::RelaxedFifo),
+        "Explicit" => explicit_present_mode,
         _ => None,
     }
 }
@@ -2020,6 +1972,84 @@ fn apply_window_runtime_settings(
     }
 }
 
+fn window_reconfigure_apply_report(
+    changes: &[RuntimeSettingChange],
+    native_appearance_report: Option<&NativeWindowAppearanceApplyReport>,
+) -> RuntimeApplyReport {
+    let mut report = RuntimeApplyReport::default();
+    for change in changes {
+        if !is_window_reconfigure_setting(&change.setting) {
+            continue;
+        }
+        report.changes.push(
+            match (
+                is_native_window_appearance_setting(&change.setting),
+                native_appearance_report,
+            ) {
+                (true, Some(native_report)) => {
+                    native_window_appearance_change_result(change.setting.clone(), native_report)
+                }
+                _ => RuntimeChangeResult::Applied {
+                    setting: change.setting.clone(),
+                    path: RuntimeApplyPath::WindowReconfigure,
+                },
+            },
+        );
+    }
+    report
+}
+
+fn native_window_appearance_change_result(
+    setting: RuntimeSettingId,
+    native_report: &NativeWindowAppearanceApplyReport,
+) -> RuntimeChangeResult {
+    match native_report.status {
+        NativeWindowAppearanceStatus::Applied => RuntimeChangeResult::Applied {
+            setting,
+            path: RuntimeApplyPath::WindowReconfigure,
+        },
+        NativeWindowAppearanceStatus::Degraded => RuntimeChangeResult::Degraded {
+            setting,
+            path: RuntimeApplyPath::WindowReconfigure,
+            reason: native_report.diagnostic_string(),
+        },
+        NativeWindowAppearanceStatus::Failed => RuntimeChangeResult::Failed {
+            setting,
+            path: RuntimeApplyPath::WindowReconfigure,
+            reason: native_report.diagnostic_string(),
+        },
+    }
+}
+
+fn is_window_reconfigure_setting(setting: &RuntimeSettingId) -> bool {
+    matches!(
+        setting,
+        RuntimeSettingId::Engine(
+            RuntimeSettingKey::WindowTitle
+                | RuntimeSettingKey::WindowWidth
+                | RuntimeSettingKey::WindowHeight
+                | RuntimeSettingKey::WindowPositionX
+                | RuntimeSettingKey::WindowPositionY
+                | RuntimeSettingKey::WindowMode
+                | RuntimeSettingKey::WindowDecorations
+                | RuntimeSettingKey::WindowResizable
+                | RuntimeSettingKey::WindowMaximized
+                | RuntimeSettingKey::WindowAlwaysOnTop
+                | RuntimeSettingKey::WindowCornerStyle
+                | RuntimeSettingKey::WindowBackgroundEffect
+        )
+    )
+}
+
+fn is_native_window_appearance_setting(setting: &RuntimeSettingId) -> bool {
+    matches!(
+        setting,
+        RuntimeSettingId::Engine(
+            RuntimeSettingKey::WindowCornerStyle | RuntimeSettingKey::WindowBackgroundEffect
+        )
+    )
+}
+
 fn window_mode_setting(mode: WindowMode) -> &'static str {
     match mode {
         WindowMode::Windowed => "Windowed",
@@ -2122,6 +2152,8 @@ fn windows_backdrop_for_appearance(appearance: WindowAppearance) -> BackdropType
 
 #[cfg(test)]
 mod tests {
+    use crate::{RuntimeSettingValue, SurfacePresentMode};
+
     use super::*;
 
     #[test]
@@ -2212,5 +2244,85 @@ mod tests {
             close_action_for_window(primary, windows.contains(stale), stale),
             ShellWindowCloseAction::IgnoreUnknown
         );
+    }
+
+    #[test]
+    fn present_policy_maps_to_preferred_present_mode() {
+        assert_eq!(parse_present_policy_setting("Auto", None), None);
+        assert_eq!(
+            parse_present_policy_setting("NoTear", None),
+            Some(SurfacePresentMode::Fifo)
+        );
+        assert_eq!(
+            parse_present_policy_setting("LowLatencyNoTear", None),
+            Some(SurfacePresentMode::Mailbox)
+        );
+        assert_eq!(
+            parse_present_policy_setting("LowLatencyAllowTear", None),
+            Some(SurfacePresentMode::RelaxedFifo)
+        );
+        assert_eq!(
+            parse_present_policy_setting("Explicit", Some(SurfacePresentMode::RelaxedFifo)),
+            Some(SurfacePresentMode::RelaxedFifo)
+        );
+    }
+
+    #[test]
+    fn window_reconfigure_report_marks_basic_window_changes_applied() {
+        let changes = vec![RuntimeSettingChange {
+            setting: RuntimeSettingId::from(RuntimeSettingKey::WindowTitle),
+            value: RuntimeSettingValue::Text("new title".to_string()),
+            path: RuntimeApplyPath::WindowReconfigure,
+            revision: 1,
+        }];
+
+        let report = window_reconfigure_apply_report(&changes, None);
+
+        assert_eq!(
+            report.changes,
+            vec![RuntimeChangeResult::Applied {
+                setting: RuntimeSettingId::from(RuntimeSettingKey::WindowTitle),
+                path: RuntimeApplyPath::WindowReconfigure,
+            }]
+        );
+    }
+
+    #[test]
+    fn window_reconfigure_report_surfaces_native_appearance_degradation() {
+        let changes = vec![
+            RuntimeSettingChange {
+                setting: RuntimeSettingId::from(RuntimeSettingKey::WindowBackgroundEffect),
+                value: RuntimeSettingValue::Text("Blur".to_string()),
+                path: RuntimeApplyPath::WindowReconfigure,
+                revision: 1,
+            },
+            RuntimeSettingChange {
+                setting: RuntimeSettingId::from(RuntimeSettingKey::SurfaceTransparency),
+                value: RuntimeSettingValue::Bool(true),
+                path: RuntimeApplyPath::SurfaceRecreate,
+                revision: 2,
+            },
+        ];
+        let native_report = NativeWindowAppearanceApplyReport {
+            requested: "blur",
+            protocol: "test-protocol",
+            status: NativeWindowAppearanceStatus::Degraded,
+            fallback: Some("winit"),
+            reason: Some("blur protocol unavailable".to_string()),
+        };
+
+        let report = window_reconfigure_apply_report(&changes, Some(&native_report));
+
+        assert_eq!(report.changes.len(), 1);
+        assert!(matches!(
+            &report.changes[0],
+            RuntimeChangeResult::Degraded {
+                setting,
+                path: RuntimeApplyPath::WindowReconfigure,
+                reason,
+            } if setting == &RuntimeSettingId::from(RuntimeSettingKey::WindowBackgroundEffect)
+                && reason.contains("status=degraded")
+                && reason.contains("blur protocol unavailable")
+        ));
     }
 }

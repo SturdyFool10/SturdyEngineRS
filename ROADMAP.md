@@ -628,30 +628,32 @@ If a roadmap item is still too large for one prompt, split it again until the pr
 
 ### Runtime settings and no-restart architecture
 
-- [ ] Add a unified runtime settings system for:
-  - [ ] Native backend selection, initially only Vulkan.
-  - [ ] Browser backend selection, WebGPU only when targeting browser/WebAssembly.
-  - [ ] Adapter/GPU selection.
-  - [ ] HDR mode.
-  - [ ] Present mode.
-  - [ ] Present policy.
-  - [ ] Latency mode.
-  - [ ] Frame-rate cap/pacing mode.
-  - [ ] Max frames in flight.
-  - [ ] Threaded input mode.
-  - [ ] Render threading mode.
-  - [ ] Surface transparency.
-  - [ ] Window background effect/material.
-  - [ ] Antialiasing mode and dials.
-  - [ ] Post-processing toggles and dials.
-  - [ ] Shader hot reload and asset hot reload policy.
+- [x] Add a unified runtime settings system for:
+  - [x] Native backend selection, initially only Vulkan.
+  - [x] Browser backend selection, WebGPU only when targeting browser/WebAssembly.
+  - [x] Adapter/GPU selection.
+  - [x] HDR mode.
+  - [x] Present mode.
+  - [x] Present policy.
+  - [x] Latency mode.
+  - [x] Frame-rate cap/pacing mode.
+  - [x] Max frames in flight.
+  - [x] Threaded input mode.
+  - [x] Render threading mode.
+  - [x] Surface transparency.
+  - [x] Window background effect/material.
+  - [x] Antialiasing mode and dials.
+  - [x] Post-processing toggles and dials.
+  - [x] Shader hot reload and asset hot reload policy.
 - [ ] Apply runtime settings changes through the right internal path automatically.
+  - [x] Route `SurfaceRecreate` settings through `AppRuntime` with structured `Applied` / `Failed` reports instead of process exit.
+  - [x] Report `WindowReconfigure` setting outcomes, including native appearance degradation/failure, through runtime apply notifications.
 - [ ] Add a transaction-style runtime reconfiguration path so multiple setting changes can be applied coherently in one step.
-- [ ] Add explicit notifications for:
-  - [ ] Setting clamped.
-  - [ ] Setting degraded.
-  - [ ] Setting rejected.
-  - [ ] Setting unavailable on the current platform/backend.
+- [x] Add explicit notifications for:
+  - [x] Setting clamped.
+  - [x] Setting degraded.
+  - [x] Setting rejected.
+  - [x] Setting unavailable on the current platform/backend.
 
 ### Window transparency and compositor effects
 
@@ -709,10 +711,10 @@ If a roadmap item is still too large for one prompt, split it again until the pr
 - [ ] Add asset hot reload for textures, meshes, and other common inputs.
 - [ ] Add stable debug/error reporting for missing or stale assets.
 - [ ] Add screenshot/export helpers.
-- [ ] Add frame graph visualization / inspection UI.
+- [x] Add frame graph visualization / inspection UI.
 - [ ] Add image inspection for named graph resources.
 - [ ] Add GPU timing and pass timing summaries.
-- [ ] Add a one-file sample that opens a window, uses top-left pixel coordinates, draws a rect at each corner, and displays cursor position.
+- [x] Add a one-file sample that opens a window, uses top-left pixel coordinates, draws a rect at each corner, and displays cursor position.
 
 ---
 

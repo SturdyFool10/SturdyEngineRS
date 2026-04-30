@@ -16,8 +16,8 @@ use std::{
 use crate::{
     BackendKind, Engine, Error, Format, GraphImage, GraphReport, MotionVectorDebugPass,
     PlatformCapabilityState, RenderFrame, Result, Surface, SurfaceCapabilities, SurfaceColorSpace,
-    SurfaceImage, SurfacePresentMode, SurfaceSize, WindowCornerStyle, WindowMaterialKind,
-    current_window_appearance_caps,
+    SurfaceHdrPreference, SurfaceImage, SurfacePresentMode, SurfaceRecreateDesc, SurfaceSize,
+    WindowCornerStyle, WindowMaterialKind, current_window_appearance_caps,
 };
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -68,6 +68,7 @@ impl AppRuntime {
                 window_maximized: false,
                 window_always_on_top: false,
                 window_corner_style: WindowCornerStyle::Default,
+                ..RuntimeSettingsSnapshot::default()
             }),
             engine,
             surface,
@@ -136,6 +137,117 @@ impl AppRuntime {
         });
     }
 
+    /// Apply runtime settings that require presentation surface recreation.
+    ///
+    /// The transaction itself records requested setting values. This method is
+    /// the runtime-owned execution point for the `SurfaceRecreate` path so the
+    /// application shell does not need to know HDR, present-mode, or alpha
+    /// policy details.
+    pub(crate) fn apply_surface_runtime_settings(
+        &mut self,
+        changes: &[RuntimeSettingChange],
+    ) -> RuntimeApplyReport {
+        let surface_changes = changes
+            .iter()
+            .filter(|change| {
+                matches!(
+                    change.setting,
+                    RuntimeSettingId::Engine(RuntimeSettingKey::HdrMode)
+                        | RuntimeSettingId::Engine(RuntimeSettingKey::PresentMode)
+                        | RuntimeSettingId::Engine(RuntimeSettingKey::PresentPolicy)
+                        | RuntimeSettingId::Engine(RuntimeSettingKey::SurfaceTransparency)
+                )
+            })
+            .collect::<Vec<_>>();
+
+        if surface_changes.is_empty() {
+            return RuntimeApplyReport::default();
+        }
+
+        let hdr_preference = if self
+            .controller
+            .bool_setting(RuntimeSettingKey::HdrMode)
+            .unwrap_or(false)
+        {
+            match self.surface.hdr_caps() {
+                Ok(caps) if caps.sc_rgb => Some(SurfaceHdrPreference::ScRgb),
+                Ok(caps) if caps.hdr10 => Some(SurfaceHdrPreference::Hdr10),
+                _ => Some(SurfaceHdrPreference::Sdr),
+            }
+        } else {
+            Some(SurfaceHdrPreference::Sdr)
+        };
+
+        let explicit_present_mode = self
+            .controller
+            .text_setting(RuntimeSettingKey::PresentMode)
+            .and_then(|value| parse_present_mode_setting(&value));
+        let preferred_present_mode = self
+            .controller
+            .text_setting(RuntimeSettingKey::PresentPolicy)
+            .and_then(|value| parse_present_policy_setting(&value, explicit_present_mode))
+            .or(explicit_present_mode);
+        let transparent = self
+            .controller
+            .bool_setting(RuntimeSettingKey::SurfaceTransparency);
+        let surface_size = self.surface.size();
+
+        let recreate_result = self.surface.recreate(SurfaceRecreateDesc {
+            size: Some(surface_size),
+            transparent,
+            hdr: hdr_preference,
+            preferred_present_mode,
+            ..SurfaceRecreateDesc::default()
+        });
+
+        let mut report = RuntimeApplyReport::default();
+        match recreate_result {
+            Ok(()) => {
+                for change in surface_changes {
+                    report.changes.push(RuntimeChangeResult::Applied {
+                        setting: change.setting.clone(),
+                        path: RuntimeApplyPath::SurfaceRecreate,
+                    });
+                }
+                let context = runtime_surface_apply_context(
+                    &self.controller,
+                    changes,
+                    surface_size,
+                    "applied",
+                );
+                self.controller.update_diagnostics(|diagnostics| {
+                    diagnostics.runtime_setting_apply = Some(context);
+                });
+                self.refresh_controller_state();
+            }
+            Err(error) => {
+                let context = runtime_surface_apply_context(
+                    &self.controller,
+                    changes,
+                    surface_size,
+                    "failed",
+                );
+                let detail = format!(
+                    "{context} error_category={:?} reason={error}",
+                    error.category()
+                );
+                for change in surface_changes {
+                    report.changes.push(RuntimeChangeResult::Failed {
+                        setting: change.setting.clone(),
+                        path: RuntimeApplyPath::SurfaceRecreate,
+                        reason: detail.clone(),
+                    });
+                }
+                self.controller.update_diagnostics(|diagnostics| {
+                    diagnostics.runtime_setting_apply = Some(detail);
+                });
+            }
+        }
+
+        self.controller.record_runtime_apply_report(report.clone());
+        report
+    }
+
     /// Acquire the current swapchain image and begin a render frame for it.
     pub fn acquire_frame(&mut self) -> Result<AppRuntimeFrame<'_>> {
         self.refresh_controller_state();
@@ -154,6 +266,53 @@ impl AppRuntime {
     /// Decompose the runtime into its current owned parts.
     pub fn into_parts(self) -> (Engine, Surface, RuntimeController) {
         (self.engine, self.surface, self.controller)
+    }
+}
+
+fn runtime_surface_apply_context(
+    controller: &RuntimeController,
+    changes: &[RuntimeSettingChange],
+    surface_size: SurfaceSize,
+    status: &str,
+) -> String {
+    let diagnostics = controller.diagnostics();
+    let settings = changes
+        .iter()
+        .map(|change| format!("{}@{}#{}", change.setting, change.path, change.revision))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "status={status} backend={:?} adapter={} surface={}x{} settings=[{}]",
+        diagnostics.backend,
+        diagnostics.adapter_name.as_deref().unwrap_or("<unknown>"),
+        surface_size.width,
+        surface_size.height,
+        settings,
+    )
+}
+
+fn parse_present_mode_setting(value: &str) -> Option<SurfacePresentMode> {
+    match value {
+        "Auto" => None,
+        "Fifo" => Some(SurfacePresentMode::Fifo),
+        "Mailbox" => Some(SurfacePresentMode::Mailbox),
+        "Immediate" => Some(SurfacePresentMode::Immediate),
+        "RelaxedFifo" => Some(SurfacePresentMode::RelaxedFifo),
+        _ => None,
+    }
+}
+
+fn parse_present_policy_setting(
+    value: &str,
+    explicit_present_mode: Option<SurfacePresentMode>,
+) -> Option<SurfacePresentMode> {
+    match value {
+        "Auto" => None,
+        "NoTear" => Some(SurfacePresentMode::Fifo),
+        "LowLatencyNoTear" => Some(SurfacePresentMode::Mailbox),
+        "LowLatencyAllowTear" => Some(SurfacePresentMode::RelaxedFifo),
+        "Explicit" => explicit_present_mode,
+        _ => None,
     }
 }
 
@@ -641,6 +800,60 @@ impl RuntimeController {
         out
     }
 
+    /// Format a compact render-graph summary suitable for an in-app overlay.
+    pub fn graph_inspection_lines(
+        report: &GraphReport,
+        max_passes: usize,
+        max_images: usize,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "frame graph: {} passes, {} images",
+            report.passes.len(),
+            report.images.len()
+        ));
+        for (index, pass) in report.passes.iter().take(max_passes).enumerate() {
+            let reads = if pass.reads.is_empty() {
+                "-".to_string()
+            } else {
+                pass.reads.join(",")
+            };
+            let writes = if pass.writes.is_empty() {
+                "-".to_string()
+            } else {
+                pass.writes.join(",")
+            };
+            lines.push(format!(
+                "  pass {index:02}: {:?} {}  r=[{}] w=[{}]",
+                pass.kind, pass.name, reads, writes
+            ));
+        }
+        if report.passes.len() > max_passes {
+            lines.push(format!(
+                "  ... {} more passes",
+                report.passes.len() - max_passes
+            ));
+        }
+        for image in report.images.iter().take(max_images) {
+            lines.push(format!(
+                "  image: {} {}x{} {:?} w={} r={}",
+                image.name,
+                image.extent.width,
+                image.extent.height,
+                image.format,
+                image.write_count,
+                image.read_count
+            ));
+        }
+        if report.images.len() > max_images {
+            lines.push(format!(
+                "  ... {} more images",
+                report.images.len() - max_images
+            ));
+        }
+        lines
+    }
+
     /// Return the current overlay text lines.
     pub fn overlay_lines(&self) -> Vec<String> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
@@ -692,15 +905,33 @@ impl RuntimeController {
             .overlay_lines
             .clear();
     }
+
+    pub(crate) fn record_runtime_apply_report(&self, report: RuntimeApplyReport) {
+        if report.changes.is_empty() {
+            return;
+        }
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.shared
+            .lock()
+            .expect("runtime controller poisoned")
+            .record_apply_report(report);
+    }
 }
 
 /// Snapshot of the current runtime settings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSettingsSnapshot {
     pub backend: BackendKind,
+    pub browser_backend: String,
     pub adapter_name: Option<String>,
     pub hdr_enabled: bool,
     pub present_mode: Option<SurfacePresentMode>,
+    pub present_policy: String,
+    pub latency_mode: String,
+    pub frame_pacing_mode: String,
+    pub max_frames_in_flight: u32,
+    pub threaded_input_mode: String,
+    pub render_threading_mode: String,
     pub surface_size: SurfaceSize,
     pub window_title: String,
     pub window_size: SurfaceSize,
@@ -717,9 +948,16 @@ impl Default for RuntimeSettingsSnapshot {
     fn default() -> Self {
         Self {
             backend: BackendKind::Auto,
+            browser_backend: "Auto".to_string(),
             adapter_name: None,
             hdr_enabled: false,
             present_mode: None,
+            present_policy: "Auto".to_string(),
+            latency_mode: "Balanced".to_string(),
+            frame_pacing_mode: "Auto".to_string(),
+            max_frames_in_flight: 2,
+            threaded_input_mode: "Auto".to_string(),
+            render_threading_mode: "Auto".to_string(),
             surface_size: SurfaceSize {
                 width: 1,
                 height: 1,
@@ -894,6 +1132,10 @@ impl RuntimeShared {
             RuntimeSettingValue::Text(format!("{:?}", settings.backend)),
         );
         self.sync_engine_value(
+            RuntimeSettingKey::BrowserBackendSelection,
+            RuntimeSettingValue::Text(settings.browser_backend.clone()),
+        );
+        self.sync_engine_value(
             RuntimeSettingKey::AdapterSelection,
             RuntimeSettingValue::Text(
                 settings
@@ -914,6 +1156,30 @@ impl RuntimeShared {
                     .map(|mode| format!("{mode:?}"))
                     .unwrap_or_else(|| "Auto".to_string()),
             ),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::PresentPolicy,
+            RuntimeSettingValue::Text(settings.present_policy.clone()),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::LatencyMode,
+            RuntimeSettingValue::Text(settings.latency_mode.clone()),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::FramePacingMode,
+            RuntimeSettingValue::Text(settings.frame_pacing_mode.clone()),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::MaxFramesInFlight,
+            RuntimeSettingValue::Integer(settings.max_frames_in_flight as i64),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::ThreadedInputMode,
+            RuntimeSettingValue::Text(settings.threaded_input_mode.clone()),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::RenderThreadingMode,
+            RuntimeSettingValue::Text(settings.render_threading_mode.clone()),
         );
         self.sync_engine_value(
             RuntimeSettingKey::WindowTitle,
@@ -1082,6 +1348,18 @@ impl RuntimeShared {
             RuntimeSettingKey::BackendSelection,
             "live backend migration is not implemented yet",
         );
+        if let Some(entry) = self.setting_entries.get_mut(&RuntimeSettingId::from(
+            RuntimeSettingKey::BrowserBackendSelection,
+        )) {
+            entry.support = if cfg!(target_arch = "wasm32") {
+                RuntimeSettingSupport::supported()
+            } else {
+                RuntimeSettingSupport::unsupported(
+                    "browser backend selection is only available on browser/WebAssembly targets"
+                        .to_string(),
+                )
+            };
+        }
         self.set_unsupported(
             RuntimeSettingKey::AdapterSelection,
             "live adapter migration is not implemented yet",
@@ -1146,20 +1424,28 @@ impl RuntimeShared {
             };
         }
 
-        if entry.value == value {
-            return RuntimeChangeResult::Exact {
-                setting: id,
-                path: entry.descriptor.apply_path,
+        let path = entry.descriptor.apply_path;
+        let (applied_value, clamp_reason) = clamp_runtime_setting_value(&id, value);
+
+        if entry.value == applied_value {
+            return match clamp_reason {
+                Some(reason) => RuntimeChangeResult::Clamped {
+                    setting: id,
+                    path,
+                    value: entry.value.serialized(),
+                    reason,
+                },
+                None => RuntimeChangeResult::Exact { setting: id, path },
             };
         }
 
-        entry.value = value.clone();
+        entry.value = applied_value.clone();
         self.settings_revision += 1;
         entry.revision = self.settings_revision;
         self.change_log.push(RuntimeSettingChange {
             setting: id.clone(),
-            value,
-            path: entry.descriptor.apply_path,
+            value: applied_value.clone(),
+            path,
             revision: self.settings_revision,
         });
         if self.change_log.len() > 256 {
@@ -1167,9 +1453,14 @@ impl RuntimeShared {
             self.change_log.drain(0..excess);
         }
 
-        RuntimeChangeResult::Exact {
-            setting: id,
-            path: entry.descriptor.apply_path,
+        match clamp_reason {
+            Some(reason) => RuntimeChangeResult::Clamped {
+                setting: id,
+                path,
+                value: applied_value.serialized(),
+                reason,
+            },
+            None => RuntimeChangeResult::Exact { setting: id, path },
         }
     }
 
@@ -1193,6 +1484,33 @@ impl RuntimeShared {
             self.diagnostics.user_diagnostics.drain(0..excess);
         }
         self.last_apply_report = Some(report);
+    }
+}
+
+fn clamp_runtime_setting_value(
+    id: &RuntimeSettingId,
+    value: RuntimeSettingValue,
+) -> (RuntimeSettingValue, Option<String>) {
+    match (id, value) {
+        (
+            RuntimeSettingId::Engine(RuntimeSettingKey::MaxFramesInFlight),
+            RuntimeSettingValue::Integer(requested),
+        ) => {
+            const MIN_FRAMES_IN_FLIGHT: i64 = 1;
+            const MAX_FRAMES_IN_FLIGHT: i64 = 8;
+            let clamped = requested.clamp(MIN_FRAMES_IN_FLIGHT, MAX_FRAMES_IN_FLIGHT);
+            if clamped == requested {
+                (RuntimeSettingValue::Integer(requested), None)
+            } else {
+                (
+                    RuntimeSettingValue::Integer(clamped),
+                    Some(format!(
+                        "requested {requested}, allowed range is {MIN_FRAMES_IN_FLIGHT}..={MAX_FRAMES_IN_FLIGHT}"
+                    )),
+                )
+            }
+        }
+        (_, value) => (value, None),
     }
 }
 
@@ -1469,9 +1787,16 @@ pub struct RuntimeSettingChange {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RuntimeSettingKey {
     BackendSelection,
+    BrowserBackendSelection,
     AdapterSelection,
     HdrMode,
     PresentMode,
+    PresentPolicy,
+    LatencyMode,
+    FramePacingMode,
+    MaxFramesInFlight,
+    ThreadedInputMode,
+    RenderThreadingMode,
     WindowTitle,
     WindowWidth,
     WindowHeight,
@@ -1501,9 +1826,16 @@ impl RuntimeSettingKey {
     pub const fn known_settings() -> &'static [RuntimeSettingKey] {
         &[
             Self::BackendSelection,
+            Self::BrowserBackendSelection,
             Self::AdapterSelection,
             Self::HdrMode,
             Self::PresentMode,
+            Self::PresentPolicy,
+            Self::LatencyMode,
+            Self::FramePacingMode,
+            Self::MaxFramesInFlight,
+            Self::ThreadedInputMode,
+            Self::RenderThreadingMode,
             Self::WindowTitle,
             Self::WindowWidth,
             Self::WindowHeight,
@@ -1532,10 +1864,13 @@ impl RuntimeSettingKey {
 
     pub const fn apply_path(self) -> RuntimeApplyPath {
         match self {
-            Self::BackendSelection | Self::AdapterSelection => RuntimeApplyPath::DeviceMigration,
+            Self::BackendSelection | Self::BrowserBackendSelection | Self::AdapterSelection => {
+                RuntimeApplyPath::DeviceMigration
+            }
             Self::HdrMode | Self::PresentMode | Self::SurfaceTransparency => {
                 RuntimeApplyPath::SurfaceRecreate
             }
+            Self::PresentPolicy => RuntimeApplyPath::SurfaceRecreate,
             Self::WindowTitle
             | Self::WindowWidth
             | Self::WindowHeight
@@ -1557,16 +1892,28 @@ impl RuntimeSettingKey {
             | Self::ToneMappingOperator
             | Self::ToneMappingDial
             | Self::MotionDebugView
-            | Self::OverlayVisibility => RuntimeApplyPath::Immediate,
+            | Self::OverlayVisibility
+            | Self::LatencyMode
+            | Self::FramePacingMode
+            | Self::MaxFramesInFlight
+            | Self::ThreadedInputMode
+            | Self::RenderThreadingMode => RuntimeApplyPath::Immediate,
         }
     }
 
     pub const fn name(self) -> &'static str {
         match self {
             Self::BackendSelection => "backend_selection",
+            Self::BrowserBackendSelection => "browser_backend_selection",
             Self::AdapterSelection => "adapter_selection",
             Self::HdrMode => "hdr_mode",
             Self::PresentMode => "present_mode",
+            Self::PresentPolicy => "present_policy",
+            Self::LatencyMode => "latency_mode",
+            Self::FramePacingMode => "frame_pacing_mode",
+            Self::MaxFramesInFlight => "max_frames_in_flight",
+            Self::ThreadedInputMode => "threaded_input_mode",
+            Self::RenderThreadingMode => "render_threading_mode",
             Self::WindowTitle => "window_title",
             Self::WindowWidth => "window_width",
             Self::WindowHeight => "window_height",
@@ -1596,9 +1943,16 @@ impl RuntimeSettingKey {
     pub const fn label(self) -> &'static str {
         match self {
             Self::BackendSelection => "backend selection",
+            Self::BrowserBackendSelection => "browser backend selection",
             Self::AdapterSelection => "adapter selection",
             Self::HdrMode => "hdr mode",
             Self::PresentMode => "present mode",
+            Self::PresentPolicy => "present policy",
+            Self::LatencyMode => "latency mode",
+            Self::FramePacingMode => "frame pacing mode",
+            Self::MaxFramesInFlight => "max frames in flight",
+            Self::ThreadedInputMode => "threaded input mode",
+            Self::RenderThreadingMode => "render threading mode",
             Self::WindowTitle => "window title",
             Self::WindowWidth => "window width",
             Self::WindowHeight => "window height",
@@ -1650,6 +2004,12 @@ pub enum RuntimeChangeResult {
         setting: RuntimeSettingId,
         path: RuntimeApplyPath,
     },
+    Clamped {
+        setting: RuntimeSettingId,
+        path: RuntimeApplyPath,
+        value: String,
+        reason: String,
+    },
     Degraded {
         setting: RuntimeSettingId,
         path: RuntimeApplyPath,
@@ -1675,6 +2035,16 @@ impl RuntimeChangeResult {
     pub fn user_diagnostic(&self) -> Option<RuntimeUserDiagnostic> {
         match self {
             Self::Exact { .. } | Self::Applied { .. } => None,
+            Self::Clamped {
+                setting,
+                value,
+                reason,
+                ..
+            } => Some(RuntimeUserDiagnostic {
+                message: format!("{} was clamped to {}.", setting.label(), value),
+                detail: Some(reason.clone()),
+                setting: Some(setting.clone()),
+            }),
             Self::Degraded {
                 setting, reason, ..
             } => Some(RuntimeUserDiagnostic {
@@ -1801,7 +2171,16 @@ fn default_setting_entries(
             RuntimeSettingKey::BackendSelection.apply_path(),
             format!("{:?}", settings.backend),
         )
-        .with_description("Select the runtime graphics backend."),
+        .with_description("Select the runtime graphics backend.")
+        .with_options(text_options(&["Auto", "Vulkan"])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::BrowserBackendSelection,
+            "Browser Graphics API",
+            RuntimeSettingKey::BrowserBackendSelection.apply_path(),
+            settings.browser_backend.clone(),
+        )
+        .with_description("Select the browser graphics backend when targeting WebAssembly.")
+        .with_options(text_options(&["Auto", "WebGPU"])),
         RuntimeSettingDescriptor::new(
             RuntimeSettingKey::AdapterSelection,
             "Graphics Adapter",
@@ -1833,6 +2212,75 @@ fn default_setting_entries(
             value: RuntimeSettingValue::Text("Auto".to_string()),
             label: "Auto".to_string(),
         }]),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::PresentPolicy,
+            "Present Policy",
+            RuntimeSettingKey::PresentPolicy.apply_path(),
+            settings.present_policy.clone(),
+        )
+        .with_description("Select a high-level presentation policy above raw present modes.")
+        .with_options(text_options(&[
+            "Auto",
+            "NoTear",
+            "LowLatencyNoTear",
+            "LowLatencyAllowTear",
+            "Explicit",
+        ])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::LatencyMode,
+            "Latency Mode",
+            RuntimeSettingKey::LatencyMode.apply_path(),
+            settings.latency_mode.clone(),
+        )
+        .with_description("Select the runtime latency preset.")
+        .with_options(text_options(&[
+            "Throughput",
+            "Balanced",
+            "LowLatency",
+            "UltraLowLatency",
+        ])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::FramePacingMode,
+            "Frame Pacing Mode",
+            RuntimeSettingKey::FramePacingMode.apply_path(),
+            settings.frame_pacing_mode.clone(),
+        )
+        .with_description("Select the frame pacing policy.")
+        .with_options(text_options(&[
+            "Auto",
+            "Unlimited",
+            "FixedFps",
+            "VsyncPaced",
+        ])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::MaxFramesInFlight,
+            "Max Frames In Flight",
+            RuntimeSettingKey::MaxFramesInFlight.apply_path(),
+            settings.max_frames_in_flight as i64,
+        )
+        .with_description("Limit the number of frames allowed to be queued concurrently."),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::ThreadedInputMode,
+            "Threaded Input Mode",
+            RuntimeSettingKey::ThreadedInputMode.apply_path(),
+            settings.threaded_input_mode.clone(),
+        )
+        .with_description("Select how input work is scheduled.")
+        .with_options(text_options(&["Auto", "MainThread", "WorkerThread"])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::RenderThreadingMode,
+            "Render Threading Mode",
+            RuntimeSettingKey::RenderThreadingMode.apply_path(),
+            settings.render_threading_mode.clone(),
+        )
+        .with_description("Select how render preparation and command recording are threaded.")
+        .with_options(text_options(&[
+            "Auto",
+            "SingleRenderThread",
+            "ParallelPreparationOnly",
+            "ParallelCommandRecording",
+            "MultiQueueExperimental",
+        ])),
         RuntimeSettingDescriptor::new(
             RuntimeSettingKey::WindowTitle,
             "Window Title",

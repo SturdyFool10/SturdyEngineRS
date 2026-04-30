@@ -7,6 +7,7 @@ use sturdy_engine::{
 
 struct CoordinateValidationApp {
     overlay: DebugOverlayRenderer,
+    cursor: Option<WindowLogicalPx>,
 }
 
 impl EngineApp for CoordinateValidationApp {
@@ -15,6 +16,7 @@ impl EngineApp for CoordinateValidationApp {
     fn init(engine: &Engine, _surface: &Surface) -> Result<Self> {
         Ok(Self {
             overlay: DebugOverlayRenderer::new(engine)?,
+            cursor: None,
         })
     }
 
@@ -23,7 +25,13 @@ impl EngineApp for CoordinateValidationApp {
         let swapchain = frame.inner().swapchain_image(surface_image)?;
         let mut overlay = DebugOverlay::new();
 
-        draw_coordinate_validation_scene(&mut overlay, ext.width, ext.height);
+        draw_coordinate_validation_scene(
+            &mut overlay,
+            ext.width,
+            ext.height,
+            frame.window_scale_factor(),
+            self.cursor,
+        );
 
         self.overlay
             .draw(frame.inner(), &swapchain, ext.width, ext.height, &overlay)?;
@@ -34,6 +42,11 @@ impl EngineApp for CoordinateValidationApp {
     fn resize(&mut self, _width: u32, _height: u32) -> Result<()> {
         Ok(())
     }
+
+    fn pointer_moved(&mut self, pos: WindowLogicalPx, _surface: &mut Surface) -> Result<()> {
+        self.cursor = Some(pos);
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -42,12 +55,13 @@ struct ValidationScene {
     content: Rect,
     clip_rect: Rect,
     cursor: WindowLogicalPx,
+    cursor_live: bool,
     edge_markers: [WindowLogicalPx; 8],
     uv_samples: [RenderTargetPx; 5],
 }
 
 impl ValidationScene {
-    fn new(width: u32, height: u32) -> Self {
+    fn new(width: u32, height: u32, cursor: Option<WindowLogicalPx>) -> Self {
         let w = width.max(1) as f32;
         let h = height.max(1) as f32;
         let inset = 24.0_f32.min(w * 0.1).min(h * 0.1);
@@ -68,7 +82,8 @@ impl ValidationScene {
             full_target: Rect::new(0.0, 0.0, w, h),
             content,
             clip_rect,
-            cursor: WindowLogicalPx::new(w * 0.72, h * 0.64),
+            cursor: cursor.unwrap_or_else(|| WindowLogicalPx::new(w * 0.72, h * 0.64)),
+            cursor_live: cursor.is_some(),
             edge_markers: [
                 WindowLogicalPx::new(0.0, 0.0),
                 WindowLogicalPx::new(w, 0.0),
@@ -98,8 +113,14 @@ impl ValidationScene {
     }
 }
 
-fn draw_coordinate_validation_scene(overlay: &mut DebugOverlay, width: u32, height: u32) {
-    let scene = ValidationScene::new(width, height);
+fn draw_coordinate_validation_scene(
+    overlay: &mut DebugOverlay,
+    width: u32,
+    height: u32,
+    scale_factor: f32,
+    cursor: Option<WindowLogicalPx>,
+) {
+    let scene = ValidationScene::new(width, height, cursor);
     let w = width.max(1) as f32;
     let h = height.max(1) as f32;
 
@@ -112,10 +133,16 @@ fn draw_coordinate_validation_scene(overlay: &mut DebugOverlay, width: u32, heig
     );
 
     draw_full_target_edges(overlay, width, height, scene);
+    draw_corner_rects(overlay, width, height);
     draw_corner_and_edge_markers(overlay, width, height, scene);
     draw_clipped_ui_target(overlay, width, height, scene);
-    draw_cursor_marker(overlay, width, height, scene);
+    draw_cursor_marker(overlay, width, height, scale_factor, scene);
     draw_uv_samples(overlay, width, height, scene);
+    overlay.add_screen_text(
+        format!("dpi scale {:.2}", scale_factor.max(0.0)),
+        12.0,
+        62.0,
+    );
 }
 
 fn draw_full_target_edges(
@@ -149,6 +176,25 @@ fn draw_corner_and_edge_markers(
 ) {
     for marker in scene.edge_markers {
         overlay.cross_marker_screen(width, height, scene.marker_draw_pos(marker), 11.0);
+    }
+}
+
+fn draw_corner_rects(overlay: &mut DebugOverlay, width: u32, height: u32) {
+    let w = width.max(1) as f32;
+    let h = height.max(1) as f32;
+    let size = 18.0_f32.min(w).min(h);
+    let corners = [
+        ([0.0, 0.0], [1.0, 0.18, 0.22, 0.9]),
+        ([(w - size).max(0.0), 0.0], [0.25, 0.95, 0.35, 0.9]),
+        ([0.0, (h - size).max(0.0)], [0.25, 0.48, 1.0, 0.9]),
+        (
+            [(w - size).max(0.0), (h - size).max(0.0)],
+            [1.0, 0.88, 0.18, 0.9],
+        ),
+    ];
+
+    for (origin, color) in corners {
+        overlay.filled_rect_screen(width, height, origin, [size, size], color);
     }
 }
 
@@ -193,16 +239,34 @@ fn draw_clipped_ui_target(
     overlay.add_screen_text("clipped UI", clip.origin.x + 8.0, clip.origin.y + 8.0);
 }
 
-fn draw_cursor_marker(overlay: &mut DebugOverlay, width: u32, height: u32, scene: ValidationScene) {
-    let surface = window_logical_to_surface(scene.cursor, 1.0);
-    let ui_surface = ui_to_surface(UiPx::new(scene.cursor.x, scene.cursor.y), 1.0);
+fn draw_cursor_marker(
+    overlay: &mut DebugOverlay,
+    width: u32,
+    height: u32,
+    scale_factor: f32,
+    scene: ValidationScene,
+) {
+    let surface = window_logical_to_surface(scene.cursor, scale_factor);
+    let ui_surface = ui_to_surface(UiPx::new(scene.cursor.x, scene.cursor.y), scale_factor);
     debug_assert_eq!(surface, ui_surface);
+    let marker = [
+        surface.x.clamp(0.0, (width.max(1) - 1) as f32),
+        surface.y.clamp(0.0, (height.max(1) - 1) as f32),
+    ];
 
-    overlay.cross_marker_screen(width, height, [surface.x, surface.y], 18.0);
+    overlay.cross_marker_screen(width, height, marker, 18.0);
+    let label = if scene.cursor_live {
+        "cursor"
+    } else {
+        "cursor sample"
+    };
     overlay.add_screen_text(
-        format!("cursor ({:.0},{:.0})", scene.cursor.x, scene.cursor.y),
-        surface.x + 12.0,
-        surface.y + 12.0,
+        format!(
+            "{label} logical ({:.0},{:.0})",
+            scene.cursor.x, scene.cursor.y
+        ),
+        (marker[0] + 12.0).min((width.max(1) as f32 - 220.0).max(0.0)),
+        (marker[1] + 12.0).min((height.max(1) as f32 - 28.0).max(0.0)),
     );
 }
 
@@ -248,7 +312,7 @@ mod tests {
 
     #[test]
     fn scene_uses_bottom_right_edge_not_last_pixel_as_target_max() {
-        let scene = ValidationScene::new(640, 360);
+        let scene = ValidationScene::new(640, 360, None);
 
         assert_eq!(
             scene.full_target.max_exclusive(),
@@ -264,7 +328,7 @@ mod tests {
 
     #[test]
     fn scene_uv_samples_cover_corners_edges_and_center() {
-        let scene = ValidationScene::new(640, 360);
+        let scene = ValidationScene::new(640, 360, None);
         let samples = scene
             .uv_samples
             .map(|sample| render_target_to_uv(sample, 640, 360).to_vec2());
@@ -278,7 +342,7 @@ mod tests {
 
     #[test]
     fn clipped_ui_child_is_limited_to_clip_rect() {
-        let scene = ValidationScene::new(640, 360);
+        let scene = ValidationScene::new(640, 360, None);
         let child = Rect::new(
             scene.clip_rect.origin.x + scene.clip_rect.size.width * 0.65,
             scene.clip_rect.origin.y + scene.clip_rect.size.height * 0.65,
@@ -289,5 +353,14 @@ mod tests {
 
         assert!(scene.clip_rect.contains(visible.origin));
         assert_eq!(visible.max_exclusive(), scene.clip_rect.max_exclusive());
+    }
+
+    #[test]
+    fn scene_uses_live_cursor_when_available() {
+        let cursor = WindowLogicalPx::new(12.0, 34.0);
+        let scene = ValidationScene::new(640, 360, Some(cursor));
+
+        assert_eq!(scene.cursor, cursor);
+        assert!(scene.cursor_live);
     }
 }

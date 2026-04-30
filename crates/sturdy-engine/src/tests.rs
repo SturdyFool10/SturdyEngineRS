@@ -264,8 +264,16 @@ fn runtime_setting_keys_report_expected_apply_paths() {
         RuntimeApplyPath::SurfaceRecreate
     );
     assert_eq!(
+        RuntimeSettingKey::PresentPolicy.apply_path(),
+        RuntimeApplyPath::SurfaceRecreate
+    );
+    assert_eq!(
         RuntimeSettingKey::AntiAliasingMode.apply_path(),
         RuntimeApplyPath::GraphRebuild
+    );
+    assert_eq!(
+        RuntimeSettingKey::LatencyMode.apply_path(),
+        RuntimeApplyPath::Immediate
     );
     assert_eq!(
         RuntimeSettingKey::OverlayVisibility.apply_path(),
@@ -345,6 +353,7 @@ fn runtime_controller_registers_app_settings_and_records_changes() {
 #[test]
 fn runtime_controller_rejects_invalid_setting_value_kind() {
     let mut controller = RuntimeController::default();
+    let starting_revision = controller.apply_notifications_revision();
     let report = controller
         .transact()
         .set_engine_value(RuntimeSettingKey::OverlayVisibility, "visible")
@@ -360,6 +369,52 @@ fn runtime_controller_rejects_invalid_setting_value_kind() {
         controller.setting_value(RuntimeSettingKey::OverlayVisibility),
         Some(RuntimeSettingValue::Bool(true))
     );
+    assert_eq!(
+        controller.apply_notifications_since(starting_revision)[0].result,
+        report.changes[0]
+    );
+    assert_eq!(
+        controller.diagnostics().user_diagnostics[0].message,
+        "overlay visibility was not changed because the requested value is invalid."
+    );
+}
+
+#[test]
+fn runtime_controller_clamps_max_frames_in_flight() {
+    let mut controller = RuntimeController::default();
+    let starting_revision = controller.apply_notifications_revision();
+
+    let report = controller
+        .transact()
+        .set_engine_value(RuntimeSettingKey::MaxFramesInFlight, 0_i64)
+        .apply()
+        .unwrap();
+
+    assert_eq!(
+        report.changes,
+        vec![RuntimeChangeResult::Clamped {
+            setting: RuntimeSettingId::from(RuntimeSettingKey::MaxFramesInFlight),
+            path: RuntimeApplyPath::Immediate,
+            value: "1".to_string(),
+            reason: "requested 0, allowed range is 1..=8".to_string(),
+        }]
+    );
+    assert_eq!(
+        controller.setting_value(RuntimeSettingKey::MaxFramesInFlight),
+        Some(RuntimeSettingValue::Integer(1))
+    );
+    assert_eq!(
+        controller.setting_changes_since(0)[0].value,
+        RuntimeSettingValue::Integer(1)
+    );
+    assert_eq!(
+        controller.apply_notifications_since(starting_revision)[0].result,
+        report.changes[0]
+    );
+    assert_eq!(
+        controller.diagnostics().user_diagnostics[0].message,
+        "max frames in flight was clamped to 1."
+    );
 }
 
 #[test]
@@ -370,6 +425,19 @@ fn runtime_controller_reports_setting_support_and_menu_metadata() {
         .unwrap();
 
     assert_eq!(overlay_entry.descriptor.options.len(), 2);
+    let present_policy_entry = controller
+        .setting_entry(RuntimeSettingKey::PresentPolicy)
+        .unwrap();
+    let latency_entry = controller
+        .setting_entry(RuntimeSettingKey::LatencyMode)
+        .unwrap();
+    let render_threading_entry = controller
+        .setting_entry(RuntimeSettingKey::RenderThreadingMode)
+        .unwrap();
+
+    assert_eq!(present_policy_entry.descriptor.options.len(), 5);
+    assert_eq!(latency_entry.descriptor.options.len(), 4);
+    assert_eq!(render_threading_entry.descriptor.options.len(), 5);
     assert_eq!(
         controller.setting_support(RuntimeSettingKey::OverlayVisibility),
         Some(RuntimeSettingSupport::supported())
@@ -436,6 +504,143 @@ fn runtime_controller_records_precise_apply_notifications_and_user_diagnostics()
     assert_eq!(
         diagnostics.user_diagnostics[0].message,
         "backend selection is unavailable in this runtime."
+    );
+}
+
+#[test]
+fn runtime_controller_records_degraded_apply_notifications_and_diagnostics() {
+    let controller = RuntimeController::default();
+    let starting_revision = controller.apply_notifications_revision();
+    let report = RuntimeApplyReport {
+        changes: vec![RuntimeChangeResult::Degraded {
+            setting: RuntimeSettingId::from(RuntimeSettingKey::WindowBackgroundEffect),
+            path: RuntimeApplyPath::WindowReconfigure,
+            reason: "blur unavailable; using transparent window fallback".to_string(),
+        }],
+    };
+
+    controller.record_runtime_apply_report(report.clone());
+
+    assert_eq!(
+        controller.apply_notifications_since(starting_revision),
+        vec![RuntimeApplyNotification {
+            revision: starting_revision + 1,
+            result: report.changes[0].clone(),
+        }]
+    );
+    let diagnostics = controller.diagnostics();
+    assert_eq!(diagnostics.user_diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics.user_diagnostics[0].message,
+        "window background effect was applied with a fallback."
+    );
+    assert_eq!(
+        diagnostics.user_diagnostics[0].detail.as_deref(),
+        Some("blur unavailable; using transparent window fallback")
+    );
+}
+
+#[test]
+fn graph_inspection_lines_summarize_and_truncate_report() {
+    let report = GraphReport {
+        passes: vec![
+            GraphPassInfo {
+                name: "scene".to_string(),
+                kind: PassKind::Mesh,
+                reads: vec!["depth".to_string()],
+                writes: vec!["hdr".to_string()],
+            },
+            GraphPassInfo {
+                name: "tonemap".to_string(),
+                kind: PassKind::Fullscreen,
+                reads: vec!["hdr".to_string()],
+                writes: vec!["swapchain".to_string()],
+            },
+        ],
+        images: vec![
+            GraphImageInfo {
+                name: "hdr".to_string(),
+                format: Format::Rgba16Float,
+                extent: Extent3d {
+                    width: 1280,
+                    height: 720,
+                    depth: 1,
+                },
+                write_count: 1,
+                read_count: 1,
+            },
+            GraphImageInfo {
+                name: "swapchain".to_string(),
+                format: Format::Bgra8Unorm,
+                extent: Extent3d {
+                    width: 1280,
+                    height: 720,
+                    depth: 1,
+                },
+                write_count: 1,
+                read_count: 0,
+            },
+        ],
+    };
+
+    let lines = RuntimeController::graph_inspection_lines(&report, 1, 1);
+
+    assert_eq!(lines[0], "frame graph: 2 passes, 2 images");
+    assert!(lines[1].contains("pass 00: Mesh scene"));
+    assert_eq!(lines[2], "  ... 1 more passes");
+    assert!(lines[3].contains("image: hdr 1280x720 Rgba16Float w=1 r=1"));
+    assert_eq!(lines[4], "  ... 1 more images");
+}
+
+#[test]
+fn app_runtime_applies_surface_runtime_settings_as_structured_report() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let surface = engine
+        .create_surface(NativeSurfaceDesc::new(
+            raw_window_handle::RawDisplayHandle::Xlib(raw_window_handle::XlibDisplayHandle::new(
+                None, 0,
+            )),
+            raw_window_handle::RawWindowHandle::Xlib(raw_window_handle::XlibWindowHandle::new(0)),
+            SurfaceSize {
+                width: 64,
+                height: 32,
+            },
+        ))
+        .unwrap();
+    let mut runtime = AppRuntime::new(engine, surface);
+
+    let starting_revision = runtime.controller().apply_notifications_revision();
+    runtime
+        .controller_mut()
+        .transact()
+        .set_engine_value(RuntimeSettingKey::PresentPolicy, "NoTear")
+        .apply()
+        .unwrap();
+    let changes = runtime.controller().setting_changes_since(0);
+
+    let report = runtime.apply_surface_runtime_settings(&changes);
+
+    assert_eq!(
+        report.changes,
+        vec![RuntimeChangeResult::Applied {
+            setting: RuntimeSettingId::from(RuntimeSettingKey::PresentPolicy),
+            path: RuntimeApplyPath::SurfaceRecreate,
+        }]
+    );
+    assert!(
+        runtime
+            .controller()
+            .diagnostics()
+            .runtime_setting_apply
+            .as_deref()
+            .is_some_and(|context| context.contains("status=applied"))
+    );
+    assert!(
+        runtime
+            .controller()
+            .apply_notifications_since(starting_revision)
+            .iter()
+            .any(|notification| notification.result == report.changes[0])
     );
 }
 
