@@ -14,10 +14,11 @@ use std::{
 };
 
 use crate::{
-    BackendKind, Engine, Error, Format, GraphImage, GraphReport, MotionVectorDebugPass,
-    PlatformCapabilityState, RenderFrame, Result, Surface, SurfaceCapabilities, SurfaceColorSpace,
-    SurfaceHdrPreference, SurfaceImage, SurfacePresentMode, SurfaceRecreateDesc, SurfaceSize,
-    WindowCornerStyle, WindowMaterialKind, current_window_appearance_caps,
+    BackendKind, Engine, Error, Format, FrameClock, FrameTime, GraphImage, GraphReport,
+    MotionVectorDebugPass, PlatformCapabilityState, RenderFrame, Result, Surface,
+    SurfaceCapabilities, SurfaceColorSpace, SurfaceHdrPreference, SurfaceImage, SurfacePresentMode,
+    SurfaceRecreateDesc, SurfaceSize, WindowCornerStyle, WindowMaterialKind,
+    current_window_appearance_caps,
 };
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -39,6 +40,7 @@ pub struct AppRuntime {
     default_scene_target: DefaultSceneTargetConfig,
     debug_images: DebugImageRegistry,
     motion_debug_pass: MotionVectorDebugPass,
+    frame_clock: FrameClock,
     frame_start: Option<Instant>,
 }
 
@@ -52,6 +54,7 @@ impl AppRuntime {
             default_scene_target: DefaultSceneTargetConfig::new(&engine),
             debug_images: DebugImageRegistry::default(),
             motion_debug_pass,
+            frame_clock: FrameClock::new(),
             frame_start: None,
             controller: RuntimeController::new(RuntimeSettingsSnapshot {
                 backend: engine.backend_kind(),
@@ -110,6 +113,21 @@ impl AppRuntime {
     /// Return the runtime-owned debug image registry.
     pub fn debug_images(&self) -> &DebugImageRegistry {
         &self.debug_images
+    }
+
+    /// Return the runtime-owned frame clock.
+    pub fn frame_clock(&self) -> &FrameClock {
+        &self.frame_clock
+    }
+
+    /// Return the runtime-owned frame clock mutably.
+    pub fn frame_clock_mut(&mut self) -> &mut FrameClock {
+        &mut self.frame_clock
+    }
+
+    /// Return timing for the most recently acquired frame.
+    pub fn frame_time(&self) -> FrameTime {
+        self.frame_clock.time()
     }
 
     /// Refresh runtime settings/diagnostics snapshots from the current engine and surface state.
@@ -254,12 +272,14 @@ impl AppRuntime {
         self.debug_images.clear();
         self.controller.clear_overlay_lines();
         self.frame_start = Some(Instant::now());
+        let frame_time = self.frame_clock.tick();
         let surface_image = self.surface.acquire_image()?;
         let render_frame = self.engine.begin_render_frame_for(&surface_image)?;
         Ok(AppRuntimeFrame {
             runtime: self,
             surface_image,
             render_frame,
+            frame_time,
             finished: false,
         })
     }
@@ -322,6 +342,7 @@ pub struct AppRuntimeFrame<'a> {
     runtime: &'a mut AppRuntime,
     surface_image: SurfaceImage,
     render_frame: RenderFrame,
+    frame_time: FrameTime,
     /// Set to `true` after `finish_and_present` completes to prevent the `Drop`
     /// impl from double-presenting when the user calls it explicitly.
     finished: bool,
@@ -341,6 +362,26 @@ impl<'a> AppRuntimeFrame<'a> {
     /// Access the render frame mutably.
     pub fn render_frame_mut(&mut self) -> &mut RenderFrame {
         &mut self.render_frame
+    }
+
+    /// Timing for this acquired frame.
+    pub fn frame_time(&self) -> FrameTime {
+        self.frame_time
+    }
+
+    /// Delta time since the previous frame in seconds.
+    pub fn delta_secs(&self) -> f32 {
+        self.frame_time.delta_secs()
+    }
+
+    /// Total elapsed runtime in seconds.
+    pub fn elapsed_secs(&self) -> f32 {
+        self.frame_time.elapsed_secs()
+    }
+
+    /// Monotonic frame index for this runtime frame.
+    pub fn frame_index(&self) -> u64 {
+        self.frame_time.frame
     }
 
     /// Return the runtime-owned default HDR scene-target policy for this frame.
@@ -393,6 +434,7 @@ impl<'a> AppRuntimeFrame<'a> {
             self.debug_images().clone(),
             self.runtime.controller.clone(),
             &self.runtime.motion_debug_pass,
+            self.frame_time,
         )
     }
 
@@ -414,9 +456,7 @@ impl<'a> AppRuntimeFrame<'a> {
         self.runtime.controller.update_diagnostics(|d| {
             d.frame_sync = Some(format!(
                 "reason={:?} submitted={} waited=false presented=true submission={:?}",
-                flush_report.reason,
-                flush_report.submitted,
-                flush_report.submission
+                flush_report.reason, flush_report.submitted, flush_report.submission
             ));
         });
         if let Some(start) = self.runtime.frame_start.take() {

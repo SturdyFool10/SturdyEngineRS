@@ -51,6 +51,18 @@ pub enum KeyToken {
     Key(String),
 }
 
+impl From<&str> for KeyToken {
+    fn from(value: &str) -> Self {
+        Self::Key(value.to_string())
+    }
+}
+
+impl From<String> for KeyToken {
+    fn from(value: String) -> Self {
+        Self::Key(value)
+    }
+}
+
 impl KeyToken {
     pub fn key(name: impl Into<String>) -> Self {
         Self::Key(name.into())
@@ -544,6 +556,19 @@ pub struct InputHub {
     simulator: clay_ui::InputSimulator,
     actions: ActionMap,
     cursor: clay_ui::WindowLogicalPx,
+    cursor_initialized: bool,
+    mouse_delta: glam::Vec2,
+    pending_mouse_delta: glam::Vec2,
+    held_keys: HashSet<KeyToken>,
+    key_just_pressed: HashSet<KeyToken>,
+    key_just_released: HashSet<KeyToken>,
+    pending_key_pressed: HashSet<KeyToken>,
+    pending_key_released: HashSet<KeyToken>,
+    held_mouse_buttons: HashSet<u8>,
+    mouse_button_just_pressed: HashSet<u8>,
+    mouse_button_just_released: HashSet<u8>,
+    pending_mouse_button_pressed: HashSet<u8>,
+    pending_mouse_button_released: HashSet<u8>,
     primary_held: bool,
     /// `KeyInput` events received since the last `update()`, drained into
     /// `ActionMap` after the simulator has run (so UI priority is respected).
@@ -562,6 +587,19 @@ impl InputHub {
             simulator: clay_ui::InputSimulator::default(),
             actions: ActionMap::new(),
             cursor: clay_ui::WindowLogicalPx::ZERO,
+            cursor_initialized: false,
+            mouse_delta: glam::Vec2::ZERO,
+            pending_mouse_delta: glam::Vec2::ZERO,
+            held_keys: HashSet::new(),
+            key_just_pressed: HashSet::new(),
+            key_just_released: HashSet::new(),
+            pending_key_pressed: HashSet::new(),
+            pending_key_released: HashSet::new(),
+            held_mouse_buttons: HashSet::new(),
+            mouse_button_just_pressed: HashSet::new(),
+            mouse_button_just_released: HashSet::new(),
+            pending_mouse_button_pressed: HashSet::new(),
+            pending_mouse_button_released: HashSet::new(),
             primary_held: false,
             pending_key_inputs: Vec::new(),
         }
@@ -572,6 +610,11 @@ impl InputHub {
     /// Call from `EngineApp::pointer_moved`.
     pub fn on_pointer_moved(&mut self, pos: clay_ui::WindowLogicalPx) {
         use clay_ui::{InputEvent, InteractionPhase, PointerButton, PointerState};
+        if self.cursor_initialized {
+            self.pending_mouse_delta += pos.to_vec2() - self.cursor.to_vec2();
+        } else {
+            self.cursor_initialized = true;
+        }
         self.cursor = pos;
         let phase = if self.primary_held {
             InteractionPhase::Pressed
@@ -591,8 +634,20 @@ impl InputHub {
     pub fn on_pointer_button(&mut self, pos: clay_ui::WindowLogicalPx, button: u8, pressed: bool) {
         use clay_ui::{InputEvent, InteractionPhase, PointerButton, PointerState};
         self.cursor = pos;
+        self.cursor_initialized = true;
         if button == 0 {
             self.primary_held = pressed;
+        }
+        if pressed {
+            if self.held_mouse_buttons.insert(button) {
+                self.pending_mouse_button_pressed.insert(button);
+            }
+            self.pending_mouse_button_released.remove(&button);
+        } else {
+            if self.held_mouse_buttons.remove(&button) {
+                self.pending_mouse_button_released.insert(button);
+            }
+            self.pending_mouse_button_pressed.remove(&button);
         }
         let btn = match button {
             0 => PointerButton::Primary,
@@ -628,6 +683,22 @@ impl InputHub {
         use clay_ui::InputEvent;
 
         let modifiers = clay_modifiers(input.modifiers);
+        if !input.repeat {
+            match input.state {
+                KeyInputState::Pressed => {
+                    if self.held_keys.insert(input.key.clone()) {
+                        self.pending_key_pressed.insert(input.key.clone());
+                    }
+                    self.pending_key_released.remove(&input.key);
+                }
+                KeyInputState::Released => {
+                    if self.held_keys.remove(&input.key) {
+                        self.pending_key_released.insert(input.key.clone());
+                    }
+                    self.pending_key_pressed.remove(&input.key);
+                }
+            }
+        }
 
         // Route key name to simulator.
         if let KeyToken::Key(name) = &input.key {
@@ -683,6 +754,7 @@ impl InputHub {
     /// 3. Dispatches buffered key inputs to `ActionMap`, using per-key UI
     ///    consumption data so unrelated game actions are not blocked.
     pub fn update(&mut self, tree: &clay_ui::LayoutTree) -> Option<clay_ui::Hit> {
+        self.publish_polling_frame();
         self.actions.end_frame();
         let hit = self.simulator.update(tree);
         let pending = std::mem::take(&mut self.pending_key_inputs);
@@ -695,6 +767,15 @@ impl InputHub {
             self.actions.process(ki, this_key_consumed);
         }
         hit
+    }
+
+    fn publish_polling_frame(&mut self) {
+        self.mouse_delta = self.pending_mouse_delta;
+        self.pending_mouse_delta = glam::Vec2::ZERO;
+        self.key_just_pressed = std::mem::take(&mut self.pending_key_pressed);
+        self.key_just_released = std::mem::take(&mut self.pending_key_released);
+        self.mouse_button_just_pressed = std::mem::take(&mut self.pending_mouse_button_pressed);
+        self.mouse_button_just_released = std::mem::take(&mut self.pending_mouse_button_released);
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────────
@@ -721,6 +802,48 @@ impl InputHub {
     /// Current cursor position in top-left/Y-down `WindowLogicalPx`.
     pub fn cursor_pos(&self) -> clay_ui::WindowLogicalPx {
         self.cursor
+    }
+
+    /// Current mouse position in top-left/Y-down `WindowLogicalPx`.
+    pub fn mouse_position(&self) -> clay_ui::WindowLogicalPx {
+        self.cursor
+    }
+
+    /// Mouse movement accumulated since the previous [`InputHub::update`].
+    pub fn mouse_delta(&self) -> glam::Vec2 {
+        self.mouse_delta
+    }
+
+    /// `true` while the raw key is held down, regardless of UI consumption.
+    pub fn is_key_pressed(&self, key: impl Into<KeyToken>) -> bool {
+        self.held_keys.contains(&key.into())
+    }
+
+    /// `true` on the first frame the raw key was pressed, regardless of UI consumption.
+    pub fn is_key_just_pressed(&self, key: impl Into<KeyToken>) -> bool {
+        self.key_just_pressed.contains(&key.into())
+    }
+
+    /// `true` on the frame the raw key was released, regardless of UI consumption.
+    pub fn is_key_just_released(&self, key: impl Into<KeyToken>) -> bool {
+        self.key_just_released.contains(&key.into())
+    }
+
+    /// `true` while the raw mouse button is held down.
+    ///
+    /// Buttons follow the shell convention: 0 = primary, 1 = secondary, 2 = middle.
+    pub fn is_mouse_button_pressed(&self, button: u8) -> bool {
+        self.held_mouse_buttons.contains(&button)
+    }
+
+    /// `true` on the first frame the raw mouse button was pressed.
+    pub fn is_mouse_button_just_pressed(&self, button: u8) -> bool {
+        self.mouse_button_just_pressed.contains(&button)
+    }
+
+    /// `true` on the frame the raw mouse button was released.
+    pub fn is_mouse_button_just_released(&self, button: u8) -> bool {
+        self.mouse_button_just_released.contains(&button)
     }
 
     // ── Simulator convenience forwards ────────────────────────────────────────
@@ -1043,5 +1166,54 @@ mod tests {
         // New "KeyW" binding works.
         map.process(&press("KeyW"), false);
         assert!(map.just_pressed("Jump"));
+    }
+
+    #[test]
+    fn input_hub_publishes_raw_key_polling_state_per_update() {
+        let mut hub = InputHub::new();
+        hub.on_key_input(&press("KeyW"));
+        assert!(hub.is_key_pressed("KeyW"));
+        assert!(!hub.is_key_just_pressed("KeyW"));
+
+        hub.update(&clay_ui::LayoutTree::default());
+        assert!(hub.is_key_pressed("KeyW"));
+        assert!(hub.is_key_just_pressed("KeyW"));
+        assert!(!hub.is_key_just_released("KeyW"));
+
+        hub.update(&clay_ui::LayoutTree::default());
+        assert!(hub.is_key_pressed("KeyW"));
+        assert!(!hub.is_key_just_pressed("KeyW"));
+
+        hub.on_key_input(&release("KeyW"));
+        hub.update(&clay_ui::LayoutTree::default());
+        assert!(!hub.is_key_pressed("KeyW"));
+        assert!(hub.is_key_just_released("KeyW"));
+    }
+
+    #[test]
+    fn input_hub_publishes_raw_mouse_polling_state_per_update() {
+        let mut hub = InputHub::new();
+        hub.on_pointer_moved(clay_ui::WindowLogicalPx::new(10.0, 20.0));
+        hub.on_pointer_moved(clay_ui::WindowLogicalPx::new(13.0, 25.0));
+        hub.on_pointer_button(clay_ui::WindowLogicalPx::new(13.0, 25.0), 0, true);
+
+        hub.update(&clay_ui::LayoutTree::default());
+        assert_eq!(
+            hub.mouse_position(),
+            clay_ui::WindowLogicalPx::new(13.0, 25.0)
+        );
+        assert_eq!(hub.mouse_delta(), glam::Vec2::new(3.0, 5.0));
+        assert!(hub.is_mouse_button_pressed(0));
+        assert!(hub.is_mouse_button_just_pressed(0));
+
+        hub.update(&clay_ui::LayoutTree::default());
+        assert_eq!(hub.mouse_delta(), glam::Vec2::ZERO);
+        assert!(hub.is_mouse_button_pressed(0));
+        assert!(!hub.is_mouse_button_just_pressed(0));
+
+        hub.on_pointer_button(clay_ui::WindowLogicalPx::new(13.0, 25.0), 0, false);
+        hub.update(&clay_ui::LayoutTree::default());
+        assert!(!hub.is_mouse_button_pressed(0));
+        assert!(hub.is_mouse_button_just_released(0));
     }
 }

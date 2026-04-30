@@ -24,8 +24,8 @@ These three tracks unblock the remaining two use cases. Work on them before ever
 
 The engine has a frame loop and a runtime settings system, but app code can't see the information a game needs.
 
-- [ ] Expose `delta_time` and `frame_index` to app code via `AppRuntimeFrame` or a new `FrameClock` helper.
-- [ ] Add input polling API alongside the existing callbacks: `InputHub::is_key_pressed`, `is_key_just_pressed`, `is_key_just_released`, `mouse_delta`, `mouse_position`.
+- [x] Expose `delta_time` and `frame_index` to app code via `AppRuntimeFrame` or a new `FrameClock` helper.
+- [x] Add input polling API alongside the existing callbacks: `InputHub::is_key_pressed`, `is_key_just_pressed`, `is_key_just_released`, `mouse_delta`, `mouse_position`.
 - [ ] Add gamepad support: abstract `GamepadAxis` and `GamepadButton` over a platform gamepad backend (gilrs or winit).
 - [ ] Add `ActionMap` that binds named actions to keyboard/mouse/gamepad inputs and returns digital/analog values per frame.
 - [ ] Add fixed-timestep and interpolation helpers (`FrameClock` with monotonic timing, delta, fixed-step accumulator, and pacing error).

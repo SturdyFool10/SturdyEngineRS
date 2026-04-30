@@ -57,13 +57,13 @@ use sturdy_engine_core::SurfaceSize;
 
 use crate::{
     AntiAliasingMode, AntiAliasingPass, AppRuntime, BloomConfig, BloomPass, DebugImageRegistry,
-    DefaultSceneTargetConfig, DiagnosticLevel, Engine, GraphImage, KeyInput, KeyModifiers,
-    MotionVectorDebugPass, NativeWindowAppearanceApplyReport, NativeWindowAppearanceStatus,
-    Result as EngineResult, RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult,
-    RuntimeController, RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimeSettingChange,
-    RuntimeSettingId, RuntimeSettingKey, RuntimeWindowDiagnostics, ScreenshotCapture,
-    ScreenshotExportReport, ShaderProgram, Surface, SurfaceHdrPreference, SurfaceImage,
-    SurfaceTransparency, WindowAppearance, WindowAppearancePreset, WindowBackdrop,
+    DefaultSceneTargetConfig, DiagnosticLevel, Engine, FrameTime, GraphImage, KeyInput,
+    KeyModifiers, MotionVectorDebugPass, NativeWindowAppearanceApplyReport,
+    NativeWindowAppearanceStatus, Result as EngineResult, RuntimeApplyPath, RuntimeApplyReport,
+    RuntimeChangeResult, RuntimeController, RuntimeDiagnostics, RuntimeGraphDiagnostics,
+    RuntimeSettingChange, RuntimeSettingId, RuntimeSettingKey, RuntimeWindowDiagnostics,
+    ScreenshotCapture, ScreenshotExportReport, ShaderProgram, Surface, SurfaceHdrPreference,
+    SurfaceImage, SurfaceTransparency, WindowAppearance, WindowAppearancePreset, WindowBackdrop,
     WindowCornerStyle, WindowHandle, WindowMaterialKind, WindowMode, WindowRegistry,
     WindowTransparencyDesc, appearance_wants_native_blur,
     apply_native_window_appearance_report_for_window,
@@ -439,6 +439,7 @@ pub struct ShellFrame<'a> {
     debug_images: DebugImageRegistry,
     controller: RuntimeController,
     motion_debug_pass: &'a MotionVectorDebugPass,
+    frame_time: FrameTime,
     window_scale_factor: f32,
     window_logical_size: Option<[f32; 2]>,
 }
@@ -487,6 +488,7 @@ impl<'a> ShellFrame<'a> {
         debug_images: DebugImageRegistry,
         controller: RuntimeController,
         motion_debug_pass: &'a MotionVectorDebugPass,
+        frame_time: FrameTime,
     ) -> Self {
         Self {
             inner,
@@ -494,6 +496,7 @@ impl<'a> ShellFrame<'a> {
             debug_images,
             controller,
             motion_debug_pass,
+            frame_time,
             window_scale_factor: 1.0,
             window_logical_size: None,
         }
@@ -507,6 +510,26 @@ impl<'a> ShellFrame<'a> {
     /// Get the underlying frame mutably.
     pub fn inner_mut(&mut self) -> &mut crate::RenderFrame {
         &mut self.inner
+    }
+
+    /// Timing for the runtime frame that produced this shell frame.
+    pub fn frame_time(&self) -> FrameTime {
+        self.frame_time
+    }
+
+    /// Delta time since the previous frame in seconds.
+    pub fn delta_secs(&self) -> f32 {
+        self.frame_time.delta_secs()
+    }
+
+    /// Total elapsed runtime in seconds.
+    pub fn elapsed_secs(&self) -> f32 {
+        self.frame_time.elapsed_secs()
+    }
+
+    /// Monotonic frame index for this shell frame.
+    pub fn frame_index(&self) -> u64 {
+        self.frame_time.frame
     }
 
     /// DPI scale factor for converting logical window/UI pixels to physical surface pixels.
@@ -867,9 +890,7 @@ impl<'a> ShellFrame<'a> {
         self.controller.update_diagnostics(|diagnostics| {
             diagnostics.frame_sync = Some(format!(
                 "reason={:?} submitted={} waited=false presented=true submission={:?}",
-                flush_report.reason,
-                flush_report.submitted,
-                flush_report.submission
+                flush_report.reason, flush_report.submitted, flush_report.submission
             ));
         });
         Ok(())

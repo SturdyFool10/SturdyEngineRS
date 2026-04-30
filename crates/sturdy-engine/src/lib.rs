@@ -18,6 +18,7 @@ mod debug_draw_2d;
 mod debug_overlay;
 mod debug_view_picker;
 mod device_manager;
+mod frame_clock;
 mod frontend_graph;
 mod gpu_procedural_texture;
 mod graph_frame;
@@ -73,6 +74,7 @@ pub use debug_overlay::{
 };
 pub use debug_view_picker::DebugViewPicker;
 pub use device_manager::{AdapterEntry, DeviceManager};
+pub use frame_clock::{FrameClock, FrameTime};
 pub use gpu_procedural_texture::GpuProceduralTexture;
 pub use graph_frame::{FullscreenPassBuilder, GraphFrame, ImageNode};
 pub use hdr_pipeline::{HdrMode, HdrPipelineDesc, HdrPreference, ToneMappingOp};
