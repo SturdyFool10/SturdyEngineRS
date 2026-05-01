@@ -9,6 +9,7 @@ use std::{
 };
 
 mod game_shell;
+mod asset_loader;
 mod anti_aliasing_pass;
 mod antialiasing;
 mod application;
@@ -49,6 +50,7 @@ mod upload_arena;
 mod window_registry;
 
 pub use anti_aliasing_pass::{AntiAliasingPass, taa_jitter_uv, taa_jittered_projection};
+pub use asset_loader::{AssetCache, AssetHandle, LoadState};
 pub use antialiasing::{
     AntiAliasingConfig, AntiAliasingDial, AntiAliasingMode, FxaaSettings, MsaaSettings, TaaSettings,
 };
@@ -109,8 +111,8 @@ pub use runtime::{
 };
 pub use sampler_catalog::SamplerPreset;
 pub use scene::{
-    CameraConstants, CameraId, CameraOutput, DirectionalLight, InstanceData, MeshId, ObjectId,
-    ObjectKind, OrbitCamera, RenderTarget, Scene, SceneCamera,
+    CameraConstants, CameraId, CameraOutput, DirectionalLight, InstanceData, MaterialDescriptor,
+    MeshId, ObjectId, ObjectKind, OrbitCamera, RenderTarget, Scene, SceneCamera,
 };
 pub use screenshot::{ScreenshotCapture, ScreenshotExportReport};
 pub use shader_watcher::ShaderWatcher;
@@ -578,6 +580,37 @@ impl Engine {
         frame.flush_with_reason(FrameSyncReason::CompatibilityShim)?;
         frame.wait_with_reason(FrameSyncReason::CompatibilityShim)?;
         Ok(image)
+    }
+
+    /// Load a texture from `path` and upload it to the GPU.
+    ///
+    /// Supports PNG, JPEG, WebP, and BMP. The returned [`AssetHandle`] is
+    /// immediately `Ready` on success or `Failed` on error — no panic.
+    ///
+    /// Use [`Engine::checkerboard_texture`] as a fallback while a texture is
+    /// unavailable, rather than unwrapping the handle unconditionally.
+    ///
+    /// ```ignore
+    /// let tex = engine.load_texture_2d("assets/rock.png");
+    /// // In render:
+    /// if let Some(img) = tex.with(|image| image.handle()) {
+    ///     frame.bind_image_handle("albedo", img);
+    /// }
+    /// ```
+    pub fn load_texture_2d(&self, path: impl AsRef<std::path::Path>) -> AssetHandle<Image> {
+        asset_loader::load_texture_2d_from_path(self, path)
+    }
+
+    /// Generate a magenta/dark-grey checkerboard image for use as a
+    /// missing-texture placeholder.
+    ///
+    /// `size` is the image side length in pixels (rounded up to the next
+    /// power of two). `tile_size` controls the size of each coloured square.
+    ///
+    /// The vivid magenta pattern is immediately recognisable as a placeholder
+    /// in a rendered scene, making missing asset bugs obvious at a glance.
+    pub fn checkerboard_texture(&self, size: u32, tile_size: u32) -> Result<Image> {
+        asset_loader::make_checkerboard(self, size, tile_size)
     }
 
     pub fn wait_idle(&self) -> Result<()> {

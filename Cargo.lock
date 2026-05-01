@@ -1781,6 +1781,7 @@ dependencies = [
  "clay-ui",
  "gilrs",
  "glam",
+ "image",
  "png 0.17.16",
  "raw-window-handle",
  "sturdy-engine-core",

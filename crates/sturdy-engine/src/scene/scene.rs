@@ -65,6 +65,76 @@ impl LightingUniforms {
     }
 }
 
+/// Per-mesh material parameters for the built-in lit shader.
+///
+/// Set via [`Scene::set_material`] after calling [`Scene::add_mesh`]. The default
+/// is a white, fully opaque, mid-roughness dielectric (no metallic, no emission).
+///
+/// # In the shader
+///
+/// `lit_fragment.slang` reads a `StructuredBuffer<MaterialConstants> material_desc`
+/// buffer that [`Scene::draw`] binds automatically. Custom fragment shaders can
+/// declare the same binding to receive these values.
+#[derive(Clone, Debug)]
+pub struct MaterialDescriptor {
+    /// Base colour (linear RGB). Multiplied with the lighting result.
+    pub albedo: Vec3,
+    /// Opacity in \[0, 1\]. Values below 1.0 require an alpha-blend program.
+    pub opacity: f32,
+    /// Self-emission added after lighting (HDR values are valid).
+    pub emissive: Vec3,
+    /// Metallic factor in \[0, 1\]. 0 = dielectric, 1 = conductor.
+    pub metallic: f32,
+    /// Surface roughness in \[0, 1\]. 0 = mirror, 1 = fully diffuse.
+    pub roughness: f32,
+}
+
+impl Default for MaterialDescriptor {
+    fn default() -> Self {
+        Self {
+            albedo: Vec3::ONE,
+            opacity: 1.0,
+            emissive: Vec3::ZERO,
+            metallic: 0.0,
+            roughness: 0.5,
+        }
+    }
+}
+
+/// GPU-layout mirror of the data read by `lit_fragment.slang` as `material_desc`.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct MaterialConstants {
+    /// xyz = albedo, w = opacity
+    albedo: [f32; 4],
+    /// xyz = emissive, w = metallic
+    emissive_metallic: [f32; 4],
+    /// x = roughness, yzw = unused (padding)
+    roughness_pad: [f32; 4],
+}
+
+impl MaterialConstants {
+    fn from_descriptor(desc: &MaterialDescriptor) -> Self {
+        Self {
+            albedo: [desc.albedo.x, desc.albedo.y, desc.albedo.z, desc.opacity],
+            emissive_metallic: [
+                desc.emissive.x,
+                desc.emissive.y,
+                desc.emissive.z,
+                desc.metallic,
+            ],
+            roughness_pad: [desc.roughness, 0.0, 0.0, 0.0],
+        }
+    }
+}
+
+/// Per-mesh material state owned by the scene.
+struct MeshMaterial {
+    descriptor: MaterialDescriptor,
+    gpu_buffer: Option<Buffer>,
+    dirty: bool,
+}
+
 /// Push constants sent to the vertex shader for each camera draw call.
 ///
 /// Vertex shaders must declare `uniform CameraConstants cam` and use
@@ -116,6 +186,8 @@ impl CameraConstants {
 /// and read `instances[SV_InstanceID].model` for the per-instance model matrix.
 pub struct Scene {
     meshes: Vec<(Mesh, MeshProgram)>,
+    /// Parallel to `meshes` — one material entry per registered mesh.
+    materials: Vec<MeshMaterial>,
     objects: Vec<SceneObject>,
     cameras: Vec<SceneCamera>,
     batches: HashMap<u32, InstanceBatch>,
@@ -123,7 +195,6 @@ pub struct Scene {
     /// Directional light applied when drawing with [`MeshProgram::lit`].
     pub directional_light: DirectionalLight,
     /// Persistent GPU buffer holding the current [`LightingUniforms`].
-    /// Created on the first `prepare()` call that can reach the engine.
     light_buffer: Option<Buffer>,
 }
 
@@ -131,6 +202,7 @@ impl Scene {
     pub fn new() -> Self {
         Self {
             meshes: Vec::new(),
+            materials: Vec::new(),
             objects: Vec::new(),
             cameras: Vec::new(),
             batches: HashMap::new(),
@@ -141,10 +213,33 @@ impl Scene {
     }
 
     /// Register a mesh+program pair. Returns a `MeshId` used to spawn objects.
+    ///
+    /// A default [`MaterialDescriptor`] (white, opaque, roughness=0.5) is assigned.
+    /// Override it with [`set_material`](Self::set_material).
     pub fn add_mesh(&mut self, mesh: Mesh, program: MeshProgram) -> MeshId {
         let id = MeshId(self.meshes.len() as u32);
         self.meshes.push((mesh, program));
+        self.materials.push(MeshMaterial {
+            descriptor: MaterialDescriptor::default(),
+            gpu_buffer: None,
+            dirty: true,
+        });
         id
+    }
+
+    /// Set the material parameters for a registered mesh.
+    ///
+    /// Changes take effect on the next [`prepare`](Self::prepare) call.
+    pub fn set_material(&mut self, id: MeshId, descriptor: MaterialDescriptor) {
+        if let Some(mat) = self.materials.get_mut(id.0 as usize) {
+            mat.descriptor = descriptor;
+            mat.dirty = true;
+        }
+    }
+
+    /// Return the current material descriptor for a mesh.
+    pub fn material(&self, id: MeshId) -> Option<&MaterialDescriptor> {
+        self.materials.get(id.0 as usize).map(|m| &m.descriptor)
     }
 
     /// Add an object instance at the world origin. Returns an `ObjectId` for later
@@ -249,6 +344,24 @@ impl Scene {
                 size: std::mem::size_of::<LightingUniforms>() as u64,
                 usage: BufferUsage::STORAGE,
             })?);
+        }
+
+        // Create or update per-mesh material buffers.
+        for mat in &mut self.materials {
+            if mat.gpu_buffer.is_none() {
+                mat.gpu_buffer = Some(engine.create_buffer(BufferDesc {
+                    size: std::mem::size_of::<MaterialConstants>() as u64,
+                    usage: BufferUsage::STORAGE,
+                })?);
+                mat.dirty = true;
+            }
+            if mat.dirty {
+                if let Some(buf) = &mat.gpu_buffer {
+                    let constants = MaterialConstants::from_descriptor(&mat.descriptor);
+                    buf.write(0, bytemuck::bytes_of(&constants))?;
+                }
+                mat.dirty = false;
+            }
         }
 
         Ok(())
@@ -379,10 +492,16 @@ impl Scene {
                 continue;
             }
 
-            let (mesh, program) = &self.meshes[batch.mesh_idx as usize];
+            let mesh_idx = batch.mesh_idx as usize;
+            let (mesh, program) = &self.meshes[mesh_idx];
             frame.bind_buffer("instances", buf);
             if let Some(light_buf) = &self.light_buffer {
                 frame.bind_buffer("lighting", light_buf);
+            }
+            if let Some(mat) = self.materials.get(mesh_idx) {
+                if let Some(mat_buf) = &mat.gpu_buffer {
+                    frame.bind_buffer("material_desc", mat_buf);
+                }
             }
             let effective_depth = if program.uses_depth { depth } else { None };
             output.draw_mesh_instanced_with_push_constants_and_depth(

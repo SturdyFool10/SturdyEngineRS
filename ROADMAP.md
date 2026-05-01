@@ -39,7 +39,7 @@ The scene renders instanced geometry with camera transforms but no lighting. Eve
 
 - [x] Add directional light: a `DirectionalLight` uniform buffer with world-space direction, colour, and ambient term bound per-frame in the scene shader.
 - [x] Add Lambert diffuse + Blinn-Phong specular shading in the default 3D fragment shader, driven by the light uniform.
-- [ ] Add a `Material` descriptor: albedo colour, roughness, metallic, emissive. One uniform buffer per draw call, reflected and bound automatically.
+- [x] Add a `Material` descriptor: albedo colour, roughness, metallic, emissive. One uniform buffer per draw call, reflected and bound automatically.
 - [ ] Add a directional shadow map pass: depth-only render pass writing to `Depth32Float`, sampled with PCF in the lit pass. The render graph handles ordering and barriers.
 - [ ] Add point lights and spot lights as follow-on.
 - [ ] Add normal mapping support: read tangent-space normals from a sampled texture, transform with a TBN matrix.
@@ -50,10 +50,10 @@ The scene renders instanced geometry with camera transforms but no lighting. Eve
 
 Everything is created programmatically today. Real projects need to load content from disk.
 
-- [ ] Add `engine.load_texture_2d(path) -> AssetHandle<Texture>` — PNG/JPEG loading via the `image` crate, automatic mip generation, GPU upload.
+- [x] Add `engine.load_texture_2d(path) -> AssetHandle<Texture>` — PNG/JPEG loading via the `image` crate, automatic mip generation, GPU upload.
 - [ ] Add `engine.load_mesh(path) -> AssetHandle<Mesh>` — GLTF loading via the `gltf` crate, producing `Vertex3d` arrays, index buffers, and material references.
-- [ ] Add `AssetHandle<T>` with state queries: `is_ready()`, `is_loading()`, `is_degraded()`, `failed_reason()`.
-- [ ] Add a placeholder policy: missing/loading textures use a visible checkerboard fallback rather than panicking.
+- [x] Add `AssetHandle<T>` with state queries: `is_ready()`, `is_loading()`, `is_degraded()`, `failed_reason()`.
+- [x] Add a placeholder policy: missing/loading textures use a visible checkerboard fallback rather than panicking.
 - [ ] Add shader hot reload for loose `.slang` files: detect change, recompile, keep last-known-good on failure, emit visible diagnostics.
 - [ ] Add asset hot reload for textures and meshes behind the same handle/state system as the streaming path.
 
