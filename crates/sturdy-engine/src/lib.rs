@@ -8,6 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+mod game_shell;
 mod anti_aliasing_pass;
 mod antialiasing;
 mod application;
@@ -57,6 +58,10 @@ pub use application::{
     RuntimePostProcessDesc, RuntimePostProcessOutput, ShellFrame, WindowConfig, WindowDesc, run,
     try_run,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use game_shell::{
+    FixedUpdateContext, GameApp, GameConfig, GameContext, run_game, try_run_game,
+};
 pub use bloom_pass::{
     BloomCompositeConstants, BloomConfig, BloomPass, BrightPassConstants, DownsampleConstants,
     UpsampleConstants,
@@ -104,8 +109,8 @@ pub use runtime::{
 };
 pub use sampler_catalog::SamplerPreset;
 pub use scene::{
-    CameraConstants, CameraId, CameraOutput, InstanceData, MeshId, ObjectId, ObjectKind,
-    OrbitCamera, RenderTarget, Scene, SceneCamera,
+    CameraConstants, CameraId, CameraOutput, DirectionalLight, InstanceData, MeshId, ObjectId,
+    ObjectKind, OrbitCamera, RenderTarget, Scene, SceneCamera,
 };
 pub use screenshot::{ScreenshotCapture, ScreenshotExportReport};
 pub use shader_watcher::ShaderWatcher;

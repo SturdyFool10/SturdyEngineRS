@@ -28,6 +28,11 @@ const UNLIT_FRAGMENT: &str = include_str!(concat!(
     "/shaders/unlit_fragment.slang"
 ));
 
+const LIT_FRAGMENT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/lit_fragment.slang"
+));
+
 pub struct MeshProgramDesc {
     pub fragment: ShaderDesc,
     /// Custom vertex shader. None uses the built-in for the chosen kind.
@@ -111,6 +116,34 @@ impl MeshProgram {
             MeshProgramDesc {
                 fragment: ShaderDesc {
                     source: ShaderSource::Inline(UNLIT_FRAGMENT.to_owned()),
+                    entry_point: "main".to_owned(),
+                    stage: ShaderStage::Fragment,
+                },
+                vertex: None,
+                vertex_kind: MeshVertexKind::V3d,
+                alpha_blend: false,
+                uses_depth: true,
+            },
+        )
+    }
+
+    /// Built-in 3D program with Lambert diffuse + Blinn-Phong specular shading.
+    ///
+    /// Requires a storage buffer named `"lighting"` containing one [`LightingUniforms`]
+    /// element, which [`Scene::draw`] writes and binds automatically. Use this with
+    /// [`Scene`] rather than driving the draw calls manually.
+    ///
+    /// Depth testing is enabled; supply a depth image (or use `Scene::draw`).
+    ///
+    /// [`LightingUniforms`]: crate::scene::DirectionalLight
+    /// [`Scene`]: crate::scene::Scene
+    /// [`Scene::draw`]: crate::scene::Scene::draw
+    pub fn lit(engine: &Engine) -> Result<Self> {
+        Self::new(
+            engine,
+            MeshProgramDesc {
+                fragment: ShaderDesc {
+                    source: ShaderSource::Inline(LIT_FRAGMENT.to_owned()),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                 },

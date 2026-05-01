@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
     str::FromStr,
@@ -822,8 +823,12 @@ pub struct InputHub {
     actions: ActionMap,
     cursor: clay_ui::WindowLogicalPx,
     cursor_initialized: bool,
+    /// Cursor-position–derived delta (UI-friendly, zero when cursor is locked).
     mouse_delta: glam::Vec2,
     pending_mouse_delta: glam::Vec2,
+    /// Raw device-event delta (reliable even when cursor is grabbed/hidden).
+    raw_mouse_delta: glam::Vec2,
+    pending_raw_mouse_delta: glam::Vec2,
     held_keys: HashSet<KeyToken>,
     key_just_pressed: HashSet<KeyToken>,
     key_just_released: HashSet<KeyToken>,
@@ -844,6 +849,11 @@ pub struct InputHub {
     /// `KeyInput` events received since the last `update()`, drained into
     /// `ActionMap` after the simulator has run (so UI priority is respected).
     pending_key_inputs: Vec<KeyInput>,
+    /// Desired pointer-lock state set by app code. Interior-mutable so
+    /// `request_pointer_lock` / `release_pointer_lock` work on `&self`.
+    pointer_lock_requested: Cell<bool>,
+    /// Actual pointer-lock state, written by the shell after applying the OS grab.
+    pointer_locked: bool,
 }
 
 impl Default for InputHub {
@@ -861,6 +871,8 @@ impl InputHub {
             cursor_initialized: false,
             mouse_delta: glam::Vec2::ZERO,
             pending_mouse_delta: glam::Vec2::ZERO,
+            raw_mouse_delta: glam::Vec2::ZERO,
+            pending_raw_mouse_delta: glam::Vec2::ZERO,
             held_keys: HashSet::new(),
             key_just_pressed: HashSet::new(),
             key_just_released: HashSet::new(),
@@ -879,6 +891,8 @@ impl InputHub {
             gamepad_axes: HashMap::new(),
             primary_held: false,
             pending_key_inputs: Vec::new(),
+            pointer_lock_requested: Cell::new(false),
+            pointer_locked: false,
         }
     }
 
@@ -942,6 +956,15 @@ impl InputHub {
             button: btn,
             phase,
         }));
+    }
+
+    /// Call with raw `DeviceEvent::MouseMotion` deltas for first-person camera support.
+    ///
+    /// This is called by the engine shell automatically. Unlike `on_pointer_moved`,
+    /// raw motion fires even when the cursor is grabbed or hidden, making it the
+    /// correct source for first-person look input. Read via [`raw_mouse_delta`](Self::raw_mouse_delta).
+    pub fn on_raw_mouse_motion(&mut self, delta: glam::Vec2) {
+        self.pending_raw_mouse_delta += delta;
     }
 
     /// Call from `EngineApp::pointer_scroll`.
@@ -1106,6 +1129,8 @@ impl InputHub {
     fn publish_polling_frame(&mut self) {
         self.mouse_delta = self.pending_mouse_delta;
         self.pending_mouse_delta = glam::Vec2::ZERO;
+        self.raw_mouse_delta = self.pending_raw_mouse_delta;
+        self.pending_raw_mouse_delta = glam::Vec2::ZERO;
         self.key_just_pressed = std::mem::take(&mut self.pending_key_pressed);
         self.key_just_released = std::mem::take(&mut self.pending_key_released);
         self.mouse_button_just_pressed = std::mem::take(&mut self.pending_mouse_button_pressed);
@@ -1147,8 +1172,61 @@ impl InputHub {
     }
 
     /// Mouse movement accumulated since the previous [`InputHub::update`].
+    ///
+    /// Derived from cursor-position events. Returns `Vec2::ZERO` when the cursor
+    /// is locked (use [`raw_mouse_delta`](Self::raw_mouse_delta) instead for
+    /// first-person cameras).
     pub fn mouse_delta(&self) -> glam::Vec2 {
         self.mouse_delta
+    }
+
+    /// Raw device-event mouse delta accumulated since the previous frame.
+    ///
+    /// Sourced from `DeviceEvent::MouseMotion`, which fires even when the cursor
+    /// is grabbed or hidden. Use this for first-person camera look input.
+    /// Returns `Vec2::ZERO` when no raw motion events were received this frame.
+    pub fn raw_mouse_delta(&self) -> glam::Vec2 {
+        self.raw_mouse_delta
+    }
+
+    /// Request that the cursor be grabbed and hidden for first-person mouse look.
+    ///
+    /// The shell applies the OS cursor grab on the next frame. Takes `&self` so
+    /// it can be called from contexts where only a shared reference is available
+    /// (e.g., [`GameContext::input`](crate::GameContext::input)).
+    pub fn request_pointer_lock(&self) {
+        self.pointer_lock_requested.set(true);
+    }
+
+    /// Release the cursor grab, making the cursor visible and free again.
+    ///
+    /// Takes `&self` for the same reason as [`request_pointer_lock`](Self::request_pointer_lock).
+    pub fn release_pointer_lock(&self) {
+        self.pointer_lock_requested.set(false);
+    }
+
+    /// `true` if the cursor is currently grabbed and hidden by the OS.
+    ///
+    /// This reflects the actual OS state, updated by the shell after each lock
+    /// attempt. May differ briefly from the requested state if the grab failed.
+    pub fn is_pointer_locked(&self) -> bool {
+        self.pointer_locked
+    }
+
+    /// `true` if the app has requested pointer lock but the shell has not applied it yet,
+    /// or if the lock state differs from the requested state.
+    pub fn is_pointer_lock_pending(&self) -> bool {
+        self.pointer_lock_requested.get() != self.pointer_locked
+    }
+
+    /// Called by the shell after attempting to apply or release the OS cursor grab.
+    pub(crate) fn set_pointer_locked(&mut self, locked: bool) {
+        self.pointer_locked = locked;
+    }
+
+    /// Called by the shell to read the desired lock state without consuming it.
+    pub(crate) fn pointer_lock_desired(&self) -> bool {
+        self.pointer_lock_requested.get()
     }
 
     /// `true` while the raw key is held down, regardless of UI consumption.

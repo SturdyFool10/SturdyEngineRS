@@ -28,17 +28,17 @@ The engine has a frame loop and a runtime settings system, but app code can't se
 - [x] Add input polling API alongside the existing callbacks: `InputHub::is_key_pressed`, `is_key_just_pressed`, `is_key_just_released`, `mouse_delta`, `mouse_position`.
 - [x] Add gamepad support: wire a platform gamepad backend (gilrs or winit) into the `GamepadAxis` / `GamepadButton` polling API.
 - [x] Add `ActionMap` that binds named actions to keyboard/mouse/gamepad inputs and returns digital/analog values per frame.
-- [ ] Add fixed-timestep and interpolation helpers (`FrameClock` with monotonic timing, delta, fixed-step accumulator, and pacing error).
-- [ ] Add pointer-lock and relative mouse motion for first-person cameras.
-- [ ] Add a default game runtime shell that wraps `AppRuntime` with the above, so a game project needs zero extra plumbing to start.
+- [x] Add fixed-timestep and interpolation helpers (`FrameClock` with monotonic timing, delta, fixed-step accumulator, and pacing error).
+- [x] Add pointer-lock and relative mouse motion for first-person cameras.
+- [x] Add a default game runtime shell that wraps `AppRuntime` with the above, so a game project needs zero extra plumbing to start.
 - [ ] Add a small 2D game sample and a small 3D game sample that use only the default shell.
 
 ### Track 2 — 3D lighting and materials
 
 The scene renders instanced geometry with camera transforms but no lighting. Even basic shading changes what the engine looks like.
 
-- [ ] Add directional light: a `DirectionalLight` uniform buffer with world-space direction, colour, and ambient term bound per-frame in the scene shader.
-- [ ] Add Lambert diffuse + Blinn-Phong specular shading in the default 3D fragment shader, driven by the light uniform.
+- [x] Add directional light: a `DirectionalLight` uniform buffer with world-space direction, colour, and ambient term bound per-frame in the scene shader.
+- [x] Add Lambert diffuse + Blinn-Phong specular shading in the default 3D fragment shader, driven by the light uniform.
 - [ ] Add a `Material` descriptor: albedo colour, roughness, metallic, emissive. One uniform buffer per draw call, reflected and bound automatically.
 - [ ] Add a directional shadow map pass: depth-only render pass writing to `Depth32Float`, sampled with PCF in the lit pass. The render graph handles ordering and barriers.
 - [ ] Add point lights and spot lights as follow-on.

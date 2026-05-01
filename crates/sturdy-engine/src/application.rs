@@ -1111,8 +1111,22 @@ where
         self.dispatch_window_event(ShellWindowEvent { window, event });
     }
 
+    fn device_event(
+        &mut self,
+        _event_loop: &winit::event_loop::ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        if let winit::event::DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+            if let Some(hub) = self.app_state.input_hub() {
+                hub.on_raw_mouse_motion(glam::Vec2::new(dx as f32, dy as f32));
+            }
+        }
+    }
+
     fn about_to_wait(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
         self.poll_gamepads();
+        self.apply_pointer_lock();
         self.request_redraw_for_window(self.primary_window);
     }
 }
@@ -1125,6 +1139,52 @@ where
     fn poll_gamepads(&mut self) {
         if let Some(hub) = self.app_state.input_hub() {
             self.gamepad_backend.poll(hub);
+        }
+    }
+
+    /// Apply or release the OS cursor grab based on what the app's InputHub requested.
+    ///
+    /// Tries `CursorGrabMode::Locked` first (supported on most desktops) and
+    /// falls back to `CursorGrabMode::Confined` (constrains to window without
+    /// hiding). Updates the hub's `pointer_locked` state to reflect whether the
+    /// grab succeeded.
+    fn apply_pointer_lock(&mut self) {
+        // Read desired vs actual lock state from the hub (borrow ends after block).
+        let (desired, current) = {
+            let Some(hub) = self.app_state.input_hub() else {
+                return;
+            };
+            (hub.pointer_lock_desired(), hub.is_pointer_locked())
+        };
+
+        if desired == current {
+            return;
+        }
+
+        // Apply the OS cursor grab (borrows self.windows, not self.app_state).
+        let lock_applied = if let Some(window) = self.window_for_handle(self.primary_window) {
+            use winit::window::CursorGrabMode;
+            if desired {
+                let ok = window
+                    .set_cursor_grab(CursorGrabMode::Locked)
+                    .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
+                    .is_ok();
+                if ok {
+                    window.set_cursor_visible(false);
+                }
+                ok
+            } else {
+                let _ = window.set_cursor_grab(CursorGrabMode::None);
+                window.set_cursor_visible(true);
+                true
+            }
+        } else {
+            false
+        };
+
+        // Write the result back to the hub (separate borrow of self.app_state).
+        if let Some(hub) = self.app_state.input_hub() {
+            hub.set_pointer_locked(desired && lock_applied);
         }
     }
 }

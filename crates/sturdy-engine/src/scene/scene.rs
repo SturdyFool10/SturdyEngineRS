@@ -1,4 +1,4 @@
-use glam::Mat4;
+use glam::{Mat4, Vec3, Vec4};
 use std::collections::HashMap;
 
 use super::{
@@ -7,10 +7,63 @@ use super::{
     object::{InstanceData, MeshId, ObjectId, ObjectKind, SceneObject},
 };
 use crate::{
-    Engine, Error, Format, GraphImage, ImageDesc, ImageDimension, ImageUsage, Mesh, MeshProgram,
-    RenderFrame, Result, push_constants,
+    Buffer, BufferDesc, BufferUsage, Engine, Error, Format, GraphImage, ImageDesc, ImageDimension,
+    ImageUsage, Mesh, MeshProgram, RenderFrame, Result, push_constants,
 };
 use sturdy_engine_core::Extent3d;
+
+/// A directional light illuminating the entire scene.
+///
+/// Set via [`Scene::directional_light`] before calling [`Scene::draw`].
+/// The default is a warm sunlight from above-right with a dark-grey ambient.
+#[derive(Clone, Debug)]
+pub struct DirectionalLight {
+    /// World-space direction the light shines **toward** (normalized before upload).
+    pub direction: Vec3,
+    /// Diffuse + specular colour of the light.
+    pub color: Vec3,
+    /// Multiplier applied to both diffuse and specular contributions.
+    pub intensity: f32,
+    /// Constant ambient term added to every fragment regardless of normal.
+    pub ambient: Vec3,
+}
+
+impl Default for DirectionalLight {
+    fn default() -> Self {
+        Self {
+            direction: Vec3::new(0.45, -0.75, -0.55).normalize(),
+            color: Vec3::new(1.0, 0.95, 0.88),
+            intensity: 1.0,
+            ambient: Vec3::new(0.08, 0.08, 0.10),
+        }
+    }
+}
+
+/// GPU-layout mirror of the data read by `lit_fragment.slang`.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct LightingUniforms {
+    /// xyz = toward-light direction (normalised), w = intensity
+    dir_direction: [f32; 4],
+    /// xyz = light colour, w = 0
+    dir_color: [f32; 4],
+    /// xyz = ambient colour, w = 0
+    ambient: [f32; 4],
+    /// xyz = camera world position, w = 0
+    camera_world_pos: [f32; 4],
+}
+
+impl LightingUniforms {
+    fn from_light_and_camera(light: &DirectionalLight, camera_world_pos: Vec3) -> Self {
+        let dir = (-light.direction).normalize();
+        Self {
+            dir_direction: [dir.x, dir.y, dir.z, light.intensity],
+            dir_color: [light.color.x, light.color.y, light.color.z, 0.0],
+            ambient: [light.ambient.x, light.ambient.y, light.ambient.z, 0.0],
+            camera_world_pos: [camera_world_pos.x, camera_world_pos.y, camera_world_pos.z, 0.0],
+        }
+    }
+}
 
 /// Push constants sent to the vertex shader for each camera draw call.
 ///
@@ -67,6 +120,11 @@ pub struct Scene {
     cameras: Vec<SceneCamera>,
     batches: HashMap<u32, InstanceBatch>,
     next_object_id: u32,
+    /// Directional light applied when drawing with [`MeshProgram::lit`].
+    pub directional_light: DirectionalLight,
+    /// Persistent GPU buffer holding the current [`LightingUniforms`].
+    /// Created on the first `prepare()` call that can reach the engine.
+    light_buffer: Option<Buffer>,
 }
 
 impl Scene {
@@ -77,6 +135,8 @@ impl Scene {
             cameras: Vec::new(),
             batches: HashMap::new(),
             next_object_id: 0,
+            directional_light: DirectionalLight::default(),
+            light_buffer: None,
         }
     }
 
@@ -183,6 +243,14 @@ impl Scene {
             batch.prepare(engine)?;
         }
 
+        // Ensure the lighting uniform buffer exists.
+        if self.light_buffer.is_none() {
+            self.light_buffer = Some(engine.create_buffer(BufferDesc {
+                size: std::mem::size_of::<LightingUniforms>() as u64,
+                usage: BufferUsage::STORAGE,
+            })?);
+        }
+
         Ok(())
     }
 
@@ -241,6 +309,18 @@ impl Scene {
             view_proj: (proj * view).to_cols_array_2d(),
             previous_view_proj: (proj * view).to_cols_array_2d(),
         };
+
+        // Extract camera world position from the view matrix inverse.
+        // view * cam_pos = [0,0,0,1], so cam_pos = view_inv * [0,0,0,1].
+        let cam_world = view.inverse() * Vec4::new(0.0, 0.0, 0.0, 1.0);
+        let lighting = LightingUniforms::from_light_and_camera(
+            &self.directional_light,
+            Vec3::new(cam_world.x, cam_world.y, cam_world.z),
+        );
+        if let Some(buf) = &self.light_buffer {
+            buf.write(0, bytemuck::bytes_of(&lighting))?;
+        }
+
         let ext = out_desc.extent;
         let depth = frame.image(
             "_scene_depth",
@@ -301,6 +381,9 @@ impl Scene {
 
             let (mesh, program) = &self.meshes[batch.mesh_idx as usize];
             frame.bind_buffer("instances", buf);
+            if let Some(light_buf) = &self.light_buffer {
+                frame.bind_buffer("lighting", light_buf);
+            }
             let effective_depth = if program.uses_depth { depth } else { None };
             output.draw_mesh_instanced_with_push_constants_and_depth(
                 mesh,

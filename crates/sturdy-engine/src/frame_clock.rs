@@ -146,6 +146,20 @@ impl FrameClock {
         count
     }
 
+    /// Unconsumed accumulator time after the last call to [`fixed_updates`](Self::fixed_updates).
+    ///
+    /// This is the raw sub-step residual: how far the simulation is behind the
+    /// current display time. A value that grows frame-over-frame means the fixed
+    /// step is too small for the current frame rate (spiral-of-death approaching).
+    /// Returns `Duration::ZERO` if no fixed step is configured.
+    pub fn pacing_error(&self) -> Duration {
+        if self.fixed_step.is_some() {
+            self.accumulator
+        } else {
+            Duration::ZERO
+        }
+    }
+
     /// Interpolation factor `[0, 1)` between the last fixed tick and the next.
     ///
     /// Use this to smoothly interpolate rendered positions when using a fixed
