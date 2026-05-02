@@ -434,6 +434,15 @@ impl CommandContext {
                         })],
                 );
             },
+            // Indirect and mesh-shader work variants are not yet encoded by the
+            // Vulkan backend. They are defined and validated by the render graph
+            // but the command-recording path still needs implementation (Track 7).
+            PassWork::DrawIndirect(_)
+            | PassWork::DispatchIndirect(_)
+            | PassWork::DrawMeshShader(_)
+            | PassWork::DrawMeshShaderIndirect(_) => {
+                // TODO(Track 7): emit vkCmdDraw*Indirect / vkCmdDrawMeshTasksIndirectEXT
+            }
             PassWork::ResolveImage(resolve) => unsafe {
                 let src_desc = resources.image_desc(resolve.src)?;
                 device.cmd_resolve_image(

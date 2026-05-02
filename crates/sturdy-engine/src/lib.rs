@@ -17,6 +17,7 @@ mod bind_group;
 mod bloom_pass;
 mod compute_program;
 mod debug_draw_2d;
+mod geometry;
 mod debug_overlay;
 mod debug_view_picker;
 mod device_manager;
@@ -89,6 +90,12 @@ pub use input::{
     ActionAxisDirection, ActionBinding, ActionBindingRegistry, ActionMap, BindingChange,
     GamepadAxis, GamepadAxisInput, GamepadButton, GamepadButtonInput, GamepadId, InputHub,
     KeyInput, KeyInputState, KeyModifier, KeyModifiers, KeyToken, Keybind, KeybindCapture,
+};
+pub use geometry::{
+    DispatchIndirectCommand, DrawIndexedIndirectCommand, DrawIndirectCommand,
+    DrawMeshTasksIndirectCommand, GeometryBackend, GeometryRendererCaps, HizDesc, MAX_MESHLET_TRIANGLES,
+    MAX_MESHLET_VERTICES, Meshlet, MeshletBounds, MeshletGroup, SubMesh, VirtualMesh,
+    VirtualMeshProxy,
 };
 pub use mesh::{Mesh, Vertex2d, Vertex3d};
 pub use mesh_program::{MeshProgram, MeshProgramDesc, MeshVertexKind};

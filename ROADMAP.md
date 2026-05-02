@@ -35,15 +35,15 @@ The engine has a frame loop and a runtime settings system, but app code can't se
 
 ### Track 2 — 3D lighting and materials
 
-The scene renders instanced geometry with camera transforms but no lighting. Even basic shading changes what the engine looks like.
+The scene renders instanced geometry with camera transforms but no lighting. Even basic shading changes what the engine looks like. Track 6 (below) lifts this to a full PBR deferred pipeline; the items here are the prerequisite foundations.
 
 - [x] Add directional light: a `DirectionalLight` uniform buffer with world-space direction, colour, and ambient term bound per-frame in the scene shader.
-- [x] Add Lambert diffuse + Blinn-Phong specular shading in the default 3D fragment shader, driven by the light uniform.
+- [x] Add Lambert diffuse + Blinn-Phong specular shading in the default 3D fragment shader, driven by the light uniform. *(Replaced by GGX PBR once Track 6 is live; kept as a fallback shading model.)*
 - [x] Add a `Material` descriptor: albedo colour, roughness, metallic, emissive. One uniform buffer per draw call, reflected and bound automatically.
-- [ ] Add a directional shadow map pass: depth-only render pass writing to `Depth32Float`, sampled with PCF in the lit pass. The render graph handles ordering and barriers.
-- [ ] Add point lights and spot lights as follow-on.
-- [ ] Add normal mapping support: read tangent-space normals from a sampled texture, transform with a TBN matrix.
-- [ ] Add image-based lighting (IBL) using an environment cubemap for ambient and specular reflection.
+- [ ] Add a directional shadow map pass: depth-only render pass writing to `Depth32Float`, sampled with PCF in the lit pass. The render graph handles ordering and barriers. *(Required by Track 6 — implement here, consumed there.)*
+- [ ] Add point lights and spot lights: add `PointLight` and `SpotLight` uniform entries; support clustered light assignment (tile or cluster grid) to scale to hundreds of lights.
+- [ ] Add normal mapping support: read tangent-space normals from a sampled texture; transform with a TBN matrix computed from mesh tangent + bitangent attributes.
+- [ ] Add image-based lighting (IBL): prefilter an environment cubemap at varying roughness levels; precompute a BRDF integration LUT (NdotV × roughness → (scale, bias)); evaluate split-sum specular and diffuse irradiance in the lit pass.
 - [ ] Add a reference scene that stresses lighting, shadows, and materials with realistic content.
 
 ### Track 3 — Asset loading
@@ -51,11 +51,203 @@ The scene renders instanced geometry with camera transforms but no lighting. Eve
 Everything is created programmatically today. Real projects need to load content from disk.
 
 - [x] Add `engine.load_texture_2d(path) -> AssetHandle<Texture>` — PNG/JPEG loading via the `image` crate, automatic mip generation, GPU upload.
-- [ ] Add `engine.load_mesh(path) -> AssetHandle<Mesh>` — GLTF loading via the `gltf` crate, producing `Vertex3d` arrays, index buffers, and material references.
+- [ ] Add `engine.load_mesh(path) -> AssetHandle<Mesh>` — GLTF 2.0 loading via the `gltf` crate, producing `Vertex3d` (position/normal/tangent/UV0/UV1) arrays, index buffers, and `GltfMaterial` references.
+- [ ] Add `GltfMaterial` → `UnifiedMaterial` mapping: extract baseColorTexture, metallicRoughnessTexture, normalTexture, occlusionTexture, emissiveTexture, and factor constants; produce a fully populated `UnifiedMaterial` ready for the PBR deferred pipeline (Track 6).
+- [ ] Support GLTF material extensions: KHR_materials_clearcoat, KHR_materials_transmission, KHR_materials_ior, KHR_materials_sheen, KHR_materials_emissive_strength.
 - [x] Add `AssetHandle<T>` with state queries: `is_ready()`, `is_loading()`, `is_degraded()`, `failed_reason()`.
 - [x] Add a placeholder policy: missing/loading textures use a visible checkerboard fallback rather than panicking.
 - [ ] Add shader hot reload for loose `.slang` files: detect change, recompile, keep last-known-good on failure, emit visible diagnostics.
 - [ ] Add asset hot reload for textures and meshes behind the same handle/state system as the streaming path.
+
+---
+
+## Track 6 — Unified Material System and Deferred PBR Pipeline
+
+A single material definition that compiles to every rendering path: deferred G-Buffer fill, forward lit, shadow depth, ray-tracing hit, and path-traced reference. No material must be re-authored when switching between raster and RT; the engine derives the correct variant automatically.
+
+### 6a — MaterialSurface interface and UnifiedMaterial
+
+- [ ] Define `MaterialSurface` as the canonical output of every material in Slang:
+  ```
+  struct MaterialSurface {
+      float3 base_color;   // linear sRGB albedo
+      float  metallic;     // [0, 1]
+      float  roughness;    // [0, 1] perceptual; shader squares to alpha for GGX
+      float3 normal_ts;    // tangent-space normal for TBN transform
+      float  occlusion;    // [0, 1] AO
+      float3 emissive;     // linear HDR radiance (unclamped)
+      float  opacity;      // [0, 1]; 1 = fully opaque
+  };
+  ```
+- [ ] Define `MaterialDomain` enum: `Opaque`, `Masked` (alpha-test), `Translucent`, `Decal`.
+- [ ] Define `ShadingModel` enum: `Unlit`, `Lambert` (legacy fallback), `PbrMetallicRoughness`, `PbrClearcoat`, `PbrTransmission`.
+- [ ] Add `UnifiedMaterial` as the engine-facing material type. It holds:
+  - `MaterialDomain`, `ShadingModel`, `RenderState`
+  - A Slang snippet (inline or file) that implements `MaterialSurface evaluate_material(VertexData v)` — this is the **only shader code the user writes for a material**
+  - Per-input source: each of the eight `MaterialSurface` fields may come from a constant value, a sampled texture, or a procedural expression baked into the snippet
+- [ ] Add `UnifiedMaterialBuilder` with fluent API: `.base_color_texture(handle)`, `.base_color_constant(color)`, `.roughness_constant(r)`, `.with_normal_map(handle)`, `.domain(Opaque)`, etc.
+- [ ] Add a standard `PbrMetallicRoughness` constructor that takes the GLTF PBR parameter set and produces a complete `UnifiedMaterial` with no additional user code.
+- [ ] Add a standard `ProceduralMaterial` constructor: user provides a Slang function body; engine wraps it in the `evaluate_material` interface and compiles all variants.
+
+### 6b — Shader variant compiler
+
+- [ ] Add `MaterialVariantCompiler` that takes a `UnifiedMaterial` and emits compiled `ShaderProgram`s for each active rendering path:
+  - **`GBufferFillVariant`** — evaluates `MaterialSurface`; packs results into G-Buffer render targets
+  - **`ForwardLitVariant`** — evaluates `MaterialSurface`; applies full PBR lighting in one pass (used for transparent objects and the forward fallback)
+  - **`ShadowVariant`** — alpha-test only; writes `gl_FragDepth` for shadow passes (depth-only for opaque)
+  - **`RtAnyHitVariant`** — evaluates opacity for alpha-masked geometry in RT traversal
+  - **`RtClosestHitVariant`** — evaluates full `MaterialSurface` for RT shadow rays, reflections, and GI queries
+  - **`PathTracedVariant`** — evaluates `MaterialSurface`; evaluates GGX BSDF importance sampling for offline reference renders
+- [ ] Cache compiled variants by material ID and variant type; invalidate on hot reload.
+- [ ] Emit readable diagnostics when a material Slang snippet fails to compile in any variant.
+
+### 6c — PBR BRDF library (`brdf.slang`)
+
+Implement a shared Slang module included by all lit variants.
+
+- [ ] **GGX specular**: Trowbridge-Reitz NDF, Smith height-correlated masking-shadowing G2 (Heitz 2014), Schlick Fresnel with `F0 = lerp(0.04, base_color, metallic)`.
+- [ ] **Lambertian diffuse**: energy-conserving complement `(1 - metallic) * base_color / π`.
+- [ ] **Multi-scattering energy compensation**: implement Turquin 2019 fit (scale + bias from precomputed BRDF LUT) to recover energy lost to multiple surface reflections at high roughness.
+- [ ] **BRDF integration LUT**: precompute a 128×128 `RG16Float` texture (NdotV, roughness) → (scale, bias) offline; ship as an engine asset; evaluate in all lit passes for energy-conserving IBL and point-light specular.
+- [ ] **IBL split-sum specular**: sample prefiltered env cubemap at mip = `roughness * MAX_MIP`; multiply by BRDF LUT lookup.
+- [ ] **IBL diffuse irradiance**: sample irradiance cubemap (or SH9 coefficients); weight by `(1 - metallic) * base_color`.
+- [ ] **Analytic light evaluation**: directional, point (sphere), spot (cone); attenuate by inverse-square law for point/spot; angular attenuation for spot; compute one `brdf_eval(surface, L, V)` call per light.
+
+### 6d — Deferred G-Buffer pipeline
+
+- [ ] Define the standard G-Buffer layout as engine constants:
+  - `g0` (`RGBA8Unorm`): `base_color.rgb` + `metallic` — base albedo and conductor flag
+  - `g1` (`RGBA16Float`): world-space normal (octahedral-encoded into `.xy`) + `roughness` + `occlusion`
+  - `g2` (`RGBA16Float`): `emissive.rgb` + shading model ID (`.a` integer flag)
+  - `depth` (`Depth32Float`): hardware depth buffer
+- [ ] Add a `GBufferPass` component: allocates the four G-Buffer images from the render graph (size-matched to swapchain); records one draw per opaque mesh using that mesh's `GBufferFillVariant`; owned by the engine, zero app code required.
+- [ ] Add a `DeferredLightingPass` component: reads G0/G1/G2/depth as shader inputs; one fullscreen compute or fragment dispatch; reconstructs world position from depth + inv-view-proj; evaluates all active lights and IBL; outputs linear HDR `scene_color`.
+- [ ] Reconstruct world position from depth in the deferred pass (no explicit world-pos G-Buffer attachment — saves bandwidth).
+- [ ] Feed `scene_color` into the existing post-processing pipeline (bloom → AA → tone mapping).
+- [ ] Keep the existing forward path for `Translucent` and `Decal` domain materials: sort back-to-front, render after deferred lighting into the HDR target.
+- [ ] Add a `RenderPath` enum exposed on `SceneRenderer`: `DeferredThenForward` (default), `ForwardOnly` (fallback for hardware without MRT support).
+
+### 6e — Shadow system
+
+- [ ] **Cascaded Shadow Maps (CSM)**: 4 cascades; depth-only pass per cascade using each mesh's `ShadowVariant`; store as `Depth32Float` array; PCF 3×3 in the deferred lighting pass; blend cascades at boundaries.
+- [ ] **Point light shadow maps**: dual-paraboloid or 6-face cube depth map; PCF lookup in deferred pass.
+- [ ] **Spot light shadow maps**: single depth map per spot; PCF.
+- [ ] **Shadow map atlas**: pack all shadow maps into a single atlas texture to avoid descriptor pressure.
+- [ ] **Optional RT shadows**: when `VK_KHR_ray_tracing_pipeline` is available, replace raster PCF with hardware RT shadow rays for the primary directional light; fall back to CSM transparently.
+
+### 6f — Clustered light assignment
+
+- [ ] Build a 3D frustum cluster grid each frame on GPU (compute pass): divide view frustum into tiles × depth slices.
+- [ ] Assign active point/spot lights to clusters by bounding-sphere/cone overlap test on CPU or GPU.
+- [ ] Upload compact light lists per cluster; index from deferred lighting pass and forward lit pass.
+- [ ] Support at least 1024 active point/spot lights in the scene at any time.
+
+### 6g — Real-time ray tracing integration
+
+- [ ] Build and maintain a top-level acceleration structure (TLAS) from all opaque mesh instances each frame; rebuild on mesh add/remove, incremental refit on transform change.
+- [ ] Add `RtShadowPass`: trace shadow rays from G-Buffer surface points toward the primary directional light; write 1-bit visibility into a shadow mask image; composite with deferred lighting.
+- [ ] Add `RtReflectionPass`: trace reflection rays from G-Buffer surface points; evaluate `RtClosestHitVariant` at hit; accumulate into a reflection radiance image; blend into deferred specular using `roughness`-based fade (smooth surfaces use RT; rough surfaces use IBL prefiltered env).
+- [ ] Add `RtAmbientOcclusion`: short-range hemisphere rays from G-Buffer; replace or blend with baked AO.
+- [ ] Expose `RtFeatures` flags on `SceneRenderer`: `SHADOWS`, `REFLECTIONS`, `AMBIENT_OCCLUSION`; each independently toggleable; graceful fallback when hardware RT is unavailable.
+- [ ] Add a path-traced reference renderer: progressive accumulation using `PathTracedVariant` hit shaders; Russian roulette termination; NEE (next-event estimation) for direct lights; use as ground-truth comparison and screenshot output.
+
+### 6h — Environment and IBL authoring
+
+- [ ] Add `EnvironmentMap` asset: load HDR equirectangular (`.hdr`, `.exr`) → convert to cubemap → prefilter for specular (per-roughness mip chain using GGX importance sampling) → compute irradiance cubemap.
+- [ ] Ship one default environment map as an engine asset so PBR materials look reasonable out of the box.
+- [ ] Add runtime environment map switching with smooth blend transition.
+- [ ] Add sky atmosphere model (Rayleigh + Mie scattering) as a procedural environment source for outdoor scenes; capture to cubemap each frame or when sun direction changes.
+
+---
+
+## Track 7 — Unified geometry front-end (mesh shaders + virtual mesh)
+
+The geometry front-end is the part of the pipeline that decides **which triangles reach the rasterizer** and how they get there. This track replaces the current single-path (vertex buffer → draw call) with a pluggable abstraction so each game can choose the right trade-off between compatibility, GPU efficiency, and feature depth.
+
+The key design rule from the research: **"mesh shader" is one backend option, not the whole system.** The asset type is `VirtualMesh`; the rendering backend is selected from `GeometryBackend` at runtime. Material/pixel shading is decoupled — all backends feed the same G-Buffer, depth, shadow, and visibility-buffer attachments.
+
+```text
+VirtualMesh (asset, authored once)
+  ├── vertices + indices          → ClassicVertex, ComputeIndirect
+  ├── meshlets + meshlet_vertices
+  │   + meshlet_triangles + bounds → MeshShader
+  ├── meshlet_groups (LOD DAG)    → VirtualizedRaster
+  └── rt_proxy                   → RayTracingFallback, RayTracingSelectedClusters
+```
+
+### 7a — VirtualMesh asset type
+
+Foundation types already added to `crates/sturdy-engine/src/geometry.rs`:
+- [x] `GeometryBackend` enum: ClassicVertex, ComputeIndirect, MeshShader, VirtualizedRaster, RayTracingFallback, RayTracingSelectedClusters.
+- [x] `GeometryRendererCaps` derived from `Caps`; `best_opaque_backend()` / `supports()`.
+- [x] `Meshlet`: vertex/triangle offsets, counts, and `MeshletBounds` (bounding sphere, normal cone, LOD error).
+- [x] `MeshletBounds` (`#[repr(C)]`, GPU-uploadable): center, radius, cone apex/axis/cutoff, LOD error.
+- [x] `MeshletGroup`: compatible LOD decision group with parent error for crack-free transitions.
+- [x] `SubMesh`: material range in the index buffer.
+- [x] `VirtualMesh`: unified asset holding classic vertices/indices + meshlet data + LOD groups + RT proxy.
+- [x] GPU indirect command structs: `DrawIndirectCommand`, `DrawIndexedIndirectCommand`, `DispatchIndirectCommand`, `DrawMeshTasksIndirectCommand`.
+- [x] `HizDesc`: hierarchical-Z pyramid descriptor for GPU occlusion culling.
+- [ ] Add `VirtualMesh::from_gltf_mesh()`: load a GLTF primitive and populate classic vertex/index data with correct `Vertex3d` layout (position, normal, tangent, UV0).
+- [ ] Add meshlet generation via `meshopt-rs`: call `meshopt::build_meshlets()` + `meshopt::build_meshlet_bounds()` to populate `meshlets`, `meshlet_vertices`, `meshlet_triangles`, and `MeshletBounds`.
+- [ ] Add LOD simplification via `meshopt-rs`: `meshopt::simplify()` at multiple error levels; pack results into `meshlet_groups` as a DAG with parent error metrics.
+- [ ] Add `VirtualMeshProxy` generation: simplify the full mesh to ≤ 10% triangle count for use as the RT BLAS proxy.
+- [ ] Add `VirtualMeshBuilder` with fluent API matching `UnifiedMaterialBuilder`'s style.
+
+### 7b — Render graph indirect work variants
+
+Foundation types added to `render_graph.rs`:
+- [x] `DrawIndirectDesc`: indirect_buffer + offset + draw_count + stride + indexed flag.
+- [x] `DispatchIndirectDesc`: indirect_buffer + offset.
+- [x] `DrawMeshShaderDesc`: direct group_count_x/y/z mesh-shader dispatch.
+- [x] `DrawMeshShaderIndirectDesc`: buffer-driven mesh-shader group counts.
+- [x] `PassWork::DrawIndirect`, `PassWork::DispatchIndirect`, `PassWork::DrawMeshShader`, `PassWork::DrawMeshShaderIndirect` variants.
+- [ ] Vulkan backend: emit `vkCmdDrawIndirect` / `vkCmdDrawIndexedIndirect` for `PassWork::DrawIndirect`.
+- [ ] Vulkan backend: emit `vkCmdDispatchIndirect` for `PassWork::DispatchIndirect`.
+- [ ] Vulkan backend: emit `vkCmdDrawMeshTasksIndirectEXT` (EXT_mesh_shader) for `PassWork::DrawMeshShaderIndirect`; check capability before use; emit error/no-op if missing.
+- [ ] Add render graph validation: indirect buffer must be in `RgState::IndirectRead` before dispatch.
+- [ ] Expose `DrawMeshShaderDesc` through `GraphImage` pass API analogous to `draw_mesh_instanced`.
+
+### 7c — Classic + compute-indirect path
+
+The lowest-risk starting point; works on all hardware.
+
+- [ ] Add `GeometryRenderer::classic(mesh)` that produces a `DrawDesc` from a `VirtualMesh`'s vertex/index data. Replaces direct `DrawDesc` construction in `frontend_graph.rs`.
+- [ ] Add `CullingComputePass`: a compute shader that reads per-object bounds and writes surviving `DrawIndexedIndirectCommand`s into a compact output buffer. Uses the previous frame's depth buffer for basic Hi-Z occlusion (even without a full pyramid).
+- [ ] Add frustum-cull predicate: project object bounding sphere against the six frustum planes; write `instance_count = 0` for culled objects.
+- [ ] Add `HizPass`: compute shader that builds a `log2(max(w, h))` mip pyramid from the depth buffer each frame, stored as `Format::R32Float` sampled image.
+- [ ] Add Hi-Z occlusion predicate to `CullingComputePass`: project bounding sphere into screen space; sample Hi-Z at `log2(screen_radius)` mip; reject if entire sphere is behind stored depth.
+- [ ] Keep `ClassicVertex` as the unconditional fallback: if the culling pass is absent or disabled, fall back to a single `DrawDesc` per sub-mesh.
+
+### 7d — Mesh shader path
+
+- [ ] Add `MeshShaderPipelineDesc` to `pipeline.rs`: task_shader (optional) + mesh_shader + fragment_shader + layout; no vertex input layout (mesh shader owns vertex loading).
+- [ ] Add Vulkan pipeline creation for `MeshShaderPipelineDesc`: require `VK_EXT_mesh_shader`; create `VkPipeline` with mesh/task stage `VkShaderStageFlagBits`.
+- [ ] Add built-in task shader template `task_cull.slang`: reads per-meshlet `MeshletBounds` from a storage buffer; evaluates frustum + backface-cone + Hi-Z tests; emits surviving meshlet workgroup indices via `EmitMeshTasksEXT`.
+- [ ] Add built-in mesh shader template `mesh_emit.slang`: reads `meshlet_vertices` and `meshlet_triangles` from storage buffers; decompresses local indices; writes `gl_Position` (+ normal, UV) per vertex; emits triangle index list.
+- [ ] Add `GeometryRenderer::mesh_shader(mesh, caps)` that selects `MeshShader` if available, otherwise falls back to `ClassicVertex`.
+- [ ] Feed the mesh-shader path into the same G-Buffer, depth, and shadow pass attachments as the classic path. The material/pixel shader is unchanged.
+
+### 7e — Virtual raster path (Nanite-like)
+
+- [ ] Add cluster hierarchy traversal compute shader `cluster_lod_select.slang`: walks `MeshletGroup` DAG from a root node; for each group evaluates `lod_error / view_distance < screen_error_threshold`; writes selected meshlet indices to a compact buffer.
+- [ ] Thread the selected cluster buffer into the task shader: instead of launching one workgroup per meshlet, launch one per selected cluster index.
+- [ ] Add `ClusterPage` streaming abstraction: meshlet data is stored in fixed-size pages; the per-frame LOD cut drives which pages must be resident; missing pages trigger an async load request.
+- [ ] Add `VirtualGeometryStats` diagnostics: drawn clusters/triangles per frame, culled clusters, LOD histogram, streaming page hits/misses.
+- [ ] Implement group-level LOD selection rather than independent per-cluster to prevent cracks at LOD boundaries (requires the `meshlet_groups` DAG and parent error values).
+
+### 7f — Ray tracing integration
+
+- [ ] Build a `TlasBuilder` that constructs a top-level acceleration structure from all `VirtualMesh` RT proxies each frame; refit on transform changes, rebuild on mesh add/remove.
+- [ ] Add `BlasBuildPass`: a compute/transfer pass that builds or refits the per-mesh BLAS from `VirtualMesh::rt_proxy` vertex/index data.
+- [ ] Expose `GeometryBackend::RayTracingFallback` through the RT shadow and reflection passes in Track 6g.
+- [ ] Add `GeometryBackend::RayTracingSelectedClusters`: build a BLAS from the current frame's selected cluster subset for high-quality near-camera geometry. Budget-gate this behind a distance threshold; fall back to `RayTracingFallback` beyond it (mirroring Unreal's Lumen behavior with Nanite fallback meshes).
+
+### 7g — Mix-and-match per pass
+
+- [ ] Expose a `RenderPassBackendOverride` per scene-renderer pass: allows a game to use `MeshShader` for the G-Buffer pass, `ClassicVertex` for shadow maps, and `RayTracingFallback` for RT reflections — all from the same `VirtualMesh` assets.
+- [ ] Add `SceneRenderer::set_backend(pass, backend)` with validation against `GeometryRendererCaps`.
+- [ ] Document the supported combination matrix: which `GeometryBackend` values are valid for G-Buffer / shadow / depth-prepass / RT / visibility-buffer passes.
+- [ ] Add a testbed mode that cycles through available backends on keypress and shows a diagnostic overlay with triangle counts, culling stats, and timing.
 
 ---
 
@@ -139,12 +331,20 @@ Work here deepens the visual output after Track 2 is complete.
 
 ### Photoreal rendering path
 
-- [ ] Add physically-based materials and parameter workflows.
-- [ ] Add image-based lighting and reflection workflows.
-- [ ] Add atmospheric/volumetric rendering.
-- [ ] Add decal and layered-surface workflows.
-- [ ] Add high-quality translucency/glass/wet surface path.
-- [ ] Build a reference scene aimed at realistic output to drive future rendering priorities.
+Track 6 delivers the PBR foundation. The items below extend it toward film-quality real-time output.
+
+- [ ] **Energy-conserving multi-scattering**: integrate Turquin 2019 multi-scattering compensation across all direct and IBL specular lobes; verify energy conservation with a white-furnace test scene.
+- [ ] **Subsurface scattering (SSS)**: separable SSS using a screen-space blur of irradiance weighted by profile; expose `ShadingModel::PbrSubsurface` for skin and translucent materials.
+- [ ] **Anisotropic specular**: expose anisotropy direction and magnitude in `MaterialSurface`; evaluate Ashikhmin-Shirley or GGX anisotropic VNDF in `brdf.slang`.
+- [ ] **Clearcoat layer**: `ShadingModel::PbrClearcoat`; second GGX lobe at fixed 0.04 F0; additive over base.
+- [ ] **Transmission and volume**: `ShadingModel::PbrTransmission`; sample behind-surface color (thin or thick volume); full glTF KHR_materials_transmission and KHR_materials_volume support.
+- [ ] **Screen-space global illumination (SSGI)**: short-range indirect diffuse using screen-space ray marching; complement RT AO and RT reflections at close range.
+- [ ] **Volumetric fog and atmosphere**: frustum-voxel density grid; in-scattering from directional + local lights; exponential height fog as a fast fallback; sky atmosphere model (Rayleigh + Mie) as a procedural environment source for outdoor scenes.
+- [ ] **Decal system**: deferred decals write to G0/G1/G2 after the G-Buffer fill pass; `MaterialDomain::Decal` projected onto geometry; blended by alpha mask.
+- [ ] **Layered surface workflows**: expose a material layer stack (base + clearcoat + fuzz) that the compiler flattens into a single `MaterialSurface` evaluation; works in deferred, forward, and RT paths.
+- [ ] **High-quality translucency**: order-independent transparency (OIT) using Weighted Blended OIT (WBOIT) or Moment OIT; rendered after the deferred pass; composited into HDR target.
+- [ ] **Wet and glossy surface path**: runtime wetness mask modulating roughness + darkening base color; puddle normals via procedural detail.
+- [ ] **Build a reference scene aimed at realistic output** to drive future rendering priorities; evaluate against path-traced ground truth using the `PathTracedVariant` accumulation mode.
 
 ### 2D and instanced rendering
 
@@ -258,15 +458,29 @@ Work here replaces the simple synchronous load from Track 3 with a proper stream
 ### Milestone C — Games work
 - [ ] Build one 2D game and one 3D game using only the default game shell.
 - [ ] Input polling, delta time, and gamepad work out of the box.
-- [ ] Scene renders with directional lighting, shadows, and basic materials.
-- [ ] Load a PNG texture and a GLTF mesh from disk without custom asset code.
-- [ ] Switch graphics settings live during gameplay.
+- [ ] Scene renders with directional CSM shadows and PBR materials (deferred G-Buffer path, Track 6).
+- [ ] Load a PNG texture and a GLTF mesh (with GLTF PBR materials) from disk without custom asset code.
+- [ ] Switch between `DeferredThenForward` and `ForwardOnly` render paths at runtime.
+- [ ] Switch other graphics settings (MSAA, bloom, tone mapping, RT features) live during gameplay.
 
-### Milestone D — High-end rendering
-- [ ] Produce a reference scene evaluated against the goal of plausibly real-looking realtime footage.
+### Milestone D — High-end rendering (raster)
+- [ ] Deferred G-Buffer pipeline with full GGX PBR BRDF, energy-compensating multi-scattering, IBL split-sum, CSM shadows, clustered point/spot lights.
+- [ ] All standard GLTF PBR materials render correctly out of the box; procedural materials use the same deferred path with zero extra plumbing.
+- [ ] White-furnace test passes (no energy gain or loss across all roughness values).
+- [ ] On mesh-shader hardware: G-Buffer and depth passes use the `MeshShader` backend; shadow passes fall back to `ClassicVertex` — same `VirtualMesh` assets, different geometry front-end per pass.
+- [ ] Frustum + Hi-Z occlusion culling active via `ComputeIndirect` path even on non-mesh-shader hardware.
 - [ ] Demonstrate runtime texture streaming with progressively refined mips and frame-budgeted uploads.
-- [ ] Demonstrate PBR materials, IBL, and shadows in realistic content.
+- [ ] Produce a reference scene evaluated against the goal of plausibly real-looking real-time footage.
 
-### Milestone E — Browser/WebGPU
+### Milestone E — High-end rendering (ray tracing + virtual geometry)
+- [ ] RT shadow rays replace CSM for the primary directional light with no visible seam.
+- [ ] RT reflections are active on smooth surfaces; IBL takes over at high roughness with no visible discontinuity.
+- [ ] Path-traced reference mode accumulates to a converged ground-truth image using the same `UnifiedMaterial` definitions as the raster path.
+- [ ] `RtFeatures` flags toggle individually at runtime; each falls back cleanly to the raster equivalent.
+- [ ] On supported hardware: `VirtualizedRaster` backend active for opaque G-Buffer; cluster LOD selection on GPU; measurable triangle-count reduction vs. `ClassicVertex` for high-poly test scene.
+- [ ] `RenderPassBackendOverride` demonstrated: G-Buffer on `MeshShader`, shadows on `ClassicVertex`, RT on `RayTracingFallback`, all from the same `VirtualMesh` asset.
+
+### Milestone F — Browser/WebGPU
 - [ ] Run a constrained browser/WebGPU sample using the same app-facing contracts as Vulkan.
 - [ ] Show clear browser-specific downgrade diagnostics.
+- [ ] Forward-only render path (Track 6 `ForwardOnly` mode) used as the WebGPU fallback; same `UnifiedMaterial` definitions, no re-authoring.

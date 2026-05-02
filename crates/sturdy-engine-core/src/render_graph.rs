@@ -163,6 +163,7 @@ pub struct DispatchDesc {
     pub z: u32,
 }
 
+/// Direct draw with explicit vertex/index buffers.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DrawDesc {
     pub vertex_count: u32,
@@ -171,6 +172,51 @@ pub struct DrawDesc {
     pub first_instance: u32,
     pub vertex_buffer: Option<VertexBufferBinding>,
     pub index_buffer: Option<IndexBufferBinding>,
+}
+
+/// Indirect draw: GPU-populated command buffer drives vertex counts and
+/// instance ranges. The render graph tracks `indirect_buffer` as
+/// `RgState::IndirectRead`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DrawIndirectDesc {
+    pub indirect_buffer: BufferHandle,
+    pub offset: u64,
+    /// Number of draw commands packed in the buffer.
+    pub draw_count: u32,
+    /// Stride between commands in bytes (≥ 16 for unindexed, ≥ 20 for indexed).
+    pub stride: u32,
+    pub indexed: bool,
+    pub vertex_buffer: Option<VertexBufferBinding>,
+    pub index_buffer: Option<IndexBufferBinding>,
+}
+
+/// Indirect compute dispatch: GPU-populated buffer drives group counts.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DispatchIndirectDesc {
+    pub indirect_buffer: BufferHandle,
+    pub offset: u64,
+}
+
+/// Direct mesh-shader dispatch.
+/// Launches `(x, y, z)` mesh-shader workgroups without a task shader.
+/// Requires `BackendFeatures::mesh_shading`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DrawMeshShaderDesc {
+    pub group_count_x: u32,
+    pub group_count_y: u32,
+    pub group_count_z: u32,
+}
+
+/// Indirect mesh-shader dispatch: GPU-populated buffer drives workgroup counts.
+/// The task shader typically populates this via `EmitMeshTasksEXT` /
+/// `DispatchMesh`; alternatively a prior compute pass writes the counts.
+/// Requires `BackendFeatures::mesh_shading`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DrawMeshShaderIndirectDesc {
+    pub indirect_buffer: BufferHandle,
+    pub offset: u64,
+    pub draw_count: u32,
+    pub stride: u32,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -236,8 +282,18 @@ pub struct ResolveImageDesc {
 pub enum PassWork {
     #[default]
     None,
+    /// Direct compute dispatch.
     Dispatch(DispatchDesc),
+    /// Indirect compute dispatch — group counts come from a GPU buffer.
+    DispatchIndirect(DispatchIndirectDesc),
+    /// Direct vertex/index draw.
     Draw(DrawDesc),
+    /// Indirect vertex/index draw — draw commands come from a GPU buffer.
+    DrawIndirect(DrawIndirectDesc),
+    /// Direct mesh-shader dispatch (no task shader).
+    DrawMeshShader(DrawMeshShaderDesc),
+    /// Indirect mesh-shader dispatch — workgroup counts come from a GPU buffer.
+    DrawMeshShaderIndirect(DrawMeshShaderIndirectDesc),
     CopyImageToBuffer(CopyImageToBufferDesc),
     CopyBufferToImage(CopyBufferToImageDesc),
     ResolveImage(ResolveImageDesc),

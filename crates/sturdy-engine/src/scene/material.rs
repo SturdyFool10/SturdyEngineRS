@@ -3498,3 +3498,380 @@ impl Default for OfflineRenderGraph {
         Self::new()
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Unified Material System
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// These types form the foundation described in Track 6 of the roadmap.
+// A `UnifiedMaterial` defines a `MaterialSurface` evaluation function once;
+// the engine derives all required shader variants automatically:
+//
+//   ┌─────────────────────────────────────────────────────────────────────────┐
+//   │  UnifiedMaterial (user-facing definition)                               │
+//   │    .domain        = Opaque | Masked | Translucent | Decal               │
+//   │    .shading_model = PbrMetallicRoughness | Clearcoat | Unlit | ...      │
+//   │    .base_color, .metallic, .roughness, .normal_map, .emissive …         │
+//   │    .evaluate_material_snippet (optional custom Slang body)              │
+//   └────────────────────────────┬────────────────────────────────────────────┘
+//                                │  MaterialVariantCompiler (Track 6b)
+//          ┌──────────┬──────────┼──────────┬───────────┬─────────────┐
+//          ▼          ▼          ▼          ▼           ▼             ▼
+//    GBufferFill  ForwardLit  Shadow    RtAnyHit  RtClosestHit  PathTraced
+//
+// The G-Buffer layout used by GBufferFill and the deferred lighting pass
+// is defined in the `gbuffer` submodule below.
+
+/// Blending and depth-write behaviour of a material surface.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum MaterialDomain {
+    /// Depth-tested, depth-written; rendered via the deferred G-Buffer fill path.
+    #[default]
+    Opaque,
+    /// Like `Opaque` but discards pixels whose `opacity < ALPHA_CUTOFF` in the
+    /// shadow pass and RT any-hit shader.
+    Masked,
+    /// Back-to-front sorted, forward-lit, alpha-blended over the HDR target.
+    /// Rendered after the deferred lighting pass.
+    Translucent,
+    /// Projected surface that writes into G0/G1/G2 after the main G-Buffer fill.
+    Decal,
+}
+
+/// Lighting model evaluated in deferred and forward lit passes.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum ShadingModel {
+    /// Emissive only — no lighting computation.
+    Unlit,
+    /// Lambertian diffuse only — legacy fallback for non-PBR assets.
+    Lambert,
+    /// GGX metallic-roughness BRDF — standard GLTF 2.0 workflow.
+    /// Energy-compensated via a precomputed BRDF integration LUT.
+    #[default]
+    PbrMetallicRoughness,
+    /// GGX metallic-roughness with a clear-coat layer on top
+    /// (GLTF `KHR_materials_clearcoat`).
+    PbrClearcoat,
+    /// Screen-space subsurface scattering for skin and organic materials.
+    PbrSubsurface,
+    /// Transmission and refraction for glass and liquids
+    /// (GLTF `KHR_materials_transmission` + `KHR_materials_volume`).
+    PbrTransmission,
+}
+
+/// One input channel of a [`UnifiedMaterial`].
+///
+/// Each `MaterialSurface` field may be driven by a constant value, a texture
+/// sampled at UV0, or a texture modulated by a constant factor.
+#[derive(Clone, Debug)]
+pub enum MaterialInput<T: Clone> {
+    /// Packed into the material's push constants each draw call.
+    Constant(T),
+    /// Sampled from a named texture binding at UV0.
+    Texture(String),
+    /// `texture.sample(uv) * factor` — GLTF convention for combined maps.
+    TextureTimesConstant { texture: String, factor: T },
+}
+
+impl<T: Clone + Default> Default for MaterialInput<T> {
+    fn default() -> Self {
+        Self::Constant(T::default())
+    }
+}
+
+/// A unified, rendering-path-agnostic material definition.
+///
+/// The user writes a single Slang snippet implementing:
+/// ```slang
+/// MaterialSurface evaluate_material(VertexData v) { ... }
+/// ```
+/// (or fills in the structured PBR inputs and lets the engine generate it).
+/// The [`MaterialVariantCompiler`] then derives every required shader variant
+/// from that one definition — deferred G-Buffer fill, forward lit, shadow
+/// depth-only, RT any-hit, RT closest-hit, and path-traced hit.
+///
+/// # Asset-driven PBR workflow (GLTF)
+/// ```rust
+/// let mat = UnifiedMaterial::pbr_metallic_roughness("ground")
+///     .base_color_texture("base_color")
+///     .metallic_roughness_texture("metallic_roughness")
+///     .normal_texture("normal_map")
+///     .occlusion_texture("occlusion")
+///     .emissive_constant([0.0, 0.0, 0.0])
+///     .build();
+/// ```
+///
+/// # Procedural workflow
+/// ```rust
+/// let mat = UnifiedMaterial::procedural("lava")
+///     .evaluate_material_fn(r#"
+///         MaterialSurface evaluate_material(VertexData v) {
+///             float heat = sin(v.world_pos.y * 4.0 + time) * 0.5 + 0.5;
+///             MaterialSurface s;
+///             s.base_color = lerp(float3(0.05, 0.0, 0.0), float3(1.0, 0.4, 0.0), heat);
+///             s.metallic   = 0.0;
+///             s.roughness  = lerp(0.9, 0.3, heat);
+///             s.normal_ts  = float3(0.0, 0.0, 1.0);
+///             s.occlusion  = 1.0;
+///             s.emissive   = float3(1.0, 0.3, 0.0) * heat * 3.0;
+///             s.opacity    = 1.0;
+///             return s;
+///         }
+///     "#)
+///     .build();
+/// ```
+#[derive(Clone, Debug)]
+pub struct UnifiedMaterial {
+    /// Debug name for diagnostics and shader variant cache keys.
+    pub name: String,
+    /// Blending and depth-write behaviour.
+    pub domain: MaterialDomain,
+    /// Lighting model evaluated in lit passes.
+    pub shading_model: ShadingModel,
+    /// Rendering state (cull mode, front face, depth bias, stencil).
+    pub render_state: RenderState,
+
+    // ── Standard PBR inputs ───────────────────────────────────────────────────
+    /// Linear sRGB albedo. Alpha channel is `opacity` for `Translucent` domain.
+    pub base_color: MaterialInput<[f32; 4]>,
+    /// [0, 1] metallic factor; 0 = dielectric, 1 = conductor.
+    pub metallic: MaterialInput<f32>,
+    /// [0, 1] perceptual roughness; shader squares to α for GGX NDF.
+    pub roughness: MaterialInput<f32>,
+    /// Tangent-space normal map binding name. `None` uses the geometric normal.
+    pub normal_map: Option<String>,
+    /// [0, 1] ambient occlusion factor.
+    pub occlusion: MaterialInput<f32>,
+    /// Linear HDR emissive radiance (not clamped — drives bloom).
+    pub emissive: MaterialInput<[f32; 3]>,
+
+    // ── Clear-coat layer (PbrClearcoat only) ──────────────────────────────────
+    /// [0, 1] clear-coat layer intensity.
+    pub clearcoat: MaterialInput<f32>,
+    /// [0, 1] clear-coat layer roughness.
+    pub clearcoat_roughness: MaterialInput<f32>,
+
+    // ── Procedural override ───────────────────────────────────────────────────
+    /// When `Some`, this Slang function body is used verbatim as
+    /// `evaluate_material(VertexData)`; the structured inputs above are ignored.
+    pub evaluate_material_snippet: Option<String>,
+}
+
+impl UnifiedMaterial {
+    /// Pixels with `opacity < ALPHA_CUTOFF` are discarded in `Masked` domain
+    /// shadow and RT passes.
+    pub const ALPHA_CUTOFF: f32 = 0.5;
+
+    /// Start building a standard PBR metallic-roughness material.
+    pub fn pbr_metallic_roughness(name: impl Into<String>) -> UnifiedMaterialBuilder {
+        UnifiedMaterialBuilder::new(name).shading_model(ShadingModel::PbrMetallicRoughness)
+    }
+
+    /// Start building an unlit emissive material (no lighting computation).
+    pub fn unlit(name: impl Into<String>) -> UnifiedMaterialBuilder {
+        UnifiedMaterialBuilder::new(name).shading_model(ShadingModel::Unlit)
+    }
+
+    /// Start building a procedural material; call `.evaluate_material_fn()` on
+    /// the returned builder to supply the Slang body.
+    pub fn procedural(name: impl Into<String>) -> UnifiedMaterialBuilder {
+        UnifiedMaterialBuilder::new(name)
+    }
+}
+
+impl Default for UnifiedMaterial {
+    fn default() -> Self {
+        Self {
+            name: "default_pbr".into(),
+            domain: MaterialDomain::Opaque,
+            shading_model: ShadingModel::PbrMetallicRoughness,
+            render_state: RenderState::default(),
+            base_color: MaterialInput::Constant([1.0, 1.0, 1.0, 1.0]),
+            metallic: MaterialInput::Constant(0.0),
+            roughness: MaterialInput::Constant(0.5),
+            normal_map: None,
+            occlusion: MaterialInput::Constant(1.0),
+            emissive: MaterialInput::Constant([0.0, 0.0, 0.0]),
+            clearcoat: MaterialInput::Constant(0.0),
+            clearcoat_roughness: MaterialInput::Constant(0.0),
+            evaluate_material_snippet: None,
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// UnifiedMaterialBuilder
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Fluent builder for [`UnifiedMaterial`].
+#[derive(Clone, Debug)]
+pub struct UnifiedMaterialBuilder {
+    inner: UnifiedMaterial,
+}
+
+impl UnifiedMaterialBuilder {
+    fn new(name: impl Into<String>) -> Self {
+        Self { inner: UnifiedMaterial { name: name.into(), ..Default::default() } }
+    }
+
+    pub fn domain(mut self, domain: MaterialDomain) -> Self {
+        self.inner.domain = domain;
+        self
+    }
+
+    pub fn shading_model(mut self, model: ShadingModel) -> Self {
+        self.inner.shading_model = model;
+        self
+    }
+
+    pub fn render_state(mut self, state: RenderState) -> Self {
+        self.inner.render_state = state;
+        self
+    }
+
+    // ── Base color ────────────────────────────────────────────────────────────
+
+    pub fn base_color_constant(mut self, rgba: [f32; 4]) -> Self {
+        self.inner.base_color = MaterialInput::Constant(rgba);
+        self
+    }
+
+    pub fn base_color_texture(mut self, binding: impl Into<String>) -> Self {
+        self.inner.base_color = MaterialInput::Texture(binding.into());
+        self
+    }
+
+    pub fn base_color_texture_factor(mut self, binding: impl Into<String>, factor: [f32; 4]) -> Self {
+        self.inner.base_color = MaterialInput::TextureTimesConstant {
+            texture: binding.into(),
+            factor,
+        };
+        self
+    }
+
+    // ── Metallic / roughness ──────────────────────────────────────────────────
+
+    pub fn metallic_constant(mut self, v: f32) -> Self {
+        self.inner.metallic = MaterialInput::Constant(v);
+        self
+    }
+
+    pub fn roughness_constant(mut self, v: f32) -> Self {
+        self.inner.roughness = MaterialInput::Constant(v);
+        self
+    }
+
+    /// Bind a combined metallic-roughness texture (GLTF convention: B=metallic, G=roughness).
+    pub fn metallic_roughness_texture(mut self, binding: impl Into<String>) -> Self {
+        let b = binding.into();
+        self.inner.metallic = MaterialInput::Texture(format!("{b}.b"));
+        self.inner.roughness = MaterialInput::Texture(format!("{b}.g"));
+        self
+    }
+
+    pub fn metallic_roughness_constants(mut self, metallic: f32, roughness: f32) -> Self {
+        self.inner.metallic = MaterialInput::Constant(metallic);
+        self.inner.roughness = MaterialInput::Constant(roughness);
+        self
+    }
+
+    // ── Normal map ────────────────────────────────────────────────────────────
+
+    pub fn normal_texture(mut self, binding: impl Into<String>) -> Self {
+        self.inner.normal_map = Some(binding.into());
+        self
+    }
+
+    // ── Occlusion ─────────────────────────────────────────────────────────────
+
+    pub fn occlusion_constant(mut self, v: f32) -> Self {
+        self.inner.occlusion = MaterialInput::Constant(v);
+        self
+    }
+
+    pub fn occlusion_texture(mut self, binding: impl Into<String>) -> Self {
+        self.inner.occlusion = MaterialInput::Texture(binding.into());
+        self
+    }
+
+    // ── Emissive ──────────────────────────────────────────────────────────────
+
+    pub fn emissive_constant(mut self, rgb: [f32; 3]) -> Self {
+        self.inner.emissive = MaterialInput::Constant(rgb);
+        self
+    }
+
+    pub fn emissive_texture(mut self, binding: impl Into<String>) -> Self {
+        self.inner.emissive = MaterialInput::Texture(binding.into());
+        self
+    }
+
+    pub fn emissive_texture_factor(mut self, binding: impl Into<String>, factor: [f32; 3]) -> Self {
+        self.inner.emissive = MaterialInput::TextureTimesConstant {
+            texture: binding.into(),
+            factor,
+        };
+        self
+    }
+
+    // ── Clear-coat ────────────────────────────────────────────────────────────
+
+    /// Enable the clear-coat layer and set its intensity and roughness constants.
+    pub fn clearcoat(mut self, intensity: f32, roughness: f32) -> Self {
+        self.inner.shading_model = ShadingModel::PbrClearcoat;
+        self.inner.clearcoat = MaterialInput::Constant(intensity);
+        self.inner.clearcoat_roughness = MaterialInput::Constant(roughness);
+        self
+    }
+
+    // ── Procedural snippet ────────────────────────────────────────────────────
+
+    /// Supply a verbatim Slang function body for `evaluate_material(VertexData)`.
+    /// When set, all structured PBR inputs above are ignored.
+    pub fn evaluate_material_fn(mut self, snippet: impl Into<String>) -> Self {
+        self.inner.evaluate_material_snippet = Some(snippet.into());
+        self
+    }
+
+    pub fn build(self) -> UnifiedMaterial {
+        self.inner
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// G-Buffer layout constants
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Standard G-Buffer attachment slots and formats for the deferred PBR pipeline.
+///
+/// All deferred-path components (G-Buffer fill pass, deferred lighting pass,
+/// SSAO, RT passes reading G-Buffer data) must use these constants so that
+/// attachment indices and formats stay consistent.
+///
+/// Layout:
+/// ```text
+/// G0  RGBA8Unorm   base_color.rgb (linear) | metallic
+/// G1  RGBA16Float  normal.xy (oct) | roughness | occlusion
+/// G2  RGBA16Float  emissive.rgb (linear HDR) | shading_model_id
+/// D   Depth32Float hardware depth
+/// ```
+pub mod gbuffer {
+    use crate::Format;
+
+    /// G-Buffer attachment 0: `base_color.rgb` + `metallic` in alpha.
+    pub const SLOT_BASE_COLOR_METALLIC: u32 = 0;
+    /// G-Buffer attachment 1: octahedral world-normal (`.xy`) + `roughness` (`.z`) + `occlusion` (`.w`).
+    pub const SLOT_NORMAL_ROUGHNESS_OCCLUSION: u32 = 1;
+    /// G-Buffer attachment 2: `emissive.rgb` (HDR, unclamped) + shading model ID (`.w`).
+    pub const SLOT_EMISSIVE_SHADING: u32 = 2;
+    /// Depth attachment.
+    pub const SLOT_DEPTH: u32 = 3;
+
+    pub const FORMAT_BASE_COLOR_METALLIC: Format = Format::Rgba8Unorm;
+    pub const FORMAT_NORMAL_ROUGHNESS_OCCLUSION: Format = Format::Rgba16Float;
+    pub const FORMAT_EMISSIVE_SHADING: Format = Format::Rgba16Float;
+    pub const FORMAT_DEPTH: Format = Format::Depth32Float;
+
+    /// Total number of color attachments in the G-Buffer (excludes depth).
+    pub const COLOR_ATTACHMENT_COUNT: u32 = 3;
+}

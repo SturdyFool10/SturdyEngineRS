@@ -71,10 +71,11 @@ pub use raw_capabilities::{
 };
 pub use render_graph::{
     Access, AliasPlan, Barrier, BufferBarrier, BufferStateKey, BufferUse, CompiledGraph,
-    CopyBufferToImageDesc, CopyImageToBufferDesc, DispatchDesc, DrawDesc, ImageBarrier,
-    ImageStateKey, ImageUse, IndexBufferBinding, IndexFormat, PassDesc, PassWork, QueueType,
-    RecordBatch, RenderGraph, ResolveImageDesc, ResourceLifetime, ResourceUse, RgState,
-    SubresourceRange, VertexBufferBinding,
+    CopyBufferToImageDesc, CopyImageToBufferDesc, DispatchDesc, DispatchIndirectDesc, DrawDesc,
+    DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, ImageBarrier, ImageStateKey,
+    ImageUse, IndexBufferBinding, IndexFormat, PassDesc, PassWork, QueueType, RecordBatch,
+    RenderGraph, ResolveImageDesc, ResourceLifetime, ResourceUse, RgState, SubresourceRange,
+    VertexBufferBinding,
 };
 pub use sampler::{AddressMode, BorderColor, CompareOp, FilterMode, MipmapMode, SamplerDesc};
 pub use shader::{
