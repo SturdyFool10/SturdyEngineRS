@@ -2460,6 +2460,8 @@ fn default_setting_entries(
             "Linear",
             "PbrNeutral",
             "AgX",
+            "PsychoV11",
+            "PsychoV17",
         ])),
         RuntimeSettingDescriptor::new(
             RuntimeSettingKey::ToneMappingDial,

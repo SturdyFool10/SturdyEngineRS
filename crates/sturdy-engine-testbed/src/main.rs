@@ -39,6 +39,17 @@ struct TonemapParams {
     reinhard_white: f32,
     hermite_contrast: f32,
     linear_white: f32,
+    // PsychoV-11 parameters
+    psycho_peak_value: f32,
+    psycho_highlights: f32,
+    psycho_shadows: f32,
+    psycho_contrast_high: f32,
+    psycho_contrast_low: f32,
+    psycho_purity: f32,
+    psycho_bleaching: f32,
+    psycho_hue_restore: f32,
+    psycho_adapt_contrast: f32,
+    psycho_cone_exp: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -55,6 +66,17 @@ struct TonemapSettings {
     reinhard_white: f32,
     hermite_contrast: f32,
     linear_white: f32,
+    // PsychoV-11 parameters
+    psycho_peak_value: f32,
+    psycho_highlights: f32,
+    psycho_shadows: f32,
+    psycho_contrast_high: f32,
+    psycho_contrast_low: f32,
+    psycho_purity: f32,
+    psycho_bleaching: f32,
+    psycho_hue_restore: f32,
+    psycho_adapt_contrast: f32,
+    psycho_cone_exp: f32,
 }
 
 impl Default for TonemapSettings {
@@ -72,6 +94,17 @@ impl Default for TonemapSettings {
             reinhard_white: 4.0,
             hermite_contrast: 1.55,
             linear_white: 1.25,
+            // 1000 nits / 203 nits (diffuse white reference) = canonical SDR peak
+            psycho_peak_value: 1000.0 / 203.0,
+            psycho_highlights: 1.0,
+            psycho_shadows: 1.0,
+            psycho_contrast_high: 1.0,
+            psycho_contrast_low: 1.0,
+            psycho_purity: 1.0,
+            psycho_bleaching: 0.0,
+            psycho_hue_restore: 1.0,
+            psycho_adapt_contrast: 1.0,
+            psycho_cone_exp: 1.0,
         }
     }
 }
@@ -100,6 +133,16 @@ impl TonemapSettings {
             reinhard_white: settings.reinhard_white,
             hermite_contrast: settings.hermite_contrast,
             linear_white: settings.linear_white,
+            psycho_peak_value: settings.psycho_peak_value,
+            psycho_highlights: settings.psycho_highlights,
+            psycho_shadows: settings.psycho_shadows,
+            psycho_contrast_high: settings.psycho_contrast_high,
+            psycho_contrast_low: settings.psycho_contrast_low,
+            psycho_purity: settings.psycho_purity,
+            psycho_bleaching: settings.psycho_bleaching,
+            psycho_hue_restore: settings.psycho_hue_restore,
+            psycho_adapt_contrast: settings.psycho_adapt_contrast,
+            psycho_cone_exp: settings.psycho_cone_exp,
         }
     }
 
@@ -117,6 +160,16 @@ impl TonemapSettings {
             TonemapDial::ReinhardWhite => self.reinhard_white,
             TonemapDial::HermiteContrast => self.hermite_contrast,
             TonemapDial::LinearWhite => self.linear_white,
+            TonemapDial::PsychoPeakValue => self.psycho_peak_value,
+            TonemapDial::PsychoHighlights => self.psycho_highlights,
+            TonemapDial::PsychoShadows => self.psycho_shadows,
+            TonemapDial::PsychoContrastHigh => self.psycho_contrast_high,
+            TonemapDial::PsychoContrastLow => self.psycho_contrast_low,
+            TonemapDial::PsychoPurity => self.psycho_purity,
+            TonemapDial::PsychoBleaching => self.psycho_bleaching,
+            TonemapDial::PsychoHueRestore => self.psycho_hue_restore,
+            TonemapDial::PsychoAdaptContrast => self.psycho_adapt_contrast,
+            TonemapDial::PsychoConeExp => self.psycho_cone_exp,
         }
     }
 
@@ -138,6 +191,18 @@ impl TonemapSettings {
             ToneMappingOp::Hermite => self.hermite_contrast = defaults.hermite_contrast,
             ToneMappingOp::Linear => self.linear_white = defaults.linear_white,
             ToneMappingOp::PbrNeutral | ToneMappingOp::AgX => {}
+            ToneMappingOp::PsychoV11 | ToneMappingOp::PsychoV17 => {
+                self.psycho_peak_value = defaults.psycho_peak_value;
+                self.psycho_highlights = defaults.psycho_highlights;
+                self.psycho_shadows = defaults.psycho_shadows;
+                self.psycho_contrast_high = defaults.psycho_contrast_high;
+                self.psycho_contrast_low = defaults.psycho_contrast_low;
+                self.psycho_purity = defaults.psycho_purity;
+                self.psycho_bleaching = defaults.psycho_bleaching;
+                self.psycho_hue_restore = defaults.psycho_hue_restore;
+                self.psycho_adapt_contrast = defaults.psycho_adapt_contrast;
+                self.psycho_cone_exp = defaults.psycho_cone_exp;
+            }
         }
     }
 
@@ -155,6 +220,16 @@ impl TonemapSettings {
             TonemapDial::ReinhardWhite => self.reinhard_white = value,
             TonemapDial::HermiteContrast => self.hermite_contrast = value,
             TonemapDial::LinearWhite => self.linear_white = value,
+            TonemapDial::PsychoPeakValue => self.psycho_peak_value = value,
+            TonemapDial::PsychoHighlights => self.psycho_highlights = value,
+            TonemapDial::PsychoShadows => self.psycho_shadows = value,
+            TonemapDial::PsychoContrastHigh => self.psycho_contrast_high = value,
+            TonemapDial::PsychoContrastLow => self.psycho_contrast_low = value,
+            TonemapDial::PsychoPurity => self.psycho_purity = value,
+            TonemapDial::PsychoBleaching => self.psycho_bleaching = value,
+            TonemapDial::PsychoHueRestore => self.psycho_hue_restore = value,
+            TonemapDial::PsychoAdaptContrast => self.psycho_adapt_contrast = value,
+            TonemapDial::PsychoConeExp => self.psycho_cone_exp = value,
         }
     }
 
@@ -168,7 +243,9 @@ impl TonemapSettings {
             ToneMappingOp::Aces
             | ToneMappingOp::Hermite
             | ToneMappingOp::PbrNeutral
-            | ToneMappingOp::AgX => {}
+            | ToneMappingOp::AgX
+            | ToneMappingOp::PsychoV11
+            | ToneMappingOp::PsychoV17 => {}
         }
     }
 }
@@ -187,6 +264,16 @@ enum TonemapDial {
     ReinhardWhite,
     HermiteContrast,
     LinearWhite,
+    PsychoPeakValue,
+    PsychoHighlights,
+    PsychoShadows,
+    PsychoContrastHigh,
+    PsychoContrastLow,
+    PsychoPurity,
+    PsychoBleaching,
+    PsychoHueRestore,
+    PsychoAdaptContrast,
+    PsychoConeExp,
 }
 
 impl TonemapDial {
@@ -203,7 +290,17 @@ impl TonemapDial {
             Self::AcesE => Self::ReinhardWhite,
             Self::ReinhardWhite => Self::HermiteContrast,
             Self::HermiteContrast => Self::LinearWhite,
-            Self::LinearWhite => Self::Exposure,
+            Self::LinearWhite => Self::PsychoPeakValue,
+            Self::PsychoPeakValue => Self::PsychoHighlights,
+            Self::PsychoHighlights => Self::PsychoShadows,
+            Self::PsychoShadows => Self::PsychoContrastHigh,
+            Self::PsychoContrastHigh => Self::PsychoContrastLow,
+            Self::PsychoContrastLow => Self::PsychoPurity,
+            Self::PsychoPurity => Self::PsychoBleaching,
+            Self::PsychoBleaching => Self::PsychoHueRestore,
+            Self::PsychoHueRestore => Self::PsychoAdaptContrast,
+            Self::PsychoAdaptContrast => Self::PsychoConeExp,
+            Self::PsychoConeExp => Self::Exposure,
         }
     }
 
@@ -221,6 +318,16 @@ impl TonemapDial {
             Self::ReinhardWhite => "Reinhard white",
             Self::HermiteContrast => "Hermite contrast",
             Self::LinearWhite => "Linear white",
+            Self::PsychoPeakValue => "Psycho peak nits/203",
+            Self::PsychoHighlights => "Psycho highlights",
+            Self::PsychoShadows => "Psycho shadows",
+            Self::PsychoContrastHigh => "Psycho contrast hi",
+            Self::PsychoContrastLow => "Psycho contrast lo",
+            Self::PsychoPurity => "Psycho purity",
+            Self::PsychoBleaching => "Psycho bleaching",
+            Self::PsychoHueRestore => "Psycho hue restore",
+            Self::PsychoAdaptContrast => "Psycho adapt contrast",
+            Self::PsychoConeExp => "Psycho cone exp",
         }
     }
 
@@ -231,6 +338,15 @@ impl TonemapDial {
             Self::AcesA | Self::AcesC | Self::AcesD => 0.1,
             Self::Exposure | Self::DisplayGain => 0.1,
             Self::WhitePoint | Self::ReinhardWhite | Self::LinearWhite => 0.25,
+            Self::PsychoPeakValue => 0.5,
+            Self::PsychoBleaching | Self::PsychoHueRestore => 0.05,
+            Self::PsychoHighlights
+            | Self::PsychoShadows
+            | Self::PsychoContrastHigh
+            | Self::PsychoContrastLow
+            | Self::PsychoPurity
+            | Self::PsychoAdaptContrast
+            | Self::PsychoConeExp => 0.05,
         }
     }
 
@@ -244,6 +360,16 @@ impl TonemapDial {
             | Self::ReinhardWhite
             | Self::LinearWhite => 0.05,
             Self::AcesA | Self::AcesC | Self::AcesD => 0.01,
+            Self::PsychoPeakValue => 0.5,
+            Self::PsychoBleaching => 0.0,
+            Self::PsychoHueRestore => 0.0,
+            Self::PsychoHighlights
+            | Self::PsychoShadows
+            | Self::PsychoContrastHigh
+            | Self::PsychoContrastLow
+            | Self::PsychoPurity
+            | Self::PsychoAdaptContrast
+            | Self::PsychoConeExp => 0.1,
         }
     }
 
@@ -258,6 +384,15 @@ impl TonemapDial {
             | Self::DisplayGain
             | Self::ReinhardWhite
             | Self::LinearWhite => 16.0,
+            Self::PsychoPeakValue => 50.0,
+            Self::PsychoBleaching | Self::PsychoHueRestore => 1.0,
+            Self::PsychoHighlights
+            | Self::PsychoShadows
+            | Self::PsychoContrastHigh
+            | Self::PsychoContrastLow
+            | Self::PsychoPurity
+            | Self::PsychoAdaptContrast
+            | Self::PsychoConeExp => 3.0,
         }
     }
 }
@@ -1181,7 +1316,9 @@ fn next_tone_mapping(op: ToneMappingOp) -> ToneMappingOp {
         ToneMappingOp::Hermite => ToneMappingOp::Linear,
         ToneMappingOp::Linear => ToneMappingOp::PbrNeutral,
         ToneMappingOp::PbrNeutral => ToneMappingOp::AgX,
-        ToneMappingOp::AgX => ToneMappingOp::Aces,
+        ToneMappingOp::AgX => ToneMappingOp::PsychoV11,
+        ToneMappingOp::PsychoV11 => ToneMappingOp::PsychoV17,
+        ToneMappingOp::PsychoV17 => ToneMappingOp::Aces,
     }
 }
 
@@ -1193,6 +1330,8 @@ fn tone_mapping_id(op: ToneMappingOp) -> u32 {
         ToneMappingOp::Linear => 3,
         ToneMappingOp::PbrNeutral => 4,
         ToneMappingOp::AgX => 5,
+        ToneMappingOp::PsychoV11 => 6,
+        ToneMappingOp::PsychoV17 => 7,
     }
 }
 
@@ -1204,6 +1343,8 @@ fn tone_mapping_label(op: ToneMappingOp) -> &'static str {
         ToneMappingOp::Linear => "Linear",
         ToneMappingOp::PbrNeutral => "PBR Neutral",
         ToneMappingOp::AgX => "AgX",
+        ToneMappingOp::PsychoV11 => "PsychoV-11",
+        ToneMappingOp::PsychoV17 => "PsychoV-17",
     }
 }
 
@@ -1215,6 +1356,8 @@ fn tone_mapping_setting_name(op: ToneMappingOp) -> &'static str {
         ToneMappingOp::Linear => "Linear",
         ToneMappingOp::PbrNeutral => "PbrNeutral",
         ToneMappingOp::AgX => "AgX",
+        ToneMappingOp::PsychoV11 => "PsychoV11",
+        ToneMappingOp::PsychoV17 => "PsychoV17",
     }
 }
 
@@ -1226,6 +1369,8 @@ fn parse_tone_mapping_setting(value: &str) -> Option<ToneMappingOp> {
         "Linear" => Some(ToneMappingOp::Linear),
         "PbrNeutral" | "PBR Neutral" => Some(ToneMappingOp::PbrNeutral),
         "AgX" | "agx" => Some(ToneMappingOp::AgX),
+        "PsychoV11" | "PsychoV-11" => Some(ToneMappingOp::PsychoV11),
+        "PsychoV17" | "PsychoV-17" => Some(ToneMappingOp::PsychoV17),
         _ => None,
     }
 }

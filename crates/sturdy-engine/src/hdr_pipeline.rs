@@ -62,6 +62,18 @@ pub enum ToneMappingOp {
     /// maps back. Keeps saturated colours from clipping and avoids the
     /// over-contrasty shoulder of ACES.
     AgX,
+    /// PsychoV-11 by clshortfuse/RenoDX — perceptual tonemapper built on the
+    /// Stockman-Sharp LMS cone model with MacLeod-Boynton hue geometry.
+    /// Supports configurable highlights/shadows, saturation (purity), highlight
+    /// bleaching, hue restoration, adaptation contrast, and cone response shaping.
+    /// Reference: <https://github.com/clshortfuse/renodx>
+    PsychoV11,
+    /// PsychoV-17 by clshortfuse/RenoDX — updated perceptual tonemapper with
+    /// adaptive-relative weighted LMS, CIE 170-2 gamut boundary for hue signals,
+    /// Naka-Rushton with separate adaptive/background anchors, and adaptive gamut
+    /// compression against the CIE 1702 human gamut boundary.
+    /// Reference: <https://github.com/clshortfuse/renodx>
+    PsychoV17,
 }
 
 /// Describes the HDR rendering pipeline configuration for a surface.
