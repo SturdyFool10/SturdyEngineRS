@@ -1,11 +1,16 @@
 mod batch;
 mod camera;
+pub mod material;
 mod object;
 mod orbit_camera;
 mod render_target;
 mod scene;
 
 pub use camera::{CameraId, CameraOutput, SceneCamera};
+pub use material::{
+    MaterialDomain, MaterialInput, RenderState, ShadingModel, UnifiedMaterial,
+    UnifiedMaterialBuilder, gbuffer,
+};
 pub use object::{InstanceData, MeshId, ObjectId, ObjectKind};
 pub use orbit_camera::OrbitCamera;
 pub use render_target::RenderTarget;

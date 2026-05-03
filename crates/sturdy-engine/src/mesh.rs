@@ -1,5 +1,6 @@
 use crate::{
-    Buffer, BufferDesc, BufferUsage, Engine, IndexFormat, Result, VertexAttributeDesc, VertexFormat,
+    BoundingSphere, Buffer, BufferDesc, BufferUsage, Engine, IndexFormat, Result,
+    VertexAttributeDesc, VertexFormat,
 };
 
 #[repr(C)]
@@ -24,6 +25,10 @@ pub struct Mesh {
     pub(crate) vertex_count: u32,
     pub(crate) index_count: u32,
     pub(crate) index_format: IndexFormat,
+    /// Conservative bounding sphere in object (local) space.
+    /// Used by CPU frustum culling (`ComputeIndirect` backend) and the
+    /// task shader bounds buffer (`MeshShader` / `VirtualizedRaster` backends).
+    pub bounding_sphere: BoundingSphere,
 }
 
 impl Mesh {
@@ -35,17 +40,20 @@ impl Mesh {
             vertex_count: vertices.len() as u32,
             index_count: 0,
             index_format: IndexFormat::Uint32,
+            bounding_sphere: BoundingSphere::EMPTY,
         })
     }
 
     pub fn new_3d(engine: &Engine, vertices: &[Vertex3d]) -> Result<Self> {
         let vertex_buffer = upload_slice(engine, vertices, BufferUsage::VERTEX)?;
+        let positions: Vec<[f32; 3]> = vertices.iter().map(|v| v.position).collect();
         Ok(Self {
             vertex_buffer,
             index_buffer: None,
             vertex_count: vertices.len() as u32,
             index_count: 0,
             index_format: IndexFormat::Uint32,
+            bounding_sphere: BoundingSphere::from_positions(&positions),
         })
     }
 
@@ -58,18 +66,21 @@ impl Mesh {
             vertex_count: vertices.len() as u32,
             index_count: indices.len() as u32,
             index_format: IndexFormat::Uint32,
+            bounding_sphere: BoundingSphere::EMPTY,
         })
     }
 
     pub fn indexed_3d(engine: &Engine, vertices: &[Vertex3d], indices: &[u32]) -> Result<Self> {
         let vertex_buffer = upload_slice(engine, vertices, BufferUsage::VERTEX)?;
         let index_buffer = upload_slice(engine, indices, BufferUsage::INDEX)?;
+        let positions: Vec<[f32; 3]> = vertices.iter().map(|v| v.position).collect();
         Ok(Self {
             vertex_buffer,
             index_buffer: Some(index_buffer),
             vertex_count: vertices.len() as u32,
             index_count: indices.len() as u32,
             index_format: IndexFormat::Uint32,
+            bounding_sphere: BoundingSphere::from_positions(&positions),
         })
     }
 

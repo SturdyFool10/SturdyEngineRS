@@ -434,14 +434,89 @@ impl CommandContext {
                         })],
                 );
             },
-            // Indirect and mesh-shader work variants are not yet encoded by the
-            // Vulkan backend. They are defined and validated by the render graph
-            // but the command-recording path still needs implementation (Track 7).
-            PassWork::DrawIndirect(_)
-            | PassWork::DispatchIndirect(_)
-            | PassWork::DrawMeshShader(_)
-            | PassWork::DrawMeshShaderIndirect(_) => {
-                // TODO(Track 7): emit vkCmdDraw*Indirect / vkCmdDrawMeshTasksIndirectEXT
+            PassWork::DispatchIndirect(desc) => {
+                let pipeline = bound_pipeline.ok_or_else(|| {
+                    Error::InvalidInput("dispatch-indirect pass requires a compute pipeline".into())
+                })?;
+                if pipeline.bind_point != vk::PipelineBindPoint::COMPUTE {
+                    return Err(Error::InvalidInput(
+                        "dispatch-indirect pass pipeline must bind to the compute pipeline bind point"
+                            .into(),
+                    ));
+                }
+                let indirect_buf = resources.buffer(desc.indirect_buffer)?;
+                unsafe {
+                    device.cmd_dispatch_indirect(command_buffer, indirect_buf, desc.offset);
+                }
+            }
+            PassWork::DrawIndirect(desc) => {
+                let pipeline = bound_pipeline.ok_or_else(|| {
+                    Error::InvalidInput("draw-indirect pass requires a graphics pipeline".into())
+                })?;
+                if pipeline.bind_point != vk::PipelineBindPoint::GRAPHICS {
+                    return Err(Error::InvalidInput(
+                        "draw-indirect pass pipeline must bind to the graphics pipeline bind point"
+                            .into(),
+                    ));
+                }
+                let indirect_buf = resources.buffer(desc.indirect_buffer)?;
+                let vertex_buffer = desc
+                    .vertex_buffer
+                    .map(|b| resources.buffer(b.buffer).map(|vb| (b.binding, vb, b.offset)))
+                    .transpose()?;
+                let index_buffer = desc
+                    .index_buffer
+                    .map(|b| {
+                        resources
+                            .buffer(b.buffer)
+                            .map(|ib| (ib, b.offset, vk_index_type(b.format)))
+                    })
+                    .transpose()?;
+                self.record_draw_pass(
+                    device,
+                    command_buffer,
+                    pass,
+                    pipeline.render_pass,
+                    resources,
+                    pipelines,
+                    || unsafe {
+                        if let Some((binding, vb, offset)) = vertex_buffer {
+                            device.cmd_bind_vertex_buffers(
+                                command_buffer,
+                                binding,
+                                &[vb],
+                                &[offset],
+                            );
+                        }
+                        if let Some((ib, offset, index_type)) = index_buffer {
+                            device.cmd_bind_index_buffer(
+                                command_buffer,
+                                ib,
+                                offset,
+                                index_type,
+                            );
+                            device.cmd_draw_indexed_indirect(
+                                command_buffer,
+                                indirect_buf,
+                                desc.offset,
+                                desc.draw_count,
+                                desc.stride,
+                            );
+                        } else {
+                            device.cmd_draw_indirect(
+                                command_buffer,
+                                indirect_buf,
+                                desc.offset,
+                                desc.draw_count,
+                                desc.stride,
+                            );
+                        }
+                    },
+                )?;
+            }
+            // Mesh-shader work variants: recorded when VK_EXT_mesh_shader is enabled (Track 7d).
+            PassWork::DrawMeshShader(_) | PassWork::DrawMeshShaderIndirect(_) => {
+                // TODO(Track 7d): emit vkCmdDrawMeshTasksEXT / vkCmdDrawMeshTasksIndirectEXT
             }
             PassWork::ResolveImage(resolve) => unsafe {
                 let src_desc = resources.image_desc(resolve.src)?;

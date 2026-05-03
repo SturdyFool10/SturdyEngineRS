@@ -92,10 +92,10 @@ pub use input::{
     KeyInput, KeyInputState, KeyModifier, KeyModifiers, KeyToken, Keybind, KeybindCapture,
 };
 pub use geometry::{
-    DispatchIndirectCommand, DrawIndexedIndirectCommand, DrawIndirectCommand,
-    DrawMeshTasksIndirectCommand, GeometryBackend, GeometryRendererCaps, HizDesc, MAX_MESHLET_TRIANGLES,
-    MAX_MESHLET_VERTICES, Meshlet, MeshletBounds, MeshletGroup, SubMesh, VirtualMesh,
-    VirtualMeshProxy,
+    BoundingSphere, DispatchIndirectCommand, DrawIndexedIndirectCommand, DrawIndirectCommand,
+    DrawMeshTasksIndirectCommand, Frustum, GeometryBackend, GeometryRendererCaps, HizDesc,
+    MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Meshlet, MeshletBounds, MeshletGroup, SubMesh,
+    VirtualMesh, VirtualMeshProxy,
 };
 pub use mesh::{Mesh, Vertex2d, Vertex3d};
 pub use mesh_program::{MeshProgram, MeshProgramDesc, MeshVertexKind};
@@ -119,7 +119,9 @@ pub use runtime::{
 pub use sampler_catalog::SamplerPreset;
 pub use scene::{
     CameraConstants, CameraId, CameraOutput, DirectionalLight, InstanceData, MaterialDescriptor,
-    MeshId, ObjectId, ObjectKind, OrbitCamera, RenderTarget, Scene, SceneCamera,
+    MaterialDomain, MaterialInput, MeshId, ObjectId, ObjectKind, OrbitCamera, RenderState,
+    RenderTarget, Scene, SceneCamera, ShadingModel, UnifiedMaterial, UnifiedMaterialBuilder,
+    gbuffer,
 };
 pub use screenshot::{ScreenshotCapture, ScreenshotExportReport};
 pub use shader_watcher::ShaderWatcher;
@@ -150,7 +152,8 @@ pub use sturdy_engine_core::{
     BufferDesc, BufferUsage, BufferUse, CanonicalBinding, CanonicalGroupLayout,
     CanonicalPipelineLayout, Caps, ColorTargetDesc, CompareOp, CompiledShaderArtifact,
     ComputePipelineDesc, CopyBufferToImageDesc, CopyImageToBufferDesc, CullMode,
-    D3d12RawCapabilities, DispatchDesc, DrawDesc, Error, ErrorCategory, Extent3d,
+    D3d12RawCapabilities, DispatchDesc, DispatchIndirectDesc, DrawDesc, DrawIndirectDesc,
+    DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, Error, ErrorCategory, Extent3d,
     ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode,
     Format, FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc,
     ImageBuilder, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse, IndexBufferBinding,

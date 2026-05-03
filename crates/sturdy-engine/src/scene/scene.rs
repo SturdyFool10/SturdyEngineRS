@@ -7,8 +7,9 @@ use super::{
     object::{InstanceData, MeshId, ObjectId, ObjectKind, SceneObject},
 };
 use crate::{
-    Buffer, BufferDesc, BufferUsage, Engine, Error, Format, GraphImage, ImageDesc, ImageDimension,
-    ImageUsage, Mesh, MeshProgram, RenderFrame, Result, push_constants,
+    BoundingSphere, Buffer, BufferDesc, BufferUsage, DrawIndexedIndirectCommand, Engine, Error,
+    Format, Frustum, GeometryBackend, GraphImage, ImageDesc, ImageDimension, ImageUsage, Mesh,
+    MeshProgram, RenderFrame, Result, push_constants,
 };
 use sturdy_engine_core::Extent3d;
 
@@ -196,6 +197,14 @@ pub struct Scene {
     pub directional_light: DirectionalLight,
     /// Persistent GPU buffer holding the current [`LightingUniforms`].
     light_buffer: Option<Buffer>,
+    /// Geometry front-end used for draw submission.
+    ///
+    /// - `ClassicVertex` (default): one `DrawDesc` per batch, no culling.
+    /// - `ComputeIndirect`: CPU frustum cull each frame, emit
+    ///   `DrawIndexedIndirectCommand`s, submit with `DrawIndirect`.
+    ///
+    /// Falls back to `ClassicVertex` if the indirect buffer is not ready.
+    geometry_backend: GeometryBackend,
 }
 
 impl Scene {
@@ -209,7 +218,26 @@ impl Scene {
             next_object_id: 0,
             directional_light: DirectionalLight::default(),
             light_buffer: None,
+            geometry_backend: GeometryBackend::ClassicVertex,
         }
+    }
+
+    /// Select the geometry front-end for draw submission.
+    ///
+    /// Call this once at init (after checking [`GeometryRendererCaps`]) to opt
+    /// into frustum culling and indirect draw. Safe to change between frames.
+    ///
+    /// ```rust
+    /// let caps = GeometryRendererCaps::from_caps(&engine.caps());
+    /// scene.set_geometry_backend(caps.best_opaque_backend());
+    /// ```
+    pub fn set_geometry_backend(&mut self, backend: GeometryBackend) {
+        self.geometry_backend = backend;
+    }
+
+    /// Returns the currently active geometry backend.
+    pub fn geometry_backend(&self) -> GeometryBackend {
+        self.geometry_backend
     }
 
     /// Register a mesh+program pair. Returns a `MeshId` used to spawn objects.
@@ -336,6 +364,8 @@ impl Scene {
 
         for batch in self.batches.values_mut() {
             batch.prepare(engine)?;
+            // Clear stale indirect commands; cull_batches() refills them before draw.
+            batch.indirect_commands.clear();
         }
 
         // Ensure the lighting uniform buffer exists.
@@ -371,11 +401,16 @@ impl Scene {
     ///
     /// Call this before the main camera pass so offscreen textures are available
     /// as named frame images when the main scene draws objects that sample them.
+    /// Draw all offscreen cameras into the render frame using the classic vertex path.
+    ///
+    /// Frustum culling is not applied to offscreen cameras; call `draw()` on the
+    /// main camera to benefit from the `ComputeIndirect` backend.
     pub fn render(&self, frame: &RenderFrame) -> Result<()> {
         for camera in &self.cameras {
             let CameraOutput::Offscreen(rt) = &camera.output;
             let target = rt.as_frame_image(frame)?;
-            self.draw_batches_for_camera(camera, &target, frame)?;
+            let constants = CameraConstants::from_camera(camera);
+            self.draw_batches_classic(&constants, &target, None, frame)?;
         }
         Ok(())
     }
@@ -395,11 +430,12 @@ impl Scene {
     /// scene.draw(view, proj, &hdr_output, &frame)?;
     /// ```
     pub fn draw(
-        &self,
+        &mut self,
         view: Mat4,
         proj: Mat4,
         output: &GraphImage,
         frame: &RenderFrame,
+        engine: &Engine,
     ) -> Result<()> {
         let out_desc = output.desc();
 
@@ -418,9 +454,10 @@ impl Scene {
             )));
         }
 
+        let view_proj = proj * view;
         let constants = CameraConstants {
-            view_proj: (proj * view).to_cols_array_2d(),
-            previous_view_proj: (proj * view).to_cols_array_2d(),
+            view_proj: view_proj.to_cols_array_2d(),
+            previous_view_proj: view_proj.to_cols_array_2d(),
         };
 
         // Extract camera world position from the view matrix inverse.
@@ -454,7 +491,7 @@ impl Scene {
                 debug_name: None,
             },
         )?;
-        self.draw_batches(&constants, output, Some(&depth), frame)
+        self.draw_batches(&constants, view_proj, output, Some(&depth), frame, engine)
     }
 
     /// Draw a single registered camera into an explicit output image.
@@ -472,10 +509,93 @@ impl Scene {
             crate::Error::InvalidInput(format!("camera {:?} not found in scene", camera_id))
         })?;
         let constants = CameraConstants::from_camera(camera);
-        self.draw_batches(&constants, output, None, frame)
+        self.draw_batches_classic(&constants, output, None, frame)
     }
 
+    /// Draw path used by the main camera. Dispatches to the classic or indirect path
+    /// based on `self.geometry_backend`.
     fn draw_batches(
+        &mut self,
+        constants: &CameraConstants,
+        view_proj: Mat4,
+        output: &GraphImage,
+        depth: Option<&GraphImage>,
+        frame: &RenderFrame,
+        engine: &Engine,
+    ) -> Result<()> {
+        if self.geometry_backend != GeometryBackend::ComputeIndirect {
+            return self.draw_batches_classic(constants, output, depth, frame);
+        }
+
+        // ComputeIndirect path: CPU frustum cull, write one DrawIndexedIndirectCommand
+        // per visible instance, upload to GPU, then issue DrawIndirect.
+        let frustum = Frustum::from_view_proj(view_proj);
+        for batch in self.batches.values_mut() {
+            batch.indirect_commands.clear();
+            let total = batch.total_count() as usize;
+            if total == 0 {
+                continue;
+            }
+            let mesh_idx = batch.mesh_idx as usize;
+            let mesh = &self.meshes[mesh_idx].0;
+            let index_count = if mesh.is_indexed() { mesh.index_count } else { mesh.vertex_count };
+
+            let all_instances: Vec<_> = batch
+                .static_instances
+                .iter()
+                .chain(batch.dynamic_instances.iter())
+                .enumerate()
+                .collect();
+            for (instance_idx, inst) in all_instances {
+                let model = Mat4::from_cols_array_2d(&inst.model);
+                let world_sphere = mesh.bounding_sphere.transform(model);
+                if frustum.intersects_sphere(&world_sphere) {
+                    batch.indirect_commands.push(DrawIndexedIndirectCommand {
+                        index_count,
+                        instance_count: 1,
+                        first_index: 0,
+                        vertex_offset: 0,
+                        first_instance: instance_idx as u32,
+                    });
+                }
+            }
+            batch.prepare_indirect(engine)?;
+        }
+
+        for batch in self.batches.values() {
+            let instance_buf = match &batch.gpu_buffer {
+                Some(b) => b,
+                None => continue,
+            };
+            let visible = batch.indirect_commands.len() as u32;
+            if visible == 0 {
+                continue;
+            }
+            let indirect_buf = match &batch.indirect_gpu_buffer {
+                Some(b) => b,
+                None => continue,
+            };
+            let mesh_idx = batch.mesh_idx as usize;
+            let (mesh, program) = &self.meshes[mesh_idx];
+            frame.bind_buffer("instances", instance_buf);
+            if let Some(light_buf) = &self.light_buffer {
+                frame.bind_buffer("lighting", light_buf);
+            }
+            if let Some(mat) = self.materials.get(mesh_idx) {
+                if let Some(mat_buf) = &mat.gpu_buffer {
+                    frame.bind_buffer("material_desc", mat_buf);
+                }
+            }
+            let effective_depth = if program.uses_depth { depth } else { None };
+            output.draw_mesh_indirect_with_push_constants_and_depth(
+                mesh, program, instance_buf, indirect_buf, visible, constants, effective_depth,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Classic draw path — no frustum culling, no mutation. Used by offscreen cameras.
+    fn draw_batches_classic(
         &self,
         constants: &CameraConstants,
         output: &GraphImage,
@@ -491,7 +611,6 @@ impl Scene {
             if total == 0 {
                 continue;
             }
-
             let mesh_idx = batch.mesh_idx as usize;
             let (mesh, program) = &self.meshes[mesh_idx];
             frame.bind_buffer("instances", buf);
@@ -505,26 +624,10 @@ impl Scene {
             }
             let effective_depth = if program.uses_depth { depth } else { None };
             output.draw_mesh_instanced_with_push_constants_and_depth(
-                mesh,
-                program,
-                buf,
-                total,
-                constants,
-                effective_depth,
+                mesh, program, buf, total, constants, effective_depth,
             )?;
         }
-
         Ok(())
-    }
-
-    fn draw_batches_for_camera(
-        &self,
-        camera: &SceneCamera,
-        output: &GraphImage,
-        frame: &RenderFrame,
-    ) -> Result<()> {
-        let constants = CameraConstants::from_camera(camera);
-        self.draw_batches(&constants, output, None, frame)
     }
 }
 

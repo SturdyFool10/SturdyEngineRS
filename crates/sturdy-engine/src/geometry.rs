@@ -16,6 +16,8 @@
 //
 // Roadmap: Track 7.
 
+use glam::{Mat4, Vec3, Vec4};
+
 use crate::mesh::Vertex3d;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,6 +126,113 @@ impl GeometryRendererCaps {
             GeometryBackend::RayTracingFallback => self.ray_tracing,
             GeometryBackend::RayTracingSelectedClusters => self.ray_tracing,
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BoundingSphere + Frustum (CPU culling)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A sphere that conservatively bounds a mesh in object space.
+///
+/// Used by the `ComputeIndirect` and `MeshShader` paths for CPU-side and
+/// GPU-side (task shader) frustum culling respectively.
+#[derive(Copy, Clone, Debug)]
+pub struct BoundingSphere {
+    pub center: Vec3,
+    pub radius: f32,
+}
+
+impl BoundingSphere {
+    pub const EMPTY: Self = Self { center: Vec3::ZERO, radius: 0.0 };
+
+    /// Compute a tight bounding sphere from a flat vertex position list.
+    /// Uses Ritter's algorithm: fast, one pass, radius slightly conservative.
+    pub fn from_positions(positions: &[[f32; 3]]) -> Self {
+        if positions.is_empty() {
+            return Self::EMPTY;
+        }
+        // Initial sphere: average center, max distance as radius.
+        let center = positions
+            .iter()
+            .fold(Vec3::ZERO, |acc, p| acc + Vec3::from_array(*p))
+            / positions.len() as f32;
+        let radius = positions
+            .iter()
+            .map(|p| center.distance(Vec3::from_array(*p)))
+            .fold(0.0_f32, f32::max);
+        Self { center, radius }
+    }
+
+    /// Transform this sphere into world space given an instance model matrix.
+    /// The radius is scaled by the maximum column-length of the 3×3 rotation+scale
+    /// sub-matrix, giving a conservative world-space sphere.
+    pub fn transform(&self, model: Mat4) -> Self {
+        let world_center = (model * Vec4::new(self.center.x, self.center.y, self.center.z, 1.0)).truncate();
+        // Maximum scale along any axis (largest column magnitude of the 3×3 part).
+        let sx = Vec3::new(model.x_axis.x, model.y_axis.x, model.z_axis.x).length();
+        let sy = Vec3::new(model.x_axis.y, model.y_axis.y, model.z_axis.y).length();
+        let sz = Vec3::new(model.x_axis.z, model.y_axis.z, model.z_axis.z).length();
+        let max_scale = sx.max(sy).max(sz);
+        Self { center: world_center, radius: self.radius * max_scale }
+    }
+}
+
+/// Six-plane view frustum for conservative sphere-frustum culling.
+///
+/// Planes are stored as `Vec4(nx, ny, nz, d)` in the convention
+/// `dot(normal, point) + d >= 0` means the point is on the **inside**.
+/// Extracted from the combined view-projection matrix (clip space).
+#[derive(Copy, Clone, Debug)]
+pub struct Frustum {
+    planes: [Vec4; 6],
+}
+
+impl Frustum {
+    /// Extract frustum planes from a column-major view-projection matrix
+    /// using Gribb/Hartmann's method. Plane normals point **inward**.
+    pub fn from_view_proj(vp: Mat4) -> Self {
+        let m = vp.to_cols_array_2d(); // column-major: m[col][row]
+        // Gribb-Hartmann: row vectors of the matrix are r0..r3.
+        // m[col][row] → row r = (m[0][r], m[1][r], m[2][r], m[3][r])
+        let r = |row: usize| Vec4::new(m[0][row], m[1][row], m[2][row], m[3][row]);
+        let r0 = r(0); let r1 = r(1); let r2 = r(2); let r3 = r(3);
+        let mut planes = [
+            r3 + r0, // left
+            r3 - r0, // right
+            r3 + r1, // bottom
+            r3 - r1, // top
+            r3 + r2, // near
+            r3 - r2, // far
+        ];
+        // Normalize so the xyz length is 1 (makes the dot product a signed distance in world units).
+        for p in &mut planes {
+            let len = Vec3::new(p.x, p.y, p.z).length();
+            if len > 1e-6 {
+                *p /= len;
+            }
+        }
+        Self { planes }
+    }
+
+    /// Returns `true` when the sphere is **not** fully outside any frustum plane
+    /// (i.e. it may be visible — conservative, no false negatives).
+    #[inline]
+    pub fn intersects_sphere(&self, sphere: &BoundingSphere) -> bool {
+        let p = Vec4::new(sphere.center.x, sphere.center.y, sphere.center.z, 1.0);
+        for plane in &self.planes {
+            if plane.dot(p) < -sphere.radius {
+                return false; // fully outside this plane
+            }
+        }
+        true
+    }
+
+    /// Returns `true` when the sphere is fully inside all planes (no clipping).
+    #[inline]
+    pub fn contains_sphere(&self, sphere: &BoundingSphere) -> bool {
+        let p = Vec4::new(sphere.center.x, sphere.center.y, sphere.center.z, 1.0);
+        self.planes.iter().all(|plane| plane.dot(p) >= sphere.radius)
     }
 }
 
