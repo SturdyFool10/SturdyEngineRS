@@ -17,6 +17,7 @@ mod bind_group;
 mod bloom_pass;
 mod compute_program;
 mod debug_draw_2d;
+mod deferred_pass;
 mod geometry;
 mod debug_overlay;
 mod debug_view_picker;
@@ -75,6 +76,7 @@ pub use clay_ui::{
     surface_to_ndc, ui_to_surface, window_logical_to_surface, window_logical_to_ui,
 };
 pub use compute_program::ComputeProgram;
+pub use deferred_pass::DeferredPass;
 pub use debug_draw_2d::{DebugDraw2d, DebugDrawStyle};
 pub use debug_overlay::{
     DebugHitRegion, DebugOverlay, DebugOverlayAntialiasing, DebugOverlayConfig,

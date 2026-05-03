@@ -1911,6 +1911,187 @@ impl GraphImage {
         )
     }
 
+    /// Draw a mesh into multiple render targets simultaneously (G-Buffer fill).
+    ///
+    /// `self` is the first color target (G0). `additional_targets` contains
+    /// the remaining color targets in order (G1, G2, …). The fragment shader
+    /// must declare matching `SV_TARGET0..N` outputs.
+    ///
+    /// A pipeline with all N color formats is cached inside `program` the
+    /// first time this combination is seen. All other state matches
+    /// `draw_mesh_instanced_with_push_constants_and_depth`.
+    pub fn draw_mesh_instanced_mrt_with_push_constants_and_depth<T: bytemuck::Pod>(
+        &self,
+        additional_targets: &[&GraphImage],
+        mesh: &Mesh,
+        program: &MeshProgram,
+        instances: &crate::Buffer,
+        instance_count: u32,
+        constants: &T,
+        depth: Option<&GraphImage>,
+    ) -> Result<()> {
+        let stage = reflected_push_constant_stages(
+            program.reflection(),
+            StageMask::VERTEX | StageMask::FRAGMENT,
+        );
+        self.draw_mesh_mrt_inner(
+            additional_targets,
+            mesh,
+            program,
+            Some(PushConstants {
+                offset: 0,
+                stages: stage,
+                bytes: bytemuck::bytes_of(constants).to_vec(),
+            }),
+            instances,
+            instance_count,
+            depth,
+        )
+    }
+
+    fn draw_mesh_mrt_inner(
+        &self,
+        additional_targets: &[&GraphImage],
+        mesh: &Mesh,
+        program: &MeshProgram,
+        push_constants: Option<PushConstants>,
+        instance_buf: &crate::Buffer,
+        instance_count: u32,
+        depth: Option<&GraphImage>,
+    ) -> Result<()> {
+        let mut inner = self.frame.borrow_mut();
+        let declaration_index = inner.declaration_index;
+        inner.declaration_index = inner.declaration_index.saturating_add(1);
+
+        // Import all images and buffers.
+        inner.frame.inner.graph_mut(|g| g.import_image(self.handle, self.desc))?;
+        for t in additional_targets {
+            inner.frame.inner.graph_mut(|g| g.import_image(t.handle, t.desc))?;
+        }
+        inner.frame.inner.graph_mut(|g| {
+            g.import_buffer(mesh.vertex_buffer.handle(), mesh.vertex_buffer.desc())
+        })?;
+        if let Some(ib) = &mesh.index_buffer {
+            inner.frame.inner.graph_mut(|g| g.import_buffer(ib.handle(), ib.desc()))?;
+        }
+        inner.frame.inner.graph_mut(|g| {
+            g.import_buffer(instance_buf.handle(), instance_buf.desc())
+        })?;
+        inner.buffers_by_name.insert(
+            "instances".to_owned(),
+            (instance_buf.handle(), instance_buf.desc()),
+        );
+        if let Some(d) = depth {
+            inner.frame.inner.graph_mut(|g| g.import_image(d.handle, d.desc))?;
+        }
+
+        // Build the ordered list of color formats for the MRT pipeline.
+        let mut color_formats = vec![self.desc.format];
+        for t in additional_targets {
+            color_formats.push(t.desc.format);
+        }
+        let pipeline = program.pipeline_handle_mrt(&color_formats, self.desc.samples)?;
+
+        let vertex_buffer = Some(VertexBufferBinding {
+            buffer: mesh.vertex_buffer.handle(),
+            binding: 0,
+            offset: 0,
+        });
+        let index_buffer = mesh.index_buffer.as_ref().map(|ib| IndexBufferBinding {
+            buffer: ib.handle(),
+            offset: 0,
+            format: mesh.index_format,
+        });
+        let draw_count = if mesh.is_indexed() { mesh.index_count } else { mesh.vertex_count };
+
+        let mut buffer_reads = vec![crate::BufferUse {
+            buffer: mesh.vertex_buffer.handle(),
+            access: Access::Read,
+            state: RgState::VertexRead,
+            offset: 0,
+            size: mesh.vertex_buffer.desc().size,
+        }];
+        if let Some(ib) = &mesh.index_buffer {
+            buffer_reads.push(crate::BufferUse {
+                buffer: ib.handle(),
+                access: Access::Read,
+                state: RgState::IndexRead,
+                offset: 0,
+                size: ib.desc().size,
+            });
+        }
+        buffer_reads.push(crate::BufferUse {
+            buffer: instance_buf.handle(),
+            access: Access::Read,
+            state: RgState::ShaderRead,
+            offset: 0,
+            size: instance_buf.desc().size,
+        });
+
+        // All color targets are RenderTarget writes, in declaration order.
+        let mut writes: Vec<crate::ImageUse> = std::iter::once(self)
+            .chain(additional_targets.iter().copied())
+            .map(|t| crate::ImageUse {
+                image: t.handle,
+                access: Access::Write,
+                state: RgState::RenderTarget,
+                subresource: single_subresource(),
+            })
+            .collect();
+        let mut clear_depth = None;
+        if let Some(d) = depth {
+            writes.push(crate::ImageUse {
+                image: d.handle,
+                access: Access::Write,
+                state: RgState::DepthWrite,
+                subresource: single_subresource(),
+            });
+            clear_depth = Some((d.handle, f32::to_bits(1.0), 0u8));
+        }
+
+        let pass_name = format!("{declaration_index:04}-draw-mesh-mrt-{}", self.name);
+        let mesh_read_names = reflected_image_reads(program.reflection());
+        let (eager_bindings, unresolved_read_names, eager_uses) =
+            split_read_names(&mesh_read_names, &self.name, &inner.images_by_name);
+
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                name: pass_name,
+                queue: crate::QueueType::Graphics,
+                shader: Some(program.fragment.handle()),
+                pipeline: Some(pipeline),
+                bind_groups: Vec::new(),
+                push_constants,
+                work: PassWork::Draw(DrawDesc {
+                    vertex_count: draw_count,
+                    instance_count,
+                    first_vertex: 0,
+                    first_instance: 0,
+                    vertex_buffer,
+                    index_buffer,
+                }),
+                reads: eager_uses,
+                writes,
+                buffer_reads,
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth,
+            },
+            deferred: Some(DeferredPassResolve {
+                layout_handle: program.pipeline_layout.handle(),
+                reflection: program.reflection().clone(),
+                eager_bindings,
+                eager_samplers: HashMap::new(),
+                eager_buffers: HashMap::new(),
+                unresolved_read_names,
+                skip_name: self.name.clone(),
+                storage_output: None,
+            }),
+        });
+
+        Ok(())
+    }
+
     /// Like `draw_mesh_instanced_with_push_constants_and_depth` but driven by a
     /// GPU indirect command buffer.
     ///

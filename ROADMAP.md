@@ -14,6 +14,10 @@ The simple path must be the best path, not a toy path. Each mode should feel com
 
 The Vulkan backend is solid: precise pipeline barriers, 2-frame-in-flight command contexts, pool-slab descriptor allocation, O(n) pass scheduling, and incremental pipeline cache saves. The deferred render graph compiles passes, infers dependencies, and submits without CPU stalls between frames. Shader reflection derives bind groups, validates resource usage, and exposes vertex inputs. The shader playground use case is functional end-to-end.
 
+**Deferred PBR pipeline** is now live (`DeferredPass`): a four-channel G-Buffer fill pass (`gbuffer_fragment.slang`) packs albedo, oct-encoded normals, roughness, emissive, and world position; a fullscreen deferred lighting pass (`deferred_lighting.slang`) evaluates GGX specular (Trowbridge-Reitz NDF, Smith height-correlated G2, Schlick Fresnel) and Lambertian diffuse for one directional light. Multi-render-target (MRT) pipeline support was added to `MeshProgram` and `GraphImage`. The output feeds directly into the existing bloom → AA → tone mapping chain. Usage: replace `scene.draw(...)` with `deferred_pass.draw(...)`.
+
+**CPU frustum culling + indirect draw** is live: the `ComputeIndirect` geometry backend CPU-culls instances by bounding sphere against the view frustum each frame and issues `DrawIndexedIndirect` commands; the Vulkan backend emits `vkCmdDrawIndexedIndirect`. Geometry backend is selectable per scene via `scene.set_geometry_backend()`.
+
 ---
 
 ## API Design Contract
@@ -103,27 +107,14 @@ A single material definition that compiles to every rendering path: deferred G-B
 
 ### 6a — MaterialSurface interface and UnifiedMaterial
 
-- [ ] Define `MaterialSurface` as the canonical output of every material in Slang:
-  ```
-  struct MaterialSurface {
-      float3 base_color;   // linear sRGB albedo
-      float  metallic;     // [0, 1]
-      float  roughness;    // [0, 1] perceptual; shader squares to alpha for GGX
-      float3 normal_ts;    // tangent-space normal for TBN transform
-      float  occlusion;    // [0, 1] AO
-      float3 emissive;     // linear HDR radiance (unclamped)
-      float  opacity;      // [0, 1]; 1 = fully opaque
-  };
-  ```
-- [ ] Define `MaterialDomain` enum: `Opaque`, `Masked` (alpha-test), `Translucent`, `Decal`.
-- [ ] Define `ShadingModel` enum: `Unlit`, `Lambert` (legacy fallback), `PbrMetallicRoughness`, `PbrClearcoat`, `PbrTransmission`.
-- [ ] Add `UnifiedMaterial` as the engine-facing material type. It holds:
-  - `MaterialDomain`, `ShadingModel`, `RenderState`
-  - A Slang snippet (inline or file) that implements `MaterialSurface evaluate_material(VertexData v)` — this is the **only shader code the user writes for a material**
-  - Per-input source: each of the eight `MaterialSurface` fields may come from a constant value, a sampled texture, or a procedural expression baked into the snippet
-- [ ] Add `UnifiedMaterialBuilder` with fluent API: `.base_color_texture(handle)`, `.base_color_constant(color)`, `.roughness_constant(r)`, `.with_normal_map(handle)`, `.domain(Opaque)`, etc.
-- [ ] Add a standard `PbrMetallicRoughness` constructor that takes the GLTF PBR parameter set and produces a complete `UnifiedMaterial` with no additional user code.
-- [ ] Add a standard `ProceduralMaterial` constructor: user provides a Slang function body; engine wraps it in the `evaluate_material` interface and compiles all variants.
+- [ ] Define `MaterialSurface` as a shared Slang module (`material_surface.slang`) included by all lit variants — the G-Buffer fill pass currently outputs an equivalent struct inline; extract it into a shared include so the variant compiler can reference it.
+- [x] Define `MaterialDomain` enum: `Opaque`, `Masked`, `Translucent`, `Decal` — in `scene/material.rs`.
+- [x] Define `ShadingModel` enum: `Unlit`, `Lambert`, `PbrMetallicRoughness`, `PbrClearcoat`, `PbrSubsurface`, `PbrTransmission` — in `scene/material.rs`.
+- [x] Add `UnifiedMaterial` holding `MaterialDomain`, `ShadingModel`, `RenderState`, structured PBR inputs (each `MaterialInput<T>`: Constant / Texture / TextureTimesConstant), and optional custom `evaluate_material_snippet` — in `scene/material.rs`.
+- [x] Add `UnifiedMaterialBuilder` with full fluent API (`base_color_texture`, `metallic_roughness_texture` GLTF B=metallic/G=roughness, `normal_texture`, `occlusion_texture`, `emissive_texture_factor`, `clearcoat`, `evaluate_material_fn`) — in `scene/material.rs`.
+- [x] Add `UnifiedMaterial::pbr_metallic_roughness()` standard constructor.
+- [x] Add `UnifiedMaterial::procedural()` constructor; user supplies Slang body.
+- [ ] Wire `UnifiedMaterial` into the variant compiler (Track 6b) so it actually drives shader generation.
 
 ### 6b — Shader variant compiler
 
@@ -141,27 +132,34 @@ A single material definition that compiles to every rendering path: deferred G-B
 
 Implement a shared Slang module included by all lit variants. Expose `BrdfConfig` — default produces energy-conserving GGX PBR; every toggle and coefficient is overridable.
 
-- [ ] **GGX specular**: Trowbridge-Reitz NDF, Smith height-correlated masking-shadowing G2 (Heitz 2014), Schlick Fresnel with `F0 = lerp(0.04, base_color, metallic)`.
-- [ ] **Lambertian diffuse**: energy-conserving complement `(1 - metallic) * base_color / π`; expose `BrdfConfig::diffuse_model: DiffuseModel` (Lambertian / Burley / OrenNayar) for games that want softer organic surfaces.
-- [ ] **Multi-scattering energy compensation**: implement Turquin 2019 fit (scale + bias from precomputed BRDF LUT); expose `BrdfConfig::multi_scatter: bool` (default true).
-- [ ] **BRDF integration LUT**: precompute a 128×128 `RG16Float` texture (NdotV, roughness) → (scale, bias); ship as engine asset; expose `BrdfConfig::lut_resolution: u32` (default 128; bump to 256 for highest fidelity).
-- [ ] **IBL split-sum specular**: sample prefiltered env cubemap; expose `BrdfConfig::ibl_specular_mip_count: u32` and `BrdfConfig::ibl_max_roughness: f32`.
-- [ ] **IBL diffuse irradiance**: SH9 or irradiance cubemap; expose `BrdfConfig::ibl_diffuse_mode: IblDiffuseMode` (SH9 / CubemapSampled).
-- [ ] **Analytic light evaluation**: directional, point (sphere), spot (cone); expose `BrdfConfig::specular_aa: bool` (default true — reduces specular aliasing on high-roughness surfaces near geometry edges) and `BrdfConfig::energy_clamp: bool`.
+- [x] **GGX specular**: Trowbridge-Reitz NDF, Smith height-correlated G2 (exact GGX form — `0.5 / (NdotV * sqrt(α² + NdotL² * (1-α²)) + NdotL * sqrt(α² + NdotV² * (1-α²)))`), Schlick Fresnel with `F0 = lerp(0.04, albedo, metallic)` — implemented in `deferred_lighting.slang`. Extract into a shared `brdf.slang` module so the forward lit, shadow, and RT passes can include it.
+- [x] **Lambertian diffuse**: energy-conserving `(1 - F0) * (1 - metallic) * albedo / π` — implemented in `deferred_lighting.slang`.
+- [x] **Analytic directional light evaluation**: `(diffuse + specular) * light_color * NdotL` — implemented in `deferred_lighting.slang`.
+- [ ] **Extract into `brdf.slang`**: factor the BRDF functions out of `deferred_lighting.slang` into a shared include so forward-lit, shadow, and RT passes can use the same implementation.
+- [ ] **Multi-scattering energy compensation**: Turquin 2019 fit via precomputed BRDF LUT; expose `BrdfConfig::multi_scatter: bool` (default true).
+- [ ] **BRDF integration LUT**: precompute 128×128 `RG16Float` (NdotV, roughness) → (scale, bias); ship as engine asset.
+- [ ] **IBL split-sum specular**: prefiltered env cubemap sample; expose `BrdfConfig::ibl_specular_mip_count` and `BrdfConfig::ibl_max_roughness`.
+- [ ] **IBL diffuse irradiance**: SH9 or irradiance cubemap; expose `BrdfConfig::ibl_diffuse_mode`.
+- [ ] **Point and spot light evaluation**: extend analytic light loop to point (sphere) and spot (cone) light types; add `BrdfConfig::specular_aa: bool` (default true).
 
 ### 6d — Deferred G-Buffer pipeline
 
-- [ ] Define the standard G-Buffer layout as engine constants:
-  - `g0` (`RGBA8Unorm`): `base_color.rgb` + `metallic` — base albedo and conductor flag
-  - `g1` (`RGBA16Float`): world-space normal (octahedral-encoded into `.xy`) + `roughness` + `occlusion`
-  - `g2` (`RGBA16Float`): `emissive.rgb` + shading model ID (`.a` integer flag)
+- [x] Define the standard G-Buffer layout as engine constants in `scene/material.rs::gbuffer`:
+  - `g0` (`RGBA8Unorm`): `base_color.rgb` + `metallic`
+  - `g1` (`RGBA16Float`): octahedral world-normal (`.xy`) + `roughness` + 0
+  - `g2` (`RGBA16Float`): `emissive.rgb` + 0
+  - `g3` (`RGBA16Float`): `world_pos.xyz` + 0 *(bandwidth optimisation: replace with depth reconstruction in a follow-up pass)*
   - `depth` (`Depth32Float`): hardware depth buffer
-- [ ] Add a `GBufferPass` component: allocates the four G-Buffer images from the render graph (size-matched to swapchain); records one draw per opaque mesh using that mesh's `GBufferFillVariant`; owned by the engine, zero app code required.
-- [ ] Add a `DeferredLightingPass` component: reads G0/G1/G2/depth as shader inputs; one fullscreen compute or fragment dispatch; reconstructs world position from depth + inv-view-proj; evaluates all active lights and IBL; outputs linear HDR `scene_color`.
-- [ ] Reconstruct world position from depth in the deferred pass (no explicit world-pos G-Buffer attachment — saves bandwidth).
-- [ ] Feed `scene_color` into the existing post-processing pipeline (bloom → AA → tone mapping).
-- [ ] Keep the existing forward path for `Translucent` and `Decal` domain materials: sort back-to-front, render after deferred lighting into the HDR target.
-- [ ] Add a `RenderPath` enum exposed on `SceneRenderer`: `DeferredThenForward` (default), `ForwardOnly` (fallback for hardware without MRT support).
+- [x] Add `MeshProgram::pipeline_handle_mrt(&[Format], samples)` — second pipeline cache keyed on `Vec<Format>`; Vulkan backend already handles N color attachments via `PassDesc::writes`.
+- [x] Add `GraphImage::draw_mesh_instanced_mrt_with_push_constants_and_depth` — MRT draw API; `self` = G0, `additional_targets = &[G1, G2, G3]`; N `RenderTarget` writes in `PassDesc`.
+- [x] Add `gbuffer_fragment.slang` — G-Buffer fill fragment shader; outputs oct-encoded normal, writes all four render targets.
+- [x] Add `Scene::draw_gbuffer(view, proj, &[g0,g1,g2,g3], depth, program, frame)` — batch loop writing all opaque instances into the G-Buffer.
+- [x] Add `DeferredPass` component (`deferred_pass.rs`): allocates G-Buffer images from render graph (auto-resize), calls `draw_gbuffer`, registers images by name, executes `deferred_lighting.slang` as a fullscreen pass — drop-in for `scene.draw()`.
+- [x] Add `deferred_lighting.slang` — GGX PBR fullscreen deferred pass: reads G0/G1/G2/G3 by name, evaluates one directional light, outputs linear HDR `scene_color`.
+- [x] Feed `scene_color` into the existing post-processing pipeline (bloom → AA → tone mapping) — unchanged.
+- [ ] Reconstruct world position from depth (eliminate the `g3` world-pos attachment; saves 8 bytes/pixel bandwidth). Requires depth texture view support or a `R32Float` depth copy.
+- [ ] Forward tail for `Translucent` and `Decal` materials: sort back-to-front, forward-lit, composited over HDR target after deferred pass.
+- [ ] Add `RenderPath` enum on `DeferredPass`: `DeferredThenForward` (default), `ForwardOnly` (fallback); selectable at runtime.
 
 ### 6e — Shadow system
 
@@ -240,8 +238,8 @@ Foundation types added to `render_graph.rs`:
 - [x] `DrawMeshShaderDesc`: direct group_count_x/y/z mesh-shader dispatch.
 - [x] `DrawMeshShaderIndirectDesc`: buffer-driven mesh-shader group counts.
 - [x] `PassWork::DrawIndirect`, `PassWork::DispatchIndirect`, `PassWork::DrawMeshShader`, `PassWork::DrawMeshShaderIndirect` variants.
-- [ ] Vulkan backend: emit `vkCmdDrawIndirect` / `vkCmdDrawIndexedIndirect` for `PassWork::DrawIndirect`.
-- [ ] Vulkan backend: emit `vkCmdDispatchIndirect` for `PassWork::DispatchIndirect`.
+- [x] Vulkan backend: emit `vkCmdDrawIndirect` / `vkCmdDrawIndexedIndirect` for `PassWork::DrawIndirect` — in `commands.rs`.
+- [x] Vulkan backend: emit `vkCmdDispatchIndirect` for `PassWork::DispatchIndirect` — in `commands.rs`.
 - [ ] Vulkan backend: emit `vkCmdDrawMeshTasksIndirectEXT` (EXT_mesh_shader) for `PassWork::DrawMeshShaderIndirect`; check capability before use; emit error/no-op if missing.
 - [ ] Add render graph validation: indirect buffer must be in `RgState::IndirectRead` before dispatch.
 - [ ] Expose `DrawMeshShaderDesc` through `GraphImage` pass API analogous to `draw_mesh_instanced`.
@@ -250,12 +248,11 @@ Foundation types added to `render_graph.rs`:
 
 The lowest-risk starting point; works on all hardware.
 
-- [ ] Add `GeometryRenderer::classic(mesh)` that produces a `DrawDesc` from a `VirtualMesh`'s vertex/index data. Replaces direct `DrawDesc` construction in `frontend_graph.rs`.
-- [ ] Add `CullingComputePass`: a compute shader that reads per-object bounds and writes surviving `DrawIndexedIndirectCommand`s into a compact output buffer. Uses the previous frame's depth buffer for basic Hi-Z occlusion (even without a full pyramid).
-- [ ] Add frustum-cull predicate: project object bounding sphere against the six frustum planes; write `instance_count = 0` for culled objects.
-- [ ] Add `HizPass`: compute shader that builds a `log2(max(w, h))` mip pyramid from the depth buffer each frame, stored as `Format::R32Float` sampled image.
-- [ ] Add Hi-Z occlusion predicate to `CullingComputePass`: project bounding sphere into screen space; sample Hi-Z at `log2(screen_radius)` mip; reject if entire sphere is behind stored depth.
-- [ ] Keep `ClassicVertex` as the unconditional fallback: if the culling pass is absent or disabled, fall back to a single `DrawDesc` per sub-mesh.
+- [x] CPU frustum culling + indirect draw: `Scene::set_geometry_backend(GeometryBackend::ComputeIndirect)` activates per-frame CPU frustum culling (Gribb-Hartmann `Frustum` from view-proj, `BoundingSphere::from_positions` at mesh creation, `BoundingSphere::transform` per instance); surviving instances write `DrawIndexedIndirectCommand`s to `InstanceBatch::indirect_gpu_buffer`; `draw_mesh_indirect_with_push_constants_and_depth` issues `vkCmdDrawIndexedIndirect`. `GeometryBackend::ClassicVertex` is the unconditional fallback.
+- [x] `BoundingSphere` computed at mesh creation (`new_3d`, `indexed_3d`, `cube`, `plane`, `uv_sphere`); stored as `Mesh::bounding_sphere`.
+- [x] `Frustum::from_view_proj` (Gribb-Hartmann); `Frustum::intersects_sphere`; `Frustum::contains_sphere`.
+- [ ] Move frustum culling to GPU: add `CullingComputePass` Slang shader that reads per-instance bounds from a GPU buffer and writes `DrawIndexedIndirectCommand`s — eliminates the CPU loop and scales to millions of instances.
+- [ ] Add `HizPass`: compute shader building a mip pyramid from the previous frame's depth buffer; feed into the culling shader for occlusion rejection.
 
 ### 7d — Mesh shader path
 
@@ -863,7 +860,8 @@ Work here replaces the simple synchronous load from Track 3 with a proper stream
 ### Milestone C — Games work
 - [ ] Build one 2D game and one 3D game using only the default game shell.
 - [ ] Input polling, delta time, and gamepad work out of the box.
-- [ ] Scene renders with directional CSM shadows and PBR materials (deferred G-Buffer path, Track 6).
+- [x] Scene renders with GGX PBR materials via the deferred G-Buffer path (`DeferredPass`).
+- [ ] Add directional CSM shadows to the deferred pipeline (Track 6e).
 - [ ] Load a PNG texture and a GLTF mesh (with GLTF PBR materials) from disk without custom asset code.
 - [ ] Switch between `DeferredThenForward` and `ForwardOnly` render paths at runtime.
 - [ ] Switch other graphics settings (MSAA, bloom, tone mapping, RT features) live during gameplay.

@@ -53,6 +53,9 @@ pub enum MeshVertexKind {
 pub struct MeshProgram {
     pub(crate) engine: Engine,
     pub(crate) pipelines: Mutex<HashMap<(Format, u8, bool), Pipeline>>,
+    /// Pipeline cache for multi-render-target variants.
+    /// Key: (sorted color formats, samples, uses_depth).
+    pub(crate) pipelines_mrt: Mutex<HashMap<(Vec<Format>, u8, bool), Pipeline>>,
     pub(crate) pipeline_layout: PipelineLayout,
     pub(crate) vertex: Shader,
     pub(crate) fragment: Shader,
@@ -215,6 +218,7 @@ impl MeshProgram {
         Ok(Self {
             engine: engine.clone(),
             pipelines: Mutex::new(HashMap::new()),
+            pipelines_mrt: Mutex::new(HashMap::new()),
             pipeline_layout,
             vertex,
             fragment,
@@ -269,6 +273,10 @@ impl MeshProgram {
             .lock()
             .expect("mesh program pipeline mutex poisoned")
             .clear();
+        self.pipelines_mrt
+            .lock()
+            .expect("mesh program MRT pipeline mutex poisoned")
+            .clear();
         Ok(true)
     }
 
@@ -299,6 +307,10 @@ impl MeshProgram {
         self.pipelines
             .lock()
             .expect("mesh program pipeline mutex poisoned")
+            .clear();
+        self.pipelines_mrt
+            .lock()
+            .expect("mesh program MRT pipeline mutex poisoned")
             .clear();
         Ok(true)
     }
@@ -359,6 +371,68 @@ impl MeshProgram {
             .get(&key)
             .map(Pipeline::handle)
             .ok_or_else(|| Error::Unknown("mesh program pipeline cache miss".into()))
+    }
+
+    /// Return a pipeline handle for a multi-render-target draw.
+    ///
+    /// `color_formats` is the ordered list of render target formats (e.g.
+    /// `[Rgba8Unorm, Rgba16Float, Rgba16Float, Rgba16Float]` for a G-Buffer fill).
+    /// The fragment shader must write to `SV_TARGET0..N-1` in the same order.
+    pub(crate) fn pipeline_handle_mrt(
+        &self,
+        color_formats: &[Format],
+        samples: u8,
+    ) -> Result<core::PipelineHandle> {
+        let mut pipelines = self
+            .pipelines_mrt
+            .lock()
+            .expect("mesh program MRT pipeline mutex poisoned");
+        let key = (color_formats.to_vec(), samples.max(1), self.uses_depth);
+        if !pipelines.contains_key(&key) {
+            let (vertex_stride, attributes) = match self.vertex_kind {
+                MeshVertexKind::V2d => (
+                    std::mem::size_of::<Vertex2d>() as u32,
+                    vertex2d_attributes(),
+                ),
+                MeshVertexKind::V3d => (
+                    std::mem::size_of::<Vertex3d>() as u32,
+                    vertex3d_attributes(),
+                ),
+            };
+            let color_targets = color_formats
+                .iter()
+                .map(|&fmt| ColorTargetDesc::opaque(fmt))
+                .collect();
+            let pipeline = self.engine.create_graphics_pipeline(GraphicsPipelineDesc {
+                vertex_shader: self.vertex.handle(),
+                fragment_shader: Some(self.fragment.handle()),
+                layout: Some(self.pipeline_layout.handle()),
+                vertex_buffers: vec![VertexBufferLayout {
+                    binding: 0,
+                    stride: vertex_stride,
+                    input_rate: VertexInputRate::Vertex,
+                }],
+                vertex_attributes: attributes,
+                color_targets,
+                depth_format: if self.uses_depth {
+                    Some(Format::Depth32Float)
+                } else {
+                    None
+                },
+                samples: key.1,
+                topology: PrimitiveTopology::TriangleList,
+                raster: RasterState {
+                    cull_mode: CullMode::None,
+                    front_face: FrontFace::CounterClockwise,
+                },
+            })?;
+            pipeline.set_debug_name("mesh-program-mrt")?;
+            pipelines.insert(key.clone(), pipeline);
+        }
+        pipelines
+            .get(&key)
+            .map(Pipeline::handle)
+            .ok_or_else(|| Error::Unknown("mesh program MRT pipeline cache miss".into()))
     }
 }
 

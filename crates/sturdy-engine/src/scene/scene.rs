@@ -401,6 +401,121 @@ impl Scene {
     ///
     /// Call this before the main camera pass so offscreen textures are available
     /// as named frame images when the main scene draws objects that sample them.
+    /// Ensure the lighting GPU buffer exists and upload + bind the current
+    /// directional light for use in the deferred lighting pass.
+    ///
+    /// Called by `DeferredPass::draw()`. Also allocates the buffer on first call.
+    pub fn prepare_deferred_lighting(
+        &mut self,
+        view: Mat4,
+        engine: &Engine,
+        frame: &RenderFrame,
+    ) -> Result<()> {
+        // Ensure buffer exists (same logic as prepare()).
+        if self.light_buffer.is_none() {
+            self.light_buffer = Some(engine.create_buffer(crate::BufferDesc {
+                size: std::mem::size_of::<LightingUniforms>() as u64,
+                usage: crate::BufferUsage::STORAGE,
+            })?);
+        }
+        // Ensure per-mesh material buffers exist.
+        for mat in &mut self.materials {
+            if mat.gpu_buffer.is_none() {
+                mat.gpu_buffer = Some(engine.create_buffer(crate::BufferDesc {
+                    size: std::mem::size_of::<MaterialConstants>() as u64,
+                    usage: crate::BufferUsage::STORAGE,
+                })?);
+                mat.dirty = true;
+            }
+            if mat.dirty {
+                if let Some(buf) = &mat.gpu_buffer {
+                    let constants = MaterialConstants::from_descriptor(&mat.descriptor);
+                    buf.write(0, bytemuck::bytes_of(&constants))?;
+                }
+                mat.dirty = false;
+            }
+        }
+        self.update_lighting_uniform(view, frame)
+    }
+
+    /// Compute and upload the current lighting uniform from the directional light
+    /// and camera view matrix, then register the buffer as `"lighting"` in the
+    /// frame so all subsequent shaders can read it by name.
+    ///
+    /// Called by `DeferredPass::draw()` before the G-Buffer fill pass. Apps
+    /// using the classic forward path don't need to call this — `draw()` does it
+    /// internally.
+    pub fn update_lighting_uniform(&self, view: Mat4, frame: &RenderFrame) -> Result<()> {
+        let cam_world = view.inverse() * Vec4::new(0.0, 0.0, 0.0, 1.0);
+        let lighting = LightingUniforms::from_light_and_camera(
+            &self.directional_light,
+            Vec3::new(cam_world.x, cam_world.y, cam_world.z),
+        );
+        if let Some(buf) = &self.light_buffer {
+            buf.write(0, bytemuck::bytes_of(&lighting))?;
+            frame.bind_buffer("lighting", buf);
+        }
+        Ok(())
+    }
+
+    /// Render all scene objects into a G-Buffer set using the supplied
+    /// `gbuffer_program` (typically created from `gbuffer_fragment.slang`).
+    ///
+    /// `color_targets` must be `[g0, g1, g2, g3]` in G-Buffer slot order.
+    /// The per-mesh `"material_desc"` and `"instances"` buffers are bound
+    /// automatically for each batch.
+    ///
+    /// Does **not** write to the output HDR image or run any lighting — that
+    /// is the `DeferredPass`'s deferred lighting step.
+    pub fn draw_gbuffer(
+        &self,
+        view: Mat4,
+        proj: Mat4,
+        color_targets: &[&GraphImage],
+        depth: &GraphImage,
+        gbuffer_program: &MeshProgram,
+        frame: &RenderFrame,
+    ) -> Result<()> {
+        let constants = CameraConstants {
+            view_proj: (proj * view).to_cols_array_2d(),
+            previous_view_proj: (proj * view).to_cols_array_2d(),
+        };
+        assert!(
+            color_targets.len() >= 1,
+            "draw_gbuffer requires at least one color target"
+        );
+        let primary = color_targets[0];
+        let additional = &color_targets[1..];
+
+        for batch in self.batches.values() {
+            let instance_buf = match &batch.gpu_buffer {
+                Some(b) => b,
+                None => continue,
+            };
+            if batch.total_count() == 0 {
+                continue;
+            }
+            let mesh_idx = batch.mesh_idx as usize;
+            let mesh = &self.meshes[mesh_idx].0;
+            frame.bind_buffer("instances", instance_buf);
+            if let Some(mat) = self.materials.get(mesh_idx) {
+                if let Some(mat_buf) = &mat.gpu_buffer {
+                    frame.bind_buffer("material_desc", mat_buf);
+                }
+            }
+            primary.draw_mesh_instanced_mrt_with_push_constants_and_depth(
+                additional,
+                mesh,
+                gbuffer_program,
+                instance_buf,
+                batch.total_count(),
+                &constants,
+                Some(depth),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Draw all offscreen cameras into the render frame using the classic vertex path.
     ///
     /// Frustum culling is not applied to offscreen cameras; call `draw()` on the
