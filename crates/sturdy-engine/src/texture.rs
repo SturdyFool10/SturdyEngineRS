@@ -39,12 +39,19 @@ pub struct TextureUploadDesc {
 
 impl TextureUploadDesc {
     pub const fn sampled_rgba8(width: u32, height: u32) -> Self {
-        Self {
-            width,
-            height,
-            format: Format::Rgba8Unorm,
-            usage: ImageUsage::SAMPLED,
-        }
+        Self { width, height, format: Format::Rgba8Unorm, usage: ImageUsage::SAMPLED }
+    }
+
+    /// 16-bit float RGBA — suitable for HDR/EXR textures, environment maps, and
+    /// any image where values exceed [0, 1]. Uses half the memory of Rgba32Float.
+    pub const fn sampled_rgba16f(width: u32, height: u32) -> Self {
+        Self { width, height, format: Format::Rgba16Float, usage: ImageUsage::SAMPLED }
+    }
+
+    /// 32-bit float RGBA — full precision HDR. Use when f16 precision is insufficient
+    /// (e.g. very bright environment maps, scientific imagery).
+    pub const fn sampled_rgba32f(width: u32, height: u32) -> Self {
+        Self { width, height, format: Format::Rgba32Float, usage: ImageUsage::SAMPLED }
     }
 }
 

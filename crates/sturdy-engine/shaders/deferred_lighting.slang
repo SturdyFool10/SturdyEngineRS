@@ -1,90 +1,103 @@
-// Deferred lighting pass.
+// Deferred lighting pass with PCF shadow mapping.
 //
 // Reads the G-Buffer written by gbuffer_fragment.slang and evaluates
-// physically based lighting for each lit pixel.
-//
-// BRDF: GGX specular (Trowbridge-Reitz NDF, Smith height-correlated G2,
-//       Schlick Fresnel) + Lambertian diffuse complement. One directional
-//       light from the existing LightingUniforms storage buffer.
+// physically based lighting for all active lights. The directional light
+// is shadowed via a 3×3 PCF kernel sampled from the shadow map.
 //
 // Inputs (resolved by name from the frame image/buffer registry):
-//   gbuffer_albedo_metallic  Texture2D RGBA8Unorm  (RT0 of the fill pass)
-//   gbuffer_normal_rough     Texture2D RGBA16Float (RT1)
-//   gbuffer_emissive         Texture2D RGBA16Float (RT2)
-//   gbuffer_world_pos        Texture2D RGBA16Float (RT3)
-//   lighting                 StructuredBuffer<LightingUniforms>
+//   gbuffer_albedo_metallic  Texture2D RGBA8Unorm
+//   gbuffer_normal_rough     Texture2D RGBA16Float
+//   gbuffer_emissive         Texture2D RGBA16Float
+//   gbuffer_world_pos        Texture2D RGBA16Float
+//   shadow_map               Texture2D Depth32Float
+//   lights                   StructuredBuffer<GpuLightData>
 //
-// Push constants:
-//   camera_world_pos.xyz     camera position in world space (for Fresnel / specular V)
+// Push constants: DeferredLightingConstants (camera_world_pos, ambient, light_count,
+//                 light_view_proj, shadow_bias)
 //
-// Output:
-//   SV_TARGET0  Linear HDR RGBA — fed directly into the existing post-process chain.
+// Light kinds in GpuLightData.direction_kind.w:
+//   0 = directional,  1 = point,  2 = spot
+
+import brdf;
+
+// ── G-Buffer textures ─────────────────────────────────────────────────────────
 
 Texture2D<float4> gbuffer_albedo_metallic;
 Texture2D<float4> gbuffer_normal_rough;
 Texture2D<float4> gbuffer_emissive;
 Texture2D<float4> gbuffer_world_pos;
-SamplerState      gbuffer_sampler;   // point / no filter — pixel-exact readback
+SamplerState      gbuffer_sampler;
 
-struct LightingUniforms {
-    float4 dir_direction;    // xyz = toward-light (normalised), w = intensity
-    float4 dir_color;        // xyz = light colour, w = unused
-    float4 ambient;          // xyz = ambient colour, w = unused
-    float4 camera_world_pos; // xyz = camera world position, w = unused
+// ── Shadow map ────────────────────────────────────────────────────────────────
+
+Texture2D<float>  shadow_map;
+SamplerState      shadow_sampler;  // point/nearest — comparison done manually for portability
+
+// ── Light data ────────────────────────────────────────────────────────────────
+
+struct GpuLightData {
+    float4 color_intensity;  // rgb intensity packed; multiply for radiance
+    float4 position_range;   // pos or toward-light dir + range
+    float4 direction_kind;   // spot dir xyz + kind (0=dir,1=point,2=spot)
+    float2 spot_angles;      // cos(inner), cos(outer)
+    float2 _pad;
 };
-StructuredBuffer<LightingUniforms> lighting;
+StructuredBuffer<GpuLightData> lights;
+
+// ── Push constants ────────────────────────────────────────────────────────────
 
 struct DeferredLightingConstants {
-    float4 camera_world_pos; // xyz = camera position, w = unused
+    float4   camera_world_pos;    // xyz = camera pos, w unused
+    float3   ambient;             // constant ambient (replaced by IBL in Track 6c)
+    uint     light_count;
+    float4x4 light_view_proj;     // directional light MVP (for shadow coordinate)
+    float    shadow_bias;         // constant depth bias against self-shadowing
+    float3   _pad;
 };
 uniform DeferredLightingConstants push;
+
+// ── Vertex input ──────────────────────────────────────────────────────────────
 
 struct VSOut {
     float4 position : SV_POSITION;
     float2 uv       : TEXCOORD0;
 };
 
-// ── Octahedral normal decode ──────────────────────────────────────────────────
+// ── Shadow sampling (3×3 PCF) ─────────────────────────────────────────────────
 
-float3 oct_decode(float2 f) {
-    float3 n = float3(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
-    if (n.z < 0.0) {
-        float2 s = float2(n.x >= 0.0 ? 1.0 : -1.0,
-                          n.y >= 0.0 ? 1.0 : -1.0);
-        n.xy = (1.0 - abs(n.yx)) * s;
+float sample_shadow_pcf(float3 world_pos) {
+    // Transform to light clip space.
+    float4 lc = mul(push.light_view_proj, float4(world_pos, 1.0f));
+    lc.xyz /= lc.w;
+
+    // Remap [-1,1] NDC to [0,1] UV; Vulkan Y is already top-down in NDC.
+    float2 uv  = lc.xy * float2(0.5f, -0.5f) + 0.5f;
+    float  ref = lc.z - push.shadow_bias;
+
+    // Early-out if outside the shadow frustum.
+    if (any(uv < 0.0f) || any(uv > 1.0f) || ref > 1.0f || ref < 0.0f)
+        return 1.0f;
+
+    // 3×3 PCF — average 9 samples.
+    uint w, h;
+    shadow_map.GetDimensions(w, h);
+    float2 texel = 1.0f / float2(w, h);
+    float  sum   = 0.0f;
+    [unroll]
+    for (int dx = -1; dx <= 1; ++dx) {
+        [unroll]
+        for (int dy = -1; dy <= 1; ++dy) {
+            float2 offset = float2(dx, dy) * texel;
+            float  depth  = shadow_map.SampleLevel(shadow_sampler, uv + offset, 0);
+            sum += (ref <= depth) ? 1.0f : 0.0f;
+        }
     }
-    return normalize(n);
-}
-
-// ── GGX BRDF ─────────────────────────────────────────────────────────────────
-// All vectors assumed normalised. NdotL clamped before this is called.
-
-// Trowbridge-Reitz / GGX normal distribution function.
-float ggx_ndf(float NdotH, float alpha2) {
-    float d = NdotH * NdotH * (alpha2 - 1.0) + 1.0;
-    return alpha2 / (3.14159265 * d * d);
-}
-
-// Smith height-correlated masking-shadowing (exact GGX form).
-// Returns G2 / (4 * NdotL * NdotV) — the combined geometry + denominator term,
-// so the caller multiplies by D * F only.
-float ggx_vis(float NdotL, float NdotV, float alpha2) {
-    float denom_l = NdotV * sqrt(alpha2 + NdotL * NdotL * (1.0 - alpha2));
-    float denom_v = NdotL * sqrt(alpha2 + NdotV * NdotV * (1.0 - alpha2));
-    return 0.5 / max(denom_l + denom_v, 1e-5);
-}
-
-// Schlick Fresnel.
-float3 fresnel_schlick(float VdotH, float3 F0) {
-    float t = 1.0 - saturate(VdotH);
-    float t2 = t * t;
-    return F0 + (1.0 - F0) * (t2 * t2 * t);
+    return sum / 9.0f;
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 float4 main(VSOut v) : SV_TARGET {
-    // Sample G-Buffer.
     float4 g0 = gbuffer_albedo_metallic.SampleLevel(gbuffer_sampler, v.uv, 0);
     float4 g1 = gbuffer_normal_rough   .SampleLevel(gbuffer_sampler, v.uv, 0);
     float4 g2 = gbuffer_emissive       .SampleLevel(gbuffer_sampler, v.uv, 0);
@@ -93,44 +106,46 @@ float4 main(VSOut v) : SV_TARGET {
     float3 albedo    = g0.rgb;
     float  metallic  = g0.a;
     float3 N         = oct_decode(g1.xy);
-    float  roughness = g1.z;
+    float  roughness = clamp(g1.z, 0.04f, 1.0f);
     float3 emissive  = g2.rgb;
     float3 world_pos = g3.xyz;
 
-    // Derived surface properties.
-    float  alpha     = roughness * roughness;   // perceptual → linear
-    float  alpha2    = alpha * alpha;
-    float3 F0        = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
-    float3 kd_coeff  = (1.0 - F0) * (1.0 - metallic); // no diffuse for conductors
+    float3 V  = normalize(push.camera_world_pos.xyz - world_pos);
+    float3 Lo = float3(0.0f, 0.0f, 0.0f);
 
-    LightingUniforms L = lighting[0];
+    for (uint i = 0; i < push.light_count; ++i) {
+        GpuLightData light = lights[i];
+        float3 light_color = light.color_intensity.xyz; // already multiplied by intensity
+        int    kind        = int(light.direction_kind.w + 0.5f);
 
-    float3 light_dir   = normalize(L.dir_direction.xyz);  // toward-light
-    float3 light_color = L.dir_color.xyz * L.dir_direction.w;
-    float3 cam_pos     = push.camera_world_pos.xyz;
+        float3 L;
+        float  attenuation = 1.0f;
 
-    float3 V     = normalize(cam_pos - world_pos);
-    float3 H     = normalize(light_dir + V);
-    float  NdotL = saturate(dot(N, light_dir));
-    float  NdotV = saturate(dot(N, V)) + 1e-5;
-    float  NdotH = saturate(dot(N, H));
-    float  VdotH = saturate(dot(V, H));
+        if (kind == 0) {
+            // Directional — position_range.xyz is precomputed toward-light direction.
+            L = normalize(light.position_range.xyz);
+            // Shadow only for the first directional light (i == 0).
+            if (i == 0) attenuation = sample_shadow_pcf(world_pos);
+        } else {
+            float3 to_light = light.position_range.xyz - world_pos;
+            float  dist     = length(to_light);
+            float  range    = light.position_range.w;
+            L           = to_light / max(dist, 1e-5f);
+            attenuation = brdf_point_attenuation(dist, range);
 
-    // Specular (GGX).
-    float  D   = ggx_ndf(NdotH, alpha2);
-    float  Vis = ggx_vis(NdotL, NdotV, alpha2);
-    float3 F   = fresnel_schlick(VdotH, F0);
-    float3 specular = D * Vis * F * NdotL;
+            if (kind == 2) {
+                float3 spot_dir = normalize(light.direction_kind.xyz);
+                attenuation *= brdf_spot_attenuation(L, spot_dir,
+                                                     light.spot_angles.x,
+                                                     light.spot_angles.y);
+            }
+        }
 
-    // Diffuse (Lambertian, energy-conserving complement of specular).
-    float3 diffuse = kd_coeff * albedo * (1.0 / 3.14159265) * NdotL;
+        if (attenuation <= 0.0f) continue;
+        Lo += brdf_eval(N, V, L, albedo, metallic, roughness, light_color * attenuation);
+    }
 
-    // Direct lighting.
-    float3 direct = (diffuse + specular) * light_color;
-
-    // Ambient (constant approximation — replaced by IBL in Track 6c).
-    float3 ambient = L.ambient.xyz * albedo;
-
-    float3 color = ambient + direct + emissive;
-    return float4(color, 1.0);
+    float3 ambient = push.ambient * albedo;
+    float3 color   = ambient + Lo + emissive;
+    return float4(color, 1.0f);
 }

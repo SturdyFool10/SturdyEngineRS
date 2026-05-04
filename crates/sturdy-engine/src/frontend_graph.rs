@@ -10,7 +10,7 @@ use sturdy_engine_core as core;
 
 use crate::{
     Access, BindGroup, BindGroupDesc, BindGroupEntry, BindingKind, Buffer, BufferDesc, BufferUsage,
-    BufferUse, ColorTargetDesc, CopyImageToBufferDesc, CullMode, DispatchDesc, DispatchIndirectDesc,
+    BufferUse, ColorTargetDesc, CopyImageToBufferDesc, CullMode, DispatchDesc,
     DrawDesc, DrawIndirectDesc, Engine, Error, Format, FrontFace, GraphicsPipelineDesc, ImageDesc,
     ImageHandle, ImageRef, ImageUse, IndexBufferBinding, PassDesc, PassWork, Pipeline,
     PipelineLayout, PrimitiveTopology, PushConstants, QueueType, RasterState, ResolveImageDesc,
@@ -1909,6 +1909,156 @@ impl GraphImage {
             instance_count,
             depth,
         )
+    }
+
+    /// Draw a mesh writing **only** to a depth buffer — no colour target.
+    ///
+    /// Intended for shadow map passes and depth pre-passes. `self` must be a
+    /// `Depth32Float` image with `ImageUsage::DEPTH_STENCIL | ImageUsage::SAMPLED`.
+    /// The `program` must have `uses_depth: true` and should be created from
+    /// `shadow_depth.slang` (vertex-only; no fragment shader required for
+    /// hardware depth writing).
+    pub fn draw_mesh_depth_only_with_push_constants<T: bytemuck::Pod>(
+        &self,
+        mesh: &Mesh,
+        program: &MeshProgram,
+        instances: &crate::Buffer,
+        instance_count: u32,
+        constants: &T,
+    ) -> Result<()> {
+        let stage = reflected_push_constant_stages(
+            program.reflection(),
+            StageMask::VERTEX,
+        );
+        self.draw_mesh_depth_only_inner(
+            mesh,
+            program,
+            Some(PushConstants {
+                offset: 0,
+                stages: stage,
+                bytes: bytemuck::bytes_of(constants).to_vec(),
+            }),
+            instances,
+            instance_count,
+        )
+    }
+
+    fn draw_mesh_depth_only_inner(
+        &self,
+        mesh: &Mesh,
+        program: &MeshProgram,
+        push_constants: Option<PushConstants>,
+        instance_buf: &crate::Buffer,
+        instance_count: u32,
+    ) -> Result<()> {
+        let mut inner = self.frame.borrow_mut();
+        let declaration_index = inner.declaration_index;
+        inner.declaration_index = inner.declaration_index.saturating_add(1);
+
+        // Import depth image, mesh buffers, and instance buffer.
+        inner.frame.inner.graph_mut(|g| g.import_image(self.handle, self.desc))?;
+        inner.frame.inner.graph_mut(|g| {
+            g.import_buffer(mesh.vertex_buffer.handle(), mesh.vertex_buffer.desc())
+        })?;
+        if let Some(ib) = &mesh.index_buffer {
+            inner.frame.inner.graph_mut(|g| g.import_buffer(ib.handle(), ib.desc()))?;
+        }
+        inner.frame.inner.graph_mut(|g| {
+            g.import_buffer(instance_buf.handle(), instance_buf.desc())
+        })?;
+        inner.buffers_by_name.insert(
+            "instances".to_owned(),
+            (instance_buf.handle(), instance_buf.desc()),
+        );
+
+        // Depth-only pipeline — empty color targets.
+        let pipeline = program.pipeline_handle_mrt(&[], self.desc.samples)?;
+
+        let vertex_buffer = Some(VertexBufferBinding {
+            buffer: mesh.vertex_buffer.handle(),
+            binding: 0,
+            offset: 0,
+        });
+        let index_buffer = mesh.index_buffer.as_ref().map(|ib| IndexBufferBinding {
+            buffer: ib.handle(),
+            offset: 0,
+            format: mesh.index_format,
+        });
+        let draw_count = if mesh.is_indexed() { mesh.index_count } else { mesh.vertex_count };
+
+        let mut buffer_reads = vec![crate::BufferUse {
+            buffer: mesh.vertex_buffer.handle(),
+            access: Access::Read,
+            state: RgState::VertexRead,
+            offset: 0,
+            size: mesh.vertex_buffer.desc().size,
+        }];
+        if let Some(ib) = &mesh.index_buffer {
+            buffer_reads.push(crate::BufferUse {
+                buffer: ib.handle(),
+                access: Access::Read,
+                state: RgState::IndexRead,
+                offset: 0,
+                size: ib.desc().size,
+            });
+        }
+        buffer_reads.push(crate::BufferUse {
+            buffer: instance_buf.handle(),
+            access: Access::Read,
+            state: RgState::ShaderRead,
+            offset: 0,
+            size: instance_buf.desc().size,
+        });
+
+        // Depth-only: self IS the depth attachment; zero color writes.
+        let writes = vec![crate::ImageUse {
+            image: self.handle,
+            access: Access::Write,
+            state: RgState::DepthWrite,
+            subresource: single_subresource(),
+        }];
+        let clear_depth = Some((self.handle, f32::to_bits(1.0), 0u8));
+
+        let pass_name = format!("{declaration_index:04}-shadow-depth-{}", self.name);
+        let (eager_bindings, unresolved_read_names, eager_uses) =
+            split_read_names(&[], &self.name, &inner.images_by_name);
+
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                name: pass_name,
+                queue: crate::QueueType::Graphics,
+                shader: Some(program.vertex.handle()),
+                pipeline: Some(pipeline),
+                bind_groups: Vec::new(),
+                push_constants,
+                work: PassWork::Draw(DrawDesc {
+                    vertex_count: draw_count,
+                    instance_count,
+                    first_vertex: 0,
+                    first_instance: 0,
+                    vertex_buffer,
+                    index_buffer,
+                }),
+                reads: eager_uses,
+                writes,
+                buffer_reads,
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth,
+            },
+            deferred: Some(DeferredPassResolve {
+                layout_handle: program.pipeline_layout.handle(),
+                reflection: program.reflection().clone(),
+                eager_bindings,
+                eager_samplers: HashMap::new(),
+                eager_buffers: HashMap::new(),
+                unresolved_read_names,
+                skip_name: self.name.clone(),
+                storage_output: None,
+            }),
+        });
+
+        Ok(())
     }
 
     /// Draw a mesh into multiple render targets simultaneously (G-Buffer fill).

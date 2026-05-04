@@ -90,9 +90,16 @@ The scene renders instanced geometry with camera transforms but no lighting. Eve
 
 Everything is created programmatically today. Real projects need to load content from disk.
 
-- [x] Add `engine.load_texture_2d(path) -> AssetHandle<Texture>` — PNG/JPEG loading via the `image` crate, automatic mip generation, GPU upload.
-- [ ] Add `engine.load_mesh(path) -> AssetHandle<Mesh>` — GLTF 2.0 loading via the `gltf` crate, producing `Vertex3d` (position/normal/tangent/UV0/UV1) arrays, index buffers, and `GltfMaterial` references.
-- [ ] Add `GltfMaterial` → `UnifiedMaterial` mapping: extract baseColorTexture, metallicRoughnessTexture, normalTexture, occlusionTexture, emissiveTexture, and factor constants; produce a fully populated `UnifiedMaterial` ready for the PBR deferred pipeline (Track 6).
+- [x] Add `engine.load_texture_2d(path)` — PNG, JPEG, WebP, BMP, TGA, TIFF loaded via the `image` crate; automatic mip generation; GPU upload. All formats transparent to the caller.
+- [x] Add `engine.load_hdr_texture(path) -> Result<Image>` — HDR (RGBE `.hdr`) and OpenEXR (`.exr`) loaded as `Rgba16Float`; suitable for environment maps and IBL. `load_hdr_texture_32f` for full f32 precision. `TextureUploadDesc::sampled_rgba16f` / `sampled_rgba32f` constructors added for float textures.
+- [x] Add `engine.load_mesh(path) -> Result<Vec<MeshPrimitive>>` — dispatches by extension to the right loader; all formats return the same `MeshPrimitive` type:
+  - **GLTF 2.0** (`.gltf`, `.glb`) — full PBR metallic-roughness material params, `KHR_materials_emissive_strength`, `KHR_materials_unlit`, alpha mode, emissive factor.
+  - **Wavefront OBJ + MTL** (`.obj`) — Kd → base color, dissolve → opacity, Ns (shininess) → roughness approximation; UV V-flip for GPU convention.
+  - **STereoLithography** (`.stl`) — binary and ASCII; face normals used as vertex normals; default PBR material.
+- [x] Add `MeshMaterialParams::to_unified_material()` and `to_material_descriptor()` — both deferred PBR (`DeferredPass`) and classic forward (`Scene::set_material`) paths covered.
+- [ ] Add texture handle resolution: load `baseColorTexture`, `metallicRoughnessTexture`, `normalTexture`, `occlusionTexture`, `emissiveTexture` from GLTF image references; bind to `MeshMaterialParams`.
+- [ ] Add tangent generation when `TANGENT` attribute is absent — required for normal mapping (Track 2 / Track 6d follow-up).
+- [ ] Add FBX support note: Autodesk FBX has no open Rust reader with full material/animation fidelity; recommended workflow is to export GLTF from Blender/Maya/3ds Max. Track for re-evaluation when a production-quality open Rust FBX reader exists.
 - [ ] Support GLTF material extensions: KHR_materials_clearcoat, KHR_materials_transmission, KHR_materials_ior, KHR_materials_sheen, KHR_materials_emissive_strength.
 - [x] Add `AssetHandle<T>` with state queries: `is_ready()`, `is_loading()`, `is_degraded()`, `failed_reason()`.
 - [x] Add a placeholder policy: missing/loading textures use a visible checkerboard fallback rather than panicking.
@@ -135,12 +142,12 @@ Implement a shared Slang module included by all lit variants. Expose `BrdfConfig
 - [x] **GGX specular**: Trowbridge-Reitz NDF, Smith height-correlated G2 (exact GGX form — `0.5 / (NdotV * sqrt(α² + NdotL² * (1-α²)) + NdotL * sqrt(α² + NdotV² * (1-α²)))`), Schlick Fresnel with `F0 = lerp(0.04, albedo, metallic)` — implemented in `deferred_lighting.slang`. Extract into a shared `brdf.slang` module so the forward lit, shadow, and RT passes can include it.
 - [x] **Lambertian diffuse**: energy-conserving `(1 - F0) * (1 - metallic) * albedo / π` — implemented in `deferred_lighting.slang`.
 - [x] **Analytic directional light evaluation**: `(diffuse + specular) * light_color * NdotL` — implemented in `deferred_lighting.slang`.
-- [ ] **Extract into `brdf.slang`**: factor the BRDF functions out of `deferred_lighting.slang` into a shared include so forward-lit, shadow, and RT passes can use the same implementation.
+- [x] **Extract into `brdf.slang`**: GGX NDF, Smith G2, Schlick Fresnel, Lambertian diffuse, `brdf_eval()`, `brdf_point_attenuation()`, `brdf_spot_attenuation()` all in a shared `brdf.slang` module imported by `deferred_lighting.slang`. Forward-lit, shadow, and RT passes include the same module.
+- [x] **Point and spot light evaluation**: `PointLight` + `SpotLight` Rust types; `GpuLightData` GPU struct (64 bytes, matches `deferred_lighting.slang`); `scene.point_lights` / `scene.spot_lights` vecs; combined lights buffer uploaded by `prepare_deferred_lighting`; deferred pass iterates all lights via a shader loop; push constants carry `light_count` and `ambient`.
 - [ ] **Multi-scattering energy compensation**: Turquin 2019 fit via precomputed BRDF LUT; expose `BrdfConfig::multi_scatter: bool` (default true).
 - [ ] **BRDF integration LUT**: precompute 128×128 `RG16Float` (NdotV, roughness) → (scale, bias); ship as engine asset.
 - [ ] **IBL split-sum specular**: prefiltered env cubemap sample; expose `BrdfConfig::ibl_specular_mip_count` and `BrdfConfig::ibl_max_roughness`.
 - [ ] **IBL diffuse irradiance**: SH9 or irradiance cubemap; expose `BrdfConfig::ibl_diffuse_mode`.
-- [ ] **Point and spot light evaluation**: extend analytic light loop to point (sphere) and spot (cone) light types; add `BrdfConfig::specular_aa: bool` (default true).
 
 ### 6d — Deferred G-Buffer pipeline
 
@@ -163,9 +170,10 @@ Implement a shared Slang module included by all lit variants. Expose `BrdfConfig
 
 ### 6e — Shadow system
 
-Expose `ShadowConfig` — defaults give CSM with 4 cascades and PCF; every parameter is tunable.
+Expose `ShadowConfig` — defaults give a single directional shadow map with 3×3 PCF; every parameter is tunable.
 
-- [ ] **Cascaded Shadow Maps (CSM)**: depth-only pass per cascade; PCF in the deferred lighting pass; blend cascades at boundaries. `CsmConfig { cascade_count: u32 [1,8], resolution: u32, pcf_radius: u32, blend_range: f32, depth_bias: f32, slope_bias: f32, stabilise_cascades: bool, lambda: f32 }`.
+- [x] **Directional shadow map (single cascade)**: depth-only render pass using `shadow_depth.slang` (vertex-only shader); orthographic light projection; 2048×2048 `Depth32Float`; 3×3 PCF kernel; constant depth bias. `ShadowConfig { resolution: u32, half_size: f32, near: f32, far: f32, depth_bias: f32 }` — all fields public, `Default` gives production-quality results. `ShadowPass` component integrates into `DeferredPass::draw()` transparently. `draw_mesh_depth_only_with_push_constants` added to `GraphImage`; depth-only rendering fixed in the Vulkan backend (`record_draw_pass` no longer requires colour targets).
+- [ ] **Cascaded Shadow Maps (CSM)**: upgrade to N cascades (default 4); per-cascade depth-only pass; tight frustum fitting to the camera view; blend cascades at boundaries. `CsmConfig { cascade_count: u32 [1,8], resolution: u32, pcf_radius: u32, blend_range: f32, depth_bias: f32, slope_bias: f32, stabilise_cascades: bool, lambda: f32 }`.
 - [ ] **Point light shadow maps**: dual-paraboloid or 6-face cube depth map. `PointShadowConfig { resolution: u32, pcf_radius: u32, depth_bias: f32, use_paraboloid: bool }`.
 - [ ] **Spot light shadow maps**: single depth map per spot. `SpotShadowConfig { resolution: u32, pcf_radius: u32, depth_bias: f32 }`.
 - [ ] **Shadow map atlas**: pack all shadow maps into a single atlas; expose `ShadowAtlasConfig { atlas_resolution: u32 [1024, 16384], page_size: u32, max_cached_pages: u32 }`.

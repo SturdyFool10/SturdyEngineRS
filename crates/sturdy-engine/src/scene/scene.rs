@@ -7,7 +7,7 @@ use super::{
     object::{InstanceData, MeshId, ObjectId, ObjectKind, SceneObject},
 };
 use crate::{
-    BoundingSphere, Buffer, BufferDesc, BufferUsage, DrawIndexedIndirectCommand, Engine, Error,
+    Buffer, BufferDesc, BufferUsage, DrawIndexedIndirectCommand, Engine, Error,
     Format, Frustum, GeometryBackend, GraphImage, ImageDesc, ImageDimension, ImageUsage, Mesh,
     MeshProgram, RenderFrame, Result, push_constants,
 };
@@ -40,27 +40,135 @@ impl Default for DirectionalLight {
     }
 }
 
-/// GPU-layout mirror of the data read by `lit_fragment.slang`.
+/// An omnidirectional point light with physically correct inverse-square falloff.
+///
+/// Add to a scene via `scene.point_lights.push(PointLight { ... })`.
+/// Changes take effect from the next `DeferredPass::draw()` call.
+#[derive(Clone, Debug)]
+pub struct PointLight {
+    /// World-space position.
+    pub position: Vec3,
+    /// Linear RGB colour (linear, not sRGB).
+    pub color: Vec3,
+    /// Luminous intensity in candela (or a relative scale when `intensity` < 1000).
+    pub intensity: f32,
+    /// Maximum influence radius in world units. The light is clamped to zero at this distance.
+    pub range: f32,
+}
+
+impl Default for PointLight {
+    fn default() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            color: Vec3::ONE,
+            intensity: 100.0,
+            range: 10.0,
+        }
+    }
+}
+
+/// A cone-shaped spot light with inner (full intensity) and outer (zero intensity) angles.
+///
+/// Add to a scene via `scene.spot_lights.push(SpotLight { ... })`.
+#[derive(Clone, Debug)]
+pub struct SpotLight {
+    /// World-space position of the light source.
+    pub position: Vec3,
+    /// World-space direction the spot **shines toward** (normalized before upload).
+    pub direction: Vec3,
+    /// Linear RGB colour.
+    pub color: Vec3,
+    /// Luminous intensity in candela (or a relative scale).
+    pub intensity: f32,
+    /// Maximum influence radius in world units.
+    pub range: f32,
+    /// Inner cone half-angle in radians — full intensity inside this cone.
+    pub inner_angle: f32,
+    /// Outer cone half-angle in radians — zero intensity outside this cone.
+    pub outer_angle: f32,
+}
+
+impl Default for SpotLight {
+    fn default() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            direction: Vec3::new(0.0, -1.0, 0.0),
+            color: Vec3::ONE,
+            intensity: 500.0,
+            range: 20.0,
+            inner_angle: 0.35, // ~20°
+            outer_angle: 0.52, // ~30°
+        }
+    }
+}
+
+// ── GPU-packed light data ─────────────────────────────────────────────────────
+// Matches GpuLightData in deferred_lighting.slang exactly (64 bytes).
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct GpuLightData {
+    color_intensity: [f32; 4],  // rgb + intensity
+    position_range:  [f32; 4],  // world pos or toward-light dir + range (0 for directional)
+    direction_kind:  [f32; 4],  // spot direction xyz + kind (0=dir, 1=point, 2=spot)
+    spot_angles:     [f32; 2],  // cos(inner), cos(outer)
+    _pad:            [f32; 2],
+}
+
+impl GpuLightData {
+    pub(crate) fn from_directional(light: &DirectionalLight) -> Self {
+        let toward = (-light.direction).normalize();
+        let lum = light.intensity;
+        Self {
+            color_intensity: [light.color.x * lum, light.color.y * lum, light.color.z * lum, 1.0],
+            position_range:  [toward.x, toward.y, toward.z, 0.0],
+            direction_kind:  [0.0, 0.0, 0.0, 0.0], // kind=0
+            spot_angles:     [1.0, 1.0],
+            _pad:            [0.0, 0.0],
+        }
+    }
+
+    pub(crate) fn from_point(light: &PointLight) -> Self {
+        let lum = light.intensity;
+        Self {
+            color_intensity: [light.color.x * lum, light.color.y * lum, light.color.z * lum, 1.0],
+            position_range:  [light.position.x, light.position.y, light.position.z, light.range],
+            direction_kind:  [0.0, 0.0, 0.0, 1.0], // kind=1
+            spot_angles:     [1.0, 1.0],
+            _pad:            [0.0, 0.0],
+        }
+    }
+
+    pub(crate) fn from_spot(light: &SpotLight) -> Self {
+        let lum = light.intensity;
+        let dir = light.direction.normalize();
+        Self {
+            color_intensity: [light.color.x * lum, light.color.y * lum, light.color.z * lum, 1.0],
+            position_range:  [light.position.x, light.position.y, light.position.z, light.range],
+            direction_kind:  [dir.x, dir.y, dir.z, 2.0], // kind=2
+            spot_angles:     [light.inner_angle.cos(), light.outer_angle.cos()],
+            _pad:            [0.0, 0.0],
+        }
+    }
+}
+
+/// GPU-layout mirror of the data read by `lit_fragment.slang` (forward path only).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct LightingUniforms {
-    /// xyz = toward-light direction (normalised), w = intensity
-    dir_direction: [f32; 4],
-    /// xyz = light colour, w = 0
-    dir_color: [f32; 4],
-    /// xyz = ambient colour, w = 0
-    ambient: [f32; 4],
-    /// xyz = camera world position, w = 0
-    camera_world_pos: [f32; 4],
+    dir_direction:    [f32; 4], // xyz = toward-light dir, w = intensity
+    dir_color:        [f32; 4], // xyz = colour, w = 0
+    ambient:          [f32; 4], // xyz = ambient colour, w = 0
+    camera_world_pos: [f32; 4], // xyz = camera pos, w = 0
 }
 
 impl LightingUniforms {
     fn from_light_and_camera(light: &DirectionalLight, camera_world_pos: Vec3) -> Self {
         let dir = (-light.direction).normalize();
         Self {
-            dir_direction: [dir.x, dir.y, dir.z, light.intensity],
-            dir_color: [light.color.x, light.color.y, light.color.z, 0.0],
-            ambient: [light.ambient.x, light.ambient.y, light.ambient.z, 0.0],
+            dir_direction:    [dir.x, dir.y, dir.z, light.intensity],
+            dir_color:        [light.color.x, light.color.y, light.color.z, 0.0],
+            ambient:          [light.ambient.x, light.ambient.y, light.ambient.z, 0.0],
             camera_world_pos: [camera_world_pos.x, camera_world_pos.y, camera_world_pos.z, 0.0],
         }
     }
@@ -193,10 +301,16 @@ pub struct Scene {
     cameras: Vec<SceneCamera>,
     batches: HashMap<u32, InstanceBatch>,
     next_object_id: u32,
-    /// Directional light applied when drawing with [`MeshProgram::lit`].
+    /// Directional light applied to all rendering passes.
     pub directional_light: DirectionalLight,
-    /// Persistent GPU buffer holding the current [`LightingUniforms`].
+    /// Point lights included in the deferred lighting pass.
+    pub point_lights: Vec<PointLight>,
+    /// Spot lights included in the deferred lighting pass.
+    pub spot_lights: Vec<SpotLight>,
+    /// Persistent GPU buffer for the forward-path `LightingUniforms`.
     light_buffer: Option<Buffer>,
+    /// GPU-resident array of [`GpuLightData`] for the deferred lighting pass.
+    pub(crate) deferred_lights_buffer: Option<Buffer>,
     /// Geometry front-end used for draw submission.
     ///
     /// - `ClassicVertex` (default): one `DrawDesc` per batch, no culling.
@@ -217,7 +331,10 @@ impl Scene {
             batches: HashMap::new(),
             next_object_id: 0,
             directional_light: DirectionalLight::default(),
+            point_lights: Vec::new(),
+            spot_lights: Vec::new(),
             light_buffer: None,
+            deferred_lights_buffer: None,
             geometry_backend: GeometryBackend::ClassicVertex,
         }
     }
@@ -238,6 +355,22 @@ impl Scene {
     /// Returns the currently active geometry backend.
     pub fn geometry_backend(&self) -> GeometryBackend {
         self.geometry_backend
+    }
+
+    /// Iterate over all drawable batches as `(mesh_index, instance_gpu_buffer, instance_count)`.
+    ///
+    /// Used by external passes (e.g. `ShadowPass`) that need to draw scene
+    /// geometry with a custom shader. The GPU instance buffer is `None` when
+    /// the batch has not yet been prepared for this frame.
+    pub fn drawable_batches(&self) -> impl Iterator<Item = (usize, Option<&Buffer>, u32)> {
+        self.batches.values().map(|b| {
+            (b.mesh_idx as usize, b.gpu_buffer.as_ref(), b.total_count())
+        })
+    }
+
+    /// Return the `Mesh` at the given index (as registered by `add_mesh`).
+    pub fn mesh_at(&self, index: usize) -> &Mesh {
+        &self.meshes[index].0
     }
 
     /// Register a mesh+program pair. Returns a `MeshId` used to spawn objects.
@@ -411,7 +544,7 @@ impl Scene {
         engine: &Engine,
         frame: &RenderFrame,
     ) -> Result<()> {
-        // Ensure buffer exists (same logic as prepare()).
+        // Ensure forward-path buffer exists.
         if self.light_buffer.is_none() {
             self.light_buffer = Some(engine.create_buffer(crate::BufferDesc {
                 size: std::mem::size_of::<LightingUniforms>() as u64,
@@ -435,7 +568,41 @@ impl Scene {
                 mat.dirty = false;
             }
         }
+
+        // Build the combined GPU light array for the deferred pass.
+        // Directional first, then point, then spot.
+        let mut gpu_lights: Vec<GpuLightData> = Vec::new();
+        gpu_lights.push(GpuLightData::from_directional(&self.directional_light));
+        for pl in &self.point_lights {
+            gpu_lights.push(GpuLightData::from_point(pl));
+        }
+        for sl in &self.spot_lights {
+            gpu_lights.push(GpuLightData::from_spot(sl));
+        }
+
+        let needed_bytes = (gpu_lights.len() * std::mem::size_of::<GpuLightData>()) as u64;
+        let needs_realloc = self.deferred_lights_buffer
+            .as_ref()
+            .map(|b| b.desc().size < needed_bytes)
+            .unwrap_or(true);
+        if needs_realloc {
+            let cap = (gpu_lights.len().next_power_of_two().max(16) * std::mem::size_of::<GpuLightData>()) as u64;
+            self.deferred_lights_buffer = Some(engine.create_buffer(crate::BufferDesc {
+                size: cap,
+                usage: crate::BufferUsage::STORAGE,
+            })?);
+        }
+        if let Some(buf) = &self.deferred_lights_buffer {
+            buf.write(0, bytemuck::cast_slice(&gpu_lights))?;
+            frame.bind_buffer("lights", buf);
+        }
+
         self.update_lighting_uniform(view, frame)
+    }
+
+    /// Total number of lights the deferred pass will evaluate (1 directional + all point + all spot).
+    pub fn deferred_light_count(&self) -> u32 {
+        (1 + self.point_lights.len() + self.spot_lights.len()) as u32
     }
 
     /// Compute and upload the current lighting uniform from the directional light

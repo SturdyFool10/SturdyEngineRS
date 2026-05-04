@@ -237,7 +237,7 @@ pub struct UnifiedMaterialBuilder {
 }
 
 impl UnifiedMaterialBuilder {
-    fn new(name: impl Into<String>) -> Self {
+    pub(crate) fn new(name: impl Into<String>) -> Self {
         Self { inner: UnifiedMaterial { name: name.into(), ..Default::default() } }
     }
 

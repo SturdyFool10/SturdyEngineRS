@@ -10,6 +10,10 @@ use std::{
 
 mod game_shell;
 mod asset_loader;
+mod gltf_loader;
+mod mesh_loader;
+mod obj_loader;
+mod stl_loader;
 mod anti_aliasing_pass;
 mod antialiasing;
 mod application;
@@ -18,6 +22,7 @@ mod bloom_pass;
 mod compute_program;
 mod debug_draw_2d;
 mod deferred_pass;
+mod shadow_pass;
 mod geometry;
 mod debug_overlay;
 mod debug_view_picker;
@@ -53,6 +58,7 @@ mod window_registry;
 
 pub use anti_aliasing_pass::{AntiAliasingPass, taa_jitter_uv, taa_jittered_projection};
 pub use asset_loader::{AssetCache, AssetHandle, LoadState};
+pub use mesh_loader::{MeshAlphaMode, MeshMaterialParams, MeshPrimitive};
 pub use antialiasing::{
     AntiAliasingConfig, AntiAliasingDial, AntiAliasingMode, FxaaSettings, MsaaSettings, TaaSettings,
 };
@@ -77,6 +83,7 @@ pub use clay_ui::{
 };
 pub use compute_program::ComputeProgram;
 pub use deferred_pass::DeferredPass;
+pub use shadow_pass::{ShadowConfig, ShadowOutput, ShadowPass};
 pub use debug_draw_2d::{DebugDraw2d, DebugDrawStyle};
 pub use debug_overlay::{
     DebugHitRegion, DebugOverlay, DebugOverlayAntialiasing, DebugOverlayConfig,
@@ -121,9 +128,9 @@ pub use runtime::{
 pub use sampler_catalog::SamplerPreset;
 pub use scene::{
     CameraConstants, CameraId, CameraOutput, DirectionalLight, InstanceData, MaterialDescriptor,
-    MaterialDomain, MaterialInput, MeshId, ObjectId, ObjectKind, OrbitCamera, RenderState,
-    RenderTarget, Scene, SceneCamera, ShadingModel, UnifiedMaterial, UnifiedMaterialBuilder,
-    gbuffer,
+    MaterialDomain, MaterialInput, MeshId, ObjectId, ObjectKind, OrbitCamera, PointLight,
+    RenderState, RenderTarget, Scene, SceneCamera, ShadingModel, SpotLight, UnifiedMaterial,
+    UnifiedMaterialBuilder, gbuffer,
 };
 pub use screenshot::{ScreenshotCapture, ScreenshotExportReport};
 pub use shader_watcher::ShaderWatcher;
@@ -405,7 +412,7 @@ impl Engine {
     /// receives a `&RenderFrame` for recording passes; the frame is flushed and
     /// GPU-waited before `render_image` returns.
     pub fn render_image(&self, image: &Image, render: impl FnOnce(&RenderFrame) -> Result<()>) -> Result<()> {
-        let mut frame = self.begin_render_frame()?;
+        let frame = self.begin_render_frame()?;
         frame.import_image("render_target", image)?;
         render(&frame)?;
         frame.flush()?;
@@ -611,6 +618,45 @@ impl Engine {
     /// ```
     pub fn load_texture_2d(&self, path: impl AsRef<std::path::Path>) -> AssetHandle<Image> {
         asset_loader::load_texture_2d_from_path(self, path)
+    }
+
+    /// Load a 3D mesh file and upload all primitives to the GPU.
+    ///
+    /// Dispatches automatically by file extension:
+    ///
+    /// | Extension        | Format             |
+    /// |-----------------|---------------------|
+    /// | `.gltf` `.glb`  | GLTF 2.0 (primary) |
+    /// | `.obj`          | Wavefront OBJ + MTL |
+    /// | `.stl`          | STereoLithography   |
+    ///
+    /// Returns a flat `Vec<MeshPrimitive>` — one per draw-call-worth of geometry.
+    ///
+    /// ```ignore
+    /// for prim in engine.load_mesh("assets/helmet.glb")? {
+    ///     let id = scene.add_mesh(prim.mesh, MeshProgram::lit(&engine)?);
+    ///     scene.set_material(id, prim.material_params.to_material_descriptor());
+    /// }
+    /// ```
+    pub fn load_mesh(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Vec<MeshPrimitive>> {
+        mesh_loader::load_mesh_from_path(self, path.as_ref())
+    }
+
+    /// Load an HDR or EXR image as a linear-float `Rgba16Float` GPU texture.
+    ///
+    /// Supports `.hdr` (RGBE radiance) and `.exr` (OpenEXR). Suitable for
+    /// environment maps and IBL prefiltering. Use `load_hdr_texture_32f` for
+    /// full 32-bit precision.
+    pub fn load_hdr_texture(&self, path: impl AsRef<std::path::Path>) -> Result<Image> {
+        asset_loader::load_hdr_texture_from_path(self, path)
+    }
+
+    /// Load an HDR or EXR image as a full 32-bit float `Rgba32Float` GPU texture.
+    pub fn load_hdr_texture_32f(&self, path: impl AsRef<std::path::Path>) -> Result<Image> {
+        asset_loader::load_hdr_texture_32f_from_path(self, path)
     }
 
     /// Generate a magenta/dark-grey checkerboard image for use as a

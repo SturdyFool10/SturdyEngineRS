@@ -27,6 +27,7 @@ struct InputVar {
 
 /// Intermediate type representation (only what we need for format derivation).
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // fields read via pattern matching; `Other` is a catch-all
 enum SpirvType {
     Float { width: u32 },
     Int { width: u32 },

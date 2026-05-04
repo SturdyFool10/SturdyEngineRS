@@ -12,7 +12,11 @@ path = "src/lib.rs"
 
 [dependencies]
 bytemuck = "1.20"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
+half = { version = "2", features = ["bytemuck"] }
+gltf = { version = "1", features = ["KHR_materials_unlit", "KHR_materials_emissive_strength"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "tga", "tiff", "hdr", "exr"] }
+stl_io = "0.11"
+tobj = { version = "4", features = ["async"] }
 clay-ui = { path = "../clay-ui" }
 glam.workspace = true
 gilrs = { version = "0.11.1", optional = true }

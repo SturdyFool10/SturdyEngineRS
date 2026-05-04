@@ -245,6 +245,59 @@ impl<T: fmt::Debug> fmt::Debug for AssetHandle<T> {
 /// the error message — no panic.
 ///
 /// Called by [`Engine::load_texture_2d`].
+/// Load an HDR or EXR image as a linear-float GPU texture.
+///
+/// Output format is `Rgba16Float` — sufficient for environment maps and most
+/// HDR content. Use `load_hdr_texture_32f` for full f32 precision.
+///
+/// Supports `.hdr` (RGBE radiance format) and `.exr` (OpenEXR) via the
+/// `image` crate's `hdr` and `exr` features.
+pub(crate) fn load_hdr_texture_from_path(
+    engine: &Engine,
+    path: impl AsRef<Path>,
+) -> Result<Image> {
+    let path = path.as_ref();
+    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("hdr_tex").to_owned();
+    load_and_upload_hdr(engine, path, &name, false)
+}
+
+/// Load an HDR or EXR image as a full 32-bit float RGBA GPU texture.
+pub(crate) fn load_hdr_texture_32f_from_path(
+    engine: &Engine,
+    path: impl AsRef<Path>,
+) -> Result<Image> {
+    let path = path.as_ref();
+    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("hdr_tex").to_owned();
+    load_and_upload_hdr(engine, path, &name, true)
+}
+
+fn load_and_upload_hdr(engine: &Engine, path: &Path, name: &str, full_32f: bool) -> Result<Image> {
+    let dyn_image = image::open(path).map_err(|e| {
+        crate::Error::Unknown(format!("failed to open hdr '{}': {e}", path.display()))
+    })?;
+
+    // Convert to f32 per channel regardless of source encoding.
+    let rgba_f32 = dyn_image.into_rgba32f();
+    let (width, height) = (rgba_f32.width(), rgba_f32.height());
+    let raw: &[f32] = rgba_f32.as_raw();
+
+    let mut frame = engine.begin_frame()?;
+    let image = if full_32f {
+        // Full f32 — 16 bytes/pixel.
+        let bytes: &[u8] = bytemuck::cast_slice(raw);
+        frame.upload_texture_2d(name, TextureUploadDesc::sampled_rgba32f(width, height), bytes)?
+    } else {
+        // Convert f32 → f16 before upload — 8 bytes/pixel.
+        let f16_pixels: Vec<half::f16> = raw.iter().map(|&v| half::f16::from_f32(v)).collect();
+        let bytes: &[u8] = bytemuck::cast_slice(&f16_pixels);
+        frame.upload_texture_2d(name, TextureUploadDesc::sampled_rgba16f(width, height), bytes)?
+    };
+    let _ = image.set_debug_name(&format!("hdr-{name}"));
+    frame.flush_with_reason(FrameSyncReason::CompatibilityShim)?;
+    frame.wait_with_reason(FrameSyncReason::CompatibilityShim)?;
+    Ok(image)
+}
+
 pub(crate) fn load_texture_2d_from_path(
     engine: &Engine,
     path: impl AsRef<Path>,

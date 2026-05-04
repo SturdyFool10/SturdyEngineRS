@@ -14,4 +14,4 @@ pub use material::{
 pub use object::{InstanceData, MeshId, ObjectId, ObjectKind};
 pub use orbit_camera::OrbitCamera;
 pub use render_target::RenderTarget;
-pub use scene::{CameraConstants, DirectionalLight, MaterialDescriptor, Scene};
+pub use scene::{CameraConstants, DirectionalLight, MaterialDescriptor, PointLight, Scene, SpotLight};

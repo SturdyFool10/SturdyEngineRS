@@ -209,6 +209,7 @@ impl CommandContext {
     }
 
     /// Block until the GPU finishes the work represented by `token`.
+    #[allow(dead_code)] // used by future multi-queue submission paths
     pub fn wait_for_submission(&self, device: &Device, token: SubmissionHandle) -> Result<()> {
         if self.frame_submitted && token.0 == self.submission_count {
             unsafe {
@@ -567,9 +568,12 @@ impl CommandContext {
             .iter()
             .filter(|usage| usage.state == RgState::RenderTarget)
             .collect::<Vec<_>>();
-        if color_uses.is_empty() {
+
+        // Depth-only passes (e.g. shadow maps) are valid — zero color attachments allowed.
+        let depth_use = pass.writes.iter().find(|u| u.state == RgState::DepthWrite);
+        if color_uses.is_empty() && depth_use.is_none() {
             return Err(Error::InvalidInput(
-                "draw pass requires at least one RenderTarget image write".into(),
+                "draw pass has neither a RenderTarget nor a DepthWrite attachment".into(),
             ));
         }
 
@@ -579,13 +583,22 @@ impl CommandContext {
                 resources.image_view_for_subresource(device, usage.image, usage.subresource)
             })
             .collect::<Result<Vec<_>>>()?;
-        let first_desc = resources.image_desc(color_uses[0].image)?;
-        let first_extent = mip_extent(first_desc.extent, color_uses[0].subresource.base_mip);
-        let framebuffer_layers =
-            subresource_layer_count(first_desc.layers, color_uses[0].subresource);
+
+        // Derive framebuffer dimensions from color targets if present, otherwise from depth.
+        let (first_extent, framebuffer_layers) = if !color_uses.is_empty() {
+            let first_desc = resources.image_desc(color_uses[0].image)?;
+            let ext = mip_extent(first_desc.extent, color_uses[0].subresource.base_mip);
+            let layers = subresource_layer_count(first_desc.layers, color_uses[0].subresource);
+            (ext, layers)
+        } else {
+            let du = depth_use.unwrap(); // safe: checked above
+            let desc = resources.image_desc(du.image)?;
+            let ext = mip_extent(desc.extent, du.subresource.base_mip);
+            let layers = subresource_layer_count(desc.layers, du.subresource);
+            (ext, layers)
+        };
 
         // Depth attachment — appended after colour views to match render-pass order.
-        let depth_use = pass.writes.iter().find(|u| u.state == RgState::DepthWrite);
         if let Some(du) = depth_use {
             let depth_view =
                 resources.image_view_for_subresource(device, du.image, du.subresource)?;

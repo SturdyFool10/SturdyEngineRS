@@ -1,28 +1,26 @@
-// Deferred G-Buffer + GGX PBR lighting pass.
+// Deferred G-Buffer + GGX PBR lighting pass with directional shadow map.
 //
 // Drop-in replacement for `Scene::draw()`. Renders all opaque scene objects
-// into a four-channel G-Buffer, then evaluates physically based lighting in a
-// fullscreen deferred pass. Transparent and forward-only objects are NOT yet
-// handled — forward tail will be added in Track 6d.
+// into a four-channel G-Buffer, generates a directional shadow map, then
+// evaluates GGX PBR lighting (+ PCF shadows) in a fullscreen deferred pass.
 //
 // Usage:
-//
 //   // At init:
 //   let deferred = DeferredPass::new(&engine)?;
 //
-//   // Each frame (replaces scene.draw(view, proj, &hdr_output, &frame, &engine)):
+//   // Each frame:
 //   scene.prepare(&engine)?;
 //   deferred.draw(&mut scene, view, proj, &hdr_output, &frame, &engine)?;
-//   // hdr_output feeds directly into the existing bloom → AA → tonemap chain.
 
 use std::path::PathBuf;
 
-use glam::{Mat4, Vec3, Vec4};
+use glam::{Mat4, Vec4};
 
 use crate::{
     Engine, Format, GraphImage, ImageDesc, ImageDimension, ImageUsage, MeshProgram,
-    MeshProgramDesc, MeshVertexKind, RenderFrame, Result, ShaderDesc, ShaderProgram,
-    ShaderSource, ShaderStage, push_constants, scene::Scene,
+    MeshProgramDesc, MeshVertexKind, RenderFrame, Result, ShaderDesc, ShaderProgram, ShaderSource,
+    ShaderStage, push_constants, scene::Scene,
+    shadow_pass::{ShadowPass, ShadowConfig},
 };
 use sturdy_engine_core::Extent3d;
 
@@ -32,28 +30,44 @@ fn engine_shader(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Push constants for the deferred lighting fullscreen pass.
+/// Push constants for `deferred_lighting.slang`.
+/// Must match `DeferredLightingConstants` in the shader exactly.
 #[push_constants]
 struct DeferredLightingConstants {
-    /// Camera world-space position (w unused). Used for Fresnel / specular V vector.
-    camera_world_pos: [f32; 4],
+    camera_world_pos: [f32; 4],    // xyz = camera pos, w unused
+    ambient: [f32; 3],             // constant ambient colour (IBL replaces this in Track 6c)
+    light_count: u32,
+    light_view_proj: [[f32; 4]; 4], // directional light MVP for shadow coords
+    shadow_bias: f32,
+    _pad: [f32; 3],
 }
 
-/// A self-contained deferred rendering component.
+/// Deferred rendering component with GGX PBR and a directional shadow map.
 ///
-/// Creates and manages the G-Buffer program and the deferred lighting shader.
-/// The G-Buffer images are allocated per-frame from the render graph (matching
-/// the output's current extent) so resize is handled automatically.
+/// `DeferredPass::new()` uses sensible defaults for everything. To configure
+/// the shadow map (resolution, frustum size, bias), use `with_shadow_config`.
+///
+/// # Usage
+/// ```ignore
+/// // At init:
+/// let deferred = DeferredPass::new(&engine)?;
+///
+/// // Each frame — replaces scene.draw():
+/// scene.prepare(&engine)?;
+/// deferred.draw(&mut scene, view, proj, &hdr_output, &frame, &engine)?;
+/// ```
 pub struct DeferredPass {
-    /// MeshProgram using `gbuffer_fragment.slang` — fills the four G-Buffer targets.
     gbuffer_program: MeshProgram,
-    /// Fullscreen `ShaderProgram` using `deferred_lighting.slang` — evaluates GGX PBR.
     lighting_program: ShaderProgram,
+    shadow: ShadowPass,
 }
 
 impl DeferredPass {
-    /// Create the deferred pass and compile both shader programs.
     pub fn new(engine: &Engine) -> Result<Self> {
+        Self::with_shadow_config(engine, ShadowConfig::default())
+    }
+
+    pub fn with_shadow_config(engine: &Engine, shadow_config: ShadowConfig) -> Result<Self> {
         let gbuffer_program = MeshProgram::new(
             engine,
             MeshProgramDesc {
@@ -69,18 +83,22 @@ impl DeferredPass {
             },
         )?;
         let lighting_program = engine.load_shader(engine_shader("deferred_lighting.slang"))?;
-        Ok(Self { gbuffer_program, lighting_program })
+        let shadow = ShadowPass::with_config(engine, shadow_config)?;
+        Ok(Self { gbuffer_program, lighting_program, shadow })
+    }
+
+    /// Expose the shadow configuration for live tuning.
+    pub fn shadow_config_mut(&mut self) -> &mut ShadowConfig {
+        &mut self.shadow.config
     }
 
     /// Execute the full deferred frame into `output`.
     ///
-    /// Equivalent to `scene.draw(view, proj, output, frame, engine)` but with
-    /// a physically correct GGX BRDF instead of Lambert + Blinn-Phong.
-    ///
-    /// `output` receives the linear-HDR lit result and feeds directly into the
-    /// existing post-processing pipeline (bloom → AA → tone mapping).
-    ///
-    /// `scene.prepare(engine)` must have been called this frame before `draw`.
+    /// Pass order:
+    ///   1. Shadow map — depth-only pass from the directional light's POV
+    ///   2. G-Buffer fill — write albedo/normal/roughness/emissive/world_pos
+    ///   3. Deferred lighting — GGX PBR evaluation + PCF shadow sampling
+    ///   4. `output` (scene_color) → existing post-process chain unchanged
     pub fn draw(
         &self,
         scene: &mut Scene,
@@ -90,17 +108,18 @@ impl DeferredPass {
         frame: &RenderFrame,
         engine: &Engine,
     ) -> Result<()> {
-        // ── 1. Upload and register the lighting uniform ───────────────────────
-        // This writes LightingUniforms to the GPU buffer and registers it as
-        // "lighting" in the frame so the deferred lighting shader can read it.
+        // ── 1. Upload lighting uniform + build lights buffer ──────────────────
         scene.prepare_deferred_lighting(view, engine, frame)?;
 
-        // ── 2. Camera world position ──────────────────────────────────────────
+        // ── 2. Shadow map pass ────────────────────────────────────────────────
+        let shadow_out = self.shadow.draw(scene, frame, engine)?;
+
+        // ── 3. Camera world position ──────────────────────────────────────────
         let cam_world = view.inverse() * Vec4::new(0.0, 0.0, 0.0, 1.0);
 
-        // ── 3. Allocate G-Buffer images (frame-managed, auto-resize) ──────────
+        // ── 4. Allocate G-Buffer images (auto-resize) ─────────────────────────
         let ext = output.desc().extent;
-        let gbuffer_desc = |name: &'static str, format: Format| ImageDesc {
+        let gbuffer_img = |name: &'static str, format: Format| ImageDesc {
             dimension: ImageDimension::D2,
             extent: Extent3d { width: ext.width, height: ext.height, depth: 1 },
             mip_levels: 1,
@@ -125,35 +144,33 @@ impl DeferredPass {
             debug_name: Some("gbuffer_depth"),
         };
 
-        let g0    = frame.image("gbuffer_albedo_metallic", gbuffer_desc("gbuffer_albedo_metallic", Format::Rgba8Unorm  ))?;
-        let g1    = frame.image("gbuffer_normal_rough",    gbuffer_desc("gbuffer_normal_rough",    Format::Rgba16Float ))?;
-        let g2    = frame.image("gbuffer_emissive",        gbuffer_desc("gbuffer_emissive",        Format::Rgba16Float ))?;
-        let g3    = frame.image("gbuffer_world_pos",       gbuffer_desc("gbuffer_world_pos",       Format::Rgba16Float ))?;
+        let g0    = frame.image("gbuffer_albedo_metallic", gbuffer_img("gbuffer_albedo_metallic", Format::Rgba8Unorm  ))?;
+        let g1    = frame.image("gbuffer_normal_rough",    gbuffer_img("gbuffer_normal_rough",    Format::Rgba16Float ))?;
+        let g2    = frame.image("gbuffer_emissive",        gbuffer_img("gbuffer_emissive",        Format::Rgba16Float ))?;
+        let g3    = frame.image("gbuffer_world_pos",       gbuffer_img("gbuffer_world_pos",       Format::Rgba16Float ))?;
         let depth = frame.image("gbuffer_depth", depth_desc)?;
 
-        // ── 4. G-Buffer fill pass ─────────────────────────────────────────────
-        scene.draw_gbuffer(
-            view,
-            proj,
-            &[&g0, &g1, &g2, &g3],
-            &depth,
-            &self.gbuffer_program,
-            frame,
-        )?;
+        // ── 5. G-Buffer fill pass ─────────────────────────────────────────────
+        scene.draw_gbuffer(view, proj, &[&g0, &g1, &g2, &g3], &depth, &self.gbuffer_program, frame)?;
 
-        // ── 5. Register G-Buffer images by name for the lighting shader ───────
-        // deferred_lighting.slang declares these as named Texture2D bindings;
-        // the engine resolves them from images_by_name at flush time.
+        // ── 6. Register G-Buffer images by name for the lighting shader ───────
         g0.register_as("gbuffer_albedo_metallic");
         g1.register_as("gbuffer_normal_rough");
         g2.register_as("gbuffer_emissive");
         g3.register_as("gbuffer_world_pos");
+        // shadow_map is already registered by ShadowPass::draw()
 
-        // ── 6. Deferred lighting fullscreen pass → output (scene_color) ───────
+        // ── 7. Deferred lighting fullscreen pass → output ─────────────────────
+        let dl = &scene.directional_light;
         output.execute_shader_with_constants_auto(
             &self.lighting_program,
             &DeferredLightingConstants {
                 camera_world_pos: [cam_world.x, cam_world.y, cam_world.z, 0.0],
+                ambient: [dl.ambient.x, dl.ambient.y, dl.ambient.z],
+                light_count: scene.deferred_light_count(),
+                light_view_proj: shadow_out.light_view_proj.to_cols_array_2d(),
+                shadow_bias: shadow_out.depth_bias,
+                _pad: [0.0; 3],
             },
         )?;
 
