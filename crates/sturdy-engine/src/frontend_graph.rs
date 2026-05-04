@@ -876,6 +876,49 @@ impl RenderFrame {
         self
     }
 
+    /// Register a GPU image under a name for the current frame.
+    ///
+    /// When the engine auto-creates bind groups from shader reflection, any
+    /// `Texture2D` binding whose variable name matches `name` will receive
+    /// this image. Call this before the draw or shader pass that needs it.
+    ///
+    /// A subsequent call with the same name overwrites the previous binding,
+    /// so you can rebind per-mesh textures inside a draw loop.
+    pub fn bind_image(&self, name: impl Into<String>, image: &crate::Image) -> &Self {
+        let mut inner = self.inner.borrow_mut();
+        inner.images_by_name.insert(
+            name.into(),
+            GraphImageRecord {
+                handle: image.handle(),
+                desc: image.desc(),
+                subresource: single_subresource(),
+            },
+        );
+        self
+    }
+
+    /// Register an image by raw handle and descriptor under a name for the current frame.
+    ///
+    /// Use this when you already have the handle but not an owned [`Image`] wrapper —
+    /// for example, when working with externally imported or swapchain images.
+    pub fn bind_image_handle(
+        &self,
+        name: impl Into<String>,
+        handle: crate::ImageHandle,
+        desc: crate::ImageDesc,
+    ) -> &Self {
+        let mut inner = self.inner.borrow_mut();
+        inner.images_by_name.insert(
+            name.into(),
+            GraphImageRecord {
+                handle,
+                desc,
+                subresource: single_subresource(),
+            },
+        );
+        self
+    }
+
     /// Start a reflected shader pass intent.
     ///
     /// The intent builder records a fullscreen or compute pass while deriving

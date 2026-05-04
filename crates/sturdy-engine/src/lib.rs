@@ -58,7 +58,7 @@ mod window_registry;
 
 pub use anti_aliasing_pass::{AntiAliasingPass, taa_jitter_uv, taa_jittered_projection};
 pub use asset_loader::{AssetCache, AssetHandle, LoadState};
-pub use mesh_loader::{MeshAlphaMode, MeshMaterialParams, MeshPrimitive};
+pub use mesh_loader::{MeshAlphaMode, MeshMaterialParams, MeshPrimitive, MeshTextures};
 pub use antialiasing::{
     AntiAliasingConfig, AntiAliasingDial, AntiAliasingMode, FxaaSettings, MsaaSettings, TaaSettings,
 };
@@ -128,9 +128,9 @@ pub use runtime::{
 pub use sampler_catalog::SamplerPreset;
 pub use scene::{
     CameraConstants, CameraId, CameraOutput, DirectionalLight, InstanceData, MaterialDescriptor,
-    MaterialDomain, MaterialInput, MeshId, ObjectId, ObjectKind, OrbitCamera, PointLight,
-    RenderState, RenderTarget, Scene, SceneCamera, ShadingModel, SpotLight, UnifiedMaterial,
-    UnifiedMaterialBuilder, gbuffer,
+    MaterialDomain, MaterialExpr, MaterialInput, MeshId, ObjectId, ObjectKind, OrbitCamera,
+    PointLight, RenderState, RenderTarget, Scene, SceneCamera, ShadingModel, SpotLight,
+    UnifiedMaterial, UnifiedMaterialBuilder, UvSource, gbuffer,
 };
 pub use screenshot::{ScreenshotCapture, ScreenshotExportReport};
 pub use shader_watcher::ShaderWatcher;

@@ -9,7 +9,7 @@
 use std::{fs::File, io::BufReader, path::Path};
 
 use crate::{Engine, Mesh, Result, Vertex3d};
-use crate::mesh_loader::{MeshMaterialParams, MeshPrimitive};
+use crate::mesh_loader::{MeshMaterialParams, MeshPrimitive, MeshTextures};
 
 pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
     let file = File::open(path).map_err(|e| {
@@ -39,6 +39,7 @@ pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
                 position: [v[0], v[1], v[2]],
                 normal,
                 uv: [0.0, 0.0],
+                tangent: [1.0, 0.0, 0.0, 1.0],
             });
             indices.push((i * 3 + vi) as u32);
         }
@@ -55,5 +56,6 @@ pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
         mesh,
         name,
         material_params: MeshMaterialParams::default(),
+        textures: MeshTextures::default(),
     }])
 }

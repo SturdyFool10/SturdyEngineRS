@@ -4,14 +4,21 @@
 // into a four-channel G-Buffer, generates a directional shadow map, then
 // evaluates GGX PBR lighting (+ PCF shadows) in a fullscreen deferred pass.
 //
+// Per-material shader variants:
+//   When a mesh has a `UnifiedMaterial` set via `scene.set_unified_material()`,
+//   `DeferredPass` compiles a unique G-Buffer fragment shader from that
+//   material's expression tree and caches it by content hash. Meshes without a
+//   `UnifiedMaterial` fall back to the default G-Buffer program.
+//
 // Usage:
 //   // At init:
 //   let deferred = DeferredPass::new(&engine)?;
 //
 //   // Each frame:
 //   scene.prepare(&engine)?;
-//   deferred.draw(&mut scene, view, proj, &hdr_output, &frame, &engine)?;
+//   deferred.draw(&mut scene, view, proj, &hdr_output, &frame, &engine, time)?;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use glam::{Mat4, Vec4};
@@ -22,6 +29,7 @@ use crate::{
     ShaderStage, push_constants, scene::Scene,
     shadow_pass::{ShadowPass, ShadowConfig},
 };
+use crate::scene::CameraConstants;
 use sturdy_engine_core::Extent3d;
 
 fn engine_shader(name: &str) -> PathBuf {
@@ -42,24 +50,41 @@ struct DeferredLightingConstants {
     _pad: [f32; 3],
 }
 
-/// Deferred rendering component with GGX PBR and a directional shadow map.
+/// Deferred rendering component with GGX PBR, per-material shader variants,
+/// and a directional shadow map.
 ///
-/// `DeferredPass::new()` uses sensible defaults for everything. To configure
-/// the shadow map (resolution, frustum size, bias), use `with_shadow_config`.
+/// `DeferredPass::new()` uses sensible defaults for everything. Material
+/// expression variants are compiled on first use and cached permanently.
 ///
 /// # Usage
 /// ```ignore
 /// // At init:
 /// let deferred = DeferredPass::new(&engine)?;
 ///
-/// // Each frame — replaces scene.draw():
+/// // Set expressive materials on scene meshes:
+/// scene.set_unified_material(mesh_id, UnifiedMaterial::pbr_metallic_roughness("rock")
+///     .base_color(MaterialExpr::texture_uv("rock_albedo", UvSource::tiled(4.0, 4.0)))
+///     .roughness(MaterialExpr::texture("rock_roughness"))
+///     .normal(MaterialExpr::texture_uv("rock_normal", UvSource::tiled(4.0, 4.0)))
+///     .build());
+///
+/// // Each frame:
 /// scene.prepare(&engine)?;
-/// deferred.draw(&mut scene, view, proj, &hdr_output, &frame, &engine)?;
+/// frame.bind_image("rock_albedo",    &rock_albedo_tex);
+/// frame.bind_image("rock_roughness", &rock_roughness_tex);
+/// frame.bind_image("rock_normal",    &rock_normal_tex);
+/// deferred.draw(&mut scene, view, proj, &hdr_output, &frame, &engine, time_secs)?;
 /// ```
 pub struct DeferredPass {
-    gbuffer_program: MeshProgram,
+    /// Default G-Buffer program (used for meshes without a `UnifiedMaterial`).
+    default_gbuffer_program: MeshProgram,
     lighting_program: ShaderProgram,
     shadow: ShadowPass,
+    /// 1×1 flat tangent-space normal texture ([0.5, 0.5, 1.0, 1.0]).
+    /// Bound as the default `"normal_map"` for meshes without a normal map.
+    flat_normal_map: crate::Image,
+    /// Cache of compiled G-Buffer shader variants, keyed by material content hash.
+    variant_cache: HashMap<u64, MeshProgram>,
 }
 
 impl DeferredPass {
@@ -68,7 +93,7 @@ impl DeferredPass {
     }
 
     pub fn with_shadow_config(engine: &Engine, shadow_config: ShadowConfig) -> Result<Self> {
-        let gbuffer_program = MeshProgram::new(
+        let default_gbuffer_program = MeshProgram::new(
             engine,
             MeshProgramDesc {
                 fragment: ShaderDesc {
@@ -84,7 +109,17 @@ impl DeferredPass {
         )?;
         let lighting_program = engine.load_shader(engine_shader("deferred_lighting.slang"))?;
         let shadow = ShadowPass::with_config(engine, shadow_config)?;
-        Ok(Self { gbuffer_program, lighting_program, shadow })
+        // 1×1 flat normal: [128, 128, 255, 255] = tangent-space (0,0,1) = no perturbation.
+        let flat_normal_map = engine.generate_texture_2d("flat_normal_map", 1, 1, |_, _| {
+            [128, 128, 255, 255]
+        })?;
+        Ok(Self {
+            default_gbuffer_program,
+            lighting_program,
+            shadow,
+            flat_normal_map,
+            variant_cache: HashMap::new(),
+        })
     }
 
     /// Expose the shadow configuration for live tuning.
@@ -94,19 +129,24 @@ impl DeferredPass {
 
     /// Execute the full deferred frame into `output`.
     ///
+    /// `time` is the elapsed time in seconds since application start. Pass
+    /// `ctx.frame_time().time` from `GameContext`, or `0.0` for static scenes.
+    ///
     /// Pass order:
     ///   1. Shadow map — depth-only pass from the directional light's POV
     ///   2. G-Buffer fill — write albedo/normal/roughness/emissive/world_pos
+    ///      (per-mesh shader variant compiled from `UnifiedMaterial` when set)
     ///   3. Deferred lighting — GGX PBR evaluation + PCF shadow sampling
     ///   4. `output` (scene_color) → existing post-process chain unchanged
     pub fn draw(
-        &self,
+        &mut self,
         scene: &mut Scene,
         view: Mat4,
         proj: Mat4,
         output: &GraphImage,
         frame: &RenderFrame,
         engine: &Engine,
+        time: f32,
     ) -> Result<()> {
         // ── 1. Upload lighting uniform + build lights buffer ──────────────────
         scene.prepare_deferred_lighting(view, engine, frame)?;
@@ -150,8 +190,92 @@ impl DeferredPass {
         let g3    = frame.image("gbuffer_world_pos",       gbuffer_img("gbuffer_world_pos",       Format::Rgba16Float ))?;
         let depth = frame.image("gbuffer_depth", depth_desc)?;
 
-        // ── 5. G-Buffer fill pass ─────────────────────────────────────────────
-        scene.draw_gbuffer(view, proj, &[&g0, &g1, &g2, &g3], &depth, &self.gbuffer_program, frame)?;
+        let color_targets: &[&GraphImage] = &[&g0, &g1, &g2, &g3];
+        let primary    = color_targets[0];
+        let additional = &color_targets[1..];
+
+        // ── 5. G-Buffer fill pass (per-mesh material variants) ────────────────
+        let view_proj = (proj * view).to_cols_array_2d();
+        let constants = CameraConstants {
+            view_proj,
+            previous_view_proj: view_proj,
+            time,
+            _pad: [0.0; 3],
+        };
+
+        // Step A: collect (hash, source) for any materials not yet compiled.
+        // Done in its own block so the borrow of `scene` ends before compilation.
+        let to_compile: Vec<(u64, String)> = (0..scene.mesh_count())
+            .filter_map(|idx| scene.unified_material_at(idx))
+            .filter(|mat| !self.variant_cache.contains_key(&mat.content_hash()))
+            .map(|mat| (mat.content_hash(), mat.generate_gbuffer_source()))
+            .collect();
+
+        // Step B: compile missing variants (no scene borrow active).
+        for (key, source) in to_compile {
+            let program = MeshProgram::new(
+                engine,
+                MeshProgramDesc {
+                    fragment: ShaderDesc {
+                        source: ShaderSource::Inline(source),
+                        entry_point: "main".to_owned(),
+                        stage: ShaderStage::Fragment,
+                    },
+                    vertex: None,
+                    vertex_kind: MeshVertexKind::V3d,
+                    alpha_blend: false,
+                    uses_depth: true,
+                },
+            )?;
+            self.variant_cache.insert(key, program);
+        }
+
+        // Step C: draw each batch.
+        // All scene accesses inside the loop are &self (immutable), compatible
+        // with the iterator also holding an immutable borrow of scene.batches.
+        for (mesh_idx, instance_buf_opt, instance_count) in scene.drawable_batches() {
+            let instance_buf = match instance_buf_opt {
+                Some(b) => b,
+                None => continue,
+            };
+            if instance_count == 0 {
+                continue;
+            }
+
+            let mesh = scene.mesh_at(mesh_idx);
+
+            // Select: per-material variant if set, otherwise default.
+            let mat_hash = scene.unified_material_at(mesh_idx).map(|m| m.content_hash());
+            let program: &MeshProgram = match mat_hash {
+                Some(h) => self.variant_cache
+                    .get(&h)
+                    .unwrap_or(&self.default_gbuffer_program),
+                None => &self.default_gbuffer_program,
+            };
+
+            frame.bind_buffer("instances", instance_buf);
+
+            // Material constants buffer (for the default program path).
+            if let Some(mat_buf) = scene.material_gpu_buffer_at(mesh_idx) {
+                frame.bind_buffer("material_desc", mat_buf);
+            }
+
+            // Normal map: per-mesh override, or flat fallback.
+            let nmap: &crate::Image = scene.normal_map_at(mesh_idx)
+                .map(|arc| arc.as_ref())
+                .unwrap_or(&self.flat_normal_map);
+            frame.bind_image("normal_map", nmap);
+
+            primary.draw_mesh_instanced_mrt_with_push_constants_and_depth(
+                additional,
+                mesh,
+                program,
+                instance_buf,
+                instance_count,
+                &constants,
+                Some(&depth),
+            )?;
+        }
 
         // ── 6. Register G-Buffer images by name for the lighting shader ───────
         g0.register_as("gbuffer_albedo_metallic");

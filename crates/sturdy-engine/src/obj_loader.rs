@@ -8,7 +8,8 @@
 use std::path::Path;
 
 use crate::{Engine, Mesh, Result, Vertex3d};
-use crate::mesh_loader::{MeshAlphaMode, MeshMaterialParams, MeshPrimitive};
+use crate::mesh::{compute_tangents};
+use crate::mesh_loader::{MeshAlphaMode, MeshMaterialParams, MeshPrimitive, MeshTextures};
 
 pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
     let load_opts = tobj::LoadOptions {
@@ -62,12 +63,16 @@ pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
             } else {
                 [0.0, 0.0]
             };
-            vertices.push(Vertex3d { position, normal, uv });
+            vertices.push(Vertex3d { position, normal, uv, tangent: [1.0, 0.0, 0.0, 1.0] });
         }
 
         // With single_index the mesh is already de-indexed into our vertex list;
         // generate sequential indices.
         let indices: Vec<u32> = (0u32..vertices.len() as u32).collect();
+
+        if has_uvs {
+            compute_tangents(&mut vertices, &indices);
+        }
 
         let mesh = match Mesh::indexed_3d(engine, &vertices, &indices) {
             Ok(m) => m,
@@ -84,7 +89,7 @@ pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
             .map(extract_material)
             .unwrap_or_default();
 
-        out.push(MeshPrimitive { mesh, name, material_params });
+        out.push(MeshPrimitive { mesh, name, material_params, textures: MeshTextures::default() });
     }
 
     Ok(out)

@@ -196,6 +196,12 @@ pub struct MaterialDescriptor {
     pub metallic: f32,
     /// Surface roughness in \[0, 1\]. 0 = mirror, 1 = fully diffuse.
     pub roughness: f32,
+    /// Whether a tangent-space normal map is bound for this mesh.
+    ///
+    /// Set automatically by [`Scene::set_normal_map`]. When `true`,
+    /// `gbuffer_fragment.slang` applies a TBN transform using the bound
+    /// `"normal_map"` texture; when `false`, the geometric normal is used.
+    pub has_normal_map: bool,
 }
 
 impl Default for MaterialDescriptor {
@@ -206,11 +212,12 @@ impl Default for MaterialDescriptor {
             emissive: Vec3::ZERO,
             metallic: 0.0,
             roughness: 0.5,
+            has_normal_map: false,
         }
     }
 }
 
-/// GPU-layout mirror of the data read by `lit_fragment.slang` as `material_desc`.
+/// GPU-layout mirror of `MaterialConstants` in the lit and G-Buffer shaders.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct MaterialConstants {
@@ -218,8 +225,8 @@ struct MaterialConstants {
     albedo: [f32; 4],
     /// xyz = emissive, w = metallic
     emissive_metallic: [f32; 4],
-    /// x = roughness, yzw = unused (padding)
-    roughness_pad: [f32; 4],
+    /// x = roughness, y = has_normal_map (1.0 = yes), zw = unused
+    roughness_flags: [f32; 4],
 }
 
 impl MaterialConstants {
@@ -232,7 +239,7 @@ impl MaterialConstants {
                 desc.emissive.z,
                 desc.metallic,
             ],
-            roughness_pad: [desc.roughness, 0.0, 0.0, 0.0],
+            roughness_flags: [desc.roughness, if desc.has_normal_map { 1.0 } else { 0.0 }, 0.0, 0.0],
         }
     }
 }
@@ -242,16 +249,32 @@ struct MeshMaterial {
     descriptor: MaterialDescriptor,
     gpu_buffer: Option<Buffer>,
     dirty: bool,
+    /// Optional tangent-space normal map for the G-Buffer fill pass.
+    ///
+    /// Set via [`Scene::set_normal_map`]. When present, it is bound as
+    /// `"normal_map"` before each G-Buffer draw call for this mesh.
+    normal_map: Option<std::sync::Arc<crate::Image>>,
+    /// Full expression-based material for the deferred G-Buffer path.
+    ///
+    /// When set, `DeferredPass` compiles a unique G-Buffer fragment shader
+    /// variant from this material's expression tree and uses it instead of the
+    /// default G-Buffer program. The `descriptor` above is still used by the
+    /// forward lit path and for `set_material` compatibility.
+    unified: Option<super::material::UnifiedMaterial>,
 }
 
-/// Push constants sent to the vertex shader for each camera draw call.
+/// Push constants sent to the vertex and fragment shaders for each camera draw call.
 ///
-/// Vertex shaders must declare `uniform CameraConstants cam` and use
-/// `cam.view_proj` to transform vertices into clip space.
+/// Shaders must declare `uniform CameraConstants cam` to receive these values.
+/// `time` is the elapsed time in seconds since application start — available
+/// in fragment shaders for procedural animation and UV scrolling.
 #[push_constants]
 pub struct CameraConstants {
     pub view_proj: [[f32; 4]; 4],
     pub previous_view_proj: [[f32; 4]; 4],
+    /// Elapsed time in seconds (application start = 0). Use in material expressions.
+    pub time: f32,
+    pub _pad: [f32; 3],
 }
 
 impl CameraConstants {
@@ -259,6 +282,8 @@ impl CameraConstants {
         Self {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             previous_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+            time: 0.0,
+            _pad: [0.0; 3],
         }
     }
 
@@ -266,7 +291,14 @@ impl CameraConstants {
         Self {
             view_proj: camera.view_proj().to_cols_array_2d(),
             previous_view_proj: camera.previous_view_proj.to_cols_array_2d(),
+            time: 0.0,
+            _pad: [0.0; 3],
         }
+    }
+
+    pub fn with_time(mut self, time: f32) -> Self {
+        self.time = time;
+        self
     }
 }
 
@@ -368,6 +400,11 @@ impl Scene {
         })
     }
 
+    /// Number of registered meshes.
+    pub fn mesh_count(&self) -> usize {
+        self.meshes.len()
+    }
+
     /// Return the `Mesh` at the given index (as registered by `add_mesh`).
     pub fn mesh_at(&self, index: usize) -> &Mesh {
         &self.meshes[index].0
@@ -384,6 +421,8 @@ impl Scene {
             descriptor: MaterialDescriptor::default(),
             gpu_buffer: None,
             dirty: true,
+            normal_map: None,
+            unified: None,
         });
         id
     }
@@ -398,9 +437,77 @@ impl Scene {
         }
     }
 
+    /// Bind a tangent-space normal map texture to a mesh.
+    ///
+    /// Sets `MaterialDescriptor::has_normal_map = true` automatically. The
+    /// texture must remain alive for the duration of rendering — the scene
+    /// holds an `Arc` clone. Pass `None` to remove the normal map.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let nmap = engine.load_texture_2d("assets/wall_normal.png");
+    /// if let Some(img) = nmap.get() {
+    ///     scene.set_normal_map(wall_id, Some(Arc::new(img)));
+    /// }
+    /// ```
+    pub fn set_normal_map(
+        &mut self,
+        id: MeshId,
+        texture: Option<std::sync::Arc<crate::Image>>,
+    ) {
+        if let Some(mat) = self.materials.get_mut(id.0 as usize) {
+            mat.descriptor.has_normal_map = texture.is_some();
+            mat.normal_map = texture;
+            mat.dirty = true;
+        }
+    }
+
     /// Return the current material descriptor for a mesh.
     pub fn material(&self, id: MeshId) -> Option<&MaterialDescriptor> {
         self.materials.get(id.0 as usize).map(|m| &m.descriptor)
+    }
+
+    /// Set a full expression-based material for a mesh.
+    ///
+    /// `DeferredPass` will compile a unique G-Buffer fragment shader from this
+    /// material's expression tree and cache it by content hash. Each distinct
+    /// material expression compiles to exactly one shader variant — two meshes
+    /// with identical expressions share the same compiled variant.
+    ///
+    /// Textures referenced in the material (via `MaterialExpr::texture("name")`)
+    /// must be bound each frame before `DeferredPass::draw`:
+    /// ```ignore
+    /// frame.bind_image("rock_albedo", &rock_tex);
+    /// deferred.draw(&mut scene, view, proj, &output, &frame, &engine)?;
+    /// ```
+    pub fn set_unified_material(
+        &mut self,
+        id: MeshId,
+        material: super::material::UnifiedMaterial,
+    ) {
+        if let Some(mat) = self.materials.get_mut(id.0 as usize) {
+            mat.unified = Some(material);
+        }
+    }
+
+    /// Return the expression-based material for a mesh, if one has been set.
+    pub fn unified_material(&self, id: MeshId) -> Option<&super::material::UnifiedMaterial> {
+        self.materials.get(id.0 as usize).and_then(|m| m.unified.as_ref())
+    }
+
+    /// Return the expression-based material by mesh index (used internally by `DeferredPass`).
+    pub(crate) fn unified_material_at(&self, mesh_idx: usize) -> Option<&super::material::UnifiedMaterial> {
+        self.materials.get(mesh_idx).and_then(|m| m.unified.as_ref())
+    }
+
+    /// Return the per-mesh normal map override, if set (used by `DeferredPass`).
+    pub(crate) fn normal_map_at(&self, mesh_idx: usize) -> Option<&std::sync::Arc<crate::Image>> {
+        self.materials.get(mesh_idx).and_then(|m| m.normal_map.as_ref())
+    }
+
+    /// Return the material GPU buffer for a mesh (used by `DeferredPass`).
+    pub(crate) fn material_gpu_buffer_at(&self, mesh_idx: usize) -> Option<&Buffer> {
+        self.materials.get(mesh_idx).and_then(|m| m.gpu_buffer.as_ref())
     }
 
     /// Add an object instance at the world origin. Returns an `ObjectId` for later
@@ -642,10 +749,14 @@ impl Scene {
         depth: &GraphImage,
         gbuffer_program: &MeshProgram,
         frame: &RenderFrame,
+        default_normal_map: &crate::Image,
     ) -> Result<()> {
+        let vp = (proj * view).to_cols_array_2d();
         let constants = CameraConstants {
-            view_proj: (proj * view).to_cols_array_2d(),
-            previous_view_proj: (proj * view).to_cols_array_2d(),
+            view_proj: vp,
+            previous_view_proj: vp,
+            time: 0.0,
+            _pad: [0.0; 3],
         };
         assert!(
             color_targets.len() >= 1,
@@ -669,6 +780,14 @@ impl Scene {
                 if let Some(mat_buf) = &mat.gpu_buffer {
                     frame.bind_buffer("material_desc", mat_buf);
                 }
+                // Per-mesh normal map, falling back to the flat-normal default.
+                let nmap: &crate::Image = mat.normal_map
+                    .as_ref()
+                    .map(|arc| arc.as_ref())
+                    .unwrap_or(default_normal_map);
+                frame.bind_image("normal_map", nmap);
+            } else {
+                frame.bind_image("normal_map", default_normal_map);
             }
             primary.draw_mesh_instanced_mrt_with_push_constants_and_depth(
                 additional,
@@ -737,9 +856,12 @@ impl Scene {
         }
 
         let view_proj = proj * view;
+        let vp_arr = view_proj.to_cols_array_2d();
         let constants = CameraConstants {
-            view_proj: view_proj.to_cols_array_2d(),
-            previous_view_proj: view_proj.to_cols_array_2d(),
+            view_proj: vp_arr,
+            previous_view_proj: vp_arr,
+            time: 0.0,
+            _pad: [0.0; 3],
         };
 
         // Extract camera world position from the view matrix inverse.

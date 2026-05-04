@@ -11,21 +11,27 @@
 //   RT3  RGBA16Float  world_pos.xyz | 0   (half-precision; upgrade to RGBA32Float for large worlds)
 //
 // Bindings written by Scene::draw_gbuffer via Scene::update_lighting_uniform
-// and the per-batch bind_buffer calls:
+// and the per-batch bind_buffer / bind_image calls:
 //   "material_desc"  StructuredBuffer<MaterialConstants>  (one element per mesh)
+//   "normal_map"     Texture2D<float4>   tangent-space normal map (or flat 1×1 fallback)
+//   "normal_sampler" SamplerState        linear clamp sampler
 
 struct MaterialConstants {
-    float4 albedo;            // xyz = base colour (linear), w = opacity
-    float4 emissive_metallic; // xyz = emissive (HDR), w = metallic [0, 1]
-    float4 roughness_pad;     // x = roughness [0, 1], yzw = unused
+    float4 albedo;              // xyz = base colour (linear), w = opacity
+    float4 emissive_metallic;   // xyz = emissive (HDR), w = metallic [0, 1]
+    float4 roughness_flags;     // x = roughness [0, 1], y = has_normal_map (1.0 = yes), zw = unused
 };
 StructuredBuffer<MaterialConstants> material_desc;
+
+Texture2D<float4> normal_map;
+SamplerState      normal_sampler;
 
 struct VSOut {
     float4 position  : SV_POSITION;
     float3 normal    : NORMAL;
     float2 uv        : TEXCOORD0;
     float3 world_pos : TEXCOORD1;
+    float4 tangent   : TANGENT;
 };
 
 // ── Octahedral normal encoding ────────────────────────────────────────────────
@@ -56,10 +62,23 @@ GBufferOut main(VSOut v) {
 
     float3 albedo    = M.albedo.xyz;
     float  metallic  = M.emissive_metallic.w;
-    float  roughness = M.roughness_pad.x;
+    float  roughness = M.roughness_flags.x;
     float3 emissive  = M.emissive_metallic.xyz;
+    bool   has_nmap  = M.roughness_flags.y > 0.5;
 
+    // ── Normal ───────────────────────────────────────────────────────────────
     float3 N = normalize(v.normal);
+
+    if (has_nmap) {
+        float3 T  = normalize(v.tangent.xyz);
+        float3 B  = cross(N, T) * v.tangent.w;
+        float3 ts = normal_map.Sample(normal_sampler, v.uv).xyz * 2.0 - 1.0;
+        // Gram-Schmidt re-orthogonalise T against N to handle interpolation drift.
+        T = normalize(T - N * dot(N, T));
+        float3x3 tbn = float3x3(T, B, N);
+        N = normalize(mul(ts, tbn));
+    }
+
     float2 oct_n = oct_encode(N);
 
     GBufferOut o;

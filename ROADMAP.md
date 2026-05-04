@@ -82,7 +82,7 @@ The scene renders instanced geometry with camera transforms but no lighting. Eve
 - [x] Add a `Material` descriptor: albedo colour, roughness, metallic, emissive. One uniform buffer per draw call, reflected and bound automatically.
 - [ ] Add a directional shadow map pass: depth-only render pass writing to `Depth32Float`, sampled with PCF in the lit pass. The render graph handles ordering and barriers. *(Required by Track 6 — implement here, consumed there.)*
 - [ ] Add point lights and spot lights: add `PointLight` and `SpotLight` uniform entries; support clustered light assignment (tile or cluster grid) to scale to hundreds of lights.
-- [ ] Add normal mapping support: read tangent-space normals from a sampled texture; transform with a TBN matrix computed from mesh tangent + bitangent attributes.
+- [x] Add normal mapping support: read tangent-space normals from a sampled texture; transform with a TBN matrix computed from mesh tangent + bitangent attributes. `Scene::set_normal_map(id, Arc<Image>)` binds per-mesh; `DeferredPass` supplies a 1×1 flat-normal fallback so all meshes compile the same G-Buffer shader variant.
 - [ ] Add image-based lighting (IBL): prefilter an environment cubemap at varying roughness levels; precompute a BRDF integration LUT (NdotV × roughness → (scale, bias)); evaluate split-sum specular and diffuse irradiance in the lit pass.
 - [ ] Add a reference scene that stresses lighting, shadows, and materials with realistic content.
 
@@ -97,8 +97,8 @@ Everything is created programmatically today. Real projects need to load content
   - **Wavefront OBJ + MTL** (`.obj`) — Kd → base color, dissolve → opacity, Ns (shininess) → roughness approximation; UV V-flip for GPU convention.
   - **STereoLithography** (`.stl`) — binary and ASCII; face normals used as vertex normals; default PBR material.
 - [x] Add `MeshMaterialParams::to_unified_material()` and `to_material_descriptor()` — both deferred PBR (`DeferredPass`) and classic forward (`Scene::set_material`) paths covered.
-- [ ] Add texture handle resolution: load `baseColorTexture`, `metallicRoughnessTexture`, `normalTexture`, `occlusionTexture`, `emissiveTexture` from GLTF image references; bind to `MeshMaterialParams`.
-- [ ] Add tangent generation when `TANGENT` attribute is absent — required for normal mapping (Track 2 / Track 6d follow-up).
+- [x] Add texture handle resolution: load `baseColorTexture`, `metallicRoughnessTexture`, `normalTexture`, `occlusionTexture`, `emissiveTexture` from GLTF image references; stored as `MeshPrimitive::textures: MeshTextures` (`Option<Arc<Image>>` per channel); all GLTF image formats (R8–R32G32B32A32FLOAT) normalised to `Rgba8Unorm` on upload.
+- [x] Add tangent generation when `TANGENT` attribute is absent — GLTF reads `TANGENT` attribute when present; falls back to UV-derivative `compute_tangents`. OBJ calls `compute_tangents` when UVs are available. All procedural primitives (cube, plane, sphere) now have correct UV-derived tangents. STL uses the `[1,0,0,1]` placeholder (no UVs).
 - [ ] Add FBX support note: Autodesk FBX has no open Rust reader with full material/animation fidelity; recommended workflow is to export GLTF from Blender/Maya/3ds Max. Track for re-evaluation when a production-quality open Rust FBX reader exists.
 - [ ] Support GLTF material extensions: KHR_materials_clearcoat, KHR_materials_transmission, KHR_materials_ior, KHR_materials_sheen, KHR_materials_emissive_strength.
 - [x] Add `AssetHandle<T>` with state queries: `is_ready()`, `is_loading()`, `is_degraded()`, `failed_reason()`.
@@ -117,23 +117,20 @@ A single material definition that compiles to every rendering path: deferred G-B
 - [ ] Define `MaterialSurface` as a shared Slang module (`material_surface.slang`) included by all lit variants — the G-Buffer fill pass currently outputs an equivalent struct inline; extract it into a shared include so the variant compiler can reference it.
 - [x] Define `MaterialDomain` enum: `Opaque`, `Masked`, `Translucent`, `Decal` — in `scene/material.rs`.
 - [x] Define `ShadingModel` enum: `Unlit`, `Lambert`, `PbrMetallicRoughness`, `PbrClearcoat`, `PbrSubsurface`, `PbrTransmission` — in `scene/material.rs`.
-- [x] Add `UnifiedMaterial` holding `MaterialDomain`, `ShadingModel`, `RenderState`, structured PBR inputs (each `MaterialInput<T>`: Constant / Texture / TextureTimesConstant), and optional custom `evaluate_material_snippet` — in `scene/material.rs`.
-- [x] Add `UnifiedMaterialBuilder` with full fluent API (`base_color_texture`, `metallic_roughness_texture` GLTF B=metallic/G=roughness, `normal_texture`, `occlusion_texture`, `emissive_texture_factor`, `clearcoat`, `evaluate_material_fn`) — in `scene/material.rs`.
-- [x] Add `UnifiedMaterial::pbr_metallic_roughness()` standard constructor.
-- [x] Add `UnifiedMaterial::procedural()` constructor; user supplies Slang body.
-- [ ] Wire `UnifiedMaterial` into the variant compiler (Track 6b) so it actually drives shader generation.
+- [x] Add `UnifiedMaterial` with per-channel `MaterialExpr<T>` expression tree — each channel (base_color, metallic, roughness, normal, occlusion, emissive) is driven by a composable expression tree supporting: `Constant`, `Texture { name, uv }`, `TextureFactor`, `ImageSequence` (Texture2DArray animated by `cam.time`), `Procedural` (inline Slang), `Multiply`, `Add`, `Mix` (lerp), `Clamp`, `Pow`. `UvSource` supports `MeshUv0`, `Tiled`, `Scrolled`, `TiledScrolled`, and `Custom` Slang expressions.
+- [x] Add `UnifiedMaterialBuilder` with full fluent API — `base_color()`, `roughness()`, `normal()`, `emissive()`, `metallic()`, `metallic_roughness_constants()`, `clearcoat()`, and convenience shortcuts per channel.
+- [x] Add `UnifiedMaterial::pbr_metallic_roughness()`, `::unlit()`, `::procedural()` standard constructors.
+- [x] Add `cam.time` (elapsed seconds) to `CameraConstants` push constant — available to fragment shaders for procedural animation and UV scrolling.
+- [x] Wire `UnifiedMaterial` into the variant compiler (Track 6b — GBufferFillVariant implemented below).
 
 ### 6b — Shader variant compiler
 
-- [ ] Add `MaterialVariantCompiler` that takes a `UnifiedMaterial` and emits compiled `ShaderProgram`s for each active rendering path:
-  - **`GBufferFillVariant`** — evaluates `MaterialSurface`; packs results into G-Buffer render targets
-  - **`ForwardLitVariant`** — evaluates `MaterialSurface`; applies full PBR lighting in one pass (used for transparent objects and the forward fallback)
-  - **`ShadowVariant`** — alpha-test only; writes `gl_FragDepth` for shadow passes (depth-only for opaque)
-  - **`RtAnyHitVariant`** — evaluates opacity for alpha-masked geometry in RT traversal
-  - **`RtClosestHitVariant`** — evaluates full `MaterialSurface` for RT shadow rays, reflections, and GI queries
-  - **`PathTracedVariant`** — evaluates `MaterialSurface`; evaluates GGX BSDF importance sampling for offline reference renders
-- [ ] Cache compiled variants by material ID and variant type; invalidate on hot reload.
-- [ ] Emit readable diagnostics when a material Slang snippet fails to compile in any variant.
+- [x] **`GBufferFillVariant`** — `UnifiedMaterial::generate_gbuffer_source()` emits a complete Slang G-Buffer fill shader: declares `Texture2D`/`Texture2DArray` bindings for all referenced textures, generates an inline `evaluate_material()` call, applies TBN for the normal channel, packs results into the 4-RT G-Buffer layout. `DeferredPass` compiles and caches variants keyed by SHA/content hash of the generated source; each unique material expression compiles to exactly one GPU program. Fallback to the static G-Buffer program for meshes without a `UnifiedMaterial`. Use `scene.set_unified_material(id, mat)` to set per-mesh; bind textures via `frame.bind_image("name", &tex)` before `DeferredPass::draw()`. Pass `time` seconds to `DeferredPass::draw()` for animated expressions.
+- [ ] **`ForwardLitVariant`** — full PBR lighting in one pass (transparent objects and forward fallback).
+- [ ] **`ShadowVariant`** — depth-only variant (alpha-test for masked domain).
+- [ ] **`RtAnyHitVariant`**, **`RtClosestHitVariant`**, **`PathTracedVariant`** — RT path variants.
+- [ ] Cache invalidation on shader hot reload.
+- [ ] Emit readable diagnostics when a material expression fails Slang compilation.
 
 ### 6c — PBR BRDF library (`brdf.slang`)
 

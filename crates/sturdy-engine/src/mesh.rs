@@ -17,6 +17,11 @@ pub struct Vertex3d {
     pub position: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
+    /// Tangent vector in object space. `w` encodes the handedness of the
+    /// bitangent: `bitangent = cross(normal, tangent.xyz) * tangent.w`.
+    /// Set to `[1, 0, 0, 1]` when tangents are unavailable (e.g. meshes
+    /// with no UV mapping). Correct tangents are required for normal mapping.
+    pub tangent: [f32; 4],
 }
 
 pub struct Mesh {
@@ -104,136 +109,41 @@ impl Mesh {
     /// separate quad so normals are sharp at edges. UVs tile 0→1 per face.
     pub fn cube(engine: &Engine, size: f32) -> Result<Self> {
         let s = size * 0.5;
-        let verts: &[Vertex3d] = &[
+        let t = [1.0f32, 0.0, 0.0, 1.0]; // placeholder; overwritten by compute_tangents
+        let mut verts: Vec<Vertex3d> = vec![
             // +Z front
-            Vertex3d {
-                position: [-s, -s, s],
-                normal: [0., 0., 1.],
-                uv: [0., 1.],
-            },
-            Vertex3d {
-                position: [s, -s, s],
-                normal: [0., 0., 1.],
-                uv: [1., 1.],
-            },
-            Vertex3d {
-                position: [s, s, s],
-                normal: [0., 0., 1.],
-                uv: [1., 0.],
-            },
-            Vertex3d {
-                position: [-s, s, s],
-                normal: [0., 0., 1.],
-                uv: [0., 0.],
-            },
+            Vertex3d { position: [-s, -s, s], normal: [0., 0., 1.], uv: [0., 1.], tangent: t },
+            Vertex3d { position: [s, -s, s],  normal: [0., 0., 1.], uv: [1., 1.], tangent: t },
+            Vertex3d { position: [s, s, s],   normal: [0., 0., 1.], uv: [1., 0.], tangent: t },
+            Vertex3d { position: [-s, s, s],  normal: [0., 0., 1.], uv: [0., 0.], tangent: t },
             // -Z back
-            Vertex3d {
-                position: [s, -s, -s],
-                normal: [0., 0., -1.],
-                uv: [0., 1.],
-            },
-            Vertex3d {
-                position: [-s, -s, -s],
-                normal: [0., 0., -1.],
-                uv: [1., 1.],
-            },
-            Vertex3d {
-                position: [-s, s, -s],
-                normal: [0., 0., -1.],
-                uv: [1., 0.],
-            },
-            Vertex3d {
-                position: [s, s, -s],
-                normal: [0., 0., -1.],
-                uv: [0., 0.],
-            },
+            Vertex3d { position: [s, -s, -s],  normal: [0., 0., -1.], uv: [0., 1.], tangent: t },
+            Vertex3d { position: [-s, -s, -s], normal: [0., 0., -1.], uv: [1., 1.], tangent: t },
+            Vertex3d { position: [-s, s, -s],  normal: [0., 0., -1.], uv: [1., 0.], tangent: t },
+            Vertex3d { position: [s, s, -s],   normal: [0., 0., -1.], uv: [0., 0.], tangent: t },
             // +X right
-            Vertex3d {
-                position: [s, -s, -s],
-                normal: [1., 0., 0.],
-                uv: [0., 1.],
-            },
-            Vertex3d {
-                position: [s, -s, s],
-                normal: [1., 0., 0.],
-                uv: [1., 1.],
-            },
-            Vertex3d {
-                position: [s, s, s],
-                normal: [1., 0., 0.],
-                uv: [1., 0.],
-            },
-            Vertex3d {
-                position: [s, s, -s],
-                normal: [1., 0., 0.],
-                uv: [0., 0.],
-            },
+            Vertex3d { position: [s, -s, -s], normal: [1., 0., 0.], uv: [0., 1.], tangent: t },
+            Vertex3d { position: [s, -s, s],  normal: [1., 0., 0.], uv: [1., 1.], tangent: t },
+            Vertex3d { position: [s, s, s],   normal: [1., 0., 0.], uv: [1., 0.], tangent: t },
+            Vertex3d { position: [s, s, -s],  normal: [1., 0., 0.], uv: [0., 0.], tangent: t },
             // -X left
-            Vertex3d {
-                position: [-s, -s, s],
-                normal: [-1., 0., 0.],
-                uv: [0., 1.],
-            },
-            Vertex3d {
-                position: [-s, -s, -s],
-                normal: [-1., 0., 0.],
-                uv: [1., 1.],
-            },
-            Vertex3d {
-                position: [-s, s, -s],
-                normal: [-1., 0., 0.],
-                uv: [1., 0.],
-            },
-            Vertex3d {
-                position: [-s, s, s],
-                normal: [-1., 0., 0.],
-                uv: [0., 0.],
-            },
+            Vertex3d { position: [-s, -s, s],  normal: [-1., 0., 0.], uv: [0., 1.], tangent: t },
+            Vertex3d { position: [-s, -s, -s], normal: [-1., 0., 0.], uv: [1., 1.], tangent: t },
+            Vertex3d { position: [-s, s, -s],  normal: [-1., 0., 0.], uv: [1., 0.], tangent: t },
+            Vertex3d { position: [-s, s, s],   normal: [-1., 0., 0.], uv: [0., 0.], tangent: t },
             // +Y top
-            Vertex3d {
-                position: [-s, s, -s],
-                normal: [0., 1., 0.],
-                uv: [0., 0.],
-            },
-            Vertex3d {
-                position: [s, s, -s],
-                normal: [0., 1., 0.],
-                uv: [1., 0.],
-            },
-            Vertex3d {
-                position: [s, s, s],
-                normal: [0., 1., 0.],
-                uv: [1., 1.],
-            },
-            Vertex3d {
-                position: [-s, s, s],
-                normal: [0., 1., 0.],
-                uv: [0., 1.],
-            },
+            Vertex3d { position: [-s, s, -s], normal: [0., 1., 0.], uv: [0., 0.], tangent: t },
+            Vertex3d { position: [s, s, -s],  normal: [0., 1., 0.], uv: [1., 0.], tangent: t },
+            Vertex3d { position: [s, s, s],   normal: [0., 1., 0.], uv: [1., 1.], tangent: t },
+            Vertex3d { position: [-s, s, s],  normal: [0., 1., 0.], uv: [0., 1.], tangent: t },
             // -Y bottom
-            Vertex3d {
-                position: [-s, -s, s],
-                normal: [0., -1., 0.],
-                uv: [0., 0.],
-            },
-            Vertex3d {
-                position: [s, -s, s],
-                normal: [0., -1., 0.],
-                uv: [1., 0.],
-            },
-            Vertex3d {
-                position: [s, -s, -s],
-                normal: [0., -1., 0.],
-                uv: [1., 1.],
-            },
-            Vertex3d {
-                position: [-s, -s, -s],
-                normal: [0., -1., 0.],
-                uv: [0., 1.],
-            },
+            Vertex3d { position: [-s, -s, s],  normal: [0., -1., 0.], uv: [0., 0.], tangent: t },
+            Vertex3d { position: [s, -s, s],   normal: [0., -1., 0.], uv: [1., 0.], tangent: t },
+            Vertex3d { position: [s, -s, -s],  normal: [0., -1., 0.], uv: [1., 1.], tangent: t },
+            Vertex3d { position: [-s, -s, -s], normal: [0., -1., 0.], uv: [0., 1.], tangent: t },
         ];
         #[rustfmt::skip]
-        let idx: &[u32] = &[
+        let idx: Vec<u32> = vec![
              0, 1, 2,  0, 2, 3,
              4, 5, 6,  4, 6, 7,
              8, 9,10,  8,10,11,
@@ -241,7 +151,8 @@ impl Mesh {
             16,17,18, 16,18,19,
             20,21,22, 20,22,23,
         ];
-        Self::indexed_3d(engine, verts, idx)
+        compute_tangents(&mut verts, &idx);
+        Self::indexed_3d(engine, &verts, &idx)
     }
 
     /// Flat horizontal plane (in the XZ plane, normal pointing +Y) centered at the origin.
@@ -250,30 +161,16 @@ impl Mesh {
     pub fn plane(engine: &Engine, width: f32, depth: f32) -> Result<Self> {
         let hw = width * 0.5;
         let hd = depth * 0.5;
-        let verts: &[Vertex3d] = &[
-            Vertex3d {
-                position: [-hw, 0., -hd],
-                normal: [0., 1., 0.],
-                uv: [0., 0.],
-            },
-            Vertex3d {
-                position: [hw, 0., -hd],
-                normal: [0., 1., 0.],
-                uv: [1., 0.],
-            },
-            Vertex3d {
-                position: [hw, 0., hd],
-                normal: [0., 1., 0.],
-                uv: [1., 1.],
-            },
-            Vertex3d {
-                position: [-hw, 0., hd],
-                normal: [0., 1., 0.],
-                uv: [0., 1.],
-            },
+        let t = [1.0f32, 0.0, 0.0, 1.0];
+        let mut verts: Vec<Vertex3d> = vec![
+            Vertex3d { position: [-hw, 0., -hd], normal: [0., 1., 0.], uv: [0., 0.], tangent: t },
+            Vertex3d { position: [hw, 0., -hd],  normal: [0., 1., 0.], uv: [1., 0.], tangent: t },
+            Vertex3d { position: [hw, 0., hd],   normal: [0., 1., 0.], uv: [1., 1.], tangent: t },
+            Vertex3d { position: [-hw, 0., hd],  normal: [0., 1., 0.], uv: [0., 1.], tangent: t },
         ];
-        let idx: &[u32] = &[0, 1, 2, 0, 2, 3];
-        Self::indexed_3d(engine, verts, idx)
+        let idx: Vec<u32> = vec![0, 1, 2, 0, 2, 3];
+        compute_tangents(&mut verts, &idx);
+        Self::indexed_3d(engine, &verts, &idx)
     }
 
     /// UV sphere centered at the origin.
@@ -299,6 +196,7 @@ impl Mesh {
                     position: [nx * radius, ny * radius, nz * radius],
                     normal: [nx, ny, nz],
                     uv: [seg as f32 / segments as f32, ring as f32 / rings as f32],
+                    tangent: [1.0, 0.0, 0.0, 1.0],
                 });
             }
         }
@@ -312,6 +210,7 @@ impl Mesh {
             }
         }
 
+        compute_tangents(&mut verts, &idx);
         Self::indexed_3d(engine, &verts, &idx)
     }
 }
@@ -372,5 +271,76 @@ pub(crate) fn vertex3d_attributes() -> Vec<VertexAttributeDesc> {
             format: VertexFormat::Float32x2,
             offset: std::mem::offset_of!(Vertex3d, uv) as u32,
         },
+        VertexAttributeDesc {
+            location: 3,
+            binding: 0,
+            format: VertexFormat::Float32x4,
+            offset: std::mem::offset_of!(Vertex3d, tangent) as u32,
+        },
     ]
+}
+
+/// Compute per-vertex tangents for an indexed triangle list using the
+/// UV-derivative method (surface-gradient tangent frame).
+///
+/// `vertices` must be indexed by `indices` in triangle-list order. The
+/// result is Gram-Schmidt orthogonalised against the vertex normal and the
+/// handedness sign is stored in `tangent.w`.
+///
+/// Call this after building a mesh from positions/normals/UVs whenever
+/// the source format doesn't supply tangents (OBJ, STL, procedural meshes).
+/// GLTF should extract tangents from the `TANGENT` attribute instead.
+pub fn compute_tangents(vertices: &mut Vec<Vertex3d>, indices: &[u32]) {
+    let n = vertices.len();
+    let mut tan_accum = vec![[0.0f32; 3]; n]; // sum of tangent contributions
+    let mut bitan_accum = vec![[0.0f32; 3]; n]; // sum of bitangent contributions
+
+    let tri_count = indices.len() / 3;
+    for t in 0..tri_count {
+        let i0 = indices[t * 3    ] as usize;
+        let i1 = indices[t * 3 + 1] as usize;
+        let i2 = indices[t * 3 + 2] as usize;
+
+        let p0 = glam::Vec3::from_array(vertices[i0].position);
+        let p1 = glam::Vec3::from_array(vertices[i1].position);
+        let p2 = glam::Vec3::from_array(vertices[i2].position);
+
+        let uv0 = glam::Vec2::from_array(vertices[i0].uv);
+        let uv1 = glam::Vec2::from_array(vertices[i1].uv);
+        let uv2 = glam::Vec2::from_array(vertices[i2].uv);
+
+        let dp1 = p1 - p0;
+        let dp2 = p2 - p0;
+        let duv1 = uv1 - uv0;
+        let duv2 = uv2 - uv0;
+
+        let denom = duv1.x * duv2.y - duv2.x * duv1.y;
+        if denom.abs() < 1e-8 {
+            continue;
+        }
+        let r = 1.0 / denom;
+        let tan   = (dp1 * duv2.y - dp2 * duv1.y) * r;
+        let bitan = (dp2 * duv1.x - dp1 * duv2.x) * r;
+
+        for &idx in &[i0, i1, i2] {
+            for j in 0..3 {
+                tan_accum[idx][j]   += tan[j];
+                bitan_accum[idx][j] += bitan[j];
+            }
+        }
+    }
+
+    // Gram-Schmidt orthogonalise and store handedness.
+    for (i, v) in vertices.iter_mut().enumerate() {
+        let n = glam::Vec3::from_array(v.normal);
+        let t = glam::Vec3::from_array(tan_accum[i]);
+        let bt = glam::Vec3::from_array(bitan_accum[i]);
+        if t.length_squared() < 1e-8 {
+            v.tangent = [1.0, 0.0, 0.0, 1.0];
+            continue;
+        }
+        let t_ortho = (t - n * n.dot(t)).normalize();
+        let handedness = if n.cross(t_ortho).dot(bt) < 0.0 { -1.0_f32 } else { 1.0_f32 };
+        v.tangent = [t_ortho.x, t_ortho.y, t_ortho.z, handedness];
+    }
 }

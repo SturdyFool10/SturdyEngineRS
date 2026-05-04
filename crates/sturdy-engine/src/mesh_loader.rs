@@ -11,13 +11,38 @@
 
 use std::path::Path;
 
+use std::sync::Arc;
+
 use crate::{
-    Engine, Mesh, Result,
+    Engine, Image, Mesh, Result,
     MaterialDomain, ShadingModel, UnifiedMaterial, UnifiedMaterialBuilder,
     scene::MaterialDescriptor,
 };
 
 // ── Common types ──────────────────────────────────────────────────────────────
+
+/// GPU textures extracted from a mesh file's material.
+///
+/// All fields are `Option<Arc<Image>>` — a `None` means the source material
+/// had no texture for that channel; the caller should supply a default or
+/// use a constant factor from [`MeshMaterialParams`] instead.
+///
+/// Textures are wrapped in `Arc` so multiple primitives sharing the same
+/// source image (common in GLTF files) can hold a reference without
+/// duplicating GPU memory.
+#[derive(Default)]
+pub struct MeshTextures {
+    /// sRGB base color / albedo map. Multiply by `base_color_factor`.
+    pub base_color: Option<Arc<Image>>,
+    /// ORM or metallic-roughness map. GLTF convention: B = metallic, G = roughness.
+    pub metallic_roughness: Option<Arc<Image>>,
+    /// Tangent-space normal map (OpenGL convention: +Y = up).
+    pub normal: Option<Arc<Image>>,
+    /// Ambient occlusion map (R channel).
+    pub occlusion: Option<Arc<Image>>,
+    /// Linear-HDR emissive map. Multiply by `emissive_factor * emissive_strength`.
+    pub emissive: Option<Arc<Image>>,
+}
 
 /// One rasterizable surface from any mesh file format.
 ///
@@ -42,6 +67,9 @@ pub struct MeshPrimitive {
     pub name: String,
     /// PBR material parameters extracted from the file (or sensible defaults).
     pub material_params: MeshMaterialParams,
+    /// GPU textures extracted from the file's material (may all be `None` for
+    /// formats without texture support or when images failed to load).
+    pub textures: MeshTextures,
 }
 
 /// PBR material parameters that work regardless of source format.
@@ -127,6 +155,7 @@ impl MeshMaterialParams {
             emissive: glam::Vec3::new(e[0] * s, e[1] * s, e[2] * s),
             metallic: self.metallic_factor,
             roughness: self.roughness_factor,
+            has_normal_map: false,
         }
     }
 }

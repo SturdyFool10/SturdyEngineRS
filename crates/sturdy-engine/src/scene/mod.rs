@@ -8,8 +8,8 @@ mod scene;
 
 pub use camera::{CameraId, CameraOutput, SceneCamera};
 pub use material::{
-    MaterialDomain, MaterialInput, RenderState, ShadingModel, UnifiedMaterial,
-    UnifiedMaterialBuilder, gbuffer,
+    MaterialDomain, MaterialExpr, MaterialInput, RenderState, ShadingModel,
+    UnifiedMaterial, UnifiedMaterialBuilder, UvSource, gbuffer,
 };
 pub use object::{InstanceData, MeshId, ObjectId, ObjectKind};
 pub use orbit_camera::OrbitCamera;
