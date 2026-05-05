@@ -141,10 +141,10 @@ Implement a shared Slang module included by all lit variants. Expose `BrdfConfig
 - [x] **Analytic directional light evaluation**: `(diffuse + specular) * light_color * NdotL` — implemented in `deferred_lighting.slang`.
 - [x] **Extract into `brdf.slang`**: GGX NDF, Smith G2, Schlick Fresnel, Lambertian diffuse, `brdf_eval()`, `brdf_point_attenuation()`, `brdf_spot_attenuation()` all in a shared `brdf.slang` module imported by `deferred_lighting.slang`. Forward-lit, shadow, and RT passes include the same module.
 - [x] **Point and spot light evaluation**: `PointLight` + `SpotLight` Rust types; `GpuLightData` GPU struct (64 bytes, matches `deferred_lighting.slang`); `scene.point_lights` / `scene.spot_lights` vecs; combined lights buffer uploaded by `prepare_deferred_lighting`; deferred pass iterates all lights via a shader loop; push constants carry `light_count` and `ambient`.
+- [x] **BRDF integration LUT**: 128×128 `RGBA16Float` (NdotV × roughness → R=F_scale, G=F_bias); CPU-computed via Hammersley + GGX importance sampling (512 samples/texel, < 100ms); generated once in `DeferredPass::new()` and bound as `"brdf_lut"` each frame.
+- [x] **IBL split-sum specular**: equirectangular Texture2DArray (`SPECULAR_LAYER_COUNT=8` layers, 128×64 each); layer 0 = roughness 0 (mirror), layer 7 = roughness 1 (diffuse); CPU GGX importance sampling (256 samples/texel); smooth roughness interpolation via manual lerp between adjacent layers in the shader. `EnvironmentMap::from_hdr(engine, path)` builds all resources; `DeferredPass::set_environment_map(env)` activates IBL; `ibl_strength` push constant allows fade-in.
+- [x] **IBL diffuse irradiance**: SH9 (L0+L1+L2 spherical harmonics, 9 float3 coefficients) computed from equirectangular pixels; GPU `StructuredBuffer<float4>` bound as `"sh9_irradiance"`; evaluated in `deferred_lighting.slang` via `eval_sh9(N, sh9_irradiance)`.
 - [ ] **Multi-scattering energy compensation**: Turquin 2019 fit via precomputed BRDF LUT; expose `BrdfConfig::multi_scatter: bool` (default true).
-- [ ] **BRDF integration LUT**: precompute 128×128 `RG16Float` (NdotV, roughness) → (scale, bias); ship as engine asset.
-- [ ] **IBL split-sum specular**: prefiltered env cubemap sample; expose `BrdfConfig::ibl_specular_mip_count` and `BrdfConfig::ibl_max_roughness`.
-- [ ] **IBL diffuse irradiance**: SH9 or irradiance cubemap; expose `BrdfConfig::ibl_diffuse_mode`.
 
 ### 6d — Deferred G-Buffer pipeline
 
@@ -195,9 +195,9 @@ Expose `ShadowConfig` — defaults give a single directional shadow map with 3×
 
 ### 6h — Environment and IBL authoring
 
-- [ ] Add `EnvironmentMap` asset: load HDR equirectangular (`.hdr`, `.exr`) → convert to cubemap → prefilter for specular (per-roughness mip chain using GGX importance sampling) → compute irradiance cubemap.
+- [x] Add `EnvironmentMap` asset: `EnvironmentMap::from_hdr(engine, path)` loads HDR equirectangular (`.hdr`, `.exr`) via the `image` crate; computes SH9 diffuse + GGX prefiltered specular Texture2DArray on the CPU; uploads all GPU resources in a single blocking frame. `DeferredPass::set_environment_map(env)` activates IBL; `clear_environment_map()` reverts to flat ambient.
 - [ ] Ship one default environment map as an engine asset so PBR materials look reasonable out of the box.
-- [ ] Add runtime environment map switching with smooth blend transition.
+- [ ] Add runtime environment map switching with smooth blend transition (blend two EnvironmentMaps by alpha over N frames).
 - [ ] Add sky atmosphere model (Rayleigh + Mie scattering) as a procedural environment source for outdoor scenes; capture to cubemap each frame or when sun direction changes.
 
 ---

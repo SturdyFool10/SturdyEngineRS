@@ -28,6 +28,7 @@ use crate::{
     MeshProgramDesc, MeshVertexKind, RenderFrame, Result, ShaderDesc, ShaderProgram, ShaderSource,
     ShaderStage, push_constants, scene::Scene,
     shadow_pass::{ShadowPass, ShadowConfig},
+    environment_map::{EnvironmentMap, compute_brdf_lut, SPECULAR_LAYER_COUNT},
 };
 use crate::scene::CameraConstants;
 use sturdy_engine_core::Extent3d;
@@ -42,12 +43,14 @@ fn engine_shader(name: &str) -> PathBuf {
 /// Must match `DeferredLightingConstants` in the shader exactly.
 #[push_constants]
 struct DeferredLightingConstants {
-    camera_world_pos: [f32; 4],    // xyz = camera pos, w unused
-    ambient: [f32; 3],             // constant ambient colour (IBL replaces this in Track 6c)
+    camera_world_pos: [f32; 4],     // xyz = camera pos, w unused
+    ambient: [f32; 3],              // flat ambient (used when ibl_strength == 0)
     light_count: u32,
     light_view_proj: [[f32; 4]; 4], // directional light MVP for shadow coords
     shadow_bias: f32,
-    _pad: [f32; 3],
+    ibl_strength: f32,              // 0 = disabled, 1 = full IBL
+    ibl_max_layer: f32,             // SPECULAR_LAYER_COUNT - 1
+    _pad: f32,
 }
 
 /// Deferred rendering component with GGX PBR, per-material shader variants,
@@ -80,11 +83,19 @@ pub struct DeferredPass {
     default_gbuffer_program: MeshProgram,
     lighting_program: ShaderProgram,
     shadow: ShadowPass,
-    /// 1×1 flat tangent-space normal texture ([0.5, 0.5, 1.0, 1.0]).
-    /// Bound as the default `"normal_map"` for meshes without a normal map.
+    /// 1×1 flat tangent-space normal (bound as default `"normal_map"`).
     flat_normal_map: crate::Image,
     /// Cache of compiled G-Buffer shader variants, keyed by material content hash.
     variant_cache: HashMap<u64, MeshProgram>,
+    /// Precomputed BRDF integration LUT (128×128 RGBA16Float, R=scale G=bias).
+    /// Always bound as `"brdf_lut"` to the deferred lighting pass.
+    brdf_lut: crate::Image,
+    /// Optional image-based lighting environment.
+    environment_map: Option<EnvironmentMap>,
+    /// 1×1 black fallback for `"env_specular"` when no env map is set.
+    black_env: crate::Image,
+    /// 9-element zero SH9 buffer fallback for `"sh9_irradiance"`.
+    zero_sh9: crate::Buffer,
 }
 
 impl DeferredPass {
@@ -109,22 +120,69 @@ impl DeferredPass {
         )?;
         let lighting_program = engine.load_shader(engine_shader("deferred_lighting.slang"))?;
         let shadow = ShadowPass::with_config(engine, shadow_config)?;
-        // 1×1 flat normal: [128, 128, 255, 255] = tangent-space (0,0,1) = no perturbation.
+
         let flat_normal_map = engine.generate_texture_2d("flat_normal_map", 1, 1, |_, _| {
             [128, 128, 255, 255]
         })?;
+
+        // Precompute the BRDF integration LUT once at init (~50ms on CPU).
+        let brdf_lut = compute_brdf_lut(engine)?;
+
+        // 1×1 black fallback for the specular env (used when no EnvironmentMap is set).
+        // Declared as a 1-layer 2D array so the shader's Texture2DArray binding is satisfied.
+        let black_env = engine.create_image(crate::ImageDesc {
+            dimension: crate::ImageDimension::D2,
+            extent: sturdy_engine_core::Extent3d { width: 1, height: 1, depth: 1 },
+            mip_levels: 1,
+            layers: SPECULAR_LAYER_COUNT as u16,
+            samples: 1,
+            format: crate::Format::Rgba16Float,
+            usage: crate::ImageUsage::SAMPLED | crate::ImageUsage::COPY_DST,
+            transient: false,
+            clear_value: None,
+            debug_name: Some("black_env"),
+        })?;
+
+        // Zero SH9 fallback buffer (9 × float4 = 144 bytes, all zeros).
+        let zero_sh9 = engine.create_buffer(crate::BufferDesc {
+            size: 9 * 16,
+            usage: crate::BufferUsage::STORAGE | crate::BufferUsage::COPY_DST,
+        })?;
+        zero_sh9.write(0, &vec![0u8; 9 * 16])?;
+
         Ok(Self {
             default_gbuffer_program,
             lighting_program,
             shadow,
             flat_normal_map,
             variant_cache: HashMap::new(),
+            brdf_lut,
+            environment_map: None,
+            black_env,
+            zero_sh9,
         })
     }
 
     /// Expose the shadow configuration for live tuning.
     pub fn shadow_config_mut(&mut self) -> &mut ShadowConfig {
         &mut self.shadow.config
+    }
+
+    /// Attach an environment map for image-based lighting.
+    ///
+    /// Enables split-sum specular reflections and SH9 diffuse irradiance.
+    /// Call once at init after loading the HDR:
+    /// ```ignore
+    /// let env = EnvironmentMap::from_hdr(&engine, "assets/outdoor.hdr")?;
+    /// deferred.set_environment_map(env);
+    /// ```
+    pub fn set_environment_map(&mut self, env: EnvironmentMap) {
+        self.environment_map = Some(env);
+    }
+
+    /// Remove the current environment map (reverts to flat ambient lighting).
+    pub fn clear_environment_map(&mut self) {
+        self.environment_map = None;
     }
 
     /// Execute the full deferred frame into `output`.
@@ -284,7 +342,19 @@ impl DeferredPass {
         g3.register_as("gbuffer_world_pos");
         // shadow_map is already registered by ShadowPass::draw()
 
-        // ── 7. Deferred lighting fullscreen pass → output ─────────────────────
+        // ── 7. Bind IBL resources and run deferred lighting ───────────────────
+        frame.bind_image("brdf_lut", &self.brdf_lut);
+
+        let (ibl_strength, ibl_max_layer) = if let Some(env) = &self.environment_map {
+            frame.bind_image("env_specular",   &env.specular);
+            frame.bind_buffer("sh9_irradiance", &env.sh9_buffer);
+            (1.0f32, (SPECULAR_LAYER_COUNT - 1) as f32)
+        } else {
+            frame.bind_image("env_specular",   &self.black_env);
+            frame.bind_buffer("sh9_irradiance", &self.zero_sh9);
+            (0.0f32, (SPECULAR_LAYER_COUNT - 1) as f32)
+        };
+
         let dl = &scene.directional_light;
         output.execute_shader_with_constants_auto(
             &self.lighting_program,
@@ -294,7 +364,9 @@ impl DeferredPass {
                 light_count: scene.deferred_light_count(),
                 light_view_proj: shadow_out.light_view_proj.to_cols_array_2d(),
                 shadow_bias: shadow_out.depth_bias,
-                _pad: [0.0; 3],
+                ibl_strength,
+                ibl_max_layer,
+                _pad: 0.0,
             },
         )?;
 

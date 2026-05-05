@@ -8,6 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+mod environment_map;
 mod game_shell;
 mod asset_loader;
 mod gltf_loader;
@@ -83,6 +84,7 @@ pub use clay_ui::{
 };
 pub use compute_program::ComputeProgram;
 pub use deferred_pass::DeferredPass;
+pub use environment_map::EnvironmentMap;
 pub use shadow_pass::{ShadowConfig, ShadowOutput, ShadowPass};
 pub use debug_draw_2d::{DebugDraw2d, DebugDrawStyle};
 pub use debug_overlay::{
