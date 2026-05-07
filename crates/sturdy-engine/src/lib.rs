@@ -9,6 +9,8 @@ use std::{
 };
 
 mod environment_map;
+mod light_bvh;
+mod oit_pass;
 mod game_shell;
 mod asset_loader;
 mod gltf_loader;
@@ -85,7 +87,12 @@ pub use clay_ui::{
 pub use compute_program::ComputeProgram;
 pub use deferred_pass::DeferredPass;
 pub use environment_map::EnvironmentMap;
-pub use shadow_pass::{ShadowConfig, ShadowOutput, ShadowPass};
+pub use light_bvh::{GpuBvhNode, LightBvhBuilder, LEAF_FLAG, BVH_EMPTY};
+pub use oit_pass::{OitConfig, OitPass};
+pub use shadow_pass::{
+    CsmConfig, CsmOutput, CsmPass, GpuCsmData, MAX_CASCADES,
+    ShadowConfig, ShadowOutput, ShadowPass,
+};
 pub use debug_draw_2d::{DebugDraw2d, DebugDrawStyle};
 pub use debug_overlay::{
     DebugHitRegion, DebugOverlay, DebugOverlayAntialiasing, DebugOverlayConfig,
@@ -135,7 +142,7 @@ pub use scene::{
     UnifiedMaterial, UnifiedMaterialBuilder, UvSource, gbuffer,
 };
 pub use screenshot::{ScreenshotCapture, ScreenshotExportReport};
-pub use shader_watcher::ShaderWatcher;
+pub use shader_watcher::{Reloadable, ShaderReloadDiagnostic, ShaderWatcher};
 pub use text_draw::{
     TextAtlasContentMode, TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput,
     TextPlacement, TextRenderer, TextScene, TextSceneQuad, TextTypography,

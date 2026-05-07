@@ -1,24 +1,24 @@
-// Directional shadow map pass.
+// Directional shadow map pass — single cascade (ShadowPass) and
+// cascaded shadow maps (CsmPass).
 //
-// Renders all opaque scene meshes into a depth-only texture from the
-// directional light's point of view. The resulting shadow map is sampled
-// in `deferred_lighting.slang` with a 3×3 PCF kernel.
+// CsmPass is the recommended path. It divides the camera frustum into N slices,
+// fits a tight orthographic projection to each slice, and renders N depth-only
+// passes. The resulting N shadow maps are sampled in `deferred_lighting.slang`
+// with cascade selection based on view-space depth and PCF blending at borders.
 //
-// Shadow map resolution: 2048×2048 by default (overridable via `ShadowConfig`).
-//
-// Light frustum: orthographic box. The default bounds (±`half_size` world units,
-// depth range [near, far]) cover a typical game scene centred at the world
-// origin. For tight fitting to the camera frustum use CSM (Track 6e follow-up).
+// ShadowPass remains for lightweight use-cases where a single fixed-box shadow
+// is acceptable (shader playground, minimal scenes, etc.).
 //
 // Roadmap: Track 6e — Shadow system.
 
 use std::path::PathBuf;
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 
 use crate::{
-    Engine, Format, GraphImage, ImageDesc, ImageDimension, ImageUsage, MeshProgram, MeshProgramDesc,
-    MeshVertexKind, RenderFrame, Result, ShaderDesc, ShaderSource, ShaderStage, push_constants,
+    Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, ImageDesc, ImageDimension,
+    ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind, RenderFrame, Result, ShaderDesc,
+    ShaderSource, ShaderStage, push_constants,
     scene::Scene,
 };
 use sturdy_engine_core::Extent3d;
@@ -29,10 +29,17 @@ fn engine_shader(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Configuration for the directional shadow map.
-///
-/// `ShadowConfig::default()` gives a 2048×2048 map covering a 100×100 unit
-/// world-space area — correct for medium-scale outdoor scenes.
+// ── Shared depth push constants ───────────────────────────────────────────────
+
+/// Push constants for `shadow_depth.slang`. Same for both ShadowPass and CsmPass.
+#[push_constants]
+struct ShadowDepthConstants {
+    light_view_proj: [[f32; 4]; 4],
+}
+
+// ── ShadowPass (single fixed-box cascade) ─────────────────────────────────────
+
+/// Configuration for the single-cascade directional shadow map.
 #[derive(Clone, Debug)]
 pub struct ShadowConfig {
     /// Shadow map resolution (square). Default 2048.
@@ -49,46 +56,18 @@ pub struct ShadowConfig {
 
 impl Default for ShadowConfig {
     fn default() -> Self {
-        Self {
-            resolution: 2048,
-            half_size: 50.0,
-            near: 1.0,
-            far: 200.0,
-            depth_bias: 0.005,
-        }
+        Self { resolution: 2048, half_size: 50.0, near: 1.0, far: 200.0, depth_bias: 0.005 }
     }
 }
 
-/// Push constants for `shadow_depth.slang`.
-#[push_constants]
-struct ShadowDepthConstants {
-    light_view_proj: [[f32; 4]; 4],
-}
-
-/// Output of a shadow pass — the shadow map image and the light matrix.
+/// Output of a single-cascade shadow pass.
 pub struct ShadowOutput {
-    /// The shadow depth image registered as `"shadow_map"` in the frame.
     pub image: GraphImage,
-    /// Combined light view-projection matrix. Pass to the deferred lighting push constants.
     pub light_view_proj: Mat4,
-    /// Depth bias configured for this pass.
     pub depth_bias: f32,
 }
 
-/// Directional shadow map component.
-///
-/// Creates the shadow MeshProgram once at init. Call `draw()` each frame
-/// before `DeferredPass::draw()` to get a `ShadowOutput`.
-///
-/// # Usage
-/// ```ignore
-/// // At init:
-/// let shadow = ShadowPass::new(&engine)?;
-///
-/// // Each frame (call before DeferredPass::draw):
-/// let shadow_out = shadow.draw(&mut scene, &frame, &engine)?;
-/// // shadow_out is used by DeferredPass to bind the shadow map.
-/// ```
+/// Single fixed-box directional shadow map. Use `CsmPass` for better quality.
 pub struct ShadowPass {
     depth_program: MeshProgram,
     pub config: ShadowConfig,
@@ -100,36 +79,11 @@ impl ShadowPass {
     }
 
     pub fn with_config(engine: &Engine, config: ShadowConfig) -> Result<Self> {
-        let depth_program = MeshProgram::new(
-            engine,
-            MeshProgramDesc {
-                fragment: ShaderDesc {
-                    // Depth-only passes don't need a fragment shader — the vertex
-                    // shader alone writes depth. Use an empty inline fragment.
-                    source: ShaderSource::Inline("float4 main() : SV_TARGET { return float4(0,0,0,0); }".into()),
-                    entry_point: "main".to_owned(),
-                    stage: ShaderStage::Fragment,
-                },
-                vertex: Some(ShaderDesc {
-                    source: ShaderSource::File(engine_shader("shadow_depth.slang")),
-                    entry_point: "main".to_owned(),
-                    stage: ShaderStage::Vertex,
-                }),
-                vertex_kind: MeshVertexKind::V3d,
-                alpha_blend: false,
-                uses_depth: true,
-            },
-        )?;
+        let depth_program = build_depth_program(engine)?;
         Ok(Self { depth_program, config })
     }
 
-    /// Compute the light view-projection matrix from the scene's directional light.
-    ///
-    /// The light "looks at" the world origin from a point along the reverse
-    /// of the light direction, using a fixed orthographic frustum. CSM with
-    /// tight frustum fitting is a Track 6e follow-up.
     pub fn light_matrix(&self, light_direction: Vec3) -> Mat4 {
-        // Stable up vector: avoid degenerate case when light points straight down.
         let up = if light_direction.y.abs() < 0.99 { Vec3::Y } else { Vec3::Z };
         let eye = -(light_direction.normalize()) * (self.config.far * 0.5);
         let view = Mat4::look_at_rh(eye, Vec3::ZERO, up);
@@ -138,63 +92,381 @@ impl ShadowPass {
         proj * view
     }
 
-    /// Render all opaque scene objects into the shadow depth map.
-    ///
-    /// Returns a `ShadowOutput` containing the shadow image (registered as
-    /// `"shadow_map"` in the frame) and the light matrix to pass to the
-    /// deferred lighting pass.
-    pub fn draw(
-        &self,
-        scene: &Scene,
-        frame: &RenderFrame,
-        _engine: &Engine,
-    ) -> Result<ShadowOutput> {
+    pub fn draw(&self, scene: &Scene, frame: &RenderFrame, _engine: &Engine) -> Result<ShadowOutput> {
         let res = self.config.resolution;
-        let shadow_desc = ImageDesc {
-            dimension: ImageDimension::D2,
-            extent: Extent3d { width: res, height: res, depth: 1 },
-            mip_levels: 1,
-            layers: 1,
-            samples: 1,
-            format: Format::Depth32Float,
-            usage: ImageUsage::DEPTH_STENCIL | ImageUsage::SAMPLED,
-            transient: false,
-            clear_value: None,
-            debug_name: Some("shadow_map"),
-        };
-        let shadow_image = frame.image("shadow_map", shadow_desc)?;
-
+        let desc = shadow_image_desc(res, "shadow_map");
+        let shadow_image = frame.image("shadow_map", desc)?;
         let light_view_proj = self.light_matrix(scene.directional_light.direction);
-        let constants = ShadowDepthConstants {
-            light_view_proj: light_view_proj.to_cols_array_2d(),
-        };
+        draw_shadow_batches(scene, frame, &shadow_image, &self.depth_program, light_view_proj)?;
+        shadow_image.register_as("shadow_map");
+        Ok(ShadowOutput { image: shadow_image, light_view_proj, depth_bias: self.config.depth_bias })
+    }
+}
 
-        // Draw all opaque batches into the shadow depth map.
-        for (mesh_idx, instance_buf_opt, instance_count) in scene.drawable_batches() {
-            let instance_buf = match instance_buf_opt {
-                Some(b) => b,
-                None => continue,
-            };
-            if instance_count == 0 {
-                continue;
-            }
-            let mesh = scene.mesh_at(mesh_idx);
-            frame.bind_buffer("instances", instance_buf);
-            shadow_image.draw_mesh_depth_only_with_push_constants(
-                mesh,
-                &self.depth_program,
-                instance_buf,
-                instance_count,
-                &constants,
-            )?;
+// ── CsmPass (N-cascade tight frustum-fitted shadows) ─────────────────────────
+
+/// Configuration for cascaded shadow maps.
+///
+/// `CsmConfig::default()` gives 4 cascades at 2048×2048 — suitable for
+/// medium to large outdoor scenes. All fields are `pub` and documented with
+/// valid ranges so IDE users can discover every dial.
+#[derive(Clone, Debug)]
+pub struct CsmConfig {
+    /// Number of shadow cascades. \[1, 4\]. Default 4.
+    ///
+    /// More cascades → smoother depth transitions, more GPU cost.
+    pub cascade_count: u32,
+    /// Shadow map resolution (square, same for all cascades). Default 2048.
+    pub resolution: u32,
+    /// Constant depth bias against self-shadowing. \[0.0, 0.05\]. Default 0.003.
+    pub depth_bias: f32,
+    /// Mix between uniform (0.0) and logarithmic (1.0) cascade partitioning.
+    /// Higher values push more cascades close to the camera for sharper near
+    /// shadows. \[0.0, 1.0\]. Default 0.75.
+    pub lambda: f32,
+    /// Fraction of each cascade's depth range used for blending with the next
+    /// cascade. Eliminates the hard visual seam at cascade boundaries.
+    /// \[0.0, 0.5\]. Default 0.15.
+    pub blend_range: f32,
+    /// Snap the shadow projection center to texel-aligned increments each frame,
+    /// preventing shadow shimmer as the camera moves. Default true.
+    pub stabilise: bool,
+    /// Light-space Z range extension beyond the fitted frustum corners.
+    /// Catches tall geometry (trees, buildings) behind the camera that still
+    /// casts shadows into the scene. Default 50.0.
+    pub z_extension: f32,
+}
+
+impl Default for CsmConfig {
+    fn default() -> Self {
+        Self {
+            cascade_count: 4,
+            resolution: 2048,
+            depth_bias: 0.003,
+            lambda: 0.75,
+            blend_range: 0.15,
+            stabilise: true,
+            z_extension: 50.0,
+        }
+    }
+}
+
+/// Maximum number of cascades the shader supports.
+pub const MAX_CASCADES: usize = 4;
+
+/// GPU-layout CSM frame data written to a `StructuredBuffer<GpuCsmData>`.
+/// Matches the Slang `GpuCsmData` struct in `deferred_lighting.slang` exactly.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuCsmData {
+    /// Per-cascade light view-projection matrices (up to 4). Unused slots are
+    /// copies of the last valid cascade.
+    pub matrices: [[[f32; 4]; 4]; MAX_CASCADES],   // 256 bytes
+    /// View-space (linear) distances where each cascade begins.
+    /// cascade 0 starts at near. Index 0..cascade_count-1 are meaningful.
+    pub split_distances: [f32; MAX_CASCADES],        // 16 bytes
+    /// Number of active cascades (≤ MAX_CASCADES).
+    pub cascade_count: u32,                          // 4 bytes
+    /// Constant depth bias applied in the PCF comparison.
+    pub depth_bias: f32,                             // 4 bytes
+    /// Fraction of each cascade range used for blending with the next.
+    pub blend_range: f32,                            // 4 bytes
+    pub _pad: f32,                                   // 4 bytes
+    // Total: 288 bytes
+}
+
+/// Per-frame output of `CsmPass::draw`.
+pub struct CsmOutput {
+    /// Shadow depth images for cascades 0–3. Indices ≥ cascade_count duplicate the last valid image.
+    pub images: [GraphImage; MAX_CASCADES],
+    /// Packed GPU data ready to write into the `csm_data` StructuredBuffer.
+    pub gpu_data: GpuCsmData,
+}
+
+/// Directional cascaded shadow map pass.
+///
+/// Replaces `ShadowPass` inside `DeferredPass`. Tightly fits each cascade's
+/// orthographic projection to its camera sub-frustum, eliminating the wasted
+/// resolution of the fixed-box approach.
+///
+/// # Usage
+/// ```ignore
+/// let csm = CsmPass::new(&engine)?;
+/// // Each frame — called internally by DeferredPass:
+/// let out = csm.draw(&scene, view, proj, near, far, &frame)?;
+/// ```
+pub struct CsmPass {
+    depth_program: MeshProgram,
+    pub config: CsmConfig,
+    /// Persistent GPU buffer for `GpuCsmData` (reused every frame).
+    pub csm_buffer: Buffer,
+}
+
+impl CsmPass {
+    pub fn new(engine: &Engine) -> Result<Self> {
+        Self::with_config(engine, CsmConfig::default())
+    }
+
+    pub fn with_config(engine: &Engine, config: CsmConfig) -> Result<Self> {
+        let depth_program = build_depth_program(engine)?;
+        let csm_buffer = engine.create_buffer(BufferDesc {
+            size: std::mem::size_of::<GpuCsmData>() as u64,
+            usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+        })?;
+        Ok(Self { depth_program, config, csm_buffer })
+    }
+
+    /// Render all cascade shadow maps and return the output.
+    ///
+    /// `view` and `proj` are the camera matrices for this frame. `near`/`far`
+    /// are the camera's clip planes — used for cascade partitioning.
+    pub fn draw(
+        &mut self,
+        scene: &Scene,
+        view: Mat4,
+        proj: Mat4,
+        near: f32,
+        far: f32,
+        frame: &RenderFrame,
+    ) -> Result<CsmOutput> {
+        let n = (self.config.cascade_count as usize).clamp(1, MAX_CASCADES);
+        let light_dir = scene.directional_light.direction.normalize();
+        let splits = compute_cascade_splits(near, far, n, self.config.lambda);
+        let res = self.config.resolution;
+
+        // Build cascade matrices from tight frustum fitting.
+        let mut matrices = [Mat4::IDENTITY; MAX_CASCADES];
+        for i in 0..n {
+            matrices[i] = cascade_light_matrix(
+                view, proj, near, far,
+                splits[i], splits[i + 1],
+                light_dir,
+                res,
+                self.config.z_extension,
+                self.config.stabilise,
+            );
+        }
+        // Fill unused cascade slots with the last valid cascade.
+        for i in n..MAX_CASCADES {
+            matrices[i] = matrices[n - 1];
         }
 
-        shadow_image.register_as("shadow_map");
+        // Allocate shadow map images (one per cascade; extras reuse last).
+        let mut images: [Option<GraphImage>; MAX_CASCADES] = [None, None, None, None];
+        for i in 0..n {
+            let name = format!("shadow_map_{i}");
+            let desc = shadow_image_desc(res, Box::leak(name.clone().into_boxed_str()));
+            let img = frame.image(&name, desc)?;
+            draw_shadow_batches(scene, frame, &img, &self.depth_program, matrices[i])?;
+            img.register_as(&name);
+            images[i] = Some(img);
+        }
+        // Clone last valid image for unused slots so the frame registry sees them.
+        let last_name = format!("shadow_map_{}", n - 1);
+        for i in n..MAX_CASCADES {
+            let name = format!("shadow_map_{i}");
+            frame.find_image_by_name(&last_name).map(|img| img.register_as(&name));
+        }
 
-        Ok(ShadowOutput {
-            image: shadow_image,
-            light_view_proj,
+        // Pack split distances (view-space linear depth of each cascade start).
+        let mut split_dists = [0.0f32; MAX_CASCADES];
+        for i in 0..MAX_CASCADES {
+            split_dists[i] = splits[i.min(n)];
+        }
+
+        let gpu_data = GpuCsmData {
+            matrices: matrices.map(|m| m.to_cols_array_2d()),
+            split_distances: split_dists,
+            cascade_count: n as u32,
             depth_bias: self.config.depth_bias,
-        })
+            blend_range: self.config.blend_range,
+            _pad: 0.0,
+        };
+
+        // Upload to the persistent GPU buffer.
+        self.csm_buffer.write(0, bytemuck::bytes_of(&gpu_data))?;
+
+        // Unwrap images — cascade 0 is always present.
+        let images = [
+            images[0].take().unwrap(),
+            images[1].take().unwrap_or_else(|| frame.find_image_by_name("shadow_map_0").unwrap()),
+            images[2].take().unwrap_or_else(|| frame.find_image_by_name("shadow_map_0").unwrap()),
+            images[3].take().unwrap_or_else(|| frame.find_image_by_name("shadow_map_0").unwrap()),
+        ];
+
+        Ok(CsmOutput { images, gpu_data })
     }
+}
+
+// ── Cascade math ──────────────────────────────────────────────────────────────
+
+/// Compute N+1 view-space linear split depths for N cascades.
+/// Uses a mix of uniform and logarithmic partitioning controlled by `lambda`.
+fn compute_cascade_splits(near: f32, far: f32, n: usize, lambda: f32) -> Vec<f32> {
+    let mut splits = vec![0.0f32; n + 1];
+    splits[0] = near;
+    splits[n] = far;
+    for i in 1..n {
+        let t = i as f32 / n as f32;
+        let log = near * f32::powf(far / near, t);
+        let uniform = near + (far - near) * t;
+        splits[i] = lambda * log + (1.0 - lambda) * uniform;
+    }
+    splits
+}
+
+/// Convert view-space depth d (positive, distance from camera) to NDC Z using the projection matrix.
+fn view_depth_to_ndc_z(proj: Mat4, d: f32) -> f32 {
+    // For RH perspective looking down -Z, view_z = -d.
+    // clip_z = proj[2][2] * (-d) + proj[3][2]
+    // clip_w = proj[2][3] * (-d) + proj[3][3]  = -(-d)... wait
+    // Using glam column-major: proj.z_axis is col 2, proj.w_axis is col 3.
+    let a = proj.z_axis.z;   // col2 row2
+    let b = proj.w_axis.z;   // col3 row2
+    let c = proj.z_axis.w;   // col2 row3
+    let e = proj.w_axis.w;   // col3 row3  (= 0 for perspective)
+    let view_z = -d;
+    let clip_z = a * view_z + b;
+    let clip_w = c * view_z + e;
+    if clip_w.abs() < 1e-7 { 0.0 } else { clip_z / clip_w }
+}
+
+/// Compute the 8 world-space corners of the cascade sub-frustum.
+/// `z_near_ndc` and `z_far_ndc` are the NDC Z values for the cascade depth range.
+fn cascade_world_corners(inv_vp: Mat4, z_near_ndc: f32, z_far_ndc: f32) -> [Vec3; 8] {
+    let ndc_pts: [[f32; 4]; 8] = [
+        [-1.0, -1.0, z_near_ndc, 1.0], [ 1.0, -1.0, z_near_ndc, 1.0],
+        [-1.0,  1.0, z_near_ndc, 1.0], [ 1.0,  1.0, z_near_ndc, 1.0],
+        [-1.0, -1.0, z_far_ndc,  1.0], [ 1.0, -1.0, z_far_ndc,  1.0],
+        [-1.0,  1.0, z_far_ndc,  1.0], [ 1.0,  1.0, z_far_ndc,  1.0],
+    ];
+    let mut out = [Vec3::ZERO; 8];
+    for (i, p) in ndc_pts.iter().enumerate() {
+        let h = inv_vp * Vec4::from_array(*p);
+        out[i] = h.truncate() / h.w;
+    }
+    out
+}
+
+/// Build the tight orthographic light-view-proj matrix for one cascade.
+fn cascade_light_matrix(
+    view: Mat4,
+    proj: Mat4,
+    cam_near: f32,
+    cam_far: f32,
+    cascade_near: f32,
+    cascade_far: f32,
+    light_dir: Vec3,
+    resolution: u32,
+    z_extension: f32,
+    stabilise: bool,
+) -> Mat4 {
+    let inv_vp = (proj * view).inverse();
+    let z_near_ndc = view_depth_to_ndc_z(proj, cascade_near.max(cam_near));
+    let z_far_ndc  = view_depth_to_ndc_z(proj, cascade_far.min(cam_far));
+    let corners    = cascade_world_corners(inv_vp, z_near_ndc, z_far_ndc);
+
+    // Build a light-view matrix looking from light direction.
+    let up = if light_dir.y.abs() < 0.99 { Vec3::Y } else { Vec3::Z };
+    let centroid: Vec3 = corners.iter().sum::<Vec3>() / 8.0;
+    let light_view = Mat4::look_at_rh(centroid - light_dir, centroid, up);
+
+    // Compute AABB of frustum corners in light space.
+    let mut min_ls = Vec3::splat(f32::INFINITY);
+    let mut max_ls = Vec3::splat(f32::NEG_INFINITY);
+    for &corner in &corners {
+        let ls = light_view.transform_point3(corner);
+        min_ls = min_ls.min(ls);
+        max_ls = max_ls.max(ls);
+    }
+
+    // Extend Z to catch casters behind the camera frustum (trees, buildings).
+    min_ls.z -= z_extension;
+
+    // Optional: snap center to texel-aligned increments (reduces shimmer).
+    if stabilise {
+        let size_x = max_ls.x - min_ls.x;
+        let size_y = max_ls.y - min_ls.y;
+        let texel_x = size_x / resolution as f32;
+        let texel_y = size_y / resolution as f32;
+        let center_x = ((min_ls.x + max_ls.x) * 0.5 / texel_x).floor() * texel_x;
+        let center_y = ((min_ls.y + max_ls.y) * 0.5 / texel_y).floor() * texel_y;
+        let half_x = size_x * 0.5;
+        let half_y = size_y * 0.5;
+        min_ls.x = center_x - half_x;
+        max_ls.x = center_x + half_x;
+        min_ls.y = center_y - half_y;
+        max_ls.y = center_y + half_y;
+    }
+
+    // Light-space orthographic projection (Z range: min_ls.z → max_ls.z, depth 0..1).
+    let light_proj = Mat4::orthographic_rh(
+        min_ls.x, max_ls.x,
+        min_ls.y, max_ls.y,
+        -max_ls.z, -min_ls.z, // light looks toward -Z; negate to get near/far
+    );
+
+    light_proj * light_view
+}
+
+// ── Shared helpers ────────────────────────────────────────────────────────────
+
+fn build_depth_program(engine: &Engine) -> Result<MeshProgram> {
+    MeshProgram::new(
+        engine,
+        MeshProgramDesc {
+            fragment: ShaderDesc {
+                source: ShaderSource::Inline(
+                    "float4 main() : SV_TARGET { return float4(0,0,0,0); }".into(),
+                ),
+                entry_point: "main".to_owned(),
+                stage: ShaderStage::Fragment,
+            },
+            vertex: Some(ShaderDesc {
+                source: ShaderSource::File(engine_shader("shadow_depth.slang")),
+                entry_point: "main".to_owned(),
+                stage: ShaderStage::Vertex,
+            }),
+            vertex_kind: MeshVertexKind::V3d,
+            alpha_blend: false,
+            uses_depth: true,
+        },
+    )
+}
+
+fn shadow_image_desc(resolution: u32, debug_name: &'static str) -> ImageDesc {
+    ImageDesc {
+        dimension: ImageDimension::D2,
+        extent: Extent3d { width: resolution, height: resolution, depth: 1 },
+        mip_levels: 1,
+        layers: 1,
+        samples: 1,
+        format: Format::Depth32Float,
+        usage: ImageUsage::DEPTH_STENCIL | ImageUsage::SAMPLED,
+        transient: false,
+        clear_value: None,
+        debug_name: Some(debug_name),
+    }
+}
+
+fn draw_shadow_batches(
+    scene: &Scene,
+    frame: &RenderFrame,
+    shadow_image: &GraphImage,
+    program: &MeshProgram,
+    light_view_proj: Mat4,
+) -> Result<()> {
+    let constants = ShadowDepthConstants {
+        light_view_proj: light_view_proj.to_cols_array_2d(),
+    };
+    for (mesh_idx, instance_buf_opt, instance_count) in scene.drawable_batches() {
+        let instance_buf = match instance_buf_opt { Some(b) => b, None => continue };
+        if instance_count == 0 { continue; }
+        let mesh = scene.mesh_at(mesh_idx);
+        frame.bind_buffer("instances", instance_buf);
+        shadow_image.draw_mesh_depth_only_with_push_constants(
+            mesh, program, instance_buf, instance_count, &constants,
+        )?;
+    }
+    Ok(())
 }

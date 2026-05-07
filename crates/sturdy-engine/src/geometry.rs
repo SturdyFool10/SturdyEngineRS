@@ -234,6 +234,15 @@ impl Frustum {
         let p = Vec4::new(sphere.center.x, sphere.center.y, sphere.center.z, 1.0);
         self.planes.iter().all(|plane| plane.dot(p) >= sphere.radius)
     }
+
+    /// Return the six frustum planes as raw `Vec4` values.
+    ///
+    /// Each plane is `(nx, ny, nz, d)` with inward-pointing normals. Pass these
+    /// directly to GPU culling shaders that perform `dot(plane, [pos, 1]) < -radius`
+    /// to test whether a sphere is outside the frustum.
+    pub fn planes_raw(&self) -> &[Vec4; 6] {
+        &self.planes
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

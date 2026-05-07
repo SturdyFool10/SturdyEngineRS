@@ -103,7 +103,7 @@ Everything is created programmatically today. Real projects need to load content
 - [ ] Support GLTF material extensions: KHR_materials_clearcoat, KHR_materials_transmission, KHR_materials_ior, KHR_materials_sheen, KHR_materials_emissive_strength.
 - [x] Add `AssetHandle<T>` with state queries: `is_ready()`, `is_loading()`, `is_degraded()`, `failed_reason()`.
 - [x] Add a placeholder policy: missing/loading textures use a visible checkerboard fallback rather than panicking.
-- [ ] Add shader hot reload for loose `.slang` files: detect change, recompile, keep last-known-good on failure, emit visible diagnostics.
+- [x] Add shader hot reload for loose `.slang` files: `Reloadable` trait on `ShaderProgram` and `ComputeProgram`; `ShaderWatcher::tick(programs)` polls mtime, reloads matching programs, returns `Vec<ShaderReloadDiagnostic>` with success/error per change; last-known-good semantics (failed compile leaves previous pipeline active); `watch_program(program)` auto-registers a program's source path; `ShaderReloadDiagnostic::summary()` for one-line log output.
 - [ ] Add asset hot reload for textures and meshes behind the same handle/state system as the streaming path.
 
 ---
@@ -162,7 +162,7 @@ Implement a shared Slang module included by all lit variants. Expose `BrdfConfig
 - [x] Add `deferred_lighting.slang` — GGX PBR fullscreen deferred pass: reads G0/G1/G2/G3 by name, evaluates one directional light, outputs linear HDR `scene_color`.
 - [x] Feed `scene_color` into the existing post-processing pipeline (bloom → AA → tone mapping) — unchanged.
 - [ ] Reconstruct world position from depth (eliminate the `g3` world-pos attachment; saves 8 bytes/pixel bandwidth). Requires depth texture view support or a `R32Float` depth copy.
-- [ ] Forward tail for `Translucent` and `Decal` materials: sort back-to-front, forward-lit, composited over HDR target after deferred pass.
+- [x] **OIT translucent tail**: Per-Pixel Linked List (PPLL) exact order-independent transparency. `OitPass::new(&engine)?` + `deferred.set_oit(oit)` enables transparent rendering for `MaterialDomain::Translucent` meshes. Collect pass inserts fragments (f16 premultiplied RGBA + depth + next pointer, 16 bytes each) into a per-pixel linked list via lock-free atomic exchange; resolve pass sorts up to 16 layers per pixel with insertion sort and composites back-to-front over the opaque HDR target using Porter-Duff src-over. Pool sized at `width × height × average_layers` (configurable via `OitConfig`). Overflow is graceful (extra fragments discarded). When RT is available, this raster path will be replaced by path-traced transmittance using the same `Translucent` material domain.
 - [ ] Add `RenderPath` enum on `DeferredPass`: `DeferredThenForward` (default), `ForwardOnly` (fallback); selectable at runtime.
 
 ### 6e — Shadow system
@@ -170,7 +170,7 @@ Implement a shared Slang module included by all lit variants. Expose `BrdfConfig
 Expose `ShadowConfig` — defaults give a single directional shadow map with 3×3 PCF; every parameter is tunable.
 
 - [x] **Directional shadow map (single cascade)**: depth-only render pass using `shadow_depth.slang` (vertex-only shader); orthographic light projection; 2048×2048 `Depth32Float`; 3×3 PCF kernel; constant depth bias. `ShadowConfig { resolution: u32, half_size: f32, near: f32, far: f32, depth_bias: f32 }` — all fields public, `Default` gives production-quality results. `ShadowPass` component integrates into `DeferredPass::draw()` transparently. `draw_mesh_depth_only_with_push_constants` added to `GraphImage`; depth-only rendering fixed in the Vulkan backend (`record_draw_pass` no longer requires colour targets).
-- [ ] **Cascaded Shadow Maps (CSM)**: upgrade to N cascades (default 4); per-cascade depth-only pass; tight frustum fitting to the camera view; blend cascades at boundaries. `CsmConfig { cascade_count: u32 [1,8], resolution: u32, pcf_radius: u32, blend_range: f32, depth_bias: f32, slope_bias: f32, stabilise_cascades: bool, lambda: f32 }`.
+- [x] **Cascaded Shadow Maps (CSM)**: `CsmPass` with up to 4 cascades (default 4); tight per-cascade orthographic frustum fitting via inverse VP unproject; log/uniform split blending controlled by `lambda`; optional texel-snap stabilisation to eliminate shimmer; cascade blending at boundaries via `blend_range`; `GpuCsmData` StructuredBuffer replaces the single push-constant matrix; 4 independent `Texture2D` shadow map bindings (`shadow_map_0..3`) selected in `deferred_lighting.slang` based on linear view-distance. `CsmConfig { cascade_count, resolution, depth_bias, lambda, blend_range, stabilise, z_extension }` — all fields public with documented ranges. `DeferredPass::new()` uses CSM by default; `DeferredPass::csm_config_mut()` for live tuning. Camera near/far auto-extracted from the projection matrix.
 - [ ] **Point light shadow maps**: dual-paraboloid or 6-face cube depth map. `PointShadowConfig { resolution: u32, pcf_radius: u32, depth_bias: f32, use_paraboloid: bool }`.
 - [ ] **Spot light shadow maps**: single depth map per spot. `SpotShadowConfig { resolution: u32, pcf_radius: u32, depth_bias: f32 }`.
 - [ ] **Shadow map atlas**: pack all shadow maps into a single atlas; expose `ShadowAtlasConfig { atlas_resolution: u32 [1024, 16384], page_size: u32, max_cached_pages: u32 }`.
@@ -179,10 +179,7 @@ Expose `ShadowConfig` — defaults give a single directional shadow map with 3×
 
 ### 6f — Clustered light assignment
 
-- [ ] Build a 3D frustum cluster grid each frame on GPU (compute pass): divide view frustum into tiles × depth slices.
-- [ ] Assign active point/spot lights to clusters by bounding-sphere/cone overlap test on CPU or GPU.
-- [ ] Upload compact light lists per cluster; index from deferred lighting pass and forward lit pass.
-- [ ] Support at least 1024 active point/spot lights in the scene at any time.
+- [x] **BVH-based light culling — O(log N) per pixel, no light count limit**: `LightBvhBuilder` constructs a flat median-split AABB BVH over all point + spot lights (O(N log N) CPU build, rebuilt on light change). `GpuBvhNode` (32 bytes: aabb_min/max + left_or_light/right_or_leaf with `LEAF_FLAG = 0x80000000`) uploaded as `StructuredBuffer<GpuBvhNode>`. In `deferred_lighting.slang`, directional lights are evaluated unconditionally; point/spot lights are found via stack-based BVH DFS (32-entry register stack, handles 2^32 lights). Each fragment traverses the BVH in O(log N) average, only evaluating lights whose AABB contains the fragment. Zero overhead for lights not touching the fragment. `DeferredPass` rebuilds + binds the BVH automatically; `bvh_root = BVH_EMPTY` disables the BVH pass safely when no point/spot lights exist.
 
 ### 6g — Real-time ray tracing integration
 
@@ -256,7 +253,7 @@ The lowest-risk starting point; works on all hardware.
 - [x] CPU frustum culling + indirect draw: `Scene::set_geometry_backend(GeometryBackend::ComputeIndirect)` activates per-frame CPU frustum culling (Gribb-Hartmann `Frustum` from view-proj, `BoundingSphere::from_positions` at mesh creation, `BoundingSphere::transform` per instance); surviving instances write `DrawIndexedIndirectCommand`s to `InstanceBatch::indirect_gpu_buffer`; `draw_mesh_indirect_with_push_constants_and_depth` issues `vkCmdDrawIndexedIndirect`. `GeometryBackend::ClassicVertex` is the unconditional fallback.
 - [x] `BoundingSphere` computed at mesh creation (`new_3d`, `indexed_3d`, `cube`, `plane`, `uv_sphere`); stored as `Mesh::bounding_sphere`.
 - [x] `Frustum::from_view_proj` (Gribb-Hartmann); `Frustum::intersects_sphere`; `Frustum::contains_sphere`.
-- [ ] Move frustum culling to GPU: add `CullingComputePass` Slang shader that reads per-instance bounds from a GPU buffer and writes `DrawIndexedIndirectCommand`s — eliminates the CPU loop and scales to millions of instances.
+- [x] Move frustum culling to GPU: `cull_compute.slang` reads pre-transformed world-space bounding spheres from `instance_bounds` buffer, tests against 6 frustum planes (passed as push constants, 96 bytes), and writes one `DrawIndexedIndirectCommand` per slot — visible instances get `instance_count=1`, invisible get 0 (GPU skips silently, no atomics or readback needed). `Scene::cull_gpu(view_proj, frame, engine)` dispatches one compute pass per batch (64 threads/group) after `scene.prepare()`. `RenderFrame::dispatch_compute_auto` added for buffer-write compute dispatches. `Frustum::planes_raw()` exposes the plane array for GPU upload. Per-batch `bounds_gpu_buffer` updated in `prepare()` with CPU-transformed world spheres; `indirect_gpu_buffer` sized to `total_count` (N slots). Draw path selects draw_count = total_count (GPU mode) or visible_count (CPU mode) based on `gpu_cull_active` flag.
 - [ ] Add `HizPass`: compute shader building a mip pyramid from the previous frame's depth buffer; feed into the culling shader for occlusion rejection.
 
 ### 7d — Mesh shader path

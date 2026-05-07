@@ -919,6 +919,100 @@ impl RenderFrame {
         self
     }
 
+    /// Dispatch a compute shader that reads and writes GPU buffers (no image target).
+    ///
+    /// All `StructuredBuffer` and `RWStructuredBuffer` bindings are resolved by name
+    /// from the frame's `bind_buffer()` registry. Bind all needed buffers before calling:
+    ///
+    /// ```ignore
+    /// frame.bind_buffer("instance_bounds",   &bounds_buf);
+    /// frame.bind_buffer("indirect_commands", &indirect_buf);
+    /// frame.dispatch_compute_auto("cull", &cull_program, &constants, [groups, 1, 1])?;
+    /// ```
+    pub fn dispatch_compute_auto<T: bytemuck::Pod>(
+        &self,
+        name: impl Into<String>,
+        program: &ComputeProgram,
+        constants: &T,
+        groups: [u32; 3],
+    ) -> Result<()> {
+        let stages = reflected_push_constant_stages(
+            program.reflection(),
+            StageMask::COMPUTE,
+        );
+        let push = Some(PushConstants {
+            offset: 0,
+            stages,
+            bytes: bytemuck::bytes_of(constants).to_vec(),
+        });
+
+        let mut inner = self.inner.borrow_mut();
+        let declaration_index = inner.declaration_index;
+        inner.declaration_index = inner.declaration_index.saturating_add(1);
+
+        // Snapshot eager buffer bindings from the current frame registry.
+        let buf_read_names  = reflected_buffer_read_names(program.reflection());
+        let buf_write_names = reflected_buffer_write_names(program.reflection());
+
+        let mut eager_buffers: HashMap<String, (core::BufferHandle, core::BufferDesc)> = HashMap::new();
+        for n in buf_read_names.iter().chain(buf_write_names.iter()) {
+            if let Some(&(handle, desc)) = inner.buffers_by_name.get(n.as_str()) {
+                eager_buffers.insert(n.clone(), (handle, desc));
+                inner.frame.inner.graph_mut(|g| g.import_buffer(handle, desc))?;
+            }
+        }
+
+        let pass_name = format!("{declaration_index:04}-compute-{}", name.into());
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                name: pass_name.clone(),
+                queue: crate::QueueType::Compute,
+                shader: Some(program.shader.handle()),
+                pipeline: Some(program.pipeline.handle()),
+                bind_groups: Vec::new(),
+                push_constants: push,
+                work: PassWork::Dispatch(DispatchDesc {
+                    x: groups[0],
+                    y: groups[1],
+                    z: groups[2],
+                }),
+                reads: Vec::new(),
+                writes: Vec::new(),
+                buffer_reads: buf_read_names.iter().filter_map(|n| {
+                    eager_buffers.get(n).map(|&(handle, desc)| crate::BufferUse {
+                        buffer: handle,
+                        access: Access::Read,
+                        state: RgState::ShaderRead,
+                        offset: 0,
+                        size: desc.size,
+                    })
+                }).collect(),
+                buffer_writes: buf_write_names.iter().filter_map(|n| {
+                    eager_buffers.get(n).map(|&(handle, desc)| crate::BufferUse {
+                        buffer: handle,
+                        access: Access::Write,
+                        state: RgState::ShaderWrite,
+                        offset: 0,
+                        size: desc.size,
+                    })
+                }).collect(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            },
+            deferred: Some(DeferredPassResolve {
+                layout_handle: program.pipeline_layout.handle(),
+                reflection: program.reflection().clone(),
+                eager_bindings: HashMap::new(),
+                eager_samplers: HashMap::new(),
+                eager_buffers,
+                unresolved_read_names: Vec::new(),
+                skip_name: String::new(),
+                storage_output: None,
+            }),
+        });
+        Ok(())
+    }
+
     /// Start a reflected shader pass intent.
     ///
     /// The intent builder records a fullscreen or compute pass while deriving

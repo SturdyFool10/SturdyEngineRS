@@ -7,7 +7,7 @@ use super::{
     object::{InstanceData, MeshId, ObjectId, ObjectKind, SceneObject},
 };
 use crate::{
-    Buffer, BufferDesc, BufferUsage, DrawIndexedIndirectCommand, Engine, Error,
+    Buffer, BufferDesc, BufferUsage, ComputeProgram, DrawIndexedIndirectCommand, Engine, Error,
     Format, Frustum, GeometryBackend, GraphImage, ImageDesc, ImageDimension, ImageUsage, Mesh,
     MeshProgram, RenderFrame, Result, push_constants,
 };
@@ -343,14 +343,12 @@ pub struct Scene {
     light_buffer: Option<Buffer>,
     /// GPU-resident array of [`GpuLightData`] for the deferred lighting pass.
     pub(crate) deferred_lights_buffer: Option<Buffer>,
-    /// Geometry front-end used for draw submission.
-    ///
-    /// - `ClassicVertex` (default): one `DrawDesc` per batch, no culling.
-    /// - `ComputeIndirect`: CPU frustum cull each frame, emit
-    ///   `DrawIndexedIndirectCommand`s, submit with `DrawIndirect`.
-    ///
-    /// Falls back to `ClassicVertex` if the indirect buffer is not ready.
     geometry_backend: GeometryBackend,
+    /// Lazily created GPU frustum culling compute program.
+    culling_program: Option<ComputeProgram>,
+    /// Set by `cull_gpu()` each frame; tells the draw path to use `total_count`
+    /// rather than `indirect_commands.len()` as the indirect draw count.
+    gpu_cull_active: bool,
 }
 
 impl Scene {
@@ -368,6 +366,8 @@ impl Scene {
             light_buffer: None,
             deferred_lights_buffer: None,
             geometry_backend: GeometryBackend::ClassicVertex,
+            culling_program: None,
+            gpu_cull_active: false,
         }
     }
 
@@ -387,6 +387,114 @@ impl Scene {
     /// Returns the currently active geometry backend.
     pub fn geometry_backend(&self) -> GeometryBackend {
         self.geometry_backend
+    }
+
+    /// Iterate batches whose `UnifiedMaterial` has `MaterialDomain::Translucent`.
+    ///
+    /// Used by `OitPass` to draw only transparent geometry in the collect pass.
+    pub fn translucent_batches(&self) -> impl Iterator<Item = (usize, Option<&Buffer>, u32)> {
+        self.batches.values().filter(|b| {
+            let idx = b.mesh_idx as usize;
+            self.materials.get(idx)
+                .and_then(|m| m.unified.as_ref())
+                .map(|u| u.domain == super::material::MaterialDomain::Translucent)
+                .unwrap_or(false)
+        }).map(|b| (b.mesh_idx as usize, b.gpu_buffer.as_ref(), b.total_count()))
+    }
+
+    /// Dispatch the GPU frustum culling compute shader for all batches.
+    ///
+    /// Call this once per frame **after** `scene.prepare()` and **before** the
+    /// draw pass. Only active when `geometry_backend == ComputeIndirect`.
+    ///
+    /// The compute shader writes one `DrawIndexedIndirectCommand` per instance
+    /// slot: visible instances get `instance_count = 1`, invisible ones get
+    /// `instance_count = 0` (silently skipped by the GPU). The CPU draws all N
+    /// slots via `DrawIndexedIndirect` — no readback or atomic counter needed.
+    ///
+    /// # Example
+    /// ```ignore
+    /// scene.set_geometry_backend(GeometryBackend::ComputeIndirect);
+    /// // Each frame:
+    /// scene.prepare(&engine)?;
+    /// scene.cull_gpu(view_proj, &frame, &engine)?;
+    /// deferred.draw(&mut scene, view, proj, &output, &frame, &engine, time)?;
+    /// ```
+    pub fn cull_gpu(
+        &mut self,
+        view_proj: Mat4,
+        frame: &RenderFrame,
+        engine: &Engine,
+    ) -> Result<()> {
+        if self.geometry_backend != GeometryBackend::ComputeIndirect {
+            return Ok(());
+        }
+
+        // Lazily compile the culling compute program.
+        if self.culling_program.is_none() {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("shaders")
+                .join("cull_compute.slang");
+            self.culling_program = Some(ComputeProgram::load(engine, path)?);
+        }
+        let program = self.culling_program.as_ref().unwrap();
+
+        // Extract frustum planes from the VP matrix.
+        let frustum = Frustum::from_view_proj(view_proj);
+        let planes: [[f32; 4]; 6] = {
+            let raw = frustum.planes_raw();
+            [
+                raw[0].to_array(), raw[1].to_array(),
+                raw[2].to_array(), raw[3].to_array(),
+                raw[4].to_array(), raw[5].to_array(),
+            ]
+        };
+
+        for batch in self.batches.values() {
+            let total = batch.total_count();
+            if total == 0 { continue; }
+
+            let bounds_buf   = match &batch.bounds_gpu_buffer   { Some(b) => b, None => continue };
+            let indirect_buf = match &batch.indirect_gpu_buffer { Some(b) => b, None => continue };
+            let mesh_idx = batch.mesh_idx as usize;
+            let mesh = &self.meshes[mesh_idx].0;
+
+            let index_count  = if mesh.is_indexed() { mesh.index_count } else { mesh.vertex_count };
+            let first_index  = 0u32;
+            let vertex_offset = 0i32;
+
+            #[repr(C)]
+            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+            struct CullConstants {
+                frustum_planes: [[f32; 4]; 6],
+                instance_count: u32,
+                index_count:    u32,
+                first_index:    u32,
+                vertex_offset:  i32,
+            }
+            let constants = CullConstants {
+                frustum_planes: planes,
+                instance_count: total,
+                index_count,
+                first_index,
+                vertex_offset,
+            };
+
+            // Bind source + dest buffers, then dispatch the culling compute.
+            frame.bind_buffer("instance_bounds",   bounds_buf);
+            frame.bind_buffer("indirect_commands", indirect_buf);
+
+            let groups = [(total + 63) / 64, 1, 1];
+            frame.dispatch_compute_auto(
+                format!("cull-batch-{mesh_idx}"),
+                program,
+                &constants,
+                groups,
+            )?;
+        }
+
+        self.gpu_cull_active = true;
+        Ok(())
     }
 
     /// Iterate over all drawable batches as `(mesh_index, instance_gpu_buffer, instance_count)`.
@@ -558,6 +666,8 @@ impl Scene {
     ///
     /// Call once per frame after all `set_transform` calls, before `render`.
     pub fn prepare(&mut self, engine: &Engine) -> Result<()> {
+        self.gpu_cull_active = false;
+
         // Clear dynamic lists; static lists persist across frames.
         for batch in self.batches.values_mut() {
             batch.dynamic_instances.clear();
@@ -602,10 +712,30 @@ impl Scene {
             }
         }
 
+        // Pre-collect mesh bounding spheres so we can borrow them inside the
+        // mutable batch loop without conflicting with &self.meshes.
+        let mesh_spheres: Vec<crate::BoundingSphere> = self.meshes.iter()
+            .map(|(mesh, _)| mesh.bounding_sphere)
+            .collect();
+        let gpu_cull = self.geometry_backend == GeometryBackend::ComputeIndirect;
+
         for batch in self.batches.values_mut() {
             batch.prepare(engine)?;
-            // Clear stale indirect commands; cull_batches() refills them before draw.
             batch.indirect_commands.clear();
+
+            if gpu_cull {
+                if let Some(sphere) = mesh_spheres.get(batch.mesh_idx as usize) {
+                    let spheres: Vec<[f32; 4]> = batch.static_instances.iter()
+                        .chain(batch.dynamic_instances.iter())
+                        .map(|inst| {
+                            let ws = sphere.transform(Mat4::from_cols_array_2d(&inst.model));
+                            [ws.center.x, ws.center.y, ws.center.z, ws.radius]
+                        })
+                        .collect();
+                    batch.prepare_bounds(engine, &spheres)?;
+                    batch.prepare_indirect_slots(engine, batch.total_count())?;
+                }
+            }
         }
 
         // Ensure the lighting uniform buffer exists.
@@ -971,8 +1101,15 @@ impl Scene {
                 Some(b) => b,
                 None => continue,
             };
-            let visible = batch.indirect_commands.len() as u32;
-            if visible == 0 {
+            // GPU cull: every slot in the indirect buffer has been written by compute
+            // (visible = instance_count 1, invisible = 0). Draw all N slots.
+            // CPU cull: visible commands only.
+            let draw_count = if self.gpu_cull_active {
+                batch.total_count()
+            } else {
+                batch.indirect_commands.len() as u32
+            };
+            if draw_count == 0 {
                 continue;
             }
             let indirect_buf = match &batch.indirect_gpu_buffer {
@@ -992,7 +1129,7 @@ impl Scene {
             }
             let effective_depth = if program.uses_depth { depth } else { None };
             output.draw_mesh_indirect_with_push_constants_and_depth(
-                mesh, program, instance_buf, indirect_buf, visible, constants, effective_depth,
+                mesh, program, instance_buf, indirect_buf, draw_count, constants, effective_depth,
             )?;
         }
         Ok(())

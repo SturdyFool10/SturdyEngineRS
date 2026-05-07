@@ -27,8 +27,10 @@ use crate::{
     Engine, Format, GraphImage, ImageDesc, ImageDimension, ImageUsage, MeshProgram,
     MeshProgramDesc, MeshVertexKind, RenderFrame, Result, ShaderDesc, ShaderProgram, ShaderSource,
     ShaderStage, push_constants, scene::Scene,
-    shadow_pass::{ShadowPass, ShadowConfig},
+    shadow_pass::{CsmConfig, CsmPass},
     environment_map::{EnvironmentMap, compute_brdf_lut, SPECULAR_LAYER_COUNT},
+    oit_pass::{OitConfig, OitPass},
+    light_bvh::LightBvhBuilder,
 };
 use crate::scene::CameraConstants;
 use sturdy_engine_core::Extent3d;
@@ -40,16 +42,14 @@ fn engine_shader(name: &str) -> PathBuf {
 }
 
 /// Push constants for `deferred_lighting.slang`.
-/// Must match `DeferredLightingConstants` in the shader exactly.
 #[push_constants]
 struct DeferredLightingConstants {
-    camera_world_pos: [f32; 4],     // xyz = camera pos, w unused
-    ambient: [f32; 3],              // flat ambient (used when ibl_strength == 0)
-    light_count: u32,
-    light_view_proj: [[f32; 4]; 4], // directional light MVP for shadow coords
-    shadow_bias: f32,
-    ibl_strength: f32,              // 0 = disabled, 1 = full IBL
-    ibl_max_layer: f32,             // SPECULAR_LAYER_COUNT - 1
+    camera_world_pos: [f32; 4],
+    ambient: [f32; 3],
+    dir_light_count: u32,
+    ibl_strength: f32,
+    ibl_max_layer: f32,
+    bvh_root: u32,  // 0 = root present, 0xFFFFFFFF = no BVH
     _pad: f32,
 }
 
@@ -79,31 +79,29 @@ struct DeferredLightingConstants {
 /// deferred.draw(&mut scene, view, proj, &hdr_output, &frame, &engine, time_secs)?;
 /// ```
 pub struct DeferredPass {
-    /// Default G-Buffer program (used for meshes without a `UnifiedMaterial`).
     default_gbuffer_program: MeshProgram,
     lighting_program: ShaderProgram,
-    shadow: ShadowPass,
-    /// 1×1 flat tangent-space normal (bound as default `"normal_map"`).
+    csm: CsmPass,
     flat_normal_map: crate::Image,
-    /// Cache of compiled G-Buffer shader variants, keyed by material content hash.
     variant_cache: HashMap<u64, MeshProgram>,
-    /// Precomputed BRDF integration LUT (128×128 RGBA16Float, R=scale G=bias).
-    /// Always bound as `"brdf_lut"` to the deferred lighting pass.
     brdf_lut: crate::Image,
-    /// Optional image-based lighting environment.
     environment_map: Option<EnvironmentMap>,
-    /// 1×1 black fallback for `"env_specular"` when no env map is set.
     black_env: crate::Image,
-    /// 9-element zero SH9 buffer fallback for `"sh9_irradiance"`.
     zero_sh9: crate::Buffer,
+    /// OIT pass for Translucent-domain materials (opt-in via `set_oit`).
+    oit: Option<OitPass>,
+    /// BVH over point/spot lights for O(log N) per-pixel light culling.
+    light_bvh: LightBvhBuilder,
+    /// 1-element zero buffer bound as `light_bvh` when no dynamic lights exist.
+    empty_bvh_buf: crate::Buffer,
 }
 
 impl DeferredPass {
     pub fn new(engine: &Engine) -> Result<Self> {
-        Self::with_shadow_config(engine, ShadowConfig::default())
+        Self::with_csm_config(engine, CsmConfig::default())
     }
 
-    pub fn with_shadow_config(engine: &Engine, shadow_config: ShadowConfig) -> Result<Self> {
+    pub fn with_csm_config(engine: &Engine, csm_config: CsmConfig) -> Result<Self> {
         let default_gbuffer_program = MeshProgram::new(
             engine,
             MeshProgramDesc {
@@ -119,17 +117,14 @@ impl DeferredPass {
             },
         )?;
         let lighting_program = engine.load_shader(engine_shader("deferred_lighting.slang"))?;
-        let shadow = ShadowPass::with_config(engine, shadow_config)?;
+        let csm = CsmPass::with_config(engine, csm_config)?;
 
         let flat_normal_map = engine.generate_texture_2d("flat_normal_map", 1, 1, |_, _| {
             [128, 128, 255, 255]
         })?;
 
-        // Precompute the BRDF integration LUT once at init (~50ms on CPU).
         let brdf_lut = compute_brdf_lut(engine)?;
 
-        // 1×1 black fallback for the specular env (used when no EnvironmentMap is set).
-        // Declared as a 1-layer 2D array so the shader's Texture2DArray binding is satisfied.
         let black_env = engine.create_image(crate::ImageDesc {
             dimension: crate::ImageDimension::D2,
             extent: sturdy_engine_core::Extent3d { width: 1, height: 1, depth: 1 },
@@ -143,29 +138,38 @@ impl DeferredPass {
             debug_name: Some("black_env"),
         })?;
 
-        // Zero SH9 fallback buffer (9 × float4 = 144 bytes, all zeros).
         let zero_sh9 = engine.create_buffer(crate::BufferDesc {
             size: 9 * 16,
             usage: crate::BufferUsage::STORAGE | crate::BufferUsage::COPY_DST,
         })?;
         zero_sh9.write(0, &vec![0u8; 9 * 16])?;
 
+        // 1-node zero BVH placeholder (32 bytes) for when no point/spot lights exist.
+        let empty_bvh_buf = engine.create_buffer(crate::BufferDesc {
+            size: 32,
+            usage: crate::BufferUsage::STORAGE | crate::BufferUsage::COPY_DST,
+        })?;
+        empty_bvh_buf.write(0, &[0u8; 32])?;
+
         Ok(Self {
             default_gbuffer_program,
             lighting_program,
-            shadow,
+            csm,
             flat_normal_map,
             variant_cache: HashMap::new(),
             brdf_lut,
             environment_map: None,
             black_env,
             zero_sh9,
+            oit: None,
+            light_bvh: LightBvhBuilder::new(),
+            empty_bvh_buf,
         })
     }
 
-    /// Expose the shadow configuration for live tuning.
-    pub fn shadow_config_mut(&mut self) -> &mut ShadowConfig {
-        &mut self.shadow.config
+    /// Expose the CSM configuration for live tuning.
+    pub fn csm_config_mut(&mut self) -> &mut CsmConfig {
+        &mut self.csm.config
     }
 
     /// Attach an environment map for image-based lighting.
@@ -183,6 +187,26 @@ impl DeferredPass {
     /// Remove the current environment map (reverts to flat ambient lighting).
     pub fn clear_environment_map(&mut self) {
         self.environment_map = None;
+    }
+
+    /// Enable order-independent transparency for `Translucent`-domain materials.
+    ///
+    /// Without this, translucent objects are silently skipped.
+    /// ```ignore
+    /// deferred.set_oit(OitPass::new(&engine)?);
+    /// ```
+    pub fn set_oit(&mut self, oit: OitPass) {
+        self.oit = Some(oit);
+    }
+
+    /// Remove the OIT pass (translucent objects will no longer be rendered).
+    pub fn clear_oit(&mut self) {
+        self.oit = None;
+    }
+
+    /// Expose OIT configuration for live tuning.
+    pub fn oit_config_mut(&mut self) -> Option<&mut OitConfig> {
+        self.oit.as_mut().map(|o| &mut o.config)
     }
 
     /// Execute the full deferred frame into `output`.
@@ -209,8 +233,11 @@ impl DeferredPass {
         // ── 1. Upload lighting uniform + build lights buffer ──────────────────
         scene.prepare_deferred_lighting(view, engine, frame)?;
 
-        // ── 2. Shadow map pass ────────────────────────────────────────────────
-        let shadow_out = self.shadow.draw(scene, frame, engine)?;
+        // ── 2. CSM shadow passes ──────────────────────────────────────────────
+        // Extract camera near/far from the projection matrix (RH perspective).
+        // proj.w_axis.z = near*far/(near-far),  proj.z_axis.z = far/(near-far)
+        let (cam_near, cam_far) = extract_near_far(proj);
+        let csm_out = self.csm.draw(scene, view, proj, cam_near, cam_far, frame)?;
 
         // ── 3. Camera world position ──────────────────────────────────────────
         let cam_world = view.inverse() * Vec4::new(0.0, 0.0, 0.0, 1.0);
@@ -335,22 +362,45 @@ impl DeferredPass {
             )?;
         }
 
-        // ── 6. Register G-Buffer images by name for the lighting shader ───────
+        // ── 6. Register G-Buffer + shadow images for the lighting shader ──────
         g0.register_as("gbuffer_albedo_metallic");
         g1.register_as("gbuffer_normal_rough");
         g2.register_as("gbuffer_emissive");
         g3.register_as("gbuffer_world_pos");
-        // shadow_map is already registered by ShadowPass::draw()
+        // shadow_map_0..3 already registered inside CsmPass::draw()
 
-        // ── 7. Bind IBL resources and run deferred lighting ───────────────────
+        // ── 7. Rebuild BVH if lights changed, bind IBL + BVH + run deferred ──
+        // Rebuild the light BVH when the point/spot light lists change.
+        let point_offset = 1u32; // directional at index 0
+        let spot_offset  = point_offset + scene.point_lights.len() as u32;
+        if self.light_bvh.dirty
+            || scene.point_lights.len() as u32 + scene.spot_lights.len() as u32 > 0
+        {
+            self.light_bvh.rebuild(
+                engine,
+                &scene.point_lights,
+                &scene.spot_lights,
+                point_offset,
+                spot_offset,
+            )?;
+        }
+
+        let (bvh_buf, bvh_root) = if !self.light_bvh.nodes.is_empty() {
+            (self.light_bvh.gpu_buffer.as_ref().unwrap(), 0u32)
+        } else {
+            (&self.empty_bvh_buf, crate::light_bvh::BVH_EMPTY)
+        };
+        frame.bind_buffer("light_bvh", bvh_buf);
+
         frame.bind_image("brdf_lut", &self.brdf_lut);
+        frame.bind_buffer("csm_data", &self.csm.csm_buffer);
 
         let (ibl_strength, ibl_max_layer) = if let Some(env) = &self.environment_map {
-            frame.bind_image("env_specular",   &env.specular);
+            frame.bind_image("env_specular",    &env.specular);
             frame.bind_buffer("sh9_irradiance", &env.sh9_buffer);
             (1.0f32, (SPECULAR_LAYER_COUNT - 1) as f32)
         } else {
-            frame.bind_image("env_specular",   &self.black_env);
+            frame.bind_image("env_specular",    &self.black_env);
             frame.bind_buffer("sh9_irradiance", &self.zero_sh9);
             (0.0f32, (SPECULAR_LAYER_COUNT - 1) as f32)
         };
@@ -361,15 +411,33 @@ impl DeferredPass {
             &DeferredLightingConstants {
                 camera_world_pos: [cam_world.x, cam_world.y, cam_world.z, 0.0],
                 ambient: [dl.ambient.x, dl.ambient.y, dl.ambient.z],
-                light_count: scene.deferred_light_count(),
-                light_view_proj: shadow_out.light_view_proj.to_cols_array_2d(),
-                shadow_bias: shadow_out.depth_bias,
+                dir_light_count: 1,
                 ibl_strength,
                 ibl_max_layer,
+                bvh_root,
                 _pad: 0.0,
             },
         )?;
 
+        // ── 8. OIT — Translucent objects (Per-Pixel Linked List) ─────────────
+        if let Some(oit) = &mut self.oit {
+            oit.draw(scene, view, proj, output, frame, engine, time)?;
+        }
+
         Ok(())
     }
+}
+
+/// Extract camera near and far clip planes from a RH perspective projection matrix.
+fn extract_near_far(proj: Mat4) -> (f32, f32) {
+    // For glam perspective_rh:  col3.z = near*far/(near-far),  col2.z = far/(near-far)
+    let a = proj.z_axis.z;   // far/(near-far)
+    let b = proj.w_axis.z;   // near*far/(near-far)
+    // a = far/(near-far) → near-far = far/a → near = far/a + far
+    // b = near*far/(near-far) = near * a_inv_... easier:
+    // b/a = near → near = b/a  (note: both negative for RH looking down -Z)
+    if a.abs() < 1e-7 { return (0.1, 1000.0); } // orthographic fallback
+    let near = b / a;
+    let far  = near * a / (a - 1.0 + 1e-7);
+    (near.abs().max(0.01), far.abs().max(near.abs() + 1.0))
 }

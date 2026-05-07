@@ -1,52 +1,121 @@
+// Shader file watcher and hot-reload coordinator.
+//
+// Polls modification times of shader source files. When a change is detected,
+// any registered program whose source file matches is reloaded via its
+// existing `reload()` method. Failed reloads are reported as diagnostics and
+// leave the previous program active (last-known-good semantics).
+//
+// Roadmap: Track 3 — shader hot reload.
+
 use std::{
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
-use crate::runtime::RuntimeController;
+use crate::Result;
+
+// ── Reloadable trait ──────────────────────────────────────────────────────────
+
+/// Implemented by shader program types that support hot-reload.
+pub trait Reloadable {
+    /// Path to the on-disk Slang source file, if this program was loaded from a file.
+    fn source_path(&self) -> Option<&Path>;
+    /// Recompile from the source file.
+    ///
+    /// Returns `Ok(true)` on success, `Ok(false)` if there is no source path,
+    /// and `Err` on compile failure (the previous pipeline is kept).
+    fn reload(&mut self) -> Result<bool>;
+}
+
+impl Reloadable for crate::ShaderProgram {
+    fn source_path(&self) -> Option<&Path> {
+        self.source_path()
+    }
+    fn reload(&mut self) -> Result<bool> {
+        self.reload()
+    }
+}
+
+impl Reloadable for crate::ComputeProgram {
+    fn source_path(&self) -> Option<&Path> {
+        self.source_path()
+    }
+    fn reload(&mut self) -> Result<bool> {
+        self.reload()
+    }
+}
+
+// ── Diagnostic ────────────────────────────────────────────────────────────────
+
+/// Result of one hot-reload attempt.
+#[derive(Debug)]
+pub struct ShaderReloadDiagnostic {
+    /// The file that changed and triggered a reload.
+    pub path: PathBuf,
+    /// Whether the recompilation succeeded.
+    pub success: bool,
+    /// Compiler error message when `success == false`.
+    pub error: Option<String>,
+}
+
+impl ShaderReloadDiagnostic {
+    /// A one-line human-readable summary for logging.
+    pub fn summary(&self) -> String {
+        if self.success {
+            format!("[shader-reload] ✓ {}", self.path.display())
+        } else {
+            format!(
+                "[shader-reload] ✗ {}: {}",
+                self.path.display(),
+                self.error.as_deref().unwrap_or("unknown error")
+            )
+        }
+    }
+}
+
+// ── ShaderWatcher ─────────────────────────────────────────────────────────────
 
 struct WatchedEntry {
     path: PathBuf,
     last_mtime: Option<SystemTime>,
 }
 
-/// Polls shader file modification times and reports which paths have changed.
+/// Polls shader file modification times and drives hot-reload.
 ///
-/// Call `watch` to register files and `poll_changed` each frame (or on a timer)
-/// to get the list of paths whose on-disk modification time has changed since
-/// the last poll.
+/// # Quick start
+/// ```ignore
+/// // At init:
+/// let mut watcher = ShaderWatcher::new();
+///
+/// // Each frame:
+/// for diag in watcher.tick(&mut [&mut my_shader, &mut my_compute]) {
+///     eprintln!("{}", diag.summary());
+/// }
+/// ```
 pub struct ShaderWatcher {
     entries: Vec<WatchedEntry>,
 }
 
 impl Default for ShaderWatcher {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 impl ShaderWatcher {
-    pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
-    }
+    pub fn new() -> Self { Self { entries: Vec::new() } }
 
     /// Register a shader file path for change detection.
     ///
-    /// The current modification time is sampled immediately so the first call
-    /// to `poll_changed` will not report a false positive for newly-watched files.
+    /// The current modification time is sampled immediately so the first `tick`
+    /// call will not report a false positive for newly-watched files.
     pub fn watch(&mut self, path: impl Into<PathBuf>) {
         let path = path.into();
         let last_mtime = mtime(&path);
         self.entries.push(WatchedEntry { path, last_mtime });
     }
 
-    /// Register a path only if it is an actual file (not inline source or missing).
+    /// Register a path only if it exists on disk (ignores inline source, missing files).
     ///
-    /// Returns `true` if the path was registered. Silently no-ops for paths that
-    /// do not exist yet — the watcher will begin tracking them on the next call
-    /// to `watch` after the file appears.
+    /// Returns `true` if registered.
     pub fn watch_if_file(&mut self, path: impl Into<PathBuf>) -> bool {
         let path = path.into();
         if !path.as_os_str().is_empty() && path.exists() {
@@ -57,21 +126,23 @@ impl ShaderWatcher {
         }
     }
 
+    /// Auto-register a program's source path if it came from a file.
+    pub fn watch_program(&mut self, program: &impl Reloadable) {
+        if let Some(p) = program.source_path() {
+            self.watch_if_file(p);
+        }
+    }
+
     /// Remove all watched entries for a given path.
     pub fn unwatch(&mut self, path: &Path) {
         self.entries.retain(|e| e.path != path);
     }
 
     /// Remove all watched entries.
-    pub fn clear(&mut self) {
-        self.entries.clear();
-    }
+    pub fn clear(&mut self) { self.entries.clear(); }
 
-    /// Return every path whose modification time has changed since the last poll.
-    ///
-    /// For each path reported, the stored timestamp is updated so subsequent
-    /// polls only report new changes. Paths that no longer exist (mtime = None)
-    /// are also included if their previous state was Some.
+    /// Return paths whose modification time has changed since the last poll.
+    /// Updates internal timestamps so subsequent calls only report new changes.
     pub fn poll_changed(&mut self) -> Vec<PathBuf> {
         let mut changed = Vec::new();
         for entry in &mut self.entries {
@@ -84,20 +155,54 @@ impl ShaderWatcher {
         changed
     }
 
+    /// Poll for file changes and reload any matching programs in `programs`.
+    ///
+    /// Each program in `programs` is checked against every changed path via
+    /// its `source_path()`. Matching programs are reloaded; failed reloads
+    /// emit a diagnostic and keep the previous pipeline active.
+    ///
+    /// Returns one diagnostic per changed path (even if no program matched).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let diags = watcher.tick(&mut [&mut scene_shader, &mut bloom_shader]);
+    /// for d in &diags {
+    ///     if !d.success { log::warn!("{}", d.summary()); }
+    /// }
+    /// ```
+    pub fn tick(&mut self, programs: &mut [&mut dyn Reloadable]) -> Vec<ShaderReloadDiagnostic> {
+        let changed = self.poll_changed();
+        let mut diags = Vec::new();
+
+        for path in changed {
+            let mut reloaded = false;
+            let mut last_err: Option<String> = None;
+
+            for program in programs.iter_mut() {
+                if let Some(src) = program.source_path() {
+                    if src == path {
+                        match program.reload() {
+                            Ok(true) => { reloaded = true; }
+                            Ok(false) => {}
+                            Err(e) => { last_err = Some(e.to_string()); }
+                        }
+                    }
+                }
+            }
+
+            let success = reloaded && last_err.is_none();
+            diags.push(ShaderReloadDiagnostic {
+                path,
+                success,
+                error: last_err,
+            });
+        }
+        diags
+    }
+
     /// Return all currently watched paths.
     pub fn watched_paths(&self) -> impl Iterator<Item = &Path> {
         self.entries.iter().map(|e| e.path.as_path())
-    }
-
-    /// Check every watched path against the runtime controller.
-    ///
-    /// Paths that exist on disk are reported as `AssetState::Ok`; missing paths
-    /// are reported as `AssetState::Missing`. Call this once at startup after
-    /// registering all shader files to surface missing-file errors immediately.
-    pub fn check_all_with_controller(&self, controller: &RuntimeController) {
-        for entry in &self.entries {
-            controller.check_asset_path(entry.path.clone());
-        }
     }
 }
 
