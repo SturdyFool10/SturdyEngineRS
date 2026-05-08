@@ -1677,36 +1677,76 @@ where
                     } else {
                         (1.0, None, SafeAreaInsets::default())
                     };
-                let mut runtime_frame = match self.runtime.acquire_frame() {
-                    Ok(frame) => frame,
-                    Err(e) => {
+                // Acquire → render → present, with typed recovery for surface/device loss.
+                // `acquire_frame` returns AppRuntimeFrame<'_> which borrows self.runtime,
+                // so any self.runtime access (e.g. surface recreation) must happen after
+                // the borrow ends. We return the error kind from the match so we can act
+                // on it once the frame is dropped.
+                enum FrameOutcome { Ok, RecreateSurface, FatalDeviceLost, FatalOther }
+                let outcome = match self.runtime.acquire_frame() {
+                    Err(ref e) if e.is_device_lost() => {
+                        eprintln!("[FATAL] GPU device lost during frame acquire: {e}");
+                        FrameOutcome::FatalDeviceLost
+                    }
+                    Err(ref e) if e.is_surface_lost() => FrameOutcome::RecreateSurface,
+                    Err(ref e) => {
                         eprintln!("failed to acquire runtime frame: {e:?}");
-                        std::process::exit(1);
+                        FrameOutcome::FatalOther
+                    }
+                    Ok(mut runtime_frame) => {
+                        let mut render_frame = runtime_frame.shell_frame();
+                        render_frame.set_window_scale_factor(window_scale_factor);
+                        if let Some(size) = window_logical_size {
+                            render_frame.set_window_logical_size(size);
+                        }
+
+                        if let Err(e) = self
+                            .app_state
+                            .render(&mut render_frame, runtime_frame.surface_image())
+                        {
+                            eprintln!("render failed: {e:?}");
+                            std::process::exit(1);
+                        }
+
+                        // Present — explicit call so errors surface here rather than Drop.
+                        match runtime_frame.finish_and_present() {
+                            Err(ref e) if e.is_device_lost() => {
+                                eprintln!("[FATAL] GPU device lost during present: {e}");
+                                FrameOutcome::FatalDeviceLost
+                            }
+                            Err(ref e) if e.is_surface_lost() => FrameOutcome::RecreateSurface,
+                            Err(ref e) => {
+                                eprintln!("present failed: {e:?}");
+                                FrameOutcome::FatalOther
+                            }
+                            Ok(()) => FrameOutcome::Ok,
+                        }
+                        // `runtime_frame` drops here, releasing the &mut AppRuntime borrow.
                     }
                 };
 
-                let mut render_frame = runtime_frame.shell_frame();
-                render_frame.set_window_scale_factor(window_scale_factor);
-                if let Some(size) = window_logical_size {
-                    render_frame.set_window_logical_size(size);
+                match outcome {
+                    FrameOutcome::Ok => {}
+                    FrameOutcome::RecreateSurface => {
+                        // Swapchain became stale — recreate with current settings, skip frame.
+                        if let Err(re) = self.runtime.surface_mut().recreate(
+                            crate::SurfaceRecreateDesc::default()
+                        ) {
+                            eprintln!("surface recreate failed: {re}");
+                            std::process::exit(1);
+                        }
+                        if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                            window.state_mut().dirty = false;
+                        }
+                        self.publish_window_diagnostics();
+                        return;
+                    }
+                    FrameOutcome::FatalDeviceLost => {
+                        eprintln!("The GPU is no longer usable. The application cannot recover.");
+                        std::process::exit(1);
+                    }
+                    FrameOutcome::FatalOther => std::process::exit(1),
                 }
-
-                if let Err(e) = self
-                    .app_state
-                    .render(&mut render_frame, runtime_frame.surface_image())
-                {
-                    eprintln!("render failed: {e:?}");
-                    std::process::exit(1);
-                }
-
-                // Present — explicit call so errors surface here rather than in Drop.
-                if let Err(e) = runtime_frame.finish_and_present() {
-                    eprintln!("present failed: {e:?}");
-                    std::process::exit(1);
-                }
-                // Drop the frame explicitly to release the `&mut AppRuntime` borrow
-                // before the subsequent `self` accesses below.
-                drop(runtime_frame);
 
                 if let Some(window) = self.window_context_for_handle_mut(window_handle) {
                     window.state_mut().dirty = false;

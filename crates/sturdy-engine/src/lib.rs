@@ -9,7 +9,9 @@ use std::{
 };
 
 pub mod animation;
+pub mod ecs;
 mod environment_map;
+mod shader_playground;
 mod headless;
 mod sprite_batch;
 mod gltf_animation;
@@ -80,6 +82,16 @@ pub use game_shell::{
     FixedUpdateContext, GameApp, GameConfig, GameContext, run_game, try_run_game,
 };
 pub use headless::{HeadlessApp, render_to_rgba8, render_to_rgba8_with_engine, run_headless};
+pub use shader_playground::{PlaygroundParam, PlaygroundPreset, PlaygroundValue, ShaderPlayground};
+pub use sturdy_engine_core::{PcFieldKind, PushConstantField};
+pub use ecs::{
+    // Core types
+    Entity, Component, World, EntityBuilder, Schedule, System, SystemFn, run_once,
+    // Built-in components
+    Active, Acceleration, Health, LocalTransform, Name, SceneLink, Transform, Velocity,
+    // Built-in systems
+    despawn_dead, integrate_transforms, propagate_local_transforms,
+};
 pub use sprite_batch::{Sprite, SpriteBatch, SpriteRenderer};
 pub use bloom_pass::{
     BloomCompositeConstants, BloomConfig, BloomPass, BrightPassConstants, DownsampleConstants,

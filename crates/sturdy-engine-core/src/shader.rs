@@ -99,6 +99,8 @@ pub struct ShaderParameterReflection {
     pub count: u32,
     pub update_rate: Option<UpdateRate>,
     pub size_bytes: Option<u32>,
+    /// Per-field detail for `PushConstant` parameters. Empty for resource bindings.
+    pub push_constant_fields: Vec<crate::PushConstantField>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

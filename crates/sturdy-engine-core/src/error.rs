@@ -11,6 +11,10 @@ pub enum ErrorCategory {
     BackendFailure,
     PlatformFailure,
     ResourceStateCorruption,
+    /// GPU device is lost and cannot recover — process must exit or recreate the device.
+    DeviceLost,
+    /// Swapchain / surface is no longer valid — caller should recreate the surface and retry.
+    SurfaceLost,
     Unknown,
 }
 
@@ -26,6 +30,18 @@ pub enum Error {
     Backend(String),
     Platform(String),
     ResourceStateCorruption(String),
+    /// The GPU device was lost (VK_ERROR_DEVICE_LOST or equivalent).
+    ///
+    /// The device and all resources it owns are no longer usable. The application
+    /// must exit or re-initialise the engine from scratch. Contains a diagnostic
+    /// hint from the backend (e.g. the VK_EXT_device_fault reason, if available).
+    DeviceLost(String),
+    /// The swapchain or window surface is no longer valid.
+    ///
+    /// This is a recoverable, transient condition: the caller should call
+    /// `Surface::recreate(...)` and retry the frame. Common causes: window
+    /// resize, monitor change, driver-initiated swapchain invalidation.
+    SurfaceLost(String),
     Unknown(String),
 }
 
@@ -42,8 +58,20 @@ impl Error {
             Self::Backend(_) => ErrorCategory::BackendFailure,
             Self::Platform(_) => ErrorCategory::PlatformFailure,
             Self::ResourceStateCorruption(_) => ErrorCategory::ResourceStateCorruption,
+            Self::DeviceLost(_) => ErrorCategory::DeviceLost,
+            Self::SurfaceLost(_) => ErrorCategory::SurfaceLost,
             Self::Unknown(_) => ErrorCategory::Unknown,
         }
+    }
+
+    /// Returns `true` when the GPU device is unrecoverably lost.
+    pub fn is_device_lost(&self) -> bool {
+        matches!(self, Self::DeviceLost(_))
+    }
+
+    /// Returns `true` when only the surface/swapchain is invalid (recoverable by recreate).
+    pub fn is_surface_lost(&self) -> bool {
+        matches!(self, Self::SurfaceLost(_))
     }
 
     pub fn code(&self) -> i32 {
@@ -58,6 +86,8 @@ impl Error {
             Self::Backend(_) => 6,
             Self::Platform(_) => 9,
             Self::ResourceStateCorruption(_) => 10,
+            Self::DeviceLost(_) => 11,
+            Self::SurfaceLost(_) => 12,
             Self::Unknown(_) => 0x7fff_ffff,
         }
     }
@@ -76,6 +106,8 @@ impl fmt::Display for Error {
             Self::Backend(msg) => write!(f, "backend error: {msg}"),
             Self::Platform(msg) => write!(f, "platform error: {msg}"),
             Self::ResourceStateCorruption(msg) => write!(f, "resource state corruption: {msg}"),
+            Self::DeviceLost(msg) => write!(f, "device lost: {msg}"),
+            Self::SurfaceLost(msg) => write!(f, "surface lost: {msg}"),
             Self::Unknown(msg) => write!(f, "unknown error: {msg}"),
         }
     }
@@ -118,6 +150,8 @@ mod tests {
                 Error::ResourceStateCorruption("missing allocation".into()),
                 ErrorCategory::ResourceStateCorruption,
             ),
+            (Error::DeviceLost("gpu hang".into()), ErrorCategory::DeviceLost),
+            (Error::SurfaceLost("out of date".into()), ErrorCategory::SurfaceLost),
             (Error::Unknown("mystery".into()), ErrorCategory::Unknown),
         ];
 

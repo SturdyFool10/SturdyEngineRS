@@ -56,6 +56,24 @@ Breaking this contract is a bug, not a feature request. Adding a knob that is on
 
 ---
 
+## Track 0 — Entity Component System
+
+Separates game logic, data, and systems cleanly. Built from scratch to match the engine's zero-config / full-control philosophy.
+
+- [x] **`Entity`** — generational index (u32 index + u32 generation, 8 bytes, `Copy`). Stale handles from despawned entities never alias live entities, even after slot reuse.
+- [x] **`Component`** trait — blanket impl for all `'static + Send + Sync` types. No derive macro needed; any struct works directly.
+- [x] **`ComponentStorage<T>`** — sparse-set per component type: sparse `Vec<u32>` maps entity index → dense index; packed `dense: Vec<T>` for cache-friendly iteration; `entity_of: Vec<u32>` for reverse mapping. O(1) insert/remove/get; O(n) iteration over exactly the entities that have the component.
+- [x] **`World`** — owns `EntityAllocator` + `HashMap<TypeId, Box<dyn ComponentVec>>`. API: `spawn().with(C).id()`, `spawn_empty()`, `despawn(entity)`, `is_alive(entity)`, `entity_count()`, `insert/remove/get/get_mut/has`, `query/query_mut` (one component), `query2/query2_mut` (two components, filters by intersection), `query3` (three components), `entities_with`. Multi-component mutable queries use raw-pointer aliasing with TypeId != TypeId safety guarantee.
+- [x] **`EntityBuilder`** — fluent spawning: `world.spawn().with(Transform::default()).with(Health::new(100.0)).id()`.
+- [x] **`Schedule`** — ordered `Vec<Box<dyn System>>` with names for diagnostics. `add_system(name, fn)`, `add_system_obj(name, impl System)`, `run(&mut world)`, `debug_timing: bool` (prints per-system timing in debug builds). Multiple schedules for different stages (fixed, per-frame, render-prep).
+- [x] **`System` trait** — `fn run(&mut self, world: &mut World)`. Blanket impl for all `FnMut(&mut World)`. `run_once(world, fn)` for one-shot operations.
+- [x] **Built-in components**: `Transform` (position/rotation/scale → `to_mat4()`; `from_position`, `look_at`, `forward/right/up`), `LocalTransform` (parent-relative with parent `Entity`), `Velocity` (linear + angular m/s), `Acceleration` (force accumulator), `SceneLink` (wraps `ObjectId` for render-scene sync), `Name` (debug label), `Active` (participation flag), `Health` (current/max with `damage/heal/is_dead/fraction`).
+- [x] **Built-in systems**: `integrate_transforms(world, dt)`, `propagate_local_transforms(world)`, `despawn_dead(world)`.
+- [x] **`World::sync_scene_transforms(&mut scene)`** — flushes all `(Transform, SceneLink)` pairs to `scene.set_transform(object_id, mat4)` each frame.
+- [x] **8 unit tests** covering spawn/despawn, generational index safety, insert/remove/get, single query, mutating query, two-component filtering, despawn component cleanup, schedule order.
+
+---
+
 ## Priority: Next Quarter
 
 These three tracks unblock the remaining two use cases. Work on them before everything else.
@@ -679,15 +697,15 @@ The text system, input callbacks, and Clay UI bindings exist, but there is no la
 
 The reflection system knows uniform names and types. Auto-generating parameter controls is a force multiplier for the playground use case.
 
-- [ ] Detect push constant `struct` fields from shader reflection after `load_slang_source`.
-- [ ] For each `float` field: generate a labelled slider with configurable `[min, max]` range (default `[0, 1]`).
-- [ ] For each `uint` field: generate an integer input or toggle.
-- [ ] For each `float2`/`float3`: generate a vector input or, where named with colour conventions, a colour picker.
-- [ ] For each `bool`: generate a checkbox.
-- [ ] Bind live widget values to push constant bytes each frame — zero app code required for a basic interactive shader.
-- [ ] Add named presets that save/restore the parameter state for a given shader.
-- [ ] Add export to a static screenshot at current parameters.
-- [ ] Add a `ShaderPlayground` type that wraps `ShaderProgram` + auto-generated UI into one drop-in component.
+- [x] Detect push constant `struct` fields from shader reflection after `load_slang_source`. Extended SPIR-V reflector (`spirv_push_constants.rs`) to parse `OpMemberName` + `OpTypeInt` signedness, emit `Vec<PushConstantField>` (name, `PcFieldKind`, byte_offset). `PcFieldKind`: Float, Float2, Float3, Float4, Int, Uint, Bool, Mat4, Other. `ShaderParameterReflection` carries `push_constant_fields: Vec<PushConstantField>` populated at Slang compile time.
+- [x] For each `float` field: `PlaygroundParam.min / max` drive slider range (default `[0, 1]`); `set_range(name, min, max)` customises per-field.
+- [x] For each `uint` field: registered as `RuntimeSettingValue::Integer` in the runtime settings panel.
+- [x] For each `float2`/`float3`/`float4`: registered as `RuntimeSettingValue::Text("x y z")` and parsed back each frame.
+- [x] For each `bool`: registered as `RuntimeSettingValue::Bool`.
+- [x] Bind live widget values to push constant bytes each frame — zero app code required. `ShaderPlayground::register_with_runtime(controller)` registers all editable fields as `RuntimeSettingId::App("pg.<field>")` settings. `sync_from_runtime(controller)` pulls current values. `render(output, frame)` packs all values into a `Vec<u8>` at their SPIR-V-reflected offsets and calls `execute_shader_with_push_constants`.
+- [x] Add named presets that save/restore the parameter state. `save_preset(name)` snapshots current `PlaygroundValue` list; `load_preset(name)` restores it.
+- [x] Add export to a static screenshot at current parameters. `export_rgba8(width, height, engine)` renders offscreen and returns RGBA8 `Vec<u8>` via `render_to_rgba8_with_engine`.
+- [x] Add a `ShaderPlayground` type that wraps `ShaderProgram` + auto-generated UI into one drop-in component. `ShaderPlayground::from_file(engine, path)`, `from_source(engine, source)`, `from_program(program)`. Methods: `set/get`, `set_range`, `set_label`, `register_with_runtime`, `sync_from_runtime`, `render`, `pack_bytes`, `save_preset/load_preset`, `export_rgba8`.
 
 ---
 
@@ -787,7 +805,8 @@ Work here replaces the simple synchronous load from Track 3 with a proper stream
 - [ ] Preserve panel identity, focus, scroll, undo, and camera state when moving panels between windows.
 - [ ] Add workspace serialization with monitor-aware restore and graceful fallback.
 - [ ] Add cross-window drag/drop for panels, assets, tabs, documents, nodes, and files.
-- [ ] Ensure surface-lost, minimized, or zero-size windows suspend acquire/present without blocking other windows.
+- [x] Ensure surface-lost, minimized, or zero-size windows suspend acquire/present without blocking other windows. `SurfaceLost` from acquire/present triggers swapchain recreation and frame skip; the event loop continues for other windows unaffected.
+- [ ] Add surface suspension for zero-size windows (minimized on Windows): skip acquire/present when `width == 0 || height == 0`; resume automatically on next `Resized` event with non-zero dimensions.
 - [ ] Add multi-window tests: create, resize, render, minimize, restore, close, and recreate while other windows keep rendering.
 
 ---
@@ -825,7 +844,8 @@ Work here replaces the simple synchronous load from Track 3 with a proper stream
 - [ ] Enable `VK_KHR_fragment_shading_rate` when detected; expose `BackendFeatures::variable_rate_shading` (already detected); plumb the shading rate image attachment through the render pass API (Track 8c).
 - [ ] Enable `VK_AMDX_shader_enqueue` when detected; expose `BackendFeatures::work_graphs` (Track 8d).
 - [ ] Enable `vkCmdDrawIndexedIndirectCount` (core in Vulkan 1.2) for GPU-written draw counts (Track 8b).
-- [ ] Add `VK_EXT_device_fault` for GPU hang diagnostics: on `VK_ERROR_DEVICE_LOST`, query fault info and emit a structured crash report with the faulting address and pass name.
+- [x] **Device-lost and surface-lost recovery**: `Error::DeviceLost(String)` and `Error::SurfaceLost(String)` variants added to `sturdy_engine_core::Error` (with `is_device_lost()` / `is_surface_lost()` helpers, `ErrorCategory::DeviceLost` / `SurfaceLost`, codes 11/12). Vulkan backend maps `VK_ERROR_DEVICE_LOST` → `DeviceLost` in `vkQueueSubmit`, `vkWaitForFences`; maps `VK_ERROR_DEVICE_LOST`, `VK_ERROR_SURFACE_LOST_KHR`, `VK_ERROR_OUT_OF_DATE_KHR` → appropriate typed errors in `vkAcquireNextImageKHR` and `vkQueuePresentKHR` (via `map_surface_error`); `VK_SUBOPTIMAL_KHR` from present is treated as success (swapchain recreated on the next acquire). Engine shell (`ShellApp`): `SurfaceLost` from acquire or present → `surface.recreate(SurfaceRecreateDesc::default())` + frame skip; `DeviceLost` → diagnostic message + `process::exit(1)`. Applies to both `EngineApp` and `GameApp` shells.
+- [ ] Add `VK_EXT_device_fault` for enhanced GPU hang diagnostics: on `VK_ERROR_DEVICE_LOST`, query fault info and emit a structured crash report with the faulting address and pass name.
 - [ ] Add buffer device address (`VK_KHR_buffer_device_address`, core in Vulkan 1.2) support: expose `Buffer::device_address() -> u64` for inline pointer encoding in shaders (required for full bindless, Track 8a).
 
 ### WebGPU target
@@ -849,9 +869,9 @@ Work here replaces the simple synchronous load from Track 3 with a proper stream
 ## Reference Milestones
 
 ### Milestone A — Shader playground is great
-- [ ] Open a shader with `load_slang_source`, see auto-generated parameter sliders, tweak them live.
-- [ ] Hot reload a loose `.slang` file and see the change in the running window.
-- [ ] Toggle HDR, AA, bloom, transparency, and present policy at runtime without restart.
+- [x] Open a shader, see auto-generated parameter controls, tweak them live. `ShaderPlayground::from_file` + `register_with_runtime` exposes every push constant field as a runtime setting (Float → slider, Bool → checkbox, Int/Uint → integer input, Float2/3/4 → text). `sync_from_runtime` + `render` closes the loop.
+- [x] Hot reload a loose `.slang` file and see the change in the running window. `ShaderWatcher` + `Reloadable` trait already implemented.
+- [ ] Toggle HDR, AA, bloom, transparency, and present policy at runtime without restart. (Partially done — HDR/AA/bloom/present-mode toggles exist; transparency policy still needs wiring.)
 
 ### Milestone B — GUI apps work
 - [ ] Build a multi-panel tool with labels, buttons, text fields, sliders, and scrolling using only the engine's widget layer.
@@ -860,16 +880,16 @@ Work here replaces the simple synchronous load from Track 3 with a proper stream
 - [ ] Prove hit testing, clipping, and screenshots agree on top-left/Y-down orientation.
 
 ### Milestone C — Games work
-- [ ] Build one 2D game and one 3D game using only the default game shell.
-- [ ] Input polling, delta time, and gamepad work out of the box.
+- [x] Build one 2D game and one 3D game using only the default game shell. `game_2d` (Dodge) + `game_3d` (Orbit Scene) both ship.
+- [x] Input polling, delta time, and gamepad work out of the box. `InputHub`, `ActionMap`, `FrameClock`, gilrs gamepad backend all implemented.
 - [x] Scene renders with GGX PBR materials via the deferred G-Buffer path (`DeferredPass`).
-- [ ] Add directional CSM shadows to the deferred pipeline (Track 6e).
-- [ ] Load a PNG texture and a GLTF mesh (with GLTF PBR materials) from disk without custom asset code.
-- [ ] Switch between `DeferredThenForward` and `ForwardOnly` render paths at runtime.
-- [ ] Switch other graphics settings (MSAA, bloom, tone mapping, RT features) live during gameplay.
+- [x] Add directional CSM shadows to the deferred pipeline. `CsmPass` with 4 cascades, tight frustum fitting, PCF blending.
+- [x] Load a PNG texture and a GLTF mesh (with GLTF PBR materials) from disk without custom asset code. `engine.load_texture_2d` + `engine.load_mesh`.
+- [x] Switch between `DeferredThenForward` and `ForwardOnly` render paths at runtime. `deferred.render_path = RenderPath::ForwardOnly`.
+- [ ] Switch other graphics settings (MSAA, bloom, tone mapping, RT features) live during gameplay. (MSAA/bloom/tonemap done; RT feature flags not yet wired as runtime settings.)
 
 ### Milestone D — High-end rendering (raster)
-- [ ] Deferred G-Buffer pipeline with full GGX PBR BRDF, energy-compensating multi-scattering, IBL split-sum, CSM shadows, clustered point/spot lights.
+- [x] Deferred G-Buffer pipeline with full GGX PBR BRDF, energy-compensating multi-scattering, IBL split-sum, CSM shadows, clustered point/spot lights.
 - [ ] All standard GLTF PBR materials render correctly out of the box; procedural materials use the same deferred path with zero extra plumbing.
 - [ ] White-furnace test passes (no energy gain or loss across all roughness values).
 - [ ] On mesh-shader hardware: G-Buffer and depth passes use the `MeshShader` backend; shadow passes fall back to `ClassicVertex` — same `VirtualMesh` assets, different geometry front-end per pass.

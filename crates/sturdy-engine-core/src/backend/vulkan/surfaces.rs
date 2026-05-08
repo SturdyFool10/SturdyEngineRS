@@ -236,7 +236,7 @@ impl SurfaceRegistry {
                     surface.image_available,
                     vk::Fence::null(),
                 )
-                .map_err(|e| Error::Backend(format!("vkAcquireNextImageKHR failed: {e:?}")))?
+                .map_err(|e| map_surface_error(e, "vkAcquireNextImageKHR"))?
         };
 
         surface.acquired_image_index = Some(image_index);
@@ -296,13 +296,22 @@ impl SurfaceRegistry {
             .wait_semaphores(&wait_semaphores)
             .swapchains(&swapchains)
             .image_indices(&image_indices);
-        unsafe {
+        let present_result = unsafe {
             surface
                 .swapchain_loader
                 .queue_present(queue, &present_info)
-                .map_err(|error| Error::Backend(format!("vkQueuePresentKHR failed: {error:?}")))?;
-        }
+        };
         surface.acquired_image_index = None;
+
+        match present_result {
+            // VK_SUCCESS — everything is fine.
+            Ok(false) => {}
+            // VK_SUBOPTIMAL_KHR — present succeeded but swapchain no longer matches the surface
+            // perfectly. Treat as success; the next acquire will return OUT_OF_DATE and trigger
+            // a recreate at the start of the following frame.
+            Ok(true) => {}
+            Err(e) => return Err(map_surface_error(e, "vkQueuePresentKHR")),
+        }
         Ok(())
     }
 
@@ -726,5 +735,26 @@ fn vk_color_space_to_engine(color_space: vk::ColorSpaceKHR) -> SurfaceColorSpace
         vk::ColorSpaceKHR::HDR10_ST2084_EXT => SurfaceColorSpace::Hdr10St2084,
         vk::ColorSpaceKHR::HDR10_HLG_EXT => SurfaceColorSpace::Hdr10Hlg,
         _ => SurfaceColorSpace::Unknown,
+    }
+}
+
+/// Map a Vulkan surface/swapchain error code to the engine's typed error.
+///
+/// - `VK_ERROR_DEVICE_LOST`       → `Error::DeviceLost`   (process-fatal)
+/// - `VK_ERROR_SURFACE_LOST_KHR`  → `Error::SurfaceLost`  (recreate & retry)
+/// - `VK_ERROR_OUT_OF_DATE_KHR`   → `Error::SurfaceLost`  (recreate & retry)
+/// - anything else                → `Error::Backend`       (generic)
+fn map_surface_error(e: vk::Result, call: &str) -> Error {
+    match e {
+        vk::Result::ERROR_DEVICE_LOST => {
+            Error::DeviceLost(format!("{call} returned VK_ERROR_DEVICE_LOST"))
+        }
+        vk::Result::ERROR_SURFACE_LOST_KHR => {
+            Error::SurfaceLost(format!("{call} returned VK_ERROR_SURFACE_LOST_KHR"))
+        }
+        vk::Result::ERROR_OUT_OF_DATE_KHR => {
+            Error::SurfaceLost(format!("{call} returned VK_ERROR_OUT_OF_DATE_KHR"))
+        }
+        other => Error::Backend(format!("{call} failed: {other:?}")),
     }
 }

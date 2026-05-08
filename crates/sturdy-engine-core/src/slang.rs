@@ -11,7 +11,7 @@ use crate::{
 };
 
 #[path = "slang/spirv_push_constants.rs"]
-mod spirv_push_constants;
+pub mod spirv_push_constants;
 
 #[path = "slang/spirv_vertex_inputs.rs"]
 mod spirv_vertex_inputs;
@@ -509,6 +509,7 @@ unsafe fn extract_reflection(
                 count: 1,
                 update_rate: None,
                 size_bytes: Some(size),
+                push_constant_fields: Vec::new(),
             });
         }
 
@@ -532,6 +533,7 @@ unsafe fn extract_reflection(
                     count: 1,
                     update_rate: None,
                     size_bytes: Some(size),
+                    push_constant_fields: Vec::new(),
                 });
                 continue;
             }
@@ -593,6 +595,7 @@ unsafe fn extract_reflection(
                 count: resolved_count,
                 update_rate: Some(update_rate),
                 size_bytes: None,
+                push_constant_fields: Vec::new(),
             });
         }
     }
@@ -731,6 +734,7 @@ fn merge_spirv_push_constant_reflection(
         count: 1,
         update_rate: None,
         size_bytes: Some(push_constants.bytes),
+        push_constant_fields: push_constants.fields,
     });
     Ok(())
 }

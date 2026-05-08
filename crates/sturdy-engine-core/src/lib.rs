@@ -83,6 +83,7 @@ pub use shader::{
     ShaderParameterReflection, ShaderReflection, ShaderResourceAccess, ShaderSource, ShaderStage,
     ShaderTarget, VertexInputReflection,
 };
+pub use slang::spirv_push_constants::{PcFieldKind, PushConstantField};
 pub use slang::{
     SlangCompileDesc, compile_and_reflect, compile_slang, compile_slang_to_file,
     compile_slang_to_spirv, reflect_pipeline_layout, reflect_pipeline_layout_with_caps,

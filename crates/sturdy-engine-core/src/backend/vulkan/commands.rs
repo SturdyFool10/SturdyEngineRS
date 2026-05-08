@@ -65,7 +65,13 @@ impl CommandContext {
             unsafe {
                 device
                     .wait_for_fences(&[self.frame_fence], true, u64::MAX)
-                    .map_err(|e| Error::Backend(format!("vkWaitForFences failed: {e:?}")))?;
+                    .map_err(|e| {
+                        if e == ash::vk::Result::ERROR_DEVICE_LOST {
+                            Error::DeviceLost("vkWaitForFences returned VK_ERROR_DEVICE_LOST".into())
+                        } else {
+                            Error::Backend(format!("vkWaitForFences failed: {e:?}"))
+                        }
+                    })?;
                 device
                     .reset_fences(&[self.frame_fence])
                     .map_err(|e| Error::Backend(format!("vkResetFences failed: {e:?}")))?;
@@ -199,7 +205,13 @@ impl CommandContext {
             unsafe {
                 device
                     .queue_submit(queues.queue(batch_queue), &[submit_info], fence)
-                    .map_err(|e| Error::Backend(format!("vkQueueSubmit failed: {e:?}")))?;
+                    .map_err(|e| {
+                        if e == ash::vk::Result::ERROR_DEVICE_LOST {
+                            Error::DeviceLost("vkQueueSubmit returned VK_ERROR_DEVICE_LOST".into())
+                        } else {
+                            Error::Backend(format!("vkQueueSubmit failed: {e:?}"))
+                        }
+                    })?;
             }
         }
         self.pending_semaphores.extend(chain_semaphores);
@@ -215,7 +227,13 @@ impl CommandContext {
             unsafe {
                 device
                     .wait_for_fences(&[self.frame_fence], true, u64::MAX)
-                    .map_err(|e| Error::Backend(format!("vkWaitForFences failed: {e:?}")))?;
+                    .map_err(|e| {
+                        if e == ash::vk::Result::ERROR_DEVICE_LOST {
+                            Error::DeviceLost("vkWaitForFences returned VK_ERROR_DEVICE_LOST".into())
+                        } else {
+                            Error::Backend(format!("vkWaitForFences failed: {e:?}"))
+                        }
+                    })?;
             }
         }
         Ok(())
@@ -1008,7 +1026,13 @@ impl FramedCommands {
             unsafe {
                 device
                     .wait_for_fences(&[ctx.frame_fence], true, u64::MAX)
-                    .map_err(|e| Error::Backend(format!("vkWaitForFences failed: {e:?}")))?;
+                    .map_err(|e| {
+                        if e == ash::vk::Result::ERROR_DEVICE_LOST {
+                            Error::DeviceLost("vkWaitForFences returned VK_ERROR_DEVICE_LOST".into())
+                        } else {
+                            Error::Backend(format!("vkWaitForFences failed: {e:?}"))
+                        }
+                    })?;
             }
         }
         Ok(())
@@ -1028,7 +1052,13 @@ impl FramedCommands {
             unsafe {
                 device
                     .wait_for_fences(&fences, true, u64::MAX)
-                    .map_err(|e| Error::Backend(format!("vkWaitForFences failed: {e:?}")))?;
+                    .map_err(|e| {
+                        if e == ash::vk::Result::ERROR_DEVICE_LOST {
+                            Error::DeviceLost("vkWaitForFences returned VK_ERROR_DEVICE_LOST".into())
+                        } else {
+                            Error::Backend(format!("vkWaitForFences failed: {e:?}"))
+                        }
+                    })?;
             }
         }
         Ok(())
