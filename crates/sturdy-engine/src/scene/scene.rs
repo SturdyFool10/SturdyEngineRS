@@ -102,17 +102,123 @@ impl Default for SpotLight {
     }
 }
 
+// ── Area lights ───────────────────────────────────────────────────────────────
+
+/// A rectangular area light. Illuminates via polygon solid-angle diffuse +
+/// representative-point specular (same BVH as point/spot lights).
+///
+/// `right` and `up` define the local axes; the light surface spans
+/// `[-half_extents.x, +half_extents.x] × [-half_extents.y, +half_extents.y]`.
+#[derive(Clone, Debug)]
+pub struct RectLight {
+    /// World-space center.
+    pub position: Vec3,
+    /// Local X axis (right direction), unit vector.
+    pub right: Vec3,
+    /// Local Y axis (up direction), unit vector.
+    pub up: Vec3,
+    /// \[half_width, half_height\] — half-dimensions along `right` and `up`.
+    pub half_extents: [f32; 2],
+    /// Emitted radiance (linear RGB).
+    pub color: Vec3,
+    /// Intensity multiplier. Default 1.0.
+    pub intensity: f32,
+    /// Maximum influence distance in world units.
+    pub range: f32,
+    /// If true, illuminates from both sides of the rectangle.
+    pub two_sided: bool,
+}
+
+impl Default for RectLight {
+    fn default() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            right: Vec3::X,
+            up: Vec3::Y,
+            half_extents: [0.5, 0.5],
+            color: Vec3::ONE,
+            intensity: 1.0,
+            range: 10.0,
+            two_sided: false,
+        }
+    }
+}
+
+/// A spherical area light (emissive sphere, e.g. bare bulb, sun disc).
+///
+/// `radius` is the source radius (controls apparent size and specular highlight
+/// softness). `range` is the maximum influence distance.
+#[derive(Clone, Debug)]
+pub struct SphereLight {
+    pub position: Vec3,
+    /// Emissive radius of the source (not the influence radius). Default 0.1.
+    pub radius: f32,
+    pub color: Vec3,
+    pub intensity: f32,
+    /// Maximum influence distance.
+    pub range: f32,
+}
+
+impl Default for SphereLight {
+    fn default() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            radius: 0.1,
+            color: Vec3::ONE,
+            intensity: 100.0,
+            range: 10.0,
+        }
+    }
+}
+
+/// A disc (circular) area light — e.g. a recessed ceiling downlight.
+#[derive(Clone, Debug)]
+pub struct DiskLight {
+    pub position: Vec3,
+    /// Outward normal of the disc surface.
+    pub normal: Vec3,
+    /// Disc radius.
+    pub radius: f32,
+    pub color: Vec3,
+    pub intensity: f32,
+    pub range: f32,
+    pub two_sided: bool,
+}
+
+impl Default for DiskLight {
+    fn default() -> Self {
+        Self {
+            position: Vec3::ZERO,
+            normal: Vec3::NEG_Y,
+            radius: 0.3,
+            color: Vec3::ONE,
+            intensity: 500.0,
+            range: 10.0,
+            two_sided: false,
+        }
+    }
+}
+
 // ── GPU-packed light data ─────────────────────────────────────────────────────
-// Matches GpuLightData in deferred_lighting.slang exactly (64 bytes).
+// Matches GpuLightData in deferred_lighting.slang exactly (96 bytes = 6 × float4).
+//
+// Layout (backward-compatible: bytes 0-63 unchanged from the old 64-byte struct):
+//   0-15:  color_intensity   rgb × intensity
+//   16-31: position_range    world pos + influence range
+//   32-47: direction_kind    dir/normal xyz + kind (float: 0=dir,1=pt,2=spot,3=rect,4=sphere,5=disk)
+//   48-63: misc              [cos_inner, cos_outer, area_radius, two_sided 0/1]
+//   64-79: right_half_w      rect: right.xyz + half_width;  others: zero
+//   80-95: up_half_h         rect: up.xyz + half_height;    others: zero
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct GpuLightData {
-    color_intensity: [f32; 4],  // rgb + intensity
-    position_range:  [f32; 4],  // world pos or toward-light dir + range (0 for directional)
-    direction_kind:  [f32; 4],  // spot direction xyz + kind (0=dir, 1=point, 2=spot)
-    spot_angles:     [f32; 2],  // cos(inner), cos(outer)
-    _pad:            [f32; 2],
+    color_intensity: [f32; 4],
+    position_range:  [f32; 4],
+    direction_kind:  [f32; 4],
+    misc:            [f32; 4],  // [cos_inner, cos_outer, area_radius, two_sided]
+    right_half_w:    [f32; 4],  // rect: right.xyz + half_width
+    up_half_h:       [f32; 4],  // rect: up.xyz + half_height
 }
 
 impl GpuLightData {
@@ -123,8 +229,9 @@ impl GpuLightData {
             color_intensity: [light.color.x * lum, light.color.y * lum, light.color.z * lum, 1.0],
             position_range:  [toward.x, toward.y, toward.z, 0.0],
             direction_kind:  [0.0, 0.0, 0.0, 0.0], // kind=0
-            spot_angles:     [1.0, 1.0],
-            _pad:            [0.0, 0.0],
+            misc:            [1.0, 1.0, 0.0, 0.0],
+            right_half_w:    [0.0; 4],
+            up_half_h:       [0.0; 4],
         }
     }
 
@@ -134,8 +241,9 @@ impl GpuLightData {
             color_intensity: [light.color.x * lum, light.color.y * lum, light.color.z * lum, 1.0],
             position_range:  [light.position.x, light.position.y, light.position.z, light.range],
             direction_kind:  [0.0, 0.0, 0.0, 1.0], // kind=1
-            spot_angles:     [1.0, 1.0],
-            _pad:            [0.0, 0.0],
+            misc:            [1.0, 1.0, 0.0, 0.0],
+            right_half_w:    [0.0; 4],
+            up_half_h:       [0.0; 4],
         }
     }
 
@@ -146,8 +254,49 @@ impl GpuLightData {
             color_intensity: [light.color.x * lum, light.color.y * lum, light.color.z * lum, 1.0],
             position_range:  [light.position.x, light.position.y, light.position.z, light.range],
             direction_kind:  [dir.x, dir.y, dir.z, 2.0], // kind=2
-            spot_angles:     [light.inner_angle.cos(), light.outer_angle.cos()],
-            _pad:            [0.0, 0.0],
+            misc:            [light.inner_angle.cos(), light.outer_angle.cos(), 0.0, 0.0],
+            right_half_w:    [0.0; 4],
+            up_half_h:       [0.0; 4],
+        }
+    }
+
+    pub(crate) fn from_rect(light: &RectLight) -> Self {
+        let lum = light.intensity;
+        let n = light.right.cross(light.up).normalize();
+        let r = light.right.normalize();
+        let u = light.up.normalize();
+        Self {
+            color_intensity: [light.color.x * lum, light.color.y * lum, light.color.z * lum, 1.0],
+            position_range:  [light.position.x, light.position.y, light.position.z, light.range],
+            direction_kind:  [n.x, n.y, n.z, 3.0], // kind=3, normal = cross(right, up)
+            misc:            [0.0, 0.0, 0.0, if light.two_sided { 1.0 } else { 0.0 }],
+            right_half_w:    [r.x, r.y, r.z, light.half_extents[0]],
+            up_half_h:       [u.x, u.y, u.z, light.half_extents[1]],
+        }
+    }
+
+    pub(crate) fn from_sphere_area(light: &SphereLight) -> Self {
+        let lum = light.intensity;
+        Self {
+            color_intensity: [light.color.x * lum, light.color.y * lum, light.color.z * lum, 1.0],
+            position_range:  [light.position.x, light.position.y, light.position.z, light.range],
+            direction_kind:  [0.0, 0.0, 0.0, 4.0], // kind=4
+            misc:            [1.0, 1.0, light.radius, 0.0],
+            right_half_w:    [0.0; 4],
+            up_half_h:       [0.0; 4],
+        }
+    }
+
+    pub(crate) fn from_disk(light: &DiskLight) -> Self {
+        let lum = light.intensity;
+        let n = light.normal.normalize();
+        Self {
+            color_intensity: [light.color.x * lum, light.color.y * lum, light.color.z * lum, 1.0],
+            position_range:  [light.position.x, light.position.y, light.position.z, light.range],
+            direction_kind:  [n.x, n.y, n.z, 5.0], // kind=5
+            misc:            [0.0, 0.0, light.radius, if light.two_sided { 1.0 } else { 0.0 }],
+            right_half_w:    [0.0; 4],
+            up_half_h:       [0.0; 4],
         }
     }
 }
@@ -339,6 +488,12 @@ pub struct Scene {
     pub point_lights: Vec<PointLight>,
     /// Spot lights included in the deferred lighting pass.
     pub spot_lights: Vec<SpotLight>,
+    /// Rectangular area lights (ceiling panels, windows, screens).
+    pub rect_lights: Vec<RectLight>,
+    /// Spherical area lights (bare bulbs, neon tubes approximated as spheres).
+    pub sphere_area_lights: Vec<SphereLight>,
+    /// Disc area lights (recessed downlights, portals).
+    pub disk_lights: Vec<DiskLight>,
     /// Persistent GPU buffer for the forward-path `LightingUniforms`.
     light_buffer: Option<Buffer>,
     /// GPU-resident array of [`GpuLightData`] for the deferred lighting pass.
@@ -363,6 +518,9 @@ impl Scene {
             directional_light: DirectionalLight::default(),
             point_lights: Vec::new(),
             spot_lights: Vec::new(),
+            rect_lights: Vec::new(),
+            sphere_area_lights: Vec::new(),
+            disk_lights: Vec::new(),
             light_buffer: None,
             deferred_lights_buffer: None,
             geometry_backend: GeometryBackend::ClassicVertex,
@@ -618,6 +776,16 @@ impl Scene {
         self.materials.get(mesh_idx).and_then(|m| m.gpu_buffer.as_ref())
     }
 
+    /// Return the `MaterialDomain` of the given mesh (used by the shadow pass).
+    ///
+    /// Returns `Opaque` for meshes without a `UnifiedMaterial`.
+    pub(crate) fn domain_at(&self, mesh_idx: usize) -> super::material::MaterialDomain {
+        self.materials.get(mesh_idx)
+            .and_then(|m| m.unified.as_ref())
+            .map(|u| u.domain)
+            .unwrap_or(super::material::MaterialDomain::Opaque)
+    }
+
     /// Add an object instance at the world origin. Returns an `ObjectId` for later
     /// transform updates via [`set_transform`](Self::set_transform).
     pub fn add_object(&mut self, mesh_id: MeshId, kind: ObjectKind) -> ObjectId {
@@ -807,15 +975,15 @@ impl Scene {
         }
 
         // Build the combined GPU light array for the deferred pass.
-        // Directional first, then point, then spot.
+        // Order: directional (index 0), point, spot, rect, sphere, disk.
+        // The BVH covers all non-directional lights via their array indices.
         let mut gpu_lights: Vec<GpuLightData> = Vec::new();
         gpu_lights.push(GpuLightData::from_directional(&self.directional_light));
-        for pl in &self.point_lights {
-            gpu_lights.push(GpuLightData::from_point(pl));
-        }
-        for sl in &self.spot_lights {
-            gpu_lights.push(GpuLightData::from_spot(sl));
-        }
+        for pl in &self.point_lights       { gpu_lights.push(GpuLightData::from_point(pl)); }
+        for sl in &self.spot_lights        { gpu_lights.push(GpuLightData::from_spot(sl)); }
+        for rl in &self.rect_lights        { gpu_lights.push(GpuLightData::from_rect(rl)); }
+        for sl in &self.sphere_area_lights { gpu_lights.push(GpuLightData::from_sphere_area(sl)); }
+        for dl in &self.disk_lights        { gpu_lights.push(GpuLightData::from_disk(dl)); }
 
         let needed_bytes = (gpu_lights.len() * std::mem::size_of::<GpuLightData>()) as u64;
         let needs_realloc = self.deferred_lights_buffer
@@ -837,9 +1005,10 @@ impl Scene {
         self.update_lighting_uniform(view, frame)
     }
 
-    /// Total number of lights the deferred pass will evaluate (1 directional + all point + all spot).
+    /// Total number of entries in the deferred lights buffer.
     pub fn deferred_light_count(&self) -> u32 {
-        (1 + self.point_lights.len() + self.spot_lights.len()) as u32
+        (1 + self.point_lights.len() + self.spot_lights.len()
+           + self.rect_lights.len() + self.sphere_area_lights.len() + self.disk_lights.len()) as u32
     }
 
     /// Compute and upload the current lighting uniform from the directional light

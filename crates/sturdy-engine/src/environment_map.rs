@@ -86,6 +86,58 @@ impl EnvironmentMap {
         Self::from_cpu_pixels(engine, &pixels, w, h)
     }
 
+    /// Create a neutral studio environment from code — no HDR file required.
+    ///
+    /// Produces a simple three-point studio lighting environment:
+    ///   - Bright white key light overhead (top hemisphere)
+    ///   - Warm fill light from the front
+    ///   - Cool blue rim from behind/below
+    ///
+    /// This is the `Default::default()` environment: every `DeferredPass` binds it
+    /// automatically when no HDR file has been loaded, so PBR materials look reasonable
+    /// out of the box without any user configuration.
+    pub fn studio(engine: &Engine) -> Result<Self> {
+        const W: usize = 128;
+        const H: usize = 64;
+        let mut pixels = vec![[0.0f32; 4]; W * H];
+
+        for y in 0..H {
+            for x in 0..W {
+                // Equirectangular: phi ∈ [0, 2π], theta ∈ [0, π]
+                let phi   = (x as f32 + 0.5) / W as f32 * std::f32::consts::TAU;
+                let theta = (y as f32 + 0.5) / H as f32 * std::f32::consts::PI;
+                // Sphere direction (Y-up convention)
+                let dx = theta.sin() * phi.cos();
+                let dy = theta.cos();           // 1 at top, -1 at bottom
+                let dz = theta.sin() * phi.sin();
+
+                // Key light: bright white from above
+                let key_atten = (dy * 1.5 + 0.5).clamp(0.0, 1.0).powf(2.0);
+                let key = [2.4 * key_atten, 2.3 * key_atten, 2.2 * key_atten];
+
+                // Fill light: warm tint from front (+z)
+                let fill_atten = (dz * 0.5 + 0.5).clamp(0.0, 1.0) * ((-dy).clamp(0.0, 1.0) + 0.3).clamp(0.0, 1.0);
+                let fill = [0.5 * fill_atten, 0.45 * fill_atten, 0.35 * fill_atten];
+
+                // Rim: cool blue from behind/below
+                let rim_atten  = ((-dz * 0.6 - dy * 0.4).clamp(0.0, 1.0)).powf(3.0);
+                let rim = [0.3 * rim_atten, 0.4 * rim_atten, 0.7 * rim_atten];
+
+                // Ground: very dark neutral bounce
+                let ground_atten = ((-dy).clamp(0.0, 1.0)).powf(2.0);
+                let ground = [0.04 * ground_atten, 0.04 * ground_atten, 0.04 * ground_atten];
+
+                let r = key[0] + fill[0] + rim[0] + ground[0];
+                let g = key[1] + fill[1] + rim[1] + ground[1];
+                let b = key[2] + fill[2] + rim[2] + ground[2];
+                let _ = (dx, dz); // used implicitly via phi/theta
+                pixels[y * W + x] = [r, g, b, 1.0];
+            }
+        }
+
+        Self::from_cpu_pixels(engine, &pixels, W, H)
+    }
+
     /// Precompute IBL from already-decoded f32 RGBA pixels (row-major, equirectangular).
     pub fn from_cpu_pixels(engine: &Engine, pixels: &[[f32; 4]], width: usize, height: usize) -> Result<Self> {
         let sh9_coefficients = compute_sh9(pixels, width, height);
@@ -364,12 +416,17 @@ pub fn compute_brdf_lut(engine: &Engine) -> Result<Image> {
         for x in 0..SIZE {
             let n_dot_v = (x as f32 + 0.5) / SIZE as f32;
             let (scale, bias) = integrate_brdf(n_dot_v, roughness, SAMPLES);
+            // B channel = E_s_white = scale + bias (single-scatter reflectance for F0=1).
+            // Used by the multi-scatter energy compensation term.
+            let e_s_white = (scale + bias).clamp(0.0, 1.0);
             let offset = (y * SIZE + x) * 8;
             let s16 = half::f16::from_f32(scale.clamp(0.0, 1.0));
             let b16 = half::f16::from_f32(bias.clamp(0.0, 1.0));
-            pixels[offset..offset + 2].copy_from_slice(&s16.to_le_bytes());
+            let e16 = half::f16::from_f32(e_s_white);
+            pixels[offset    ..offset + 2].copy_from_slice(&s16.to_le_bytes());
             pixels[offset + 2..offset + 4].copy_from_slice(&b16.to_le_bytes());
-            // B and A channels left as 0
+            pixels[offset + 4..offset + 6].copy_from_slice(&e16.to_le_bytes());
+            // A channel left as 0
         }
     }
 
@@ -383,6 +440,39 @@ pub fn compute_brdf_lut(engine: &Engine) -> Result<Image> {
     frame.flush_with_reason(FrameSyncReason::CompatibilityShim)?;
     frame.wait_with_reason(FrameSyncReason::CompatibilityShim)?;
     Ok(image)
+}
+
+/// Precompute E_avg(roughness) — the hemispherical average of E_s_white.
+///
+/// E_avg[i] = ∫ E_s_white(NdotV, roughness_i) · 2·NdotV dNdotV  over [0, 1]
+///
+/// Returned as a 128-element `float32` buffer, indexed by `uint(roughness * 127.5)`.
+/// Bind as `"e_avg_lut"` in the frame for multi-scatter IBL compensation.
+pub fn compute_e_avg_lut(engine: &Engine) -> Result<crate::Buffer> {
+    const SIZE: usize = 128;
+    const SAMPLES_BRDF: u32 = 256;
+    const STEPS_NDOTV: usize = 64;
+
+    let mut values = vec![0.0f32; SIZE];
+    for y in 0..SIZE {
+        let roughness = (y as f32 + 0.5) / SIZE as f32;
+        let mut e_avg = 0.0f32;
+        for j in 0..STEPS_NDOTV {
+            let n_dot_v = (j as f32 + 0.5) / STEPS_NDOTV as f32;
+            let (scale, bias) = integrate_brdf(n_dot_v, roughness, SAMPLES_BRDF);
+            let e_s = (scale + bias).clamp(0.0, 1.0);
+            // Hemisphere integration weight: 2·NdotV (cos-weighted average)
+            e_avg += e_s * 2.0 * n_dot_v / STEPS_NDOTV as f32;
+        }
+        values[y] = e_avg.clamp(0.0, 1.0);
+    }
+
+    let buf = engine.create_buffer(crate::BufferDesc {
+        size: (SIZE * 4) as u64,
+        usage: crate::BufferUsage::STORAGE | crate::BufferUsage::COPY_DST,
+    })?;
+    buf.write(0, bytemuck::cast_slice(&values))?;
+    Ok(buf)
 }
 
 /// GGX split-sum integral for a single (NdotV, roughness) pair.

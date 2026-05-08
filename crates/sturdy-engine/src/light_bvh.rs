@@ -80,11 +80,55 @@ pub fn spot_light_entries(
     light_array_offset: u32,
 ) -> Vec<(Vec3, Vec3, u32)> {
     lights.iter().enumerate().map(|(i, l)| {
-        // Conservative AABB: sphere enclosing the spotlight cone.
-        // A tighter cone AABB exists but the sphere is correct and cheaper to compute.
         let r = Vec3::splat(l.range);
         let c = l.position;
         (c - r, c + r, light_array_offset + i as u32)
+    }).collect()
+}
+
+/// Compute the AABB entries for a list of rect lights.
+pub fn rect_light_entries(
+    lights: &[crate::scene::RectLight],
+    light_array_offset: u32,
+) -> Vec<(Vec3, Vec3, u32)> {
+    lights.iter().enumerate().map(|(i, l)| {
+        // AABB encloses all 4 corners plus the influence sphere.
+        let hw = l.right.normalize() * l.half_extents[0];
+        let hh = l.up.normalize()    * l.half_extents[1];
+        let corners = [
+            l.position - hw - hh,
+            l.position + hw - hh,
+            l.position - hw + hh,
+            l.position + hw + hh,
+        ];
+        let mut mn = Vec3::splat(f32::INFINITY);
+        let mut mx = Vec3::splat(f32::NEG_INFINITY);
+        for c in &corners { mn = mn.min(*c); mx = mx.max(*c); }
+        // Extend by the range in all directions so indirect illumination is captured.
+        let r = Vec3::splat(l.range);
+        (mn - r, mx + r, light_array_offset + i as u32)
+    }).collect()
+}
+
+/// Compute the AABB entries for a list of sphere area lights.
+pub fn sphere_area_light_entries(
+    lights: &[crate::scene::SphereLight],
+    light_array_offset: u32,
+) -> Vec<(Vec3, Vec3, u32)> {
+    lights.iter().enumerate().map(|(i, l)| {
+        let r = Vec3::splat(l.range);
+        (l.position - r, l.position + r, light_array_offset + i as u32)
+    }).collect()
+}
+
+/// Compute the AABB entries for a list of disk lights.
+pub fn disk_light_entries(
+    lights: &[crate::scene::DiskLight],
+    light_array_offset: u32,
+) -> Vec<(Vec3, Vec3, u32)> {
+    lights.iter().enumerate().map(|(i, l)| {
+        let r = Vec3::splat(l.range);
+        (l.position - r, l.position + r, light_array_offset + i as u32)
     }).collect()
 }
 
@@ -168,23 +212,32 @@ impl LightBvhBuilder {
         }
     }
 
-    /// Rebuild the BVH from the current point and spot light lists.
+    /// Rebuild the BVH from all non-directional lights.
     ///
-    /// `point_offset` and `spot_offset` are the indices into the `lights`
-    /// StructuredBuffer where point and spot lights start (after the directional).
+    /// Offsets are indices into the combined `lights` StructuredBuffer
+    /// (directional at 0, then point, spot, rect, sphere, disk in order).
     pub fn rebuild(
         &mut self,
         engine: &crate::Engine,
-        point_lights: &[crate::scene::PointLight],
-        spot_lights:  &[crate::scene::SpotLight],
-        point_offset: u32,
-        spot_offset:  u32,
+        point_lights:  &[crate::scene::PointLight],
+        spot_lights:   &[crate::scene::SpotLight],
+        rect_lights:   &[crate::scene::RectLight],
+        sphere_lights: &[crate::scene::SphereLight],
+        disk_lights:   &[crate::scene::DiskLight],
+        point_offset:  u32,
+        spot_offset:   u32,
+        rect_offset:   u32,
+        sphere_offset: u32,
+        disk_offset:   u32,
     ) -> crate::Result<()> {
         self.point_light_offset = point_offset;
         self.spot_light_offset  = spot_offset;
 
         let mut entries = point_light_entries(point_lights, point_offset);
         entries.extend(spot_light_entries(spot_lights, spot_offset));
+        entries.extend(rect_light_entries(rect_lights, rect_offset));
+        entries.extend(sphere_area_light_entries(sphere_lights, sphere_offset));
+        entries.extend(disk_light_entries(disk_lights, disk_offset));
 
         self.nodes = build_bvh(&mut entries);
 

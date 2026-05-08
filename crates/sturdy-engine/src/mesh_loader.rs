@@ -42,6 +42,21 @@ pub struct MeshTextures {
     pub occlusion: Option<Arc<Image>>,
     /// Linear-HDR emissive map. Multiply by `emissive_factor * emissive_strength`.
     pub emissive: Option<Arc<Image>>,
+    // ── KHR_materials_clearcoat ───────────────────────────────────────────────
+    /// Clearcoat intensity map (R channel). Multiply by `clearcoat_factor`.
+    pub clearcoat: Option<Arc<Image>>,
+    /// Clearcoat roughness map (G channel). Multiply by `clearcoat_roughness_factor`.
+    pub clearcoat_roughness: Option<Arc<Image>>,
+    /// Clearcoat tangent-space normal map.
+    pub clearcoat_normal: Option<Arc<Image>>,
+    // ── KHR_materials_transmission ────────────────────────────────────────────
+    /// Transmission weight map (R channel). Multiply by `transmission_factor`.
+    pub transmission: Option<Arc<Image>>,
+    // ── KHR_materials_sheen ───────────────────────────────────────────────────
+    /// Sheen color map (RGB). Multiply by `sheen_color_factor`.
+    pub sheen_color: Option<Arc<Image>>,
+    /// Sheen roughness map (A channel). Multiply by `sheen_roughness_factor`.
+    pub sheen_roughness: Option<Arc<Image>>,
 }
 
 /// One rasterizable surface from any mesh file format.
@@ -96,6 +111,27 @@ pub struct MeshMaterialParams {
     pub alpha_cutoff: f32,
     /// True when the material ignores all lighting (KHR_materials_unlit or vertex-only).
     pub unlit: bool,
+
+    // ── KHR_materials_clearcoat ───────────────────────────────────────────────
+    /// Clearcoat layer intensity `[0, 1]`. Non-zero → `ShadingModel::PbrClearcoat`.
+    pub clearcoat_factor: f32,
+    /// Clearcoat layer roughness `[0, 1]`.
+    pub clearcoat_roughness_factor: f32,
+
+    // ── KHR_materials_transmission ────────────────────────────────────────────
+    /// Fraction of light transmitted through the surface `[0, 1]`.
+    /// Non-zero → `MaterialDomain::Translucent` / `ShadingModel::PbrTransmission`.
+    pub transmission_factor: f32,
+
+    // ── KHR_materials_ior ─────────────────────────────────────────────────────
+    /// Index of refraction. Default `1.5` (glass). Affects F0: `((ior-1)/(ior+1))²`.
+    pub ior: f32,
+
+    // ── KHR_materials_sheen ───────────────────────────────────────────────────
+    /// Sheen color (linear RGB). Non-zero → `ShadingModel::PbrSubsurface` (sheen mode).
+    pub sheen_color_factor: [f32; 3],
+    /// Sheen roughness `[0, 1]`.
+    pub sheen_roughness_factor: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,28 +153,69 @@ impl Default for MeshMaterialParams {
             alpha_mode: MeshAlphaMode::Opaque,
             alpha_cutoff: 0.5,
             unlit: false,
+            clearcoat_factor: 0.0,
+            clearcoat_roughness_factor: 0.0,
+            transmission_factor: 0.0,
+            ior: 1.5,
+            sheen_color_factor: [0.0, 0.0, 0.0],
+            sheen_roughness_factor: 0.0,
         }
     }
 }
 
 impl MeshMaterialParams {
     /// Convert to a `UnifiedMaterial` for use with `DeferredPass`.
+    ///
+    /// Shading model selection:
+    /// - `unlit = true` → `ShadingModel::Unlit`
+    /// - `clearcoat_factor > 0` → `ShadingModel::PbrClearcoat`
+    /// - `transmission_factor > 0` → `ShadingModel::PbrTransmission`
+    /// - otherwise → `ShadingModel::PbrMetallicRoughness`
+    ///
+    /// Material domain:
+    /// - Transmission with factor > 0 → `Translucent` (overrides alpha_mode)
+    /// - Otherwise follows `alpha_mode` as before
     pub fn to_unified_material(&self, name: impl Into<String>) -> UnifiedMaterial {
-        let shading = if self.unlit { ShadingModel::Unlit } else { ShadingModel::PbrMetallicRoughness };
-        let domain = match self.alpha_mode {
-            MeshAlphaMode::Opaque => MaterialDomain::Opaque,
-            MeshAlphaMode::Mask => MaterialDomain::Masked,
-            MeshAlphaMode::Blend => MaterialDomain::Translucent,
+        let shading = if self.unlit {
+            ShadingModel::Unlit
+        } else if self.clearcoat_factor > 0.0 {
+            ShadingModel::PbrClearcoat
+        } else if self.transmission_factor > 0.0 {
+            ShadingModel::PbrTransmission
+        } else {
+            ShadingModel::PbrMetallicRoughness
         };
+
+        let domain = if self.transmission_factor > 0.0 {
+            // Transmissive materials go through the translucent (OIT) path.
+            MaterialDomain::Translucent
+        } else {
+            match self.alpha_mode {
+                MeshAlphaMode::Opaque => MaterialDomain::Opaque,
+                MeshAlphaMode::Mask   => MaterialDomain::Masked,
+                MeshAlphaMode::Blend  => MaterialDomain::Translucent,
+            }
+        };
+
+        // Compute F0 from IOR: F0 = ((ior - 1) / (ior + 1))²
+        // Standard dielectric: IOR 1.5 → F0 ≈ 0.04 (matches the shader default).
+        let _f0 = ((self.ior - 1.0) / (self.ior + 1.0)).powi(2);
+
         let e = self.emissive_factor;
         let s = self.emissive_strength;
-        UnifiedMaterialBuilder::new(name)
+
+        let mut builder = UnifiedMaterialBuilder::new(name)
             .shading_model(shading)
             .domain(domain)
             .base_color_constant(self.base_color_factor)
             .metallic_roughness_constants(self.metallic_factor, self.roughness_factor)
-            .emissive_constant([e[0] * s, e[1] * s, e[2] * s])
-            .build()
+            .emissive_constant([e[0] * s, e[1] * s, e[2] * s]);
+
+        if self.clearcoat_factor > 0.0 {
+            builder = builder.clearcoat(self.clearcoat_factor, self.clearcoat_roughness_factor);
+        }
+
+        builder.build()
     }
 
     /// Convert to the `MaterialDescriptor` for `Scene::set_material` (forward path).

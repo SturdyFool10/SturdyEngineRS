@@ -70,6 +70,7 @@ pub struct ShadowOutput {
 /// Single fixed-box directional shadow map. Use `CsmPass` for better quality.
 pub struct ShadowPass {
     depth_program: MeshProgram,
+    masked_depth_program: MeshProgram,
     pub config: ShadowConfig,
 }
 
@@ -80,7 +81,8 @@ impl ShadowPass {
 
     pub fn with_config(engine: &Engine, config: ShadowConfig) -> Result<Self> {
         let depth_program = build_depth_program(engine)?;
-        Ok(Self { depth_program, config })
+        let masked_depth_program = build_masked_depth_program(engine)?;
+        Ok(Self { depth_program, masked_depth_program, config })
     }
 
     pub fn light_matrix(&self, light_direction: Vec3) -> Mat4 {
@@ -97,7 +99,8 @@ impl ShadowPass {
         let desc = shadow_image_desc(res, "shadow_map");
         let shadow_image = frame.image("shadow_map", desc)?;
         let light_view_proj = self.light_matrix(scene.directional_light.direction);
-        draw_shadow_batches(scene, frame, &shadow_image, &self.depth_program, light_view_proj)?;
+        draw_shadow_batches(scene, frame, &shadow_image,
+                            &self.depth_program, &self.masked_depth_program, light_view_proj)?;
         shadow_image.register_as("shadow_map");
         Ok(ShadowOutput { image: shadow_image, light_view_proj, depth_bias: self.config.depth_bias })
     }
@@ -197,6 +200,7 @@ pub struct CsmOutput {
 /// ```
 pub struct CsmPass {
     depth_program: MeshProgram,
+    masked_depth_program: MeshProgram,
     pub config: CsmConfig,
     /// Persistent GPU buffer for `GpuCsmData` (reused every frame).
     pub csm_buffer: Buffer,
@@ -209,11 +213,12 @@ impl CsmPass {
 
     pub fn with_config(engine: &Engine, config: CsmConfig) -> Result<Self> {
         let depth_program = build_depth_program(engine)?;
+        let masked_depth_program = build_masked_depth_program(engine)?;
         let csm_buffer = engine.create_buffer(BufferDesc {
             size: std::mem::size_of::<GpuCsmData>() as u64,
             usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
         })?;
-        Ok(Self { depth_program, config, csm_buffer })
+        Ok(Self { depth_program, masked_depth_program, config, csm_buffer })
     }
 
     /// Render all cascade shadow maps and return the output.
@@ -257,7 +262,8 @@ impl CsmPass {
             let name = format!("shadow_map_{i}");
             let desc = shadow_image_desc(res, Box::leak(name.clone().into_boxed_str()));
             let img = frame.image(&name, desc)?;
-            draw_shadow_batches(scene, frame, &img, &self.depth_program, matrices[i])?;
+            draw_shadow_batches(scene, frame, &img,
+                                &self.depth_program, &self.masked_depth_program, matrices[i])?;
             img.register_as(&name);
             images[i] = Some(img);
         }
@@ -449,24 +455,71 @@ fn shadow_image_desc(resolution: u32, debug_name: &'static str) -> ImageDesc {
     }
 }
 
+/// Draw all shadow-casting batches into `shadow_image`.
+///
+/// - `Opaque` / `Unlit` / `Decal` meshes use the plain depth program.
+/// - `Masked` meshes use the alpha-tested depth program and bind `material_desc`.
+/// - `Translucent` meshes are skipped (they don't cast hard shadows).
 fn draw_shadow_batches(
     scene: &Scene,
     frame: &RenderFrame,
     shadow_image: &GraphImage,
     program: &MeshProgram,
+    masked_program: &MeshProgram,
     light_view_proj: Mat4,
 ) -> Result<()> {
+    use crate::scene::material::MaterialDomain;
+
     let constants = ShadowDepthConstants {
         light_view_proj: light_view_proj.to_cols_array_2d(),
     };
     for (mesh_idx, instance_buf_opt, instance_count) in scene.drawable_batches() {
         let instance_buf = match instance_buf_opt { Some(b) => b, None => continue };
         if instance_count == 0 { continue; }
+
+        let domain = scene.domain_at(mesh_idx);
+        if domain == MaterialDomain::Translucent {
+            continue;  // translucent objects don't cast hard shadows
+        }
+
         let mesh = scene.mesh_at(mesh_idx);
         frame.bind_buffer("instances", instance_buf);
-        shadow_image.draw_mesh_depth_only_with_push_constants(
-            mesh, program, instance_buf, instance_count, &constants,
-        )?;
+
+        if domain == MaterialDomain::Masked {
+            // Alpha-tested shadow: bind material constants so the fragment shader
+            // can read `albedo.a` and discard fragments below the cutoff.
+            if let Some(mat_buf) = scene.material_gpu_buffer_at(mesh_idx) {
+                frame.bind_buffer("material_desc", mat_buf);
+            }
+            shadow_image.draw_mesh_depth_only_with_push_constants(
+                mesh, masked_program, instance_buf, instance_count, &constants,
+            )?;
+        } else {
+            shadow_image.draw_mesh_depth_only_with_push_constants(
+                mesh, program, instance_buf, instance_count, &constants,
+            )?;
+        }
     }
     Ok(())
+}
+
+fn build_masked_depth_program(engine: &Engine) -> Result<MeshProgram> {
+    MeshProgram::new(
+        engine,
+        MeshProgramDesc {
+            fragment: ShaderDesc {
+                source: ShaderSource::File(engine_shader("shadow_depth_masked.slang")),
+                entry_point: "main".to_owned(),
+                stage: ShaderStage::Fragment,
+            },
+            vertex: Some(ShaderDesc {
+                source: ShaderSource::File(engine_shader("shadow_depth.slang")),
+                entry_point: "main".to_owned(),
+                stage: ShaderStage::Vertex,
+            }),
+            vertex_kind: MeshVertexKind::V3d,
+            alpha_blend: false,
+            uses_depth: true,
+        },
+    )
 }

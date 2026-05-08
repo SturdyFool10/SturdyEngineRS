@@ -50,11 +50,14 @@ float2 oct_encode(float3 n) {
 
 // ── G-Buffer output struct ────────────────────────────────────────────────────
 
+// G3 (world_pos) removed — world position is now reconstructed from the depth
+// buffer in deferred_lighting.slang using the inverse view-projection matrix.
+// This saves 8 bytes/pixel (~16 MB/frame at 1080p) with no quality loss.
+
 struct GBufferOut {
     float4 g0 : SV_TARGET0; // albedo.rgb | metallic
     float4 g1 : SV_TARGET1; // oct-normal.xy | roughness | 0
     float4 g2 : SV_TARGET2; // emissive.rgb | 0
-    float4 g3 : SV_TARGET3; // world_pos.xyz | 0
 };
 
 GBufferOut main(VSOut v) {
@@ -85,6 +88,5 @@ GBufferOut main(VSOut v) {
     o.g0 = float4(albedo, metallic);
     o.g1 = float4(oct_n, roughness, 0.0);
     o.g2 = float4(emissive, 0.0);
-    o.g3 = float4(v.world_pos, 0.0);
     return o;
 }

@@ -10,7 +10,7 @@ use crate::{
     ColorTargetDesc, CullMode, Engine, Error, Format, FrontFace, GraphicsPipelineDesc, Pipeline,
     PipelineLayout, PrimitiveTopology, RasterState, Result, Shader, ShaderDesc, ShaderReflection,
     ShaderSource, ShaderStage, VertexAttributeDesc, VertexBufferLayout, VertexInputRate,
-    mesh::{Vertex2d, Vertex3d, vertex2d_attributes, vertex3d_attributes},
+    mesh::{Vertex2d, Vertex3d, vertex2d_attributes, vertex3d_attributes, skinned_vertex3d_attributes},
 };
 
 const DEFAULT_VERTEX_2D: &str = include_str!(concat!(
@@ -21,6 +21,11 @@ const DEFAULT_VERTEX_2D: &str = include_str!(concat!(
 const DEFAULT_VERTEX_3D: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/mesh_vertex_3d.slang"
+));
+
+const DEFAULT_VERTEX_3D_SKINNED: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/mesh_vertex_skinned_3d.slang"
 ));
 
 const UNLIT_FRAGMENT: &str = include_str!(concat!(
@@ -48,6 +53,9 @@ pub struct MeshProgramDesc {
 pub enum MeshVertexKind {
     V2d,
     V3d,
+    /// Skinned 3D vertex — position, normal, uv, tangent, joint_idx, joint_wt.
+    /// Uses `mesh_vertex_skinned_3d.slang` as the default vertex shader.
+    V3dSkinned,
 }
 
 pub struct MeshProgram {
@@ -189,8 +197,9 @@ impl MeshProgram {
 
     pub fn new(engine: &Engine, desc: MeshProgramDesc) -> Result<Self> {
         let default_vertex_src = match desc.vertex_kind {
-            MeshVertexKind::V2d => DEFAULT_VERTEX_2D,
-            MeshVertexKind::V3d => DEFAULT_VERTEX_3D,
+            MeshVertexKind::V2d       => DEFAULT_VERTEX_2D,
+            MeshVertexKind::V3d       => DEFAULT_VERTEX_3D,
+            MeshVertexKind::V3dSkinned => DEFAULT_VERTEX_3D_SKINNED,
         };
         let vertex_path = desc.vertex.as_ref().and_then(|v| match &v.source {
             ShaderSource::File(p) => Some(p.clone()),
@@ -209,8 +218,9 @@ impl MeshProgram {
         let fragment = engine.create_shader(desc.fragment)?;
         let reflection = engine.graphics_shader_reflection(&vertex, Some(&fragment))?;
         let expected_attributes = match desc.vertex_kind {
-            MeshVertexKind::V2d => vertex2d_attributes(),
-            MeshVertexKind::V3d => vertex3d_attributes(),
+            MeshVertexKind::V2d        => vertex2d_attributes(),
+            MeshVertexKind::V3d        => vertex3d_attributes(),
+            MeshVertexKind::V3dSkinned => skinned_vertex3d_attributes(),
         };
         validate_vertex_inputs_match_layout(&reflection, &expected_attributes)?;
         let pipeline_layout =
@@ -336,6 +346,10 @@ impl MeshProgram {
                     std::mem::size_of::<Vertex3d>() as u32,
                     vertex3d_attributes(),
                 ),
+                MeshVertexKind::V3dSkinned => (
+                    std::mem::size_of::<crate::SkinnedVertex3d>() as u32,
+                    skinned_vertex3d_attributes(),
+                ),
             };
             let pipeline = self.engine.create_graphics_pipeline(GraphicsPipelineDesc {
                 vertex_shader: self.vertex.handle(),
@@ -397,6 +411,10 @@ impl MeshProgram {
                 MeshVertexKind::V3d => (
                     std::mem::size_of::<Vertex3d>() as u32,
                     vertex3d_attributes(),
+                ),
+                MeshVertexKind::V3dSkinned => (
+                    std::mem::size_of::<crate::SkinnedVertex3d>() as u32,
+                    skinned_vertex3d_attributes(),
                 ),
             };
             let color_targets = color_formats

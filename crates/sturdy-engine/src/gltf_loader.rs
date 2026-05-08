@@ -199,6 +199,24 @@ fn extract_material(material: &gltf::Material<'_>) -> MeshMaterialParams {
         gltf::material::AlphaMode::Mask   => MeshAlphaMode::Mask,
         gltf::material::AlphaMode::Blend  => MeshAlphaMode::Blend,
     };
+
+    // KHR_materials_transmission
+    let transmission_factor =
+        material.transmission().map(|t| t.transmission_factor()).unwrap_or(0.0);
+
+    // KHR_materials_ior
+    let ior = material.ior().unwrap_or(1.5);
+
+    // KHR_materials_specular: treat specular_factor as an F0 scale when present
+    let _specular_factor = material.specular()
+        .map(|s| s.specular_factor())
+        .unwrap_or(1.0);
+
+    // KHR_materials_volume: attenuation / thick dielectric — captured in transmission
+    let _attenuation_color = material.volume()
+        .map(|v| v.attenuation_color())
+        .unwrap_or([1.0, 1.0, 1.0]);
+
     MeshMaterialParams {
         base_color_factor: pbr.base_color_factor(),
         metallic_factor:   pbr.metallic_factor(),
@@ -209,6 +227,12 @@ fn extract_material(material: &gltf::Material<'_>) -> MeshMaterialParams {
         alpha_mode,
         alpha_cutoff:      material.alpha_cutoff().unwrap_or(0.5),
         unlit:             material.unlit(),
+        clearcoat_factor: 0.0,            // KHR_materials_clearcoat not in gltf 1.x
+        clearcoat_roughness_factor: 0.0,
+        transmission_factor,
+        ior,
+        sheen_color_factor: [0.0, 0.0, 0.0], // KHR_materials_sheen not in gltf 1.x
+        sheen_roughness_factor: 0.0,
     }
 }
 
@@ -219,11 +243,23 @@ fn extract_textures(material: &gltf::Material<'_>, gpu_images: &[Option<Arc<Imag
         gpu_images.get(tex.source().index()).and_then(|v| v.clone())
     };
 
+    // KHR_materials_transmission texture
+    let transmission = material.transmission()
+        .and_then(|t| t.transmission_texture())
+        .and_then(|t| lookup(t.texture()));
+
     MeshTextures {
-        base_color:        pbr.base_color_texture().and_then(|t| lookup(t.texture())),
+        base_color:         pbr.base_color_texture().and_then(|t| lookup(t.texture())),
         metallic_roughness: pbr.metallic_roughness_texture().and_then(|t| lookup(t.texture())),
-        normal:            material.normal_texture().and_then(|t| lookup(t.texture())),
-        occlusion:         material.occlusion_texture().and_then(|t| lookup(t.texture())),
-        emissive:          material.emissive_texture().and_then(|t| lookup(t.texture())),
+        normal:             material.normal_texture().and_then(|t| lookup(t.texture())),
+        occlusion:          material.occlusion_texture().and_then(|t| lookup(t.texture())),
+        emissive:           material.emissive_texture().and_then(|t| lookup(t.texture())),
+        // KHR_materials_clearcoat / sheen not available in gltf 1.x — None for now
+        clearcoat:          None,
+        clearcoat_roughness: None,
+        clearcoat_normal:   None,
+        transmission,
+        sheen_color:        None,
+        sheen_roughness:    None,
     }
 }

@@ -126,5 +126,6 @@ fn extract_material(mat: &tobj::Material) -> MeshMaterialParams {
         alpha_mode,
         alpha_cutoff:      0.5,
         unlit:             false,
+        ..MeshMaterialParams::default()
     }
 }

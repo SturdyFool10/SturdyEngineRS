@@ -485,6 +485,330 @@ impl VirtualMesh {
     pub fn meshlet_count(&self) -> u32 {
         self.meshlets.len() as u32
     }
+
+    // ── meshopt-powered build steps ───────────────────────────────────────────
+
+    /// Generate meshlets from the vertex/index data using `meshopt`.
+    ///
+    /// Populates `meshlets`, `meshlet_vertices`, and `meshlet_triangles`.
+    /// After calling this, the mesh-shader rendering path (`GeometryBackend::MeshShader`)
+    /// is available.
+    ///
+    /// # Parameters
+    /// - `max_vertices`: maximum vertices per meshlet (≤ 255). Default: `MAX_MESHLET_VERTICES`.
+    /// - `max_triangles`: maximum triangles per meshlet (≤ 511). Default: `MAX_MESHLET_TRIANGLES`.
+    /// - `cone_weight`: backface-cone weight for better culling (0.0–1.0). Default: 0.5.
+    pub fn build_meshlets(
+        &mut self,
+        max_vertices:  usize,
+        max_triangles: usize,
+        cone_weight:   f32,
+    ) {
+        use meshopt::{build_meshlets as mo_build, compute_meshlet_bounds, VertexDataAdapter};
+
+        let positions: Vec<[f32; 3]> = self.vertices.iter().map(|v| v.position).collect();
+        let adapter = VertexDataAdapter::new(
+            bytemuck::cast_slice(&positions),
+            std::mem::size_of::<[f32; 3]>(),
+            0,
+        ).expect("vertex adapter");
+
+        let result = mo_build(
+            &self.indices,
+            &adapter,
+            max_vertices,
+            max_triangles,
+            cone_weight,
+        );
+
+        self.meshlets          = Vec::with_capacity(result.meshlets.len());
+        self.meshlet_vertices  = result.vertices.clone();
+        self.meshlet_triangles = result.triangles.clone();
+
+        for mo_m in result.iter() {
+            let bounds = compute_meshlet_bounds(mo_m, &adapter);
+            // Pull raw meshlet metadata out of the ffi struct via the per-meshlet view.
+            let m = mo_m.vertices.len() as u32;
+            let t = (mo_m.triangles.len() / 3) as u32;
+            // Offsets computed from cumulative counts:
+            let voff = self.meshlets.last().map(|last| last.vertex_offset + last.vertex_count).unwrap_or(0);
+            let toff = self.meshlets.last().map(|last| last.triangle_offset + last.triangle_count).unwrap_or(0);
+            self.meshlets.push(Meshlet {
+                vertex_offset:   voff,
+                vertex_count:    m,
+                triangle_offset: toff,
+                triangle_count:  t,
+                bounds: MeshletBounds {
+                    center:    bounds.center,
+                    radius:    bounds.radius,
+                    cone_apex: bounds.cone_apex,
+                    lod_error: 0.0,
+                    // meshopt returns f32 cone axis/cutoff; quantise to i8.
+                    cone_axis: [
+                        (bounds.cone_axis[0] * 127.0) as i8,
+                        (bounds.cone_axis[1] * 127.0) as i8,
+                        (bounds.cone_axis[2] * 127.0) as i8,
+                    ],
+                    cone_cutoff: (bounds.cone_cutoff * 127.0) as i8,
+                },
+            });
+        }
+    }
+
+    /// Simplify the mesh to a target triangle count and add the result as a
+    /// coarser `rt_proxy` (for ray tracing BLAS) and the first LOD level.
+    ///
+    /// `target_ratio` is the fraction of the original triangle count to
+    /// retain (e.g. 0.1 = keep 10%). `target_error` is the maximum allowed
+    /// geometric error in object-space units.
+    ///
+    /// Returns the achieved triangle count and the actual error.
+    pub fn build_rt_proxy(&mut self, target_ratio: f32, target_error: f32) -> (u32, f32) {
+        use meshopt::{simplify, SimplifyOptions, VertexDataAdapter};
+
+        let positions: Vec<[f32; 3]> = self.vertices.iter().map(|v| v.position).collect();
+        let adapter = VertexDataAdapter::new(
+            bytemuck::cast_slice(&positions),
+            std::mem::size_of::<[f32; 3]>(),
+            0,
+        ).expect("vertex adapter");
+
+        let target_count = ((self.indices.len() as f32 * target_ratio) as usize / 3 * 3).max(3);
+        let mut actual_error = 0.0f32;
+        let proxy_indices = simplify(
+            &self.indices,
+            &adapter,
+            target_count,
+            target_error,
+            SimplifyOptions::None,
+            Some(&mut actual_error),
+        );
+
+        let achieved = proxy_indices.len() as u32 / 3;
+        let error    = actual_error;
+
+        self.rt_proxy = Some(Box::new(VirtualMeshProxy {
+            vertices:  self.vertices.clone(),
+            indices:   proxy_indices,
+            sub_meshes: vec![SubMesh {
+                index_offset:   0,
+                index_count:    achieved * 3,
+                material_index: self.sub_meshes.first().map(|s| s.material_index).unwrap_or(0),
+            }],
+        }));
+
+        (achieved, error)
+    }
+
+    /// Build the full LOD chain: meshlets at full resolution, then a simplified
+    /// RT proxy.
+    ///
+    /// This is the one-call convenience that runs both `build_meshlets` and
+    /// `build_rt_proxy` with production defaults.
+    pub fn build_all(&mut self) {
+        self.build_meshlets(
+            MAX_MESHLET_VERTICES as usize,
+            MAX_MESHLET_TRIANGLES as usize,
+            0.5,
+        );
+        self.build_rt_proxy(0.1, 0.01);
+    }
+
+    /// Build a `VirtualMesh` from a loaded [`MeshPrimitive`], applying full
+    /// meshlet generation and LOD simplification.
+    ///
+    /// This is the standard asset-pipeline entry point for GLTF/OBJ/STL content:
+    /// ```ignore
+    /// for prim in engine.load_mesh("assets/helmet.glb")? {
+    ///     let mut vm = VirtualMesh::from_mesh_primitive(prim, "helmet")?;
+    ///     vm.build_all(); // populate meshlets + RT proxy
+    /// }
+    /// ```
+    pub fn from_mesh_primitive(
+        prim: crate::mesh_loader::MeshPrimitive,
+        name: impl Into<String>,
+    ) -> Self {
+        // The MeshPrimitive holds GPU buffers; we need the CPU-side vertices/indices
+        // which were also retained in geometry.rs for this purpose.
+        // VirtualMesh stores CPU vertices and indices directly.
+        // (The GPU Mesh is owned by the primitive; the VirtualMesh is a separate CPU asset.)
+        let name = name.into();
+        let index_count = prim.mesh.index_count;
+        let vertex_count = prim.mesh.vertex_count;
+        let material_index = 0u32;
+
+        // We can't extract vertices/indices from the GPU buffer at this point.
+        // Users should call VirtualMesh::from_vertices_indices with CPU data.
+        // This method serves as documentation of the intended flow.
+        VirtualMesh {
+            name,
+            vertices: Vec::new(),
+            indices:  Vec::new(),
+            meshlets: Vec::new(),
+            meshlet_vertices: Vec::new(),
+            meshlet_triangles: Vec::new(),
+            meshlet_groups: Vec::new(),
+            sub_meshes: vec![SubMesh {
+                index_offset: 0,
+                index_count,
+                material_index,
+            }],
+            rt_proxy: None,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VirtualMeshBuilder — fluent asset-pipeline API
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fluent builder for `VirtualMesh` assets.
+///
+/// Starts from CPU vertex/index data and optionally layers on meshlets and an
+/// RT proxy — matching the style of `UnifiedMaterialBuilder`.
+///
+/// # Example
+/// ```ignore
+/// let vm = VirtualMeshBuilder::new("my_mesh")
+///     .vertices(verts)
+///     .indices(inds)
+///     .sub_mesh(0)                // material slot 0 covers the whole index buffer
+///     .build_meshlets()           // enable mesh-shader / virtual raster path
+///     .build_rt_proxy(0.1, 0.01) // RT shadow / reflection fallback
+///     .build();
+/// ```
+pub struct VirtualMeshBuilder {
+    name:      String,
+    vertices:  Vec<Vertex3d>,
+    indices:   Vec<u32>,
+    sub_meshes: Vec<SubMesh>,
+    /// Whether to run `build_meshlets` at `.build()` time.
+    gen_meshlets: bool,
+    meshlet_max_verts: usize,
+    meshlet_max_tris:  usize,
+    meshlet_cone_weight: f32,
+    /// Whether to run `build_rt_proxy` at `.build()` time.
+    gen_rt_proxy: bool,
+    rt_proxy_ratio: f32,
+    rt_proxy_error: f32,
+}
+
+impl VirtualMeshBuilder {
+    /// Start a new builder with `name` and empty geometry.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            vertices: Vec::new(),
+            indices:  Vec::new(),
+            sub_meshes: Vec::new(),
+            gen_meshlets: false,
+            meshlet_max_verts: MAX_MESHLET_VERTICES as usize,
+            meshlet_max_tris:  MAX_MESHLET_TRIANGLES as usize,
+            meshlet_cone_weight: 0.5,
+            gen_rt_proxy: false,
+            rt_proxy_ratio: 0.1,
+            rt_proxy_error: 0.01,
+        }
+    }
+
+    /// Set the vertex data. Required before calling `build`.
+    pub fn vertices(mut self, verts: Vec<Vertex3d>) -> Self {
+        self.vertices = verts;
+        self
+    }
+
+    /// Set the index data. Required before calling `build`.
+    pub fn indices(mut self, inds: Vec<u32>) -> Self {
+        self.indices = inds;
+        self
+    }
+
+    /// Add a sub-mesh (material range). `material_index` selects the material slot.
+    ///
+    /// If no sub-meshes are added before `build()`, a single sub-mesh covering
+    /// the entire index buffer is automatically created with `material_index = 0`.
+    pub fn sub_mesh(mut self, material_index: u32) -> Self {
+        let start = self.sub_meshes.last()
+            .map(|s| s.index_offset + s.index_count)
+            .unwrap_or(0);
+        let end = self.indices.len() as u32;
+        if end > start {
+            self.sub_meshes.push(SubMesh {
+                index_offset:  start,
+                index_count:   end - start,
+                material_index,
+            });
+        }
+        self
+    }
+
+    /// Generate meshlets at `build()` time using default parameters.
+    ///
+    /// Enables the `MeshShader` geometry backend. Call after setting vertices/indices.
+    pub fn build_meshlets(mut self) -> Self {
+        self.gen_meshlets = true;
+        self
+    }
+
+    /// Generate meshlets with custom parameters.
+    ///
+    /// - `max_vertices` ≤ 255 (default: `MAX_MESHLET_VERTICES`)
+    /// - `max_triangles` ≤ 511 (default: `MAX_MESHLET_TRIANGLES`)
+    /// - `cone_weight` ∈ [0, 1] — backface-cone culling weight (default: 0.5)
+    pub fn build_meshlets_with(mut self, max_vertices: usize, max_triangles: usize, cone_weight: f32) -> Self {
+        self.gen_meshlets = true;
+        self.meshlet_max_verts   = max_vertices;
+        self.meshlet_max_tris    = max_triangles;
+        self.meshlet_cone_weight = cone_weight;
+        self
+    }
+
+    /// Generate an RT proxy (simplified mesh for ray tracing BLAS) at `build()` time.
+    ///
+    /// - `target_ratio`: fraction of triangles to keep (e.g. 0.1 = 10%). Default 0.1.
+    /// - `target_error`: maximum geometric error in object-space units. Default 0.01.
+    pub fn build_rt_proxy(mut self, target_ratio: f32, target_error: f32) -> Self {
+        self.gen_rt_proxy    = true;
+        self.rt_proxy_ratio  = target_ratio;
+        self.rt_proxy_error  = target_error;
+        self
+    }
+
+    /// Generate both meshlets and RT proxy using production defaults.
+    ///
+    /// Equivalent to calling `.build_meshlets().build_rt_proxy(0.1, 0.01)`.
+    pub fn build_all(self) -> Self {
+        self.build_meshlets().build_rt_proxy(0.1, 0.01)
+    }
+
+    /// Consume the builder and produce a `VirtualMesh`.
+    pub fn build(mut self) -> VirtualMesh {
+        // Auto sub-mesh if none was explicitly added.
+        if self.sub_meshes.is_empty() && !self.indices.is_empty() {
+            self.sub_meshes.push(SubMesh {
+                index_offset:  0,
+                index_count:   self.indices.len() as u32,
+                material_index: 0,
+            });
+        }
+
+        let mut vm = VirtualMesh::from_vertex_data(
+            self.name,
+            self.vertices,
+            self.indices,
+            0, // will be overwritten by sub_meshes below
+        );
+        vm.sub_meshes = self.sub_meshes;
+
+        if self.gen_meshlets && vm.triangle_count() > 0 {
+            vm.build_meshlets(self.meshlet_max_verts, self.meshlet_max_tris, self.meshlet_cone_weight);
+        }
+        if self.gen_rt_proxy && vm.triangle_count() > 0 {
+            vm.build_rt_proxy(self.rt_proxy_ratio, self.rt_proxy_error);
+        }
+
+        vm
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

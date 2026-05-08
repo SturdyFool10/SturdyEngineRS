@@ -10,6 +10,14 @@ rust-version.workspace = true
 name = "sturdy-engine-testbed"
 path = "src/main.rs"
 
+[[bin]]
+name = "game_3d"
+path = "src/bin/game_3d.rs"
+
+[[bin]]
+name = "game_2d"
+path = "src/bin/game_2d.rs"
+
 [dependencies]
 bytemuck = "1"
 clay-ui = { path = "../clay-ui" }

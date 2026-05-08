@@ -13,11 +13,10 @@
 use std::path::PathBuf;
 
 use crate::{
-    Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, ImageDesc, ImageDimension,
+    Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, Image, ImageDesc, ImageDimension,
     ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind, RenderFrame, Result,
     ShaderDesc, ShaderProgram, ShaderSource, ShaderStage, push_constants,
     scene::Scene,
-    scene::CameraConstants,
 };
 use glam::Mat4;
 use sturdy_engine_core::Extent3d;
@@ -103,6 +102,9 @@ pub struct OitPass {
     resolve_program: ShaderProgram,
     pub config: OitConfig,
 
+    /// Flat (128, 128, 255, 255) normal map used for meshes without a normal map.
+    flat_normal_map: Image,
+
     /// Persistent buffers, rebuilt when the framebuffer size changes.
     head_buf:  Option<Buffer>,
     frag_pool: Option<Buffer>,
@@ -134,10 +136,15 @@ impl OitPass {
 
         let resolve_program = engine.load_shader(engine_shader("oit_resolve.slang"))?;
 
+        let flat_normal_map = engine.generate_texture_2d("oit_flat_normal_map", 1, 1, |_, _| {
+            [128, 128, 255, 255]
+        })?;
+
         Ok(Self {
             collect_program,
             resolve_program,
             config,
+            flat_normal_map,
             head_buf: None,
             frag_pool: None,
             counter: None,
@@ -261,6 +268,12 @@ impl OitPass {
             if let Some(mat_buf) = scene.material_gpu_buffer_at(mesh_idx) {
                 frame.bind_buffer("material_desc", mat_buf);
             }
+
+            // Bind normal map: per-mesh override, or flat fallback.
+            let nmap: &Image = scene.normal_map_at(mesh_idx)
+                .map(|arc| arc.as_ref())
+                .unwrap_or(&self.flat_normal_map);
+            frame.bind_image("normal_map", nmap);
 
             // Collect pass writes into a null colour target (the OIT buffers
             // are storage buffers bound above). We draw into a 1×1 dummy target

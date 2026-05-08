@@ -704,38 +704,33 @@ float2 oct_encode(float3 n) {{
 }}
 
 // ── G-Buffer output ──────────────────────────────────────────────────────────
+// G3 removed — world position reconstructed from depth in deferred_lighting.slang.
 struct GBufferOut {{
     float4 g0 : SV_TARGET0; // base_color.rgb | metallic
     float4 g1 : SV_TARGET1; // oct-normal.xy | roughness | 0
     float4 g2 : SV_TARGET2; // emissive.rgb | 0
-    float4 g3 : SV_TARGET3; // world_pos.xyz | 0
 }};
 
 // ── Material evaluation ──────────────────────────────────────────────────────
 GBufferOut main(VSOut v) {{
-    // Evaluate all material channels.
     float4 base_color = {base_color_e};
     float  metallic   = {metallic_e};
     float  roughness  = {roughness_e};
-    float3 normal_ts  = {normal_e};  // tangent-space normal
+    float3 normal_ts  = {normal_e};
     float3 emissive   = {emissive_e};
 
-    // Apply TBN to produce world-space normal.
-    // When normal_ts == float3(0,0,1) (no normal map), this returns the geometric normal.
     float3 N = normalize(v.normal);
     float3 T = normalize(v.tangent.xyz);
-    T = normalize(T - N * dot(N, T));       // Gram-Schmidt re-orthogonalise
+    T = normalize(T - N * dot(N, T));
     float3 B = cross(N, T) * v.tangent.w;
     float3x3 tbn = float3x3(T, B, N);
     N = normalize(mul(normal_ts, tbn));
-
     float2 oct_n = oct_encode(N);
 
     GBufferOut o;
     o.g0 = float4(base_color.rgb, metallic);
     o.g1 = float4(oct_n, roughness, 0.0);
     o.g2 = float4(emissive, 0.0);
-    o.g3 = float4(v.world_pos, 0.0);
     return o;
 }}
 "#,
@@ -933,27 +928,29 @@ pub type MaterialInput<T> = MaterialExpr<T>;
 
 /// Standard G-Buffer attachment slots and formats for the deferred PBR pipeline.
 ///
-/// All passes that read or write G-Buffer data must use these constants so
-/// attachment indices and formats are consistent across the frame graph.
+/// G3 (world position) was eliminated in favour of depth reconstruction.
+/// World position is reconstructed in `deferred_lighting.slang` from the hardware
+/// depth buffer and the inverse view-projection matrix, saving 8 bytes/pixel.
 ///
 /// ```text
 /// G0  RGBA8Unorm   base_color.rgb (linear) | metallic
 /// G1  RGBA16Float  world-normal.xy (oct-encoded) | roughness | 0
 /// G2  RGBA16Float  emissive.rgb (linear HDR, unclamped) | 0
-/// G3  RGBA16Float  world_pos.xyz | 0
-/// D   Depth32Float hardware depth
+/// D   Depth32Float hardware depth (also sampled by the lighting pass)
 /// ```
 pub mod gbuffer {
     use crate::Format;
 
     pub const SLOT_BASE_COLOR_METALLIC: u32 = 0;
-    pub const SLOT_NORMAL_ROUGHNESS_OCCLUSION: u32 = 1;
-    pub const SLOT_EMISSIVE_SHADING: u32 = 2;
+    pub const SLOT_NORMAL_ROUGHNESS: u32 = 1;
+    pub const SLOT_EMISSIVE: u32 = 2;
+
+    /// Kept for compatibility; depth is the D attachment, not a colour slot.
     pub const SLOT_DEPTH: u32 = 3;
 
     pub const FORMAT_BASE_COLOR_METALLIC: Format = Format::Rgba8Unorm;
-    pub const FORMAT_NORMAL_ROUGHNESS_OCCLUSION: Format = Format::Rgba16Float;
-    pub const FORMAT_EMISSIVE_SHADING: Format = Format::Rgba16Float;
+    pub const FORMAT_NORMAL_ROUGHNESS: Format = Format::Rgba16Float;
+    pub const FORMAT_EMISSIVE: Format = Format::Rgba16Float;
     pub const FORMAT_DEPTH: Format = Format::Depth32Float;
 
     pub const COLOR_ATTACHMENT_COUNT: u32 = 3;

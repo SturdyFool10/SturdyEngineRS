@@ -1,6 +1,6 @@
 use crate::{
     BoundingSphere, Buffer, BufferDesc, BufferUsage, Engine, IndexFormat, Result,
-    VertexAttributeDesc, VertexFormat,
+    VertexAttributeDesc, VertexFormat, VertexInputRate,
 };
 
 #[repr(C)]
@@ -22,6 +22,38 @@ pub struct Vertex3d {
     /// Set to `[1, 0, 0, 1]` when tangents are unavailable (e.g. meshes
     /// with no UV mapping). Correct tangents are required for normal mapping.
     pub tangent: [f32; 4],
+}
+
+/// A skinnable vertex with 4 joint indices and 4 blend weights.
+///
+/// Used by `Mesh::new_skinned` and sampled by `mesh_vertex_skinned_3d.slang`.
+/// Joint indices are stored as `f32` for vertex-format compatibility; the shader
+/// converts them to `uint4` with `uint4(joint_idx)`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct SkinnedVertex3d {
+    pub position:  [f32; 3],
+    pub normal:    [f32; 3],
+    pub uv:        [f32; 2],
+    pub tangent:   [f32; 4],
+    /// Joint indices stored as float (converted from GLTF u8/u16 on load).
+    /// The skinned vertex shader casts these back to uint4.
+    pub joint_idx: [f32; 4],
+    /// Blend weights normalised to sum 1. Maps joint_idx[i] → weight[i].
+    pub joint_wt:  [f32; 4],
+}
+
+impl Default for SkinnedVertex3d {
+    fn default() -> Self {
+        Self {
+            position:  [0.0; 3],
+            normal:    [0.0, 1.0, 0.0],
+            uv:        [0.0; 2],
+            tangent:   [1.0, 0.0, 0.0, 1.0],
+            joint_idx: [0.0; 4],
+            joint_wt:  [1.0, 0.0, 0.0, 0.0],
+        }
+    }
 }
 
 pub struct Mesh {
@@ -278,6 +310,65 @@ pub(crate) fn vertex3d_attributes() -> Vec<VertexAttributeDesc> {
             offset: std::mem::offset_of!(Vertex3d, tangent) as u32,
         },
     ]
+}
+
+/// Vertex attribute layout for `SkinnedVertex3d` — used with
+/// `mesh_vertex_skinned_3d.slang`. Locations 0-3 mirror `Vertex3d`; locations
+/// 4-5 carry joint indices (TEXCOORD2) and blend weights (TEXCOORD3).
+pub(crate) fn skinned_vertex3d_attributes() -> Vec<VertexAttributeDesc> {
+    use std::mem::offset_of;
+    vec![
+        VertexAttributeDesc {
+            location: 0, binding: 0,
+            format: VertexFormat::Float32x3,
+            offset: offset_of!(SkinnedVertex3d, position) as u32,
+        },
+        VertexAttributeDesc {
+            location: 1, binding: 0,
+            format: VertexFormat::Float32x3,
+            offset: offset_of!(SkinnedVertex3d, normal) as u32,
+        },
+        VertexAttributeDesc {
+            location: 2, binding: 0,
+            format: VertexFormat::Float32x2,
+            offset: offset_of!(SkinnedVertex3d, uv) as u32,
+        },
+        VertexAttributeDesc {
+            location: 3, binding: 0,
+            format: VertexFormat::Float32x4,
+            offset: offset_of!(SkinnedVertex3d, tangent) as u32,
+        },
+        // joint_idx: stored as float4 to match available vertex formats.
+        // The shader casts to uint4 with uint4(joint_idx).
+        VertexAttributeDesc {
+            location: 4, binding: 0,
+            format: VertexFormat::Float32x4,
+            offset: offset_of!(SkinnedVertex3d, joint_idx) as u32,
+        },
+        // joint_wt: float4 weights, TEXCOORD3.
+        VertexAttributeDesc {
+            location: 5, binding: 0,
+            format: VertexFormat::Float32x4,
+            offset: offset_of!(SkinnedVertex3d, joint_wt) as u32,
+        },
+    ]
+}
+
+impl Mesh {
+    /// Create a skinned mesh from a list of `SkinnedVertex3d` and indices.
+    pub fn new_skinned(engine: &Engine, vertices: &[SkinnedVertex3d], indices: &[u32]) -> Result<Self> {
+        let vertex_buffer = upload_slice(engine, vertices, BufferUsage::VERTEX)?;
+        let index_buffer  = upload_slice(engine, indices,   BufferUsage::INDEX)?;
+        let positions: Vec<[f32; 3]> = vertices.iter().map(|v| v.position).collect();
+        Ok(Self {
+            vertex_buffer,
+            index_buffer: Some(index_buffer),
+            vertex_count: vertices.len() as u32,
+            index_count: indices.len() as u32,
+            index_format: IndexFormat::Uint32,
+            bounding_sphere: BoundingSphere::from_positions(&positions),
+        })
+    }
 }
 
 /// Compute per-vertex tangents for an indexed triangle list using the

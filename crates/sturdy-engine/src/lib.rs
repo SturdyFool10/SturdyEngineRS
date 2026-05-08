@@ -8,7 +8,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+pub mod animation;
 mod environment_map;
+mod headless;
+mod sprite_batch;
+mod gltf_animation;
 mod light_bvh;
 mod oit_pass;
 mod game_shell;
@@ -75,6 +79,8 @@ pub use application::{
 pub use game_shell::{
     FixedUpdateContext, GameApp, GameConfig, GameContext, run_game, try_run_game,
 };
+pub use headless::{HeadlessApp, render_to_rgba8, render_to_rgba8_with_engine, run_headless};
+pub use sprite_batch::{Sprite, SpriteBatch, SpriteRenderer};
 pub use bloom_pass::{
     BloomCompositeConstants, BloomConfig, BloomPass, BrightPassConstants, DownsampleConstants,
     UpsampleConstants,
@@ -85,7 +91,7 @@ pub use clay_ui::{
     surface_to_ndc, ui_to_surface, window_logical_to_surface, window_logical_to_ui,
 };
 pub use compute_program::ComputeProgram;
-pub use deferred_pass::DeferredPass;
+pub use deferred_pass::{DeferredPass, RenderPath, SkyConfig};
 pub use environment_map::EnvironmentMap;
 pub use light_bvh::{GpuBvhNode, LightBvhBuilder, LEAF_FLAG, BVH_EMPTY};
 pub use oit_pass::{OitConfig, OitPass};
@@ -113,9 +119,13 @@ pub use geometry::{
     BoundingSphere, DispatchIndirectCommand, DrawIndexedIndirectCommand, DrawIndirectCommand,
     DrawMeshTasksIndirectCommand, Frustum, GeometryBackend, GeometryRendererCaps, HizDesc,
     MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Meshlet, MeshletBounds, MeshletGroup, SubMesh,
-    VirtualMesh, VirtualMeshProxy,
+    VirtualMesh, VirtualMeshBuilder, VirtualMeshProxy,
 };
-pub use mesh::{Mesh, Vertex2d, Vertex3d};
+pub use animation::{AnimationChannel, AnimationClip, AnimationPlayer, AnimationProperty,
+                    GltfSkin, Interpolation};
+pub use gltf_animation::{load_skins_and_animations, load_skins, load_animations,
+                          load_skinned_vertices};
+pub use mesh::{Mesh, SkinnedVertex3d, Vertex2d, Vertex3d};
 pub use mesh_program::{MeshProgram, MeshProgramDesc, MeshVertexKind};
 pub use mip_pyramid::MipPyramid;
 pub use motion_vector_debug::MotionVectorDebugPass;
@@ -136,10 +146,11 @@ pub use runtime::{
 };
 pub use sampler_catalog::SamplerPreset;
 pub use scene::{
-    CameraConstants, CameraId, CameraOutput, DirectionalLight, InstanceData, MaterialDescriptor,
-    MaterialDomain, MaterialExpr, MaterialInput, MeshId, ObjectId, ObjectKind, OrbitCamera,
-    PointLight, RenderState, RenderTarget, Scene, SceneCamera, ShadingModel, SpotLight,
-    UnifiedMaterial, UnifiedMaterialBuilder, UvSource, gbuffer,
+    CameraConstants, CameraId, CameraOutput, DirectionalLight, DiskLight, InstanceData,
+    MaterialDescriptor, MaterialDomain, MaterialExpr, MaterialInput, MeshId, ObjectId, ObjectKind,
+    OrbitCamera, PointLight, RectLight, RenderState, RenderTarget, Scene, SceneCamera,
+    ShadingModel, SphereLight, SpotLight, UnifiedMaterial, UnifiedMaterialBuilder, UvSource,
+    gbuffer,
 };
 pub use screenshot::{ScreenshotCapture, ScreenshotExportReport};
 pub use shader_watcher::{Reloadable, ShaderReloadDiagnostic, ShaderWatcher};
