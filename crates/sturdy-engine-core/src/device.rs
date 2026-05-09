@@ -207,6 +207,19 @@ impl Device {
             .caps()
     }
 
+    /// Per-pass GPU timings from the most recently completed frame.
+    ///
+    /// Returns `(pass_name, gpu_milliseconds)` pairs in submission order.
+    /// Empty before the second frame or on backends without timestamp support.
+    pub fn pass_timings(&self) -> Vec<(String, f32)> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .pass_timings()
+    }
+
     pub fn format_capabilities(&self, format: Format) -> FormatCapabilities {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner

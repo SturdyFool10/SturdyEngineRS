@@ -1,6 +1,6 @@
 use crate::{
     BoundingSphere, Buffer, BufferDesc, BufferUsage, Engine, IndexFormat, Result,
-    VertexAttributeDesc, VertexFormat, VertexInputRate,
+    VertexAttributeDesc, VertexFormat,
 };
 
 #[repr(C)]

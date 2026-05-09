@@ -1664,6 +1664,16 @@ where
                 event: winit::event::WindowEvent::RedrawRequested,
                 ..
             } => {
+                // Skip rendering when the window is zero-size (minimized on Windows,
+                // or a transient 0×0 resize event). The swapchain cannot be acquired
+                // for a zero-size surface; the Resized handler will re-enable rendering
+                // when the window is restored to a non-zero size.
+                if let Some(state) = self.window_state_for_handle(window_handle) {
+                    if state.surface_size.width == 0 || state.surface_size.height == 0 {
+                        return;
+                    }
+                }
+
                 let (window_scale_factor, window_logical_size, _window_safe_area) =
                     if let Some(state) = self.window_state_for_handle(window_handle) {
                         (

@@ -318,6 +318,10 @@ pub(crate) fn load_texture_2d_from_path(
     }
 }
 
+pub(crate) fn load_and_upload_blocking(engine: &Engine, path: &Path, name: &str) -> Result<Image> {
+    load_and_upload(engine, path, name)
+}
+
 fn load_and_upload(engine: &Engine, path: &Path, name: &str) -> Result<Image> {
     // Decode via the `image` crate (handles PNG, JPEG, WebP, BMP, …)
     let dyn_image = image::open(path).map_err(|e| {

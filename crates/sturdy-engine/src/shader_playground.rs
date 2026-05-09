@@ -319,7 +319,7 @@ impl ShaderPlayground {
     ///
     /// Packs all field values into a push constant byte buffer and calls
     /// `output.execute_shader_with_push_constants`. Binds as VERTEX | FRAGMENT stages.
-    pub fn render(&self, output: &GraphImage, frame: &RenderFrame) -> Result<()> {
+    pub fn render(&self, output: &GraphImage, _frame: &RenderFrame) -> Result<()> {
         let bytes = self.pack_bytes();
         if bytes.is_empty() {
             output.execute_shader(&self.program)

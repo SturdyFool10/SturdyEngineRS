@@ -14,7 +14,6 @@
 //
 // Roadmap: Track 1 — game loop shell (2D game sample).
 
-use std::f32::consts::TAU;
 use std::time::Duration;
 
 use glam::{Mat4, Quat, Vec2, Vec3};
@@ -245,7 +244,7 @@ impl GameApp for Dodge {
         &mut self,
         frame: &mut ShellFrame<'_>,
         surface_image: &SurfaceImage,
-        ctx: &GameContext<'_>,
+        _ctx: &GameContext<'_>,
     ) -> sturdy_engine::Result<()> {
         let ext    = surface_image.desc().extent;
         let aspect = ext.width as f32 / ext.height.max(1) as f32;

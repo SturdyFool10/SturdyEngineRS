@@ -11,7 +11,6 @@
 //   player.play(Arc::new(clips[0])); // "Walk", "Idle", etc.
 
 use std::path::Path;
-use std::sync::Arc;
 
 /// Read a float4x4 accessor's data as `Vec<Mat4>` by walking raw bytes.
 fn read_mat4_accessor(acc: &gltf::Accessor<'_>, buffers: &[gltf::buffer::Data]) -> Vec<Mat4> {
@@ -34,9 +33,9 @@ fn read_mat4_accessor(acc: &gltf::Accessor<'_>, buffers: &[gltf::buffer::Data]) 
 use glam::{Mat4, Quat, Vec3};
 
 use crate::animation::{
-    AnimationChannel, AnimationClip, AnimationPlayer, AnimationProperty, GltfSkin, Interpolation,
+    AnimationChannel, AnimationClip, AnimationProperty, GltfSkin, Interpolation,
 };
-use crate::{Engine, Result};
+use crate::Result;
 
 /// Load all skins and animation clips from a GLTF/GLB file.
 ///

@@ -9,6 +9,7 @@ use std::{
 };
 
 pub mod animation;
+mod asset_watcher;
 pub mod ecs;
 mod environment_map;
 mod shader_playground;
@@ -32,6 +33,7 @@ mod compute_program;
 mod debug_draw_2d;
 mod deferred_pass;
 mod shadow_pass;
+mod spot_shadow_pass;
 mod geometry;
 mod debug_overlay;
 mod debug_view_picker;
@@ -111,6 +113,7 @@ pub use shadow_pass::{
     CsmConfig, CsmOutput, CsmPass, GpuCsmData, MAX_CASCADES,
     ShadowConfig, ShadowOutput, ShadowPass,
 };
+pub use spot_shadow_pass::{GpuSpotShadowData, MAX_SPOT_SHADOWS, SpotShadowConfig, SpotShadowPass};
 pub use debug_draw_2d::{DebugDraw2d, DebugDrawStyle};
 pub use debug_overlay::{
     DebugHitRegion, DebugOverlay, DebugOverlayAntialiasing, DebugOverlayConfig,
@@ -166,6 +169,7 @@ pub use scene::{
 };
 pub use screenshot::{ScreenshotCapture, ScreenshotExportReport};
 pub use shader_watcher::{Reloadable, ShaderReloadDiagnostic, ShaderWatcher};
+pub use asset_watcher::{AssetReloadDiagnostic, AssetWatcher};
 pub use text_draw::{
     TextAtlasContentMode, TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput,
     TextPlacement, TextRenderer, TextScene, TextSceneQuad, TextTypography,
@@ -650,6 +654,16 @@ impl Engine {
     /// ```
     pub fn load_texture_2d(&self, path: impl AsRef<std::path::Path>) -> AssetHandle<Image> {
         asset_loader::load_texture_2d_from_path(self, path)
+    }
+
+    /// Synchronous variant of `load_texture_2d` that returns `Result<Image>` directly.
+    ///
+    /// Blocks until the image is loaded and uploaded to the GPU. Use this in
+    /// hot-reload callbacks where you need the new image before the next frame.
+    pub fn load_texture_2d_blocking(&self, path: impl AsRef<std::path::Path>) -> Result<Image> {
+        let path = path.as_ref();
+        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("texture");
+        asset_loader::load_and_upload_blocking(self, path, name)
     }
 
     /// Load a 3D mesh file and upload all primitives to the GPU.
@@ -1362,6 +1376,7 @@ impl<'f> DrawPassBuilder<'f> {
                 first_instance,
                 vertex_buffer,
                 index_buffer,
+                viewport: None,
             }),
             reads,
             writes,
@@ -1558,6 +1573,47 @@ impl Frame {
 
     pub fn add_pass(&mut self, pass: PassDesc) -> Result<()> {
         self.inner.graph_mut(|graph| graph.add_pass(pass))
+    }
+
+    /// Generate a full mip chain for `image` using linear-filtered blits.
+    ///
+    /// The image must have been created with `mip_levels > 1` and
+    /// `ImageUsage::COPY_SRC | ImageUsage::COPY_DST`. Call after any write to
+    /// mip 0 that you want propagated to all deeper mips.
+    ///
+    /// The pass is recorded immediately into the current frame; the GPU executes
+    /// it when `flush()` is called.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut tex = engine.create_image(ImageDesc {
+    ///     mip_levels: 8,
+    ///     usage: ImageUsage::SAMPLED | ImageUsage::COPY_SRC | ImageUsage::COPY_DST | ImageUsage::RENDER_TARGET,
+    ///     ..ImageDesc::d2(512, 512, Format::Rgba8Unorm)
+    /// })?;
+    /// // ... upload data into mip 0 ...
+    /// frame.generate_mipmaps(&tex)?;
+    /// ```
+    pub fn generate_mipmaps(&mut self, image: &Image) -> Result<()> {
+        self.import_image(image)?;
+        self.add_pass(PassDesc {
+            name: format!("generate_mipmaps({})", image.desc().debug_name.unwrap_or("image")),
+            queue: QueueType::Graphics,
+            shader: None,
+            pipeline: None,
+            bind_groups: Vec::new(),
+            push_constants: None,
+            work: PassWork::GenerateMipmaps {
+                image: image.handle(),
+                mip_count: image.desc().mip_levels as u32,
+            },
+            reads: Vec::new(),
+            writes: Vec::new(),
+            buffer_reads: Vec::new(),
+            buffer_writes: Vec::new(),
+            clear_colors: Vec::new(),
+            clear_depth: None,
+        })
     }
 
     pub fn debug_marker(&mut self, name: impl Into<String>) -> Result<()> {

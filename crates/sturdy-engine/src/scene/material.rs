@@ -368,6 +368,7 @@ impl<T: Clone> MaterialExpr<T> {
     }
 
     /// Whether any node in the tree uses `cam.time`.
+    #[allow(dead_code)]
     pub(crate) fn uses_time(&self) -> bool {
         match self {
             Self::Procedural(s) => s.contains("cam.time"),
@@ -381,6 +382,7 @@ impl<T: Clone> MaterialExpr<T> {
     }
 }
 
+#[allow(dead_code)]
 fn uv_uses_time(uv: &UvSource) -> bool {
     matches!(uv, UvSource::Scrolled { .. } | UvSource::TiledScrolled { .. })
         || matches!(uv, UvSource::Custom(s) if s.contains("cam.time"))

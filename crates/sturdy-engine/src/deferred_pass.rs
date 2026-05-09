@@ -170,6 +170,12 @@ pub struct DeferredPass {
     e_avg_buf: Buffer,
     /// Selects the rendering path for opaque geometry. Default `DeferredThenForward`.
     pub render_path: RenderPath,
+    /// Optional spot light shadow pass. Attach via `set_spot_shadows`.
+    spot_shadows: Option<crate::SpotShadowPass>,
+    /// Zero-filled spot shadow data buffer bound when no spot shadows are active.
+    empty_spot_shadow_buf: Buffer,
+    /// 1×1 depth image bound as a placeholder for spot shadow maps when disabled.
+    black_spot_depth: crate::Image,
     /// Pending environment map being blended toward. `None` when not blending.
     blend_target: Option<EnvironmentMap>,
     /// Current blend alpha [0, 1]. 0 = fully current, 1 = fully target.
@@ -254,6 +260,25 @@ impl DeferredPass {
             usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
         })?;
 
+        // Zero-filled spot shadow buffer for when no spot shadows are active.
+        let spot_data_size = std::mem::size_of::<crate::GpuSpotShadowData>() as u64;
+        let empty_spot_shadow_buf = engine.create_buffer(BufferDesc {
+            size: spot_data_size,
+            usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+        })?;
+        empty_spot_shadow_buf.write(0, &vec![0u8; spot_data_size as usize])?;
+
+        // 1×1 Depth32Float placeholder for unbound spot shadow slots.
+        let black_spot_depth = engine.create_image(crate::ImageDesc {
+            dimension: crate::ImageDimension::D2,
+            extent: sturdy_engine_core::Extent3d { width: 1, height: 1, depth: 1 },
+            mip_levels: 1, layers: 1, samples: 1,
+            format: crate::Format::Depth32Float,
+            usage: crate::ImageUsage::DEPTH_STENCIL | crate::ImageUsage::SAMPLED,
+            transient: false, clear_value: None,
+            debug_name: Some("black_spot_depth"),
+        })?;
+
         let e_avg_buf = compute_e_avg_lut(engine)?;
 
         // Auto-create the default studio environment so PBR materials look
@@ -290,12 +315,35 @@ impl DeferredPass {
             blend_alpha: 0.0,
             blend_step: 0.0,
             blend_sh9_buf,
+            spot_shadows: None,
+            empty_spot_shadow_buf,
+            black_spot_depth,
         })
     }
 
     /// Expose the CSM configuration for live tuning.
     pub fn csm_config_mut(&mut self) -> &mut CsmConfig {
         &mut self.csm.config
+    }
+
+    /// Enable spot light shadow maps.
+    ///
+    /// ```ignore
+    /// let spot_shadows = SpotShadowPass::new(&engine)?;
+    /// deferred.set_spot_shadows(spot_shadows);
+    /// ```
+    pub fn set_spot_shadows(&mut self, pass: crate::SpotShadowPass) {
+        self.spot_shadows = Some(pass);
+    }
+
+    /// Remove the spot light shadow pass.
+    pub fn clear_spot_shadows(&mut self) {
+        self.spot_shadows = None;
+    }
+
+    /// Expose spot shadow config for tuning.
+    pub fn spot_shadow_config_mut(&mut self) -> Option<&mut crate::SpotShadowConfig> {
+        self.spot_shadows.as_mut().map(|s| &mut s.config)
     }
 
     /// Attach an environment map for image-based lighting.
@@ -409,6 +457,16 @@ impl DeferredPass {
         // proj.w_axis.z = near*far/(near-far),  proj.z_axis.z = far/(near-far)
         let (cam_near, cam_far) = extract_near_far(proj);
         self.csm.draw(scene, view, proj, cam_near, cam_far, frame)?;
+
+        // ── 2b. Spot light shadow passes ─────────────────────────────────────
+        // The spot_light_buf_offset is 1 (directional) + N_point_lights.
+        let spot_buf_offset = 1u32 + scene.point_lights.len() as u32;
+        if let Some(spot) = &mut self.spot_shadows {
+            if !scene.spot_lights.is_empty() {
+                spot.draw(scene, spot_buf_offset, frame, engine)?;
+                frame.bind_buffer("spot_shadow_data", &spot.shadow_buf);
+            }
+        }
 
         // ── 3. Camera world position ──────────────────────────────────────────
         let cam_world = view.inverse() * Vec4::new(0.0, 0.0, 0.0, 1.0);
@@ -599,6 +657,19 @@ impl DeferredPass {
         frame.bind_image("brdf_lut", &self.brdf_lut);
         frame.bind_buffer("e_avg_lut", &self.e_avg_buf);
         frame.bind_buffer("csm_data", &self.csm.csm_buffer);
+
+        // Bind spot shadow data (all-invalid when no spot shadows are active).
+        if let Some(spot) = &self.spot_shadows {
+            frame.bind_buffer("spot_shadow_data", &spot.shadow_buf);
+            // spot_shadow_map_0..3 are registered by SpotShadowPass::draw() above.
+        } else {
+            frame.bind_buffer("spot_shadow_data", &self.empty_spot_shadow_buf);
+            // Register placeholder depth images so the binding resolves.
+            frame.bind_image("spot_shadow_map_0", &self.black_spot_depth);
+            frame.bind_image("spot_shadow_map_1", &self.black_spot_depth);
+            frame.bind_image("spot_shadow_map_2", &self.black_spot_depth);
+            frame.bind_image("spot_shadow_map_3", &self.black_spot_depth);
+        }
 
         // Advance blend transition if one is active.
         if self.blend_target.is_some() {

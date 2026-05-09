@@ -172,6 +172,11 @@ pub struct DrawDesc {
     pub first_instance: u32,
     pub vertex_buffer: Option<VertexBufferBinding>,
     pub index_buffer: Option<IndexBufferBinding>,
+    /// Optional viewport override: `[x, y, width, height]` in pixels.
+    ///
+    /// When `None`, the viewport covers the full attachment extent.
+    /// Use this for atlas shadow maps where each cascade occupies a tile.
+    pub viewport: Option<[u32; 4]>,
 }
 
 /// Indirect draw: GPU-populated command buffer drives vertex counts and
@@ -297,6 +302,25 @@ pub enum PassWork {
     CopyImageToBuffer(CopyImageToBufferDesc),
     CopyBufferToImage(CopyBufferToImageDesc),
     ResolveImage(ResolveImageDesc),
+    /// Generate a full mip chain for a single image by blitting each level
+    /// from the previous one. The image must have `COPY_SRC | COPY_DST` usage
+    /// and `mip_levels > 1`. The Vulkan backend uses `vkCmdBlitImage` with a
+    /// linear filter; all mip levels end in `SHADER_READ_ONLY_OPTIMAL`.
+    GenerateMipmaps { image: ImageHandle, mip_count: u32 },
+    /// Blit a single mip level to another mip level of the same image (linear filter).
+    ///
+    /// Used for explicit level-by-level downsample chains (e.g. HizPass) where
+    /// a compute shader is not needed and the blit filter is acceptable.
+    BlitMip {
+        image: ImageHandle,
+        src_mip: u32,
+        dst_mip: u32,
+        src_width: u32,
+        src_height: u32,
+        dst_width: u32,
+        dst_height: u32,
+        aspect: SubresourceRange,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1403,6 +1427,7 @@ mod tests {
                     first_instance: 0,
                     vertex_buffer: None,
                     index_buffer: None,
+                    viewport: None,
                 }),
                 reads: Vec::new(),
                 writes: Vec::new(),
@@ -1859,6 +1884,7 @@ mod tests {
                     first_instance: 0,
                     vertex_buffer: None,
                     index_buffer: None,
+                    viewport: None,
                 }),
                 reads: vec![ImageUse {
                     image: uploaded,
@@ -1942,6 +1968,7 @@ mod tests {
                     first_instance: 0,
                     vertex_buffer: None,
                     index_buffer: None,
+                    viewport: None,
                 }),
                 reads: vec![ImageUse {
                     image: lighting,

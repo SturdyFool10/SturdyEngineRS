@@ -192,7 +192,7 @@ impl AnimationPlayer {
             size: (n * std::mem::size_of::<Mat4>()) as u64,
             usage: BufferUsage::STORAGE,
         })?;
-        let mut p = Self {
+        let p = Self {
             skin, clip: None, time: 0.0, speed: 1.0,
             looping: true, finished: false,
             joint_t, joint_r, joint_s, bone_matrices,

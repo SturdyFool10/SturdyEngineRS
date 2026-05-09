@@ -1195,6 +1195,7 @@ fn graph_inspection_lines_summarize_and_truncate_report() {
                 writes: vec!["hdr".to_string()],
                 buffer_reads: vec![],
                 buffer_writes: vec![],
+                gpu_time_ms: None,
             },
             GraphPassInfo {
                 name: "tonemap".to_string(),
@@ -1204,6 +1205,7 @@ fn graph_inspection_lines_summarize_and_truncate_report() {
                 writes: vec!["swapchain".to_string()],
                 buffer_reads: vec![],
                 buffer_writes: vec![],
+                gpu_time_ms: None,
             },
         ],
         images: vec![

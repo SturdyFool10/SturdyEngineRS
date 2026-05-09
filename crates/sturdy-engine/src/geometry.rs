@@ -634,7 +634,7 @@ impl VirtualMesh {
         // (The GPU Mesh is owned by the primitive; the VirtualMesh is a separate CPU asset.)
         let name = name.into();
         let index_count = prim.mesh.index_count;
-        let vertex_count = prim.mesh.vertex_count;
+        let _vertex_count = prim.mesh.vertex_count;
         let material_index = 0u32;
 
         // We can't extract vertices/indices from the GPU buffer at this point.

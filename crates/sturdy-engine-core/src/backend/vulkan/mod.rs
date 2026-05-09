@@ -74,10 +74,16 @@ impl VulkanBackend {
         let selection = DeviceSelection::pick(&instance, &config.adapter_selection)?;
         let logical = create_logical_device(&instance, &selection, &config)?;
         let caps = caps::query_caps(&instance, selection.physical_device);
+        let props = unsafe { instance.get_physical_device_properties(selection.physical_device) };
+        let timestamp_period_ns = props.limits.timestamp_period;
         let memory_properties =
             unsafe { instance.get_physical_device_memory_properties(selection.physical_device) };
         let resource_registry = resources::ResourceRegistry::new(memory_properties);
-        let commands = commands::FramedCommands::create(&logical.device, logical.queue_families)?;
+        let commands = commands::FramedCommands::create(
+            &logical.device,
+            logical.queue_families,
+            timestamp_period_ns,
+        )?;
         let cache_data = load_pipeline_cache_file();
         let pipeline_registry =
             pipelines::PipelineRegistry::create(&logical.device, cache_data.as_deref())?;
@@ -596,6 +602,15 @@ impl Backend for VulkanBackend {
         }
 
         Ok(handle)
+    }
+
+    fn pass_timings(&self) -> Vec<(String, f32)> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.commands
+            .lock()
+            .expect("vulkan command context mutex poisoned")
+            .pass_timings()
+            .to_vec()
     }
 
     fn wait_submission(&self, token: SubmissionHandle) -> Result<()> {

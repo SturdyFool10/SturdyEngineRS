@@ -10,24 +10,16 @@
 //
 // Roadmap: Track 6e — Spot light shadow maps.
 
-use std::path::PathBuf;
-
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 
 use crate::{
     Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, ImageDesc,
-    ImageDimension, ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind,
-    RenderFrame, Result, ShaderDesc, ShaderSource, ShaderStage, push_constants,
+    ImageDimension, ImageUsage, MeshProgram,
+    RenderFrame, Result, push_constants,
     scene::Scene,
 };
 use sturdy_engine_core::Extent3d;
-
-fn engine_shader(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("shaders")
-        .join(name)
-}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 

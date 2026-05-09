@@ -157,6 +157,10 @@ impl Default for CsmConfig {
 /// Maximum number of cascades the shader supports.
 pub const MAX_CASCADES: usize = 4;
 
+/// Maximum number of cascades the atlas can hold.
+pub const ATLAS_COLS: u32 = 2;
+pub const ATLAS_ROWS: u32 = 2;
+
 /// GPU-layout CSM frame data written to a `StructuredBuffer<GpuCsmData>`.
 /// Matches the Slang `GpuCsmData` struct in `deferred_lighting.slang` exactly.
 #[repr(C)]
@@ -166,7 +170,6 @@ pub struct GpuCsmData {
     /// copies of the last valid cascade.
     pub matrices: [[[f32; 4]; 4]; MAX_CASCADES],   // 256 bytes
     /// View-space (linear) distances where each cascade begins.
-    /// cascade 0 starts at near. Index 0..cascade_count-1 are meaningful.
     pub split_distances: [f32; MAX_CASCADES],        // 16 bytes
     /// Number of active cascades (≤ MAX_CASCADES).
     pub cascade_count: u32,                          // 4 bytes
@@ -174,14 +177,16 @@ pub struct GpuCsmData {
     pub depth_bias: f32,                             // 4 bytes
     /// Fraction of each cascade range used for blending with the next.
     pub blend_range: f32,                            // 4 bytes
-    pub _pad: f32,                                   // 4 bytes
-    // Total: 288 bytes
+    pub _pad: f32,                                   // 4 bytes → 288 bytes
+    /// Per-cascade atlas UV tile bounds: [x_min, y_min, x_max, y_max] in [0,1].
+    /// Cascade N's shadow UV is mapped to this sub-region of the atlas texture.
+    pub atlas_tiles: [[f32; 4]; MAX_CASCADES],       // 64 bytes → 352 bytes
 }
 
 /// Per-frame output of `CsmPass::draw`.
 pub struct CsmOutput {
-    /// Shadow depth images for cascades 0–3. Indices ≥ cascade_count duplicate the last valid image.
-    pub images: [GraphImage; MAX_CASCADES],
+    /// The shadow atlas image containing all cascades. All cascades are packed into a 2×2 grid.
+    pub shadow_atlas: GraphImage,
     /// Packed GPU data ready to write into the `csm_data` StructuredBuffer.
     pub gpu_data: GpuCsmData,
 }
@@ -256,23 +261,67 @@ impl CsmPass {
             matrices[i] = matrices[n - 1];
         }
 
-        // Allocate shadow map images (one per cascade; extras reuse last).
-        let mut images: [Option<GraphImage>; MAX_CASCADES] = [None, None, None, None];
+        // Allocate one atlas image containing all cascades in a 2×2 tile grid.
+        //
+        //   Cascade 0 │ Cascade 1
+        //   ──────────┼──────────
+        //   Cascade 2 │ Cascade 3
+        //
+        // Each tile is `res × res`; the atlas is `2*res × 2*res`.
+        let atlas_w = res * ATLAS_COLS;
+        let atlas_h = res * ATLAS_ROWS;
+        let atlas_desc = ImageDesc {
+            dimension: ImageDimension::D2,
+            extent: Extent3d { width: atlas_w, height: atlas_h, depth: 1 },
+            mip_levels: 1, layers: 1, samples: 1,
+            format: Format::Depth32Float,
+            usage: ImageUsage::DEPTH_STENCIL | ImageUsage::SAMPLED,
+            transient: false, clear_value: None,
+            debug_name: Some("shadow_atlas"),
+        };
+        let shadow_atlas = frame.image("shadow_atlas", atlas_desc)?;
+
+        // Compute atlas tile UV bounds and render each cascade into its tile.
+        let tile_scale_x = 1.0 / ATLAS_COLS as f32;
+        let tile_scale_y = 1.0 / ATLAS_ROWS as f32;
+        let mut atlas_tiles = [[0.0f32; 4]; MAX_CASCADES];
+
         for i in 0..n {
-            let name = format!("shadow_map_{i}");
-            let desc = shadow_image_desc(res, Box::leak(name.clone().into_boxed_str()));
-            let img = frame.image(&name, desc)?;
-            draw_shadow_batches(scene, frame, &img,
-                                &self.depth_program, &self.masked_depth_program, matrices[i])?;
-            img.register_as(&name);
-            images[i] = Some(img);
+            let col = (i % ATLAS_COLS as usize) as u32;
+            let row = (i / ATLAS_COLS as usize) as u32;
+            let tile_x = col * res;
+            let tile_y = row * res;
+
+            // Atlas UV sub-region for this cascade [x_min, y_min, x_max, y_max].
+            atlas_tiles[i] = [
+                col as f32 * tile_scale_x,
+                row as f32 * tile_scale_y,
+                (col + 1) as f32 * tile_scale_x,
+                (row + 1) as f32 * tile_scale_y,
+            ];
+
+            // Render this cascade into its tile using a viewport override.
+            draw_shadow_batches_viewport(
+                scene, frame, &shadow_atlas,
+                &self.depth_program, &self.masked_depth_program,
+                matrices[i],
+                [tile_x, tile_y, res, res],
+            )?;
         }
-        // Clone last valid image for unused slots so the frame registry sees them.
-        let last_name = format!("shadow_map_{}", n - 1);
+        // Fill unused tile bounds with the last valid cascade's bounds.
         for i in n..MAX_CASCADES {
-            let name = format!("shadow_map_{i}");
-            frame.find_image_by_name(&last_name).map(|img| img.register_as(&name));
+            atlas_tiles[i] = atlas_tiles[n - 1];
         }
+
+        // Register for the deferred lighting shader.
+        shadow_atlas.register_as("shadow_atlas");
+
+        // Also register the legacy per-cascade names so existing shaders keep working.
+        for i in 0..MAX_CASCADES {
+            let name = format!("shadow_map_{i}");
+            shadow_atlas.register_as(&name);
+        }
+
 
         // Pack split distances (view-space linear depth of each cascade start).
         let mut split_dists = [0.0f32; MAX_CASCADES];
@@ -287,20 +336,16 @@ impl CsmPass {
             depth_bias: self.config.depth_bias,
             blend_range: self.config.blend_range,
             _pad: 0.0,
+            atlas_tiles,
         };
 
         // Upload to the persistent GPU buffer.
         self.csm_buffer.write(0, bytemuck::bytes_of(&gpu_data))?;
 
-        // Unwrap images — cascade 0 is always present.
-        let images = [
-            images[0].take().unwrap(),
-            images[1].take().unwrap_or_else(|| frame.find_image_by_name("shadow_map_0").unwrap()),
-            images[2].take().unwrap_or_else(|| frame.find_image_by_name("shadow_map_0").unwrap()),
-            images[3].take().unwrap_or_else(|| frame.find_image_by_name("shadow_map_0").unwrap()),
-        ];
+        let shadow_atlas = frame.find_image_by_name("shadow_atlas")
+            .expect("shadow_atlas must exist after draw_shadow_batches_viewport");
 
-        Ok(CsmOutput { images, gpu_data })
+        Ok(CsmOutput { shadow_atlas, gpu_data })
     }
 }
 
@@ -417,6 +462,10 @@ fn cascade_light_matrix(
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
+pub(crate) fn build_depth_program_pub(engine: &Engine) -> Result<MeshProgram> {
+    build_depth_program(engine)
+}
+
 fn build_depth_program(engine: &Engine) -> Result<MeshProgram> {
     MeshProgram::new(
         engine,
@@ -453,6 +502,40 @@ fn shadow_image_desc(resolution: u32, debug_name: &'static str) -> ImageDesc {
         clear_value: None,
         debug_name: Some(debug_name),
     }
+}
+
+/// Draw all shadow-casting batches into a viewport tile of `shadow_image`.
+///
+/// Used by the atlas path: `viewport` is `[x, y, width, height]` in pixels.
+fn draw_shadow_batches_viewport(
+    scene: &Scene,
+    frame: &RenderFrame,
+    shadow_image: &GraphImage,
+    program: &MeshProgram,
+    masked_program: &MeshProgram,
+    light_view_proj: Mat4,
+    viewport: [u32; 4],
+) -> Result<()> {
+    use crate::scene::material::MaterialDomain;
+    let constants = ShadowDepthConstants { light_view_proj: light_view_proj.to_cols_array_2d() };
+    for (mesh_idx, instance_buf_opt, instance_count) in scene.drawable_batches() {
+        let instance_buf = match instance_buf_opt { Some(b) => b, None => continue };
+        if instance_count == 0 { continue; }
+        let domain = scene.domain_at(mesh_idx);
+        if domain == MaterialDomain::Translucent { continue; }
+        let mesh = scene.mesh_at(mesh_idx);
+        frame.bind_buffer("instances", instance_buf);
+        let prog = if domain == MaterialDomain::Masked {
+            if let Some(mb) = scene.material_gpu_buffer_at(mesh_idx) {
+                frame.bind_buffer("material_desc", mb);
+            }
+            masked_program
+        } else { program };
+        shadow_image.draw_mesh_depth_only_with_push_constants_and_viewport(
+            mesh, prog, instance_buf, instance_count, &constants, viewport,
+        )?;
+    }
+    Ok(())
 }
 
 /// Draw all shadow-casting batches into `shadow_image`.
@@ -501,6 +584,10 @@ fn draw_shadow_batches(
         }
     }
     Ok(())
+}
+
+pub(crate) fn build_masked_depth_program_pub(engine: &Engine) -> Result<MeshProgram> {
+    build_masked_depth_program(engine)
 }
 
 fn build_masked_depth_program(engine: &Engine) -> Result<MeshProgram> {

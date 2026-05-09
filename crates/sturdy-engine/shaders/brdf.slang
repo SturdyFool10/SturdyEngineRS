@@ -7,34 +7,12 @@
 //   GGX specular lobe  (Trowbridge-Reitz NDF, Smith height-correlated G2, Schlick Fresnel)
 //   Lambertian diffuse (energy-conserving complement)
 //   Analytic point, spot, and directional light evaluation
-//   Octahedral normal encode/decode helpers
 //
 // All functions expect pre-normalised input vectors and NdotL > 0 where noted.
 // Constants: PI = 3.14159265
 
 static const float BRDF_PI = 3.14159265f;
 static const float BRDF_INV_PI = 0.31830989f;
-
-// ── Octahedral normal helpers ─────────────────────────────────────────────────
-
-float2 oct_encode(float3 n) {
-    float3 a = abs(n);
-    n /= a.x + a.y + a.z;
-    if (n.z < 0.0f) {
-        float2 s = float2(n.x >= 0.0f ? 1.0f : -1.0f, n.y >= 0.0f ? 1.0f : -1.0f);
-        n.xy = (1.0f - abs(n.yx)) * s;
-    }
-    return n.xy;
-}
-
-float3 oct_decode(float2 f) {
-    float3 n = float3(f.x, f.y, 1.0f - abs(f.x) - abs(f.y));
-    if (n.z < 0.0f) {
-        float2 s = float2(n.x >= 0.0f ? 1.0f : -1.0f, n.y >= 0.0f ? 1.0f : -1.0f);
-        n.xy = (1.0f - abs(n.yx)) * s;
-    }
-    return normalize(n);
-}
 
 // ── GGX specular ──────────────────────────────────────────────────────────────
 

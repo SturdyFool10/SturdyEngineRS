@@ -56,6 +56,7 @@ impl UiGraphPassBuilder {
                         first_instance: 0,
                         vertex_buffer: None,
                         index_buffer: None,
+                        viewport: None,
                     }),
                     reads,
                     writes: vec![ImageUse {

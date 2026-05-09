@@ -92,6 +92,7 @@ impl EntityAllocator {
     }
 
     /// Total allocated slots (live + recycled).
+    #[allow(dead_code)]
     pub fn slot_count(&self) -> usize {
         self.generations.len()
     }

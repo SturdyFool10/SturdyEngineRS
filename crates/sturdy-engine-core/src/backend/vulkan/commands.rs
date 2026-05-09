@@ -15,6 +15,9 @@ use super::queues::{QueueFamilyMap, VulkanQueues, queue_family_index};
 use super::resources::ResourceRegistry;
 use batch_pool::BatchPool;
 
+/// Maximum number of render-graph passes we track per frame with GPU timestamps.
+const MAX_TIMESTAMP_PASSES: u32 = 256;
+
 pub struct CommandContext {
     /// One pool per batch slot; grows to match the largest batch count seen.
     batch_pools: Vec<BatchPool>,
@@ -22,15 +25,41 @@ pub struct CommandContext {
     frame_fence: vk::Fence,
     frame_submitted: bool,
     submission_count: u64,
+    /// Timestamp query pool — 2 queries per pass (before + after).
+    timestamp_pool: vk::QueryPool,
+    /// Nanoseconds per GPU timestamp tick (from physical device limits).
+    timestamp_period_ns: f32,
+    /// Pass names recorded during the most-recently-submitted frame.
+    /// Populated during recording; used to label the readback results.
+    pending_pass_names: Vec<String>,
+    /// How many passes were submitted in the last frame.
+    pending_pass_count: u32,
+    /// Per-pass GPU timings from the previous frame (name, milliseconds).
+    /// Empty until the second `submit_graph` call (first readback).
+    pub pass_timings: Vec<(String, f32)>,
 }
 
 impl CommandContext {
-    pub fn create(device: &Device, queue_families: QueueFamilyMap) -> Result<Self> {
+    pub fn create(
+        device: &Device,
+        queue_families: QueueFamilyMap,
+        timestamp_period_ns: f32,
+    ) -> Result<Self> {
         let fence_info = vk::FenceCreateInfo::default();
         let frame_fence = unsafe {
             device
                 .create_fence(&fence_info, None)
                 .map_err(|e| Error::Backend(format!("vkCreateFence failed: {e:?}")))?
+        };
+
+        // Timestamp query pool: 2 entries per pass (start + end).
+        let pool_info = vk::QueryPoolCreateInfo::default()
+            .query_type(vk::QueryType::TIMESTAMP)
+            .query_count(MAX_TIMESTAMP_PASSES * 2);
+        let timestamp_pool = unsafe {
+            device
+                .create_query_pool(&pool_info, None)
+                .map_err(|e| Error::Backend(format!("vkCreateQueryPool failed: {e:?}")))?
         };
 
         // Pre-allocate one batch pool so there is always at least one cmd buf.
@@ -42,6 +71,11 @@ impl CommandContext {
             frame_fence,
             frame_submitted: false,
             submission_count: 0,
+            timestamp_pool,
+            timestamp_period_ns,
+            pending_pass_names: Vec::new(),
+            pending_pass_count: 0,
+            pass_timings: Vec::new(),
         })
     }
 
@@ -76,6 +110,35 @@ impl CommandContext {
                     .reset_fences(&[self.frame_fence])
                     .map_err(|e| Error::Backend(format!("vkResetFences failed: {e:?}")))?;
             }
+            // Read back timestamps from the just-completed frame.
+            if self.pending_pass_count > 0 {
+                let n = self.pending_pass_count as usize;
+                let mut raw = vec![0u64; n * 2];
+                let result = unsafe {
+                    device.get_query_pool_results(
+                        self.timestamp_pool,
+                        0,
+                        &mut raw[..n * 2],
+                        vk::QueryResultFlags::TYPE_64,
+                    )
+                };
+                if result.is_ok() {
+                    let period = self.timestamp_period_ns;
+                    self.pass_timings = self.pending_pass_names
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| {
+                            let start = raw[i * 2];
+                            let end   = raw[i * 2 + 1];
+                            let ms    = (end.saturating_sub(start)) as f32 * period / 1_000_000.0;
+                            (name.clone(), ms)
+                        })
+                        .collect();
+                }
+                self.pending_pass_count = 0;
+                self.pending_pass_names.clear();
+            }
+
             for semaphore in self.pending_semaphores.drain(..) {
                 unsafe {
                     device.destroy_semaphore(semaphore, None);
@@ -106,16 +169,33 @@ impl CommandContext {
             }
         }
 
+        // Reset the timestamp query pool for this frame's queries.
+        // We reset in the first command buffer of the first batch.
+        let mut ts_query_idx: u32 = 0;
+        self.pending_pass_names.clear();
+
         // Record each batch into its own command buffer.
         if graph.batches.is_empty() {
             // Empty graph: record one empty command buffer.
             let cmd = self.batch_pools[0].command_buffer;
             self.begin_cmd(device, cmd)?;
+            unsafe {
+                device.cmd_reset_query_pool(cmd, self.timestamp_pool, 0, MAX_TIMESTAMP_PASSES * 2);
+            }
             self.end_cmd(device, cmd)?;
         } else {
+            let mut reset_done = false;
             for (batch_idx, batch) in graph.batches.iter().enumerate() {
                 let cmd = self.batch_pools[batch_idx].command_buffer;
                 self.begin_cmd(device, cmd)?;
+                if !reset_done {
+                    unsafe {
+                        device.cmd_reset_query_pool(
+                            cmd, self.timestamp_pool, 0, MAX_TIMESTAMP_PASSES * 2,
+                        );
+                    }
+                    reset_done = true;
+                }
                 for &pass_idx in &batch.pass_indices {
                     let pass_idx = pass_idx as usize;
                     let image_barriers = graph
@@ -137,6 +217,19 @@ impl CommandContext {
                         queue_families,
                     )?;
                     if let Some(pass) = graph.passes.get(pass_idx) {
+                        // Write start timestamp before the pass.
+                        let slot = ts_query_idx;
+                        if slot < MAX_TIMESTAMP_PASSES {
+                            unsafe {
+                                device.cmd_write_timestamp(
+                                    cmd,
+                                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                                    self.timestamp_pool,
+                                    slot * 2,
+                                );
+                            }
+                        }
+
                         if !pass.name.is_empty() {
                             debug.begin_region(cmd, &pass.name, [0.5, 0.5, 1.0, 1.0]);
                         }
@@ -144,11 +237,26 @@ impl CommandContext {
                         if !pass.name.is_empty() {
                             debug.end_region(cmd);
                         }
+
+                        // Write end timestamp after the pass.
+                        if slot < MAX_TIMESTAMP_PASSES {
+                            unsafe {
+                                device.cmd_write_timestamp(
+                                    cmd,
+                                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                                    self.timestamp_pool,
+                                    slot * 2 + 1,
+                                );
+                            }
+                            self.pending_pass_names.push(pass.name.clone());
+                            ts_query_idx += 1;
+                        }
                     }
                 }
                 self.end_cmd(device, cmd)?;
             }
         }
+        self.pending_pass_count = ts_query_idx;
 
         let batch_count = graph.batches.len().max(1);
         let mut chain_semaphores = Vec::new();
@@ -243,6 +351,7 @@ impl CommandContext {
         unsafe {
             // device_wait_idle is called first in VulkanBackend::Drop.
             device.destroy_fence(self.frame_fence, None);
+            device.destroy_query_pool(self.timestamp_pool, None);
             for semaphore in &self.pending_semaphores {
                 device.destroy_semaphore(*semaphore, None);
             }
@@ -365,6 +474,7 @@ impl CommandContext {
                     pipeline.render_pass,
                     resources,
                     pipelines,
+                    draw.viewport,
                     || unsafe {
                         if let Some((binding, buffer, offset)) = vertex_buffer {
                             let buffers = [buffer];
@@ -498,6 +608,7 @@ impl CommandContext {
                     pipeline.render_pass,
                     resources,
                     pipelines,
+                    None, // DrawIndirect has no per-tile viewport yet
                     || unsafe {
                         if let Some((binding, vb, offset)) = vertex_buffer {
                             device.cmd_bind_vertex_buffers(
@@ -537,6 +648,172 @@ impl CommandContext {
             PassWork::DrawMeshShader(_) | PassWork::DrawMeshShaderIndirect(_) => {
                 // TODO(Track 7d): emit vkCmdDrawMeshTasksEXT / vkCmdDrawMeshTasksIndirectEXT
             }
+            PassWork::GenerateMipmaps { image: img_handle, mip_count } => unsafe {
+                let vk_image = resources.image(img_handle)?;
+                let img_desc = resources.image_desc(img_handle)?;
+                let aspect = image_aspect_mask(img_desc.format);
+                let mips = mip_count.min(img_desc.mip_levels as u32);
+
+                // Transition mip 0 from SHADER_READ_ONLY (or whatever) to TRANSFER_SRC.
+                let src_barrier = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::SHADER_READ)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .image(vk_image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: aspect,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
+                device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[], &[], &[src_barrier],
+                );
+
+                for mip in 1..mips {
+                    let src_w = (img_desc.extent.width  >> (mip - 1)).max(1) as i32;
+                    let src_h = (img_desc.extent.height >> (mip - 1)).max(1) as i32;
+                    let dst_w = (img_desc.extent.width  >>  mip      ).max(1) as i32;
+                    let dst_h = (img_desc.extent.height >>  mip      ).max(1) as i32;
+
+                    // Transition destination mip to TRANSFER_DST.
+                    let dst_barrier = vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .src_access_mask(vk::AccessFlags::empty())
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .image(vk_image)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: aspect,
+                            base_mip_level: mip,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        });
+                    device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[], &[], &[dst_barrier],
+                    );
+
+                    // Blit mip-1 → mip.
+                    let blit = vk::ImageBlit::default()
+                        .src_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: aspect,
+                            mip_level: mip - 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        })
+                        .src_offsets([
+                            vk::Offset3D { x: 0, y: 0, z: 0 },
+                            vk::Offset3D { x: src_w, y: src_h, z: 1 },
+                        ])
+                        .dst_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: aspect,
+                            mip_level: mip,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        })
+                        .dst_offsets([
+                            vk::Offset3D { x: 0, y: 0, z: 0 },
+                            vk::Offset3D { x: dst_w, y: dst_h, z: 1 },
+                        ]);
+                    device.cmd_blit_image(
+                        command_buffer,
+                        vk_image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        vk_image, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[blit],
+                        vk::Filter::LINEAR,
+                    );
+
+                    // Transition this mip to TRANSFER_SRC so the next iteration can read it.
+                    let to_src = vk::ImageMemoryBarrier::default()
+                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                        .image(vk_image)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: aspect,
+                            base_mip_level: mip,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        });
+                    device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[], &[], &[to_src],
+                    );
+                }
+
+                // Transition all mips from TRANSFER_SRC to SHADER_READ_ONLY.
+                let final_barrier = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .image(vk_image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: aspect,
+                        base_mip_level: 0,
+                        level_count: mips,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
+                device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[], &[], &[final_barrier],
+                );
+            },
+
+            PassWork::BlitMip { image, src_mip, dst_mip, src_width, src_height, dst_width, dst_height, .. } => unsafe {
+                let vk_image = resources.image(image)?;
+                let img_desc = resources.image_desc(image)?;
+                let aspect = image_aspect_mask(img_desc.format);
+                let blit = vk::ImageBlit::default()
+                    .src_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: aspect,
+                        mip_level:   src_mip,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .src_offsets([
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D { x: src_width as i32, y: src_height as i32, z: 1 },
+                    ])
+                    .dst_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: aspect,
+                        mip_level:   dst_mip,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .dst_offsets([
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D { x: dst_width as i32, y: dst_height as i32, z: 1 },
+                    ]);
+                device.cmd_blit_image(
+                    command_buffer,
+                    vk_image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk_image, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[blit],
+                    vk::Filter::LINEAR,
+                );
+            },
+
             PassWork::ResolveImage(resolve) => unsafe {
                 let src_desc = resources.image_desc(resolve.src)?;
                 device.cmd_resolve_image(
@@ -579,6 +856,7 @@ impl CommandContext {
         render_pass: vk::RenderPass,
         resources: &ResourceRegistry,
         pipelines: &mut PipelineRegistry,
+        viewport_override: Option<[u32; 4]>,
         record_draw: impl FnOnce(),
     ) -> Result<()> {
         let color_uses = pass
@@ -660,21 +938,21 @@ impl CommandContext {
             .framebuffer(framebuffer)
             .render_area(render_area)
             .clear_values(&clear_values);
+        let (vp, scissor) = match viewport_override {
+            Some([x, y, w, h]) => {
+                let vp = vk::Viewport { x: x as f32, y: y as f32, width: w as f32, height: h as f32, min_depth: 0.0, max_depth: 1.0 };
+                let sc = vk::Rect2D { offset: vk::Offset2D { x: x as i32, y: y as i32 }, extent: vk::Extent2D { width: w, height: h } };
+                (vp, sc)
+            }
+            None => {
+                let vp = vk::Viewport { x: 0.0, y: 0.0, width: first_extent.width as f32, height: first_extent.height as f32, min_depth: 0.0, max_depth: 1.0 };
+                (vp, render_area)
+            }
+        };
         unsafe {
             device.cmd_begin_render_pass(command_buffer, &begin, vk::SubpassContents::INLINE);
-            device.cmd_set_viewport(
-                command_buffer,
-                0,
-                &[vk::Viewport {
-                    x: 0.0,
-                    y: 0.0,
-                    width: first_extent.width as f32,
-                    height: first_extent.height as f32,
-                    min_depth: 0.0,
-                    max_depth: 1.0,
-                }],
-            );
-            device.cmd_set_scissor(command_buffer, 0, &[render_area]);
+            device.cmd_set_viewport(command_buffer, 0, &[vp]);
+            device.cmd_set_scissor(command_buffer, 0, &[scissor]);
         }
 
         record_draw();
@@ -961,10 +1239,14 @@ pub struct FramedCommands {
 }
 
 impl FramedCommands {
-    pub fn create(device: &Device, queue_families: QueueFamilyMap) -> Result<Self> {
+    pub fn create(
+        device: &Device,
+        queue_families: QueueFamilyMap,
+        timestamp_period_ns: f32,
+    ) -> Result<Self> {
         let mut contexts = Vec::with_capacity(FRAMES_IN_FLIGHT);
         for _ in 0..FRAMES_IN_FLIGHT {
-            contexts.push(CommandContext::create(device, queue_families)?);
+            contexts.push(CommandContext::create(device, queue_families, timestamp_period_ns)?);
         }
         Ok(Self {
             contexts,
@@ -1062,6 +1344,16 @@ impl FramedCommands {
             }
         }
         Ok(())
+    }
+
+    /// Per-pass GPU timings from the most recently completed frame.
+    ///
+    /// Each entry is `(pass_name, gpu_ms)`. Empty until the second frame.
+    pub fn pass_timings(&self) -> &[(String, f32)] {
+        // Return timings from the context that last completed (previous slot).
+        let n = self.contexts.len();
+        let prev_slot = self.next_slot.wrapping_sub(1).min(n - 1);
+        &self.contexts[prev_slot].pass_timings
     }
 
     pub fn destroy(&self, device: &Device) {

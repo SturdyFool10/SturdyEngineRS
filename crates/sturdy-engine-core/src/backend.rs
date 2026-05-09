@@ -270,6 +270,14 @@ pub trait Backend: Send + Sync {
     fn wait_submission(&self, _token: SubmissionHandle) -> Result<()> {
         Ok(())
     }
+    /// Per-pass GPU timings from the most recently completed frame.
+    ///
+    /// Returns `(pass_name, gpu_milliseconds)` pairs in submission order.
+    /// Empty on backends that don't support timestamp queries, or before the
+    /// second frame (timestamps are read back one frame in arrears).
+    fn pass_timings(&self) -> Vec<(String, f32)> {
+        Vec::new()
+    }
     fn present(&self) -> Result<()>;
     fn wait_idle(&self) -> Result<()>;
 }

@@ -8,6 +8,7 @@
 // CSM data:          csm_data (StructuredBuffer<GpuCsmData>)
 
 import brdf;
+import material_surface;
 
 // ── G-Buffer ──────────────────────────────────────────────────────────────────
 // G3 (world_pos) removed — world position reconstructed from gbuffer_depth.
@@ -18,8 +19,13 @@ Texture2D<float4> gbuffer_emissive;
 Texture2D<float>  gbuffer_depth;    // hardware depth [0,1] — used for world pos reconstruction
 SamplerState      gbuffer_sampler;
 
-// ── Shadow maps (one per cascade, up to 4) ────────────────────────────────────
+// ── Shadow atlas ──────────────────────────────────────────────────────────────
+// All CSM cascades are packed into a single Depth32Float atlas (2×2 tile grid).
+// The legacy per-cascade names (shadow_map_0..3) are also registered as aliases
+// so forward/OIT shaders continue to work unmodified.
 
+Texture2D<float>  shadow_atlas;   // packed cascade atlas (replaces shadow_map_0..3)
+// Legacy aliases — bound to the same atlas image for compatibility.
 Texture2D<float>  shadow_map_0;
 Texture2D<float>  shadow_map_1;
 Texture2D<float>  shadow_map_2;
@@ -30,11 +36,13 @@ SamplerState      shadow_sampler;
 
 struct GpuCsmData {
     float4x4 matrices[4];          // per-cascade light view-proj
-    float4   split_distances;      // view-space linear distances (xyz = splits 0-2, w = far)
+    float4   split_distances;      // view-space linear distances
     uint     cascade_count;
     float    depth_bias;
     float    blend_range;
     float    _pad;
+    /// Per-cascade atlas UV tile bounds: [x_min, y_min, x_max, y_max] in [0,1].
+    float4   atlas_tiles[4];
 };
 StructuredBuffer<GpuCsmData> csm_data;
 
@@ -46,6 +54,53 @@ StructuredBuffer<float4> sh9_irradiance;
 /// E_avg(roughness) LUT: 128 float32 values.
 /// Hemispherical average of E_s_white(NdotV, roughness) — used for multi-scatter.
 StructuredBuffer<float>  e_avg_lut;
+
+// ── Spot light shadow maps ────────────────────────────────────────────────────
+// Up to MAX_SPOT_SHADOWS (4) spot lights cast shadows via individual depth maps.
+
+static const uint MAX_SPOT_SHADOWS_SHADER = 4u;
+static const uint SPOT_SHADOW_INVALID    = 0xFFFFFFFFu;
+
+struct GpuSpotShadowData {
+    float4x4 matrices[4];      // light view-proj per caster
+    uint     light_indices[4]; // index into `lights[]`; SPOT_SHADOW_INVALID = unused
+    uint     count;
+    float    depth_bias;
+    uint     _pad0;
+    uint     _pad1;
+};
+StructuredBuffer<GpuSpotShadowData> spot_shadow_data;
+
+Texture2D<float> spot_shadow_map_0;
+Texture2D<float> spot_shadow_map_1;
+Texture2D<float> spot_shadow_map_2;
+Texture2D<float> spot_shadow_map_3;
+
+float sample_spot_shadow(uint slot, float3 world_pos) {
+    float4x4 lm = spot_shadow_data[0].matrices[slot];
+    float4   lc = mul(lm, float4(world_pos, 1.0));
+    lc.xyz /= lc.w;
+    float2 uv  = lc.xy * float2(0.5, -0.5) + 0.5;
+    float  ref = lc.z - spot_shadow_data[0].depth_bias;
+    if (any(uv < 0.0) || any(uv > 1.0) || ref > 1.0 || ref < 0.0) return 1.0;
+    Texture2D<float> smap;
+    if      (slot == 0) smap = spot_shadow_map_0;
+    else if (slot == 1) smap = spot_shadow_map_1;
+    else if (slot == 2) smap = spot_shadow_map_2;
+    else                smap = spot_shadow_map_3;
+    return pcf3x3(smap, uv, ref);
+}
+
+/// Return PCF shadow factor for a spot light identified by its global light index.
+/// Returns 1.0 (no shadow) if the light has no shadow map assigned.
+float spot_light_shadow_factor(uint light_idx, float3 world_pos) {
+    GpuSpotShadowData sd = spot_shadow_data[0];
+    for (uint s = 0; s < sd.count && s < MAX_SPOT_SHADOWS_SHADER; ++s) {
+        if (sd.light_indices[s] == light_idx)
+            return sample_spot_shadow(s, world_pos);
+    }
+    return 1.0;
+}
 
 // ── Analytic lights ───────────────────────────────────────────────────────────
 // GpuLightData — 96 bytes (6 × float4), matches scene/scene.rs GpuLightData.
@@ -126,20 +181,22 @@ float pcf3x3(Texture2D<float> smap, float2 uv, float ref_depth) {
     return sum / 9.0;
 }
 
-/// Sample one cascade's PCF shadow factor.
+/// Sample one cascade's PCF shadow factor from the shadow atlas.
 float sample_cascade(uint cas, float3 world_pos, float bias) {
     float4x4 lm = csm_data[0].matrices[cas];
     float4   lc = mul(lm, float4(world_pos, 1.0));
     lc.xyz /= lc.w;
-    float2 uv  = lc.xy * float2(0.5, -0.5) + 0.5;
-    float  ref = lc.z - bias;
-    if (any(uv < 0.0) || any(uv > 1.0) || ref > 1.0 || ref < 0.0) return 1.0;
-    Texture2D<float> smap;
-    if      (cas == 0) smap = shadow_map_0;
-    else if (cas == 1) smap = shadow_map_1;
-    else if (cas == 2) smap = shadow_map_2;
-    else               smap = shadow_map_3;
-    return pcf3x3(smap, uv, ref);
+    // Tile UV in [0,1] space within the cascade's projection.
+    float2 tile_uv = lc.xy * float2(0.5, -0.5) + 0.5;
+    float  ref     = lc.z - bias;
+    if (any(tile_uv < 0.0) || any(tile_uv > 1.0) || ref > 1.0 || ref < 0.0) return 1.0;
+
+    // Map tile UV to atlas UV using the stored tile bounds.
+    float4 tile = csm_data[0].atlas_tiles[cas];  // [x_min, y_min, x_max, y_max]
+    float2 tile_size = tile.zw - tile.xy;
+    float2 atlas_uv  = tile.xy + tile_uv * tile_size;
+
+    return pcf3x3(shadow_atlas, atlas_uv, ref);
 }
 
 /// Select cascade and evaluate shadow with optional blend at boundaries.
@@ -227,9 +284,10 @@ float3 rect_closest_point(float3 hit, float3 center, float3 right_n, float3 up_n
 }
 
 /// Evaluate one BVH-leaf light (point, spot, rect, sphere, disk).
+/// `light_idx` is the global index into `lights[]`, used for spot shadow lookup.
 float3 eval_bvh_light(float3 N, float3 V, float3 P,
                       float3 albedo, float metallic, float roughness,
-                      GpuLightData light, int kind)
+                      GpuLightData light, int kind, uint light_idx)
 {
     float3 radiance = light.color_intensity.xyz;
 
@@ -251,6 +309,9 @@ float3 eval_bvh_light(float3 N, float3 V, float3 P,
         float  att  = brdf_point_attenuation(dist, light.position_range.w);
         att *= brdf_spot_attenuation(L, normalize(light.direction_kind.xyz),
                                      light.misc.x, light.misc.y);
+        if (att <= 0.0) return 0.0;
+        // Apply spot shadow (1.0 when no shadow map is assigned).
+        att *= spot_light_shadow_factor(light_idx, P);
         if (att <= 0.0) return 0.0;
         return brdf_eval(N, V, L, albedo, metallic, roughness, radiance * att);
     }
@@ -495,9 +556,10 @@ float4 main(VSOut v) : SV_TARGET {
 
             if ((node.right_or_leaf & LEAF_FLAG) != 0u) {
                 // Leaf: evaluate this light based on its kind.
-                GpuLightData light = lights[node.left_or_light];
+                uint light_idx = node.left_or_light;
+                GpuLightData light = lights[light_idx];
                 int kind = int(light.direction_kind.w + 0.5);
-                Lo += eval_bvh_light(N, V, world_pos, albedo, metallic, roughness, light, kind);
+                Lo += eval_bvh_light(N, V, world_pos, albedo, metallic, roughness, light, kind, light_idx);
             } else {
                 // Internal: push both children (right first so left is processed first).
                 if (sp + 1u < 32u) {

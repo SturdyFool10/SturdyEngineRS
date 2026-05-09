@@ -191,6 +191,12 @@ pub struct GraphPassInfo {
     pub buffer_reads: Vec<String>,
     /// Names of buffers written by this pass.
     pub buffer_writes: Vec<String>,
+    /// GPU execution time for this pass in the **previous** frame (milliseconds).
+    ///
+    /// `None` until the second frame, or on backends without timestamp support.
+    /// Timestamp queries are one frame in arrears — the value reflects last frame's
+    /// GPU cost, not the frame currently being recorded.
+    pub gpu_time_ms: Option<f32>,
 }
 
 /// Per-image information returned by [`RenderFrame::describe`].
@@ -862,6 +868,25 @@ impl RenderFrame {
         self
     }
 
+    /// Bind a custom [`Sampler`] (created via [`Engine::create_sampler`]) under `name`.
+    ///
+    /// Use this when the built-in [`SamplerPreset`] variants don't cover your needs —
+    /// for example, to set a specific `lod_bias`, `min_lod`, or `max_lod`:
+    /// ```ignore
+    /// let my_sampler = engine.create_sampler(SamplerDesc {
+    ///     mip_lod_bias: -0.5,
+    ///     min_lod: 0.0,
+    ///     max_lod: 4.0,
+    ///     ..SamplerPreset::Trilinear.desc()
+    /// })?;
+    /// frame.set_sampler_custom("terrain_sampler", &my_sampler);
+    /// ```
+    pub fn set_sampler_custom(&self, name: impl Into<String>, sampler: &crate::Sampler) -> &Self {
+        let mut inner = self.inner.borrow_mut();
+        inner.samplers_by_name.insert(name.into(), sampler.handle());
+        self
+    }
+
     /// Register a GPU buffer under a name for the current frame.
     ///
     /// When the engine auto-creates bind groups from shader reflection, any
@@ -1081,21 +1106,30 @@ impl RenderFrame {
             names
         };
 
+        // Fetch previous-frame GPU timings from the backend (one frame in arrears).
+        let gpu_timings = inner.engine.device.pass_timings();
         let passes = inner
             .pass_records
             .iter()
-            .map(|rec| GraphPassInfo {
-                name: rec.name.clone(),
-                kind: rec.kind,
-                queue: rec.queue,
-                reads: effective_read_names(rec),
-                writes: rec
-                    .writes
+            .map(|rec| {
+                let gpu_time_ms = gpu_timings
                     .iter()
-                    .filter_map(|use_| handle_to_name(use_.image))
-                    .collect(),
-                buffer_reads: rec.buffer_read_names.clone(),
-                buffer_writes: rec.buffer_write_names.clone(),
+                    .find(|(n, _)| n == &rec.name)
+                    .map(|(_, ms)| *ms);
+                GraphPassInfo {
+                    name: rec.name.clone(),
+                    kind: rec.kind,
+                    queue: rec.queue,
+                    reads: effective_read_names(rec),
+                    writes: rec
+                        .writes
+                        .iter()
+                        .filter_map(|use_| handle_to_name(use_.image))
+                        .collect(),
+                    buffer_reads: rec.buffer_read_names.clone(),
+                    buffer_writes: rec.buffer_write_names.clone(),
+                    gpu_time_ms,
+                }
             })
             .collect();
 
@@ -1340,6 +1374,34 @@ impl RenderFrame {
             }
         }
 
+        // ── Mip-range barrier validation ──────────────────────────────────────
+        // Flag passes that use a full-resource barrier where a narrower mip/layer
+        // subrange would suffice (only worth warning for images with many mip levels,
+        // where unnecessary invalidation is expensive).
+        for rec in &inner.pass_records {
+            for use_ in rec.writes.iter().chain(rec.reads.iter()) {
+                if use_.subresource == SubresourceRange::WHOLE {
+                    let mip_count = inner.images_by_name.values()
+                        .find(|r| r.handle == use_.image)
+                        .map(|r| r.desc.mip_levels)
+                        .unwrap_or(1);
+                    if mip_count > 4 {
+                        diagnostics.push(GraphDiagnostic {
+                            level: DiagnosticLevel::Warning,
+                            message: format!(
+                                "pass '{}': image '{}' has {} mip levels but the pass uses a \
+                                 full-resource subresource range — tracking the specific mips \
+                                 accessed would reduce unnecessary cache invalidation",
+                                rec.name,
+                                handle_to_name(use_.image),
+                                mip_count,
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
         diagnostics
     }
 
@@ -1529,6 +1591,17 @@ impl RenderFrame {
             deferred: None,
         });
         Ok(())
+    }
+
+    /// Generate a full mip chain for an imported `Image` using linear blits.
+    ///
+    /// The image must have been created with `mip_levels > 1` and
+    /// `ImageUsage::COPY_SRC | ImageUsage::COPY_DST`. Call after any write to
+    /// mip 0 that you want propagated to all deeper mips. The GPU executes this
+    /// at frame flush time; no CPU stall occurs.
+    pub fn generate_mipmaps(&self, image: &crate::Image) -> Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        inner.frame.generate_mipmaps(image)
     }
 
     /// Create a swapchain-sized FP16 HDR color image for rendering.
@@ -2080,6 +2153,27 @@ impl GraphImage {
         )
     }
 
+    /// Depth-only draw with push constants and a viewport tile override.
+    ///
+    /// Used for shadow atlas rendering where each cascade is constrained to a
+    /// sub-region of the atlas image via `viewport = [x, y, width, height]`.
+    pub fn draw_mesh_depth_only_with_push_constants_and_viewport<T: bytemuck::Pod>(
+        &self,
+        mesh: &Mesh,
+        program: &MeshProgram,
+        instances: &crate::Buffer,
+        instance_count: u32,
+        constants: &T,
+        viewport: [u32; 4],
+    ) -> Result<()> {
+        let stage = reflected_push_constant_stages(program.reflection(), StageMask::VERTEX);
+        self.draw_mesh_depth_only_inner_with_viewport(
+            mesh, program,
+            Some(PushConstants { offset: 0, stages: stage, bytes: bytemuck::bytes_of(constants).to_vec() }),
+            instances, instance_count, Some(viewport),
+        )
+    }
+
     fn draw_mesh_depth_only_inner(
         &self,
         mesh: &Mesh,
@@ -2087,6 +2181,20 @@ impl GraphImage {
         push_constants: Option<PushConstants>,
         instance_buf: &crate::Buffer,
         instance_count: u32,
+    ) -> Result<()> {
+        self.draw_mesh_depth_only_inner_with_viewport(
+            mesh, program, push_constants, instance_buf, instance_count, None,
+        )
+    }
+
+    fn draw_mesh_depth_only_inner_with_viewport(
+        &self,
+        mesh: &Mesh,
+        program: &MeshProgram,
+        push_constants: Option<PushConstants>,
+        instance_buf: &crate::Buffer,
+        instance_count: u32,
+        viewport: Option<[u32; 4]>,
     ) -> Result<()> {
         let mut inner = self.frame.borrow_mut();
         let declaration_index = inner.declaration_index;
@@ -2175,6 +2283,7 @@ impl GraphImage {
                     first_instance: 0,
                     vertex_buffer,
                     index_buffer,
+                    viewport,
                 }),
                 reads: eager_uses,
                 writes,
@@ -2356,6 +2465,7 @@ impl GraphImage {
                     first_instance: 0,
                     vertex_buffer,
                     index_buffer,
+                    viewport: None,
                 }),
                 reads: eager_uses,
                 writes,
@@ -2708,6 +2818,7 @@ impl GraphImage {
                     first_instance: 0,
                     vertex_buffer,
                     index_buffer,
+                    viewport: None,
                 }),
                 reads: eager_uses,
                 writes,
@@ -3019,6 +3130,7 @@ fn record_fullscreen_shader_pass(
                     offset: 0,
                 }),
                 index_buffer: None,
+                viewport: None,
             }),
             reads: eager_uses,
             writes: vec![target_use],
@@ -3224,6 +3336,31 @@ impl GraphImageView {
     ) -> Result<()> {
         let stages = reflected_push_constant_stages(shader.reflection(), shader.stage_mask());
         self.execute_shader_with_push_constants(shader, stages, bytemuck::bytes_of(constants))
+    }
+
+    // ── Explicit mip-level operations ─────────────────────────────────────────
+
+    /// Return a view of this image restricted to a single mip level.
+    ///
+    /// Pass the result to `execute_shader_with_*` to target only that mip.
+    pub fn at_mip(&self, mip: u32) -> GraphImageView {
+        assert!(
+            mip < self.desc.mip_levels as u32,
+            "mip {mip} out of range (image has {} levels)",
+            self.desc.mip_levels
+        );
+        GraphImageView {
+            frame: self.frame.clone(),
+            name: format!("{}.mip{mip}", self.name),
+            handle: self.handle,
+            desc: self.desc,
+            subresource: SubresourceRange {
+                base_mip:    mip as u16,
+                mip_count:   1,
+                base_layer:  0,
+                layer_count: self.desc.layers,
+            },
+        }
     }
 
     pub fn register_as(&self, name: impl Into<String>) {
