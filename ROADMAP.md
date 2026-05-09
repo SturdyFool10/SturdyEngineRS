@@ -18,7 +18,7 @@ The simple path must be the best path, not a toy path. Each mode should feel com
 
 **Game loop shell**: `FrameClock`, `InputHub` (keyboard/mouse/gamepad), `ActionMap`, fixed-timestep accumulator, pointer-lock. `GameApp` + `run_game` zero-config shell. `HeadlessApp` + `run_headless` for windowless compute. 2D and 3D game samples.
 
-**Deferred PBR pipeline**: G-Buffer fill (albedo/normal/roughness/emissive), GGX specular (Trowbridge-Reitz NDF, Smith G2, Schlick Fresnel), Lambertian diffuse, split-sum IBL with SH9 diffuse, BRDF LUT, multi-scattering (Kulla-Conty). Cascaded shadow maps (4 cascades, PCF, texel-snap). Spot light shadow maps (up to 4, PCF). BVH-culled point/spot/rect/sphere/disk lights. OIT (Per-Pixel Linked List). Forward-only path. Procedural sky (Rayleigh + Mie). Environment map blending. Normal mapping.
+**Deferred PBR pipeline**: G-Buffer fill (albedo/normal/roughness/emissive), GGX specular (Trowbridge-Reitz NDF, Smith G2, Schlick Fresnel), Lambertian diffuse, split-sum IBL with SH9 diffuse, BRDF LUT, multi-scattering (Kulla-Conty). Cascaded shadow maps (4 cascades, PCF, texel-snap). Spot light shadow maps (up to 4, PCF). Point light shadow maps (up to 4, dual-paraboloid). BVH-culled point/spot/rect/sphere/disk lights. OIT (Per-Pixel Linked List). Forward-only path. Procedural sky (Rayleigh + Mie). Environment map blending. Normal mapping.
 
 **Unified material system**: `MaterialSurface` shared module, `UnifiedMaterial` with expression trees, `GBufferFillVariant` shader codegen, `ForwardLitVariant`, `ShadowVariant` (with alpha test). Hot reload for shaders and assets with last-known-good semantics.
 
@@ -45,12 +45,6 @@ Every major subsystem ships a `*Config` struct where `Default::default()` produc
 Breaking this contract is a bug. Adding a knob only accessible by editing source code is not allowed.
 
 ---
-
-## Immediate: In-Progress Items
-
-These are partially started and should be completed before moving to other tracks.
-
-- [ ] **Point light shadow maps** — `PointShadowPass` and `shadow_depth_dual_paraboloid.slang` exist but are not wired up: add `mod point_shadow_pass` to `lib.rs`, add `set_point_shadows` to `DeferredPass`, bind `point_shadow_data` + `point_shadow_map_0..3` in the deferred lighting shader, sample paraboloid depth in the lighting loop. `PointShadowConfig { resolution: u32, depth_bias: f32, near: f32 }`.
 
 ---
 

@@ -102,6 +102,88 @@ float spot_light_shadow_factor(uint light_idx, float3 world_pos) {
     return 1.0;
 }
 
+// ── Point light shadow maps (dual-paraboloid) ─────────────────────────────────
+
+static const uint MAX_POINT_SHADOWS_SHADER = 4u;
+static const uint POINT_SHADOW_INVALID     = 0xFFFFFFFFu;
+
+struct GpuPointShadowData {
+    float4x4 world_to_light[4]; // world → light-local (translation only)
+    float2   near_far[4];       // [near, far] per caster
+    uint     light_indices[4];  // global index into lights[]; INVALID = unused
+    uint     count;
+    float    depth_bias;
+    uint     _pad0;
+    uint     _pad1;
+};
+StructuredBuffer<GpuPointShadowData> point_shadow_data;
+
+Texture2D<float> point_shadow_front_0;
+Texture2D<float> point_shadow_front_1;
+Texture2D<float> point_shadow_front_2;
+Texture2D<float> point_shadow_front_3;
+Texture2D<float> point_shadow_back_0;
+Texture2D<float> point_shadow_back_1;
+Texture2D<float> point_shadow_back_2;
+Texture2D<float> point_shadow_back_3;
+
+/// Sample a dual-paraboloid shadow map for one shadow caster slot.
+/// Returns 1.0 (lit) or 0.0 (in shadow).
+float sample_point_shadow(uint slot, float3 world_pos) {
+    GpuPointShadowData psd = point_shadow_data[0];
+    float4x4 wtl  = psd.world_to_light[slot];
+    float    near = psd.near_far[slot].x;
+    float    far  = psd.near_far[slot].y;
+
+    float3 lp   = mul(wtl, float4(world_pos, 1.0)).xyz;
+    float  dist = length(lp);
+    if (dist < near || dist > far) return 1.0;
+
+    float lin_depth = (dist - near) / (far - near);
+
+    // Determine hemisphere: back if lp.z < 0; flip z so formula is uniform.
+    bool   is_back = lp.z < 0.0;
+    float3 lp_n    = lp / max(dist, 1e-5);
+    if (is_back) lp_n.z = -lp_n.z;
+
+    // Paraboloid UV in [-1, 1].
+    float2 dp_uv = lp_n.xy / (1.0 + lp_n.z);
+    if (any(abs(dp_uv) > 1.0)) return 1.0;  // outside paraboloid coverage
+
+    // Remap to [0, 1] matching the vertex shader's NDC output convention:
+    //   NDC.x = dp_uv.x   → UV.x = (dp_uv.x + 1) / 2
+    //   NDC.y = -dp_uv.y  → UV.y = (1 - dp_uv.y) / 2
+    float2 uv = float2((dp_uv.x + 1.0) * 0.5, (1.0 - dp_uv.y) * 0.5);
+
+    float ref = lin_depth - psd.depth_bias;
+
+    Texture2D<float> smap;
+    if (!is_back) {
+        if      (slot == 0) smap = point_shadow_front_0;
+        else if (slot == 1) smap = point_shadow_front_1;
+        else if (slot == 2) smap = point_shadow_front_2;
+        else                smap = point_shadow_front_3;
+    } else {
+        if      (slot == 0) smap = point_shadow_back_0;
+        else if (slot == 1) smap = point_shadow_back_1;
+        else if (slot == 2) smap = point_shadow_back_2;
+        else                smap = point_shadow_back_3;
+    }
+    float stored = smap.SampleLevel(gbuffer_sampler, uv, 0);
+    return (stored < ref) ? 0.0 : 1.0;
+}
+
+/// Return shadow factor [0, 1] for a point light identified by its global light index.
+/// Returns 1.0 (fully lit) when the light has no shadow map assigned.
+float point_light_shadow_factor(uint light_idx, float3 world_pos) {
+    GpuPointShadowData psd = point_shadow_data[0];
+    for (uint s = 0u; s < psd.count && s < MAX_POINT_SHADOWS_SHADER; ++s) {
+        if (psd.light_indices[s] == light_idx)
+            return sample_point_shadow(s, world_pos);
+    }
+    return 1.0;
+}
+
 // ── Analytic lights ───────────────────────────────────────────────────────────
 // GpuLightData — 96 bytes (6 × float4), matches scene/scene.rs GpuLightData.
 //
@@ -297,6 +379,8 @@ float3 eval_bvh_light(float3 N, float3 V, float3 P,
         float  dist = length(to_l);
         float3 L    = to_l / max(dist, 1e-5);
         float  att  = brdf_point_attenuation(dist, light.position_range.w);
+        if (att <= 0.0) return 0.0;
+        att *= point_light_shadow_factor(light_idx, P);
         if (att <= 0.0) return 0.0;
         return brdf_eval(N, V, L, albedo, metallic, roughness, radiance * att);
     }

@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3};
+use glam::Mat4;
 
 use crate::{
     Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, ImageDesc,
@@ -29,6 +29,16 @@ fn engine_shader(name: &str) -> PathBuf {
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 pub const MAX_POINT_SHADOWS: usize = 4;
+
+/// Static names for each shadow map slot — avoids per-frame heap allocation.
+static FRONT_NAMES: [&str; MAX_POINT_SHADOWS] = [
+    "point_shadow_front_0", "point_shadow_front_1",
+    "point_shadow_front_2", "point_shadow_front_3",
+];
+static BACK_NAMES: [&str; MAX_POINT_SHADOWS] = [
+    "point_shadow_back_0", "point_shadow_back_1",
+    "point_shadow_back_2", "point_shadow_back_3",
+];
 
 // ── GPU data ──────────────────────────────────────────────────────────────────
 
@@ -160,20 +170,18 @@ impl PointShadowPass {
             light_indices[slot] = point_light_buf_offset + pl_idx as u32;
 
             // Render front hemisphere (is_back = 0.0).
-            let front_name = format!("point_shadow_front_{slot}");
-            let front_desc = dp_image_desc(res, Box::leak(front_name.clone().into_boxed_str()));
-            let front_img = frame.image(&front_name, front_desc)?;
+            let front_name = FRONT_NAMES[slot];
+            let front_img = frame.image(front_name, dp_image_desc(res, front_name))?;
             draw_dp_batches(scene, frame, &front_img, &self.depth_program,
                             wtl, near, far, false)?;
-            front_img.register_as(&front_name);
+            front_img.register_as(front_name);
 
             // Render back hemisphere (is_back = 1.0).
-            let back_name = format!("point_shadow_back_{slot}");
-            let back_desc = dp_image_desc(res, Box::leak(back_name.clone().into_boxed_str()));
-            let back_img = frame.image(&back_name, back_desc)?;
+            let back_name = BACK_NAMES[slot];
+            let back_img = frame.image(back_name, dp_image_desc(res, back_name))?;
             draw_dp_batches(scene, frame, &back_img, &self.depth_program,
                             wtl, near, far, true)?;
-            back_img.register_as(&back_name);
+            back_img.register_as(back_name);
         }
 
         let gpu_data = GpuPointShadowData {

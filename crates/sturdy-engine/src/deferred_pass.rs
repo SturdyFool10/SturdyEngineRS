@@ -174,8 +174,12 @@ pub struct DeferredPass {
     spot_shadows: Option<crate::SpotShadowPass>,
     /// Zero-filled spot shadow data buffer bound when no spot shadows are active.
     empty_spot_shadow_buf: Buffer,
-    /// 1×1 depth image bound as a placeholder for spot shadow maps when disabled.
+    /// 1×1 depth image bound as a placeholder for spot/point shadow maps when disabled.
     black_spot_depth: crate::Image,
+    /// Optional point light shadow pass (dual-paraboloid). Attach via `set_point_shadows`.
+    point_shadows: Option<crate::PointShadowPass>,
+    /// Zero-filled point shadow data buffer bound when no point shadows are active.
+    empty_point_shadow_buf: Buffer,
     /// Pending environment map being blended toward. `None` when not blending.
     blend_target: Option<EnvironmentMap>,
     /// Current blend alpha [0, 1]. 0 = fully current, 1 = fully target.
@@ -268,6 +272,14 @@ impl DeferredPass {
         })?;
         empty_spot_shadow_buf.write(0, &vec![0u8; spot_data_size as usize])?;
 
+        // Zero-filled point shadow buffer for when no point shadows are active.
+        let pt_data_size = std::mem::size_of::<crate::GpuPointShadowData>() as u64;
+        let empty_point_shadow_buf = engine.create_buffer(BufferDesc {
+            size: pt_data_size,
+            usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+        })?;
+        empty_point_shadow_buf.write(0, &vec![0u8; pt_data_size as usize])?;
+
         // 1×1 Depth32Float placeholder for unbound spot shadow slots.
         let black_spot_depth = engine.create_image(crate::ImageDesc {
             dimension: crate::ImageDimension::D2,
@@ -318,6 +330,8 @@ impl DeferredPass {
             spot_shadows: None,
             empty_spot_shadow_buf,
             black_spot_depth,
+            point_shadows: None,
+            empty_point_shadow_buf,
         })
     }
 
@@ -344,6 +358,26 @@ impl DeferredPass {
     /// Expose spot shadow config for tuning.
     pub fn spot_shadow_config_mut(&mut self) -> Option<&mut crate::SpotShadowConfig> {
         self.spot_shadows.as_mut().map(|s| &mut s.config)
+    }
+
+    /// Enable dual-paraboloid point light shadow maps for up to 4 lights.
+    ///
+    /// ```ignore
+    /// let point_shadows = PointShadowPass::new(&engine)?;
+    /// deferred.set_point_shadows(point_shadows);
+    /// ```
+    pub fn set_point_shadows(&mut self, pass: crate::PointShadowPass) {
+        self.point_shadows = Some(pass);
+    }
+
+    /// Remove the point light shadow pass.
+    pub fn clear_point_shadows(&mut self) {
+        self.point_shadows = None;
+    }
+
+    /// Expose point shadow config for tuning.
+    pub fn point_shadow_config_mut(&mut self) -> Option<&mut crate::PointShadowConfig> {
+        self.point_shadows.as_mut().map(|p| &mut p.config)
     }
 
     /// Attach an environment map for image-based lighting.
@@ -465,6 +499,15 @@ impl DeferredPass {
             if !scene.spot_lights.is_empty() {
                 spot.draw(scene, spot_buf_offset, frame, engine)?;
                 frame.bind_buffer("spot_shadow_data", &spot.shadow_buf);
+            }
+        }
+
+        // ── 2c. Point light shadow passes (dual-paraboloid) ───────────────────
+        // Point lights occupy buffer slots 1..(1 + N_point).
+        let point_buf_offset = 1u32;
+        if let Some(pt) = &mut self.point_shadows {
+            if !scene.point_lights.is_empty() {
+                pt.draw(scene, point_buf_offset, frame, engine)?;
             }
         }
 
@@ -669,6 +712,22 @@ impl DeferredPass {
             frame.bind_image("spot_shadow_map_1", &self.black_spot_depth);
             frame.bind_image("spot_shadow_map_2", &self.black_spot_depth);
             frame.bind_image("spot_shadow_map_3", &self.black_spot_depth);
+        }
+
+        // Bind point shadow data (all-invalid when no point shadows are active).
+        if let Some(pt) = &self.point_shadows {
+            frame.bind_buffer("point_shadow_data", &pt.shadow_buf);
+            // point_shadow_front/back_0..3 registered by PointShadowPass::draw() above.
+        } else {
+            frame.bind_buffer("point_shadow_data", &self.empty_point_shadow_buf);
+            frame.bind_image("point_shadow_front_0", &self.black_spot_depth);
+            frame.bind_image("point_shadow_front_1", &self.black_spot_depth);
+            frame.bind_image("point_shadow_front_2", &self.black_spot_depth);
+            frame.bind_image("point_shadow_front_3", &self.black_spot_depth);
+            frame.bind_image("point_shadow_back_0",  &self.black_spot_depth);
+            frame.bind_image("point_shadow_back_1",  &self.black_spot_depth);
+            frame.bind_image("point_shadow_back_2",  &self.black_spot_depth);
+            frame.bind_image("point_shadow_back_3",  &self.black_spot_depth);
         }
 
         // Advance blend transition if one is active.

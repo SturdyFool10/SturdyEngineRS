@@ -34,6 +34,7 @@ mod debug_draw_2d;
 mod deferred_pass;
 mod shadow_pass;
 mod spot_shadow_pass;
+mod point_shadow_pass;
 mod geometry;
 mod debug_overlay;
 mod debug_view_picker;
@@ -114,6 +115,7 @@ pub use shadow_pass::{
     ShadowConfig, ShadowOutput, ShadowPass,
 };
 pub use spot_shadow_pass::{GpuSpotShadowData, MAX_SPOT_SHADOWS, SpotShadowConfig, SpotShadowPass};
+pub use point_shadow_pass::{GpuPointShadowData, MAX_POINT_SHADOWS, PointShadowConfig, PointShadowPass};
 pub use debug_draw_2d::{DebugDraw2d, DebugDrawStyle};
 pub use debug_overlay::{
     DebugHitRegion, DebugOverlay, DebugOverlayAntialiasing, DebugOverlayConfig,
