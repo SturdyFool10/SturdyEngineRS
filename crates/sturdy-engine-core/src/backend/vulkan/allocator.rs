@@ -144,6 +144,19 @@ impl Block {
     }
 }
 
+/// Per-pool memory usage snapshot.
+#[derive(Clone, Debug, Default)]
+pub struct PoolStats {
+    /// Total bytes in all live VkDeviceMemory blocks for this pool.
+    pub capacity_bytes: u64,
+    /// Bytes currently sub-allocated (capacity minus free list totals).
+    pub used_bytes: u64,
+    /// Number of live VkDeviceMemory blocks.
+    pub block_count: u32,
+    /// Whether the pool is host-visible.
+    pub host_visible: bool,
+}
+
 struct TypePool {
     memory_type: u32,
     host_visible: bool,
@@ -268,6 +281,29 @@ impl TypePool {
             }
         }
     }
+
+    fn stats(&self) -> PoolStats {
+        let capacity_bytes: u64 = self.blocks.iter().map(|b| b.capacity).sum();
+        let free_bytes: u64 = self.blocks.iter()
+            .flat_map(|b| b.free.values())
+            .sum();
+        PoolStats {
+            capacity_bytes,
+            used_bytes: capacity_bytes.saturating_sub(free_bytes),
+            block_count: self.blocks.len() as u32,
+            host_visible: self.host_visible,
+        }
+    }
+}
+
+/// Aggregate memory usage snapshot across all sub-allocator pools.
+#[derive(Clone, Debug, Default)]
+pub struct AllocatorStats {
+    pub device_local_used_bytes: u64,
+    pub device_local_capacity_bytes: u64,
+    pub host_visible_used_bytes: u64,
+    pub host_visible_capacity_bytes: u64,
+    pub block_count: u32,
 }
 
 pub struct GpuAllocator {
@@ -330,6 +366,23 @@ impl GpuAllocator {
             pool.destroy_all(device);
         }
         self.pools.clear();
+    }
+
+    /// Aggregate memory usage across all pools.
+    pub fn stats(&self) -> AllocatorStats {
+        let mut stats = AllocatorStats::default();
+        for pool in &self.pools {
+            let ps = pool.stats();
+            if ps.host_visible {
+                stats.host_visible_capacity_bytes += ps.capacity_bytes;
+                stats.host_visible_used_bytes     += ps.used_bytes;
+            } else {
+                stats.device_local_capacity_bytes += ps.capacity_bytes;
+                stats.device_local_used_bytes     += ps.used_bytes;
+            }
+            stats.block_count += ps.block_count;
+        }
+        stats
     }
 
     pub fn find_memory_type(

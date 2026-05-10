@@ -9,7 +9,7 @@ use crate::{
     SubresourceRange, VulkanExternalBuffer, VulkanExternalImage,
 };
 
-use super::allocator::{Allocation, GpuAllocator};
+use super::allocator::{Allocation, AllocatorStats, GpuAllocator};
 
 pub struct ResourceRegistry {
     allocator: GpuAllocator,
@@ -48,6 +48,10 @@ impl ResourceRegistry {
             buffers: HashMap::new(),
             samplers: HashMap::new(),
         }
+    }
+
+    pub fn allocator_stats(&self) -> AllocatorStats {
+        self.allocator.stats()
     }
 
     pub fn create_image(

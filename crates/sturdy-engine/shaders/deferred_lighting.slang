@@ -35,14 +35,14 @@ SamplerState      shadow_sampler;
 // ── CSM data ──────────────────────────────────────────────────────────────────
 
 struct GpuCsmData {
-    float4x4 matrices[4];          // per-cascade light view-proj
-    float4   split_distances;      // view-space linear distances
-    uint     cascade_count;
-    float    depth_bias;
-    float    blend_range;
-    float    _pad;
-    /// Per-cascade atlas UV tile bounds: [x_min, y_min, x_max, y_max] in [0,1].
-    float4   atlas_tiles[4];
+    float4x4 matrices[4];          // per-cascade light view-proj        → 256 bytes
+    float4   split_distances;      // view-space linear distances (x=cas0…w=cas3) → 16 bytes
+    uint     cascade_count;        //  4
+    float    depth_bias;           //  4
+    float    blend_range;          //  4
+    uint     pcss_enabled;         //  4 bytes → 288
+    float4   atlas_tiles[4];       // 64 bytes → 352
+    float4   pcss_light_size_uv;   // 16 bytes → 368  (x=cas0…w=cas3)
 };
 StructuredBuffer<GpuCsmData> csm_data;
 
@@ -263,21 +263,103 @@ float pcf3x3(Texture2D<float> smap, float2 uv, float ref_depth) {
     return sum / 9.0;
 }
 
-/// Sample one cascade's PCF shadow factor from the shadow atlas.
+// ── PCSS — Percentage-Closer Soft Shadows ─────────────────────────────────────
+//
+// Two-pass algorithm (Fernando 2005):
+//   1. Blocker search — find average depth of occluders within a search disc.
+//   2. Penumbra estimation — penumbra_radius = (d_receiver - d_avg_blocker)
+//                                              / d_avg_blocker * light_size_uv
+//   3. Variable-kernel PCF — PCF using the penumbra radius.
+//
+// Both passes use the same 32-point Poisson disc. Blocker search uses 16 taps,
+// PCF uses all 32. The atlas tile bounds are respected so lookups never bleed
+// into a neighbouring cascade.
+
+static const float2 POISSON_DISK[32] = {
+    float2(-0.975402, -0.091116), float2( 0.220162, -0.938053),
+    float2( 0.987766,  0.159899), float2( 0.717278,  0.655820),
+    float2(-0.171612,  0.994272), float2(-0.778744,  0.626903),
+    float2(-0.390991,  0.921700), float2( 0.474516, -0.880023),
+    float2(-0.498705, -0.849979), float2(-0.980862,  0.194701),
+    float2( 0.534441,  0.845017), float2( 0.218253,  0.975985),
+    float2(-0.683882, -0.726618), float2( 0.950821, -0.309053),
+    float2( 0.128643,  0.406538), float2(-0.358577, -0.433583),
+    float2(-0.773359,  0.193378), float2( 0.441798,  0.133218),
+    float2( 0.765778, -0.640960), float2( 0.175520, -0.459618),
+    float2(-0.234099,  0.228696), float2(-0.041654, -0.757143),
+    float2( 0.589093,  0.435432), float2(-0.647628,  0.012411),
+    float2(-0.284987, -0.034764), float2( 0.756773,  0.268025),
+    float2(-0.437107,  0.561498), float2( 0.338858, -0.234398),
+    float2(-0.798551, -0.370025), float2( 0.023987,  0.638500),
+    float2(-0.527001,  0.812997), float2( 0.327498,  0.726093),
+};
+
+/// Step 1: Average depth of blockers within a search disc.
+/// Returns -1 if no blockers found (receiver is fully lit).
+float find_avg_blocker_depth(float2 atlas_uv, float ref_depth,
+                              float search_radius, float4 tile_bounds) {
+    float sum   = 0.0;
+    int   count = 0;
+    for (int i = 0; i < 16; ++i) {
+        float2 uv = clamp(atlas_uv + POISSON_DISK[i] * search_radius,
+                          tile_bounds.xy, tile_bounds.zw);
+        float d = shadow_atlas.SampleLevel(shadow_sampler, uv, 0);
+        if (ref_depth > d) { sum += d; count++; }
+    }
+    return count > 0 ? sum / float(count) : -1.0;
+}
+
+/// Step 3: PCF over a variable-radius disc.
+float pcf_disk(float2 atlas_uv, float ref_depth,
+               float radius, float4 tile_bounds) {
+    float sum = 0.0;
+    for (int i = 0; i < 32; ++i) {
+        float2 uv = clamp(atlas_uv + POISSON_DISK[i] * radius,
+                          tile_bounds.xy, tile_bounds.zw);
+        float d = shadow_atlas.SampleLevel(shadow_sampler, uv, 0);
+        sum += (ref_depth <= d) ? 1.0 : 0.0;
+    }
+    return sum / 32.0;
+}
+
+/// Full PCSS shadow factor for one cascade (atlas tile already selected).
+float sample_cascade_pcss(float2 atlas_uv, float ref_depth,
+                           float light_size_uv, float4 tile_bounds) {
+    // Step 1: blocker search.
+    float avg_blocker = find_avg_blocker_depth(atlas_uv, ref_depth,
+                                               light_size_uv, tile_bounds);
+    if (avg_blocker < 0.0) return 1.0; // no occluder → fully lit
+
+    // Step 2: penumbra radius (clamped so we don't over-blur near-contact shadows).
+    float penumbra = (ref_depth - avg_blocker) / avg_blocker * light_size_uv;
+    // Minimum of 1.5 texels in atlas space to avoid aliasing at near contact.
+    float2 atlas_size;
+    shadow_atlas.GetDimensions(atlas_size.x, atlas_size.y);
+    float min_radius = 1.5 / atlas_size.x;
+    penumbra = max(penumbra, min_radius);
+
+    // Step 3: PCF with penumbra-sized disc.
+    return pcf_disk(atlas_uv, ref_depth, penumbra, tile_bounds);
+}
+
+/// Sample one cascade's shadow factor from the shadow atlas.
+/// Dispatches to PCSS or fixed 3×3 PCF based on csm_data[0].pcss_enabled.
 float sample_cascade(uint cas, float3 world_pos, float bias) {
     float4x4 lm = csm_data[0].matrices[cas];
     float4   lc = mul(lm, float4(world_pos, 1.0));
     lc.xyz /= lc.w;
-    // Tile UV in [0,1] space within the cascade's projection.
     float2 tile_uv = lc.xy * float2(0.5, -0.5) + 0.5;
     float  ref     = lc.z - bias;
     if (any(tile_uv < 0.0) || any(tile_uv > 1.0) || ref > 1.0 || ref < 0.0) return 1.0;
 
-    // Map tile UV to atlas UV using the stored tile bounds.
-    float4 tile = csm_data[0].atlas_tiles[cas];  // [x_min, y_min, x_max, y_max]
+    float4 tile      = csm_data[0].atlas_tiles[cas];
     float2 tile_size = tile.zw - tile.xy;
     float2 atlas_uv  = tile.xy + tile_uv * tile_size;
 
+    if (csm_data[0].pcss_enabled != 0u) {
+        float light_size = csm_data[0].pcss_light_size_uv[cas];
+        return sample_cascade_pcss(atlas_uv, ref, light_size, tile);
+    }
     return pcf3x3(shadow_atlas, atlas_uv, ref);
 }
 

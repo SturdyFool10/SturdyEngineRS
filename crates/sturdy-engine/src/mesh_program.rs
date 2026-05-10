@@ -4,6 +4,8 @@ use std::{
     sync::Mutex,
 };
 
+use crate::shader_watcher::Reloadable;
+
 use sturdy_engine_core as core;
 
 use crate::{
@@ -486,4 +488,16 @@ fn validate_vertex_inputs_match_layout(
         }
     }
     Ok(())
+}
+
+/// `Reloadable` for `MeshProgram` targets the fragment shader — the part that
+/// changes during iteration on material code. Use `reload_vertex()` directly
+/// when the vertex shader is the thing that changed.
+impl Reloadable for MeshProgram {
+    fn source_path(&self) -> Option<&Path> {
+        self.fragment_path()
+    }
+    fn reload(&mut self) -> Result<bool> {
+        self.reload_fragment()
+    }
 }

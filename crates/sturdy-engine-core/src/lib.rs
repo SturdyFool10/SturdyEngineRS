@@ -18,6 +18,7 @@ pub mod gpu_capture;
 pub mod handles;
 pub mod image;
 pub mod limits;
+pub mod memory_budget;
 pub mod native_handles;
 pub mod pipeline;
 pub mod push_constants;
@@ -56,6 +57,7 @@ pub use image::{
     ImageRole, ImageUsage,
 };
 pub use limits::Limits;
+pub use memory_budget::GpuMemoryBudget;
 pub use native_handles::{
     NativeHandleCapabilities, NativeHandleCapability, NativeHandleKind, NativeHandleOwnership,
     native_handle_capabilities_for_backend,

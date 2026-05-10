@@ -138,6 +138,13 @@ pub struct CsmConfig {
     /// Catches tall geometry (trees, buildings) behind the camera that still
     /// casts shadows into the scene. Default 50.0.
     pub z_extension: f32,
+    /// Enable Percentage-Closer Soft Shadows (PCSS). When true, shadow edges are
+    /// physically blurred based on blocker distance — contact shadows stay sharp,
+    /// far-from-caster shadows soften. Default false (regular 3×3 PCF).
+    pub pcss: bool,
+    /// World-space angular diameter of the light source used for PCSS penumbra
+    /// estimation. Larger values produce softer shadows. \[0.1, 20.0\]. Default 2.5.
+    pub pcss_light_size: f32,
 }
 
 impl Default for CsmConfig {
@@ -150,6 +157,8 @@ impl Default for CsmConfig {
             blend_range: 0.15,
             stabilise: true,
             z_extension: 50.0,
+            pcss: false,
+            pcss_light_size: 2.5,
         }
     }
 }
@@ -170,17 +179,20 @@ pub struct GpuCsmData {
     /// copies of the last valid cascade.
     pub matrices: [[[f32; 4]; 4]; MAX_CASCADES],   // 256 bytes
     /// View-space (linear) distances where each cascade begins.
-    pub split_distances: [f32; MAX_CASCADES],        // 16 bytes
+    pub split_distances: [f32; MAX_CASCADES],        //  16 bytes
     /// Number of active cascades (≤ MAX_CASCADES).
-    pub cascade_count: u32,                          // 4 bytes
+    pub cascade_count: u32,                          //   4 bytes
     /// Constant depth bias applied in the PCF comparison.
-    pub depth_bias: f32,                             // 4 bytes
+    pub depth_bias: f32,                             //   4 bytes
     /// Fraction of each cascade range used for blending with the next.
-    pub blend_range: f32,                            // 4 bytes
-    pub _pad: f32,                                   // 4 bytes → 288 bytes
+    pub blend_range: f32,                            //   4 bytes
+    /// 1 = PCSS enabled, 0 = regular 3×3 PCF.
+    pub pcss_enabled: u32,                           //   4 bytes → 288 bytes
     /// Per-cascade atlas UV tile bounds: [x_min, y_min, x_max, y_max] in [0,1].
-    /// Cascade N's shadow UV is mapped to this sub-region of the atlas texture.
-    pub atlas_tiles: [[f32; 4]; MAX_CASCADES],       // 64 bytes → 352 bytes
+    pub atlas_tiles: [[f32; 4]; MAX_CASCADES],       //  64 bytes → 352 bytes
+    /// Per-cascade light source size in atlas UV space for PCSS blocker search.
+    /// = world_light_size / cascade_world_width * tile_scale.
+    pub pcss_light_size_uv: [f32; MAX_CASCADES],     //  16 bytes → 368 bytes
 }
 
 /// Per-frame output of `CsmPass::draw`.
@@ -246,8 +258,10 @@ impl CsmPass {
 
         // Build cascade matrices from tight frustum fitting.
         let mut matrices = [Mat4::IDENTITY; MAX_CASCADES];
+        let mut pcss_light_size_uv = [0.0f32; MAX_CASCADES];
+        let tile_scale = 1.0 / ATLAS_COLS as f32;  // 0.5 for a 2×2 atlas
         for i in 0..n {
-            matrices[i] = cascade_light_matrix(
+            let (mat, world_width) = cascade_light_matrix(
                 view, proj, near, far,
                 splits[i], splits[i + 1],
                 light_dir,
@@ -255,10 +269,16 @@ impl CsmPass {
                 self.config.z_extension,
                 self.config.stabilise,
             );
+            matrices[i] = mat;
+            // UV-space size of the light source within this cascade's atlas tile.
+            // Clamped to reasonable range to avoid huge kernels on tiny cascades.
+            pcss_light_size_uv[i] = (self.config.pcss_light_size / world_width.max(1e-3) * tile_scale)
+                .clamp(0.001, 0.25);
         }
         // Fill unused cascade slots with the last valid cascade.
         for i in n..MAX_CASCADES {
             matrices[i] = matrices[n - 1];
+            pcss_light_size_uv[i] = pcss_light_size_uv[n - 1];
         }
 
         // Allocate one atlas image containing all cascades in a 2×2 tile grid.
@@ -335,8 +355,9 @@ impl CsmPass {
             cascade_count: n as u32,
             depth_bias: self.config.depth_bias,
             blend_range: self.config.blend_range,
-            _pad: 0.0,
+            pcss_enabled: self.config.pcss as u32,
             atlas_tiles,
+            pcss_light_size_uv,
         };
 
         // Upload to the persistent GPU buffer.
@@ -400,6 +421,8 @@ fn cascade_world_corners(inv_vp: Mat4, z_near_ndc: f32, z_far_ndc: f32) -> [Vec3
 }
 
 /// Build the tight orthographic light-view-proj matrix for one cascade.
+/// Returns `(matrix, cascade_world_width)` where the world width is the
+/// X-extent of the fitted frustum in light space — used for PCSS light-size scaling.
 fn cascade_light_matrix(
     view: Mat4,
     proj: Mat4,
@@ -411,7 +434,7 @@ fn cascade_light_matrix(
     resolution: u32,
     z_extension: f32,
     stabilise: bool,
-) -> Mat4 {
+) -> (Mat4, f32) {
     let inv_vp = (proj * view).inverse();
     let z_near_ndc = view_depth_to_ndc_z(proj, cascade_near.max(cam_near));
     let z_far_ndc  = view_depth_to_ndc_z(proj, cascade_far.min(cam_far));
@@ -451,13 +474,14 @@ fn cascade_light_matrix(
     }
 
     // Light-space orthographic projection (Z range: min_ls.z → max_ls.z, depth 0..1).
+    let world_width = max_ls.x - min_ls.x;
     let light_proj = Mat4::orthographic_rh(
         min_ls.x, max_ls.x,
         min_ls.y, max_ls.y,
         -max_ls.z, -min_ls.z, // light looks toward -Z; negate to get near/far
     );
 
-    light_proj * light_view
+    (light_proj * light_view, world_width)
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────

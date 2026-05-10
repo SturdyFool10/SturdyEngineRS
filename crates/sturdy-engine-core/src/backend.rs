@@ -9,7 +9,7 @@ use crate::{
     SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, ShaderTarget, SubmissionHandle,
     SurfaceCapabilities, SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
 };
-use crate::{Format, FormatCapabilities};
+use crate::{Format, FormatCapabilities, GpuMemoryBudget};
 
 #[cfg(target_os = "windows")]
 pub mod d3d12;
@@ -96,6 +96,11 @@ pub trait Backend: Send + Sync {
     fn caps(&self) -> Caps;
     fn format_capabilities(&self, _format: Format) -> FormatCapabilities {
         FormatCapabilities::default()
+    }
+    /// Current GPU memory usage and capacity. Returns `None` on backends that
+    /// don't expose allocator statistics.
+    fn memory_budget(&self) -> Option<GpuMemoryBudget> {
+        None
     }
     fn native_handle_capabilities(&self) -> NativeHandleCapabilities {
         native_handle_capabilities_for_backend(self.kind())

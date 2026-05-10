@@ -135,6 +135,20 @@ impl Backend for VulkanBackend {
         caps::query_format_capabilities(&self.instance, self.physical_device, format)
     }
 
+    fn memory_budget(&self) -> Option<crate::GpuMemoryBudget> {
+        let stats = self.resources
+            .read()
+            .expect("vulkan resource registry rwlock poisoned")
+            .allocator_stats();
+        Some(crate::GpuMemoryBudget {
+            device_local_used_bytes:     stats.device_local_used_bytes,
+            device_local_capacity_bytes: stats.device_local_capacity_bytes,
+            host_visible_used_bytes:     stats.host_visible_used_bytes,
+            host_visible_capacity_bytes: stats.host_visible_capacity_bytes,
+            block_count:                 stats.block_count,
+        })
+    }
+
     fn create_image(&self, handle: ImageHandle, desc: ImageDesc) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources

@@ -207,6 +207,18 @@ impl Device {
             .caps()
     }
 
+    /// Current GPU memory usage and sub-allocator capacity.
+    ///
+    /// Returns `None` on backends that don't expose allocator statistics.
+    /// Call once per frame; the overhead is a single mutex read.
+    pub fn memory_budget(&self) -> Option<crate::GpuMemoryBudget> {
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .memory_budget()
+    }
+
     /// Per-pass GPU timings from the most recently completed frame.
     ///
     /// Returns `(pass_name, gpu_milliseconds)` pairs in submission order.

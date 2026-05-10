@@ -202,7 +202,7 @@ pub use sturdy_engine_core::{
     D3d12RawCapabilities, DispatchDesc, DispatchIndirectDesc, DrawDesc, DrawIndirectDesc,
     DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, Error, ErrorCategory, Extent3d,
     ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode,
-    Format, FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc,
+    Format, FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GpuMemoryBudget, GraphicsPipelineDesc,
     ImageBuilder, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse, IndexBufferBinding,
     IndexFormat, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
     NativeHandleCapability, NativeHandleKind, NativeHandleOwnership, PassDesc, PassWork,
@@ -284,6 +284,22 @@ impl Engine {
 
     pub fn caps(&self) -> Caps {
         self.device.caps()
+    }
+
+    /// Current GPU memory usage and sub-allocator capacity.
+    ///
+    /// Returns `None` when the backend doesn't expose allocation statistics.
+    /// Cheap to call every frame (one mutex read). Use `budget.over_budget()` or
+    /// `budget.summary()` to log VRAM pressure.
+    ///
+    /// # Example
+    /// ```ignore
+    /// if let Some(b) = engine.memory_budget() {
+    ///     eprintln!("{}", b.summary()); // "VRAM 423 / 512 MiB (82 %) [over budget]"
+    /// }
+    /// ```
+    pub fn memory_budget(&self) -> Option<GpuMemoryBudget> {
+        self.device.memory_budget()
     }
 
     pub fn format_capabilities(&self, format: Format) -> FormatCapabilities {
