@@ -17,6 +17,8 @@
 // ```
 
 use super::World;
+use super::parallel_system::{ErasedParallelSystem, ParallelSystem, ParallelSystemAdapter};
+use super::compiled_schedule::{CompiledSchedule, CompiledScheduleBuilder};
 
 // ── SystemFn ──────────────────────────────────────────────────────────────────
 
@@ -45,87 +47,158 @@ impl<F: FnMut(&mut World) + Send + Sync + 'static> System for F {
 
 /// An ordered collection of named systems that execute against a `World`.
 ///
-/// Use multiple `Schedule` instances for different stages of your game loop:
+/// Use multiple `Schedule` instances for different stages of your game loop.
+/// Call `run` for simple serial execution, or `build` to compile a parallel
+/// schedule that uses rayon to run non-conflicting systems concurrently.
 ///
 /// ```ignore
-/// struct MyGame {
-///     world: World,
-///     fixed_schedule: Schedule,   // physics, AI
-///     render_schedule: Schedule,  // animation, transform sync
-/// }
+/// // Serial (existing API — unchanged):
+/// let mut sched = Schedule::new();
+/// sched.add_system("integrate", integrate_transforms);
+/// sched.run(&mut world);
 ///
-/// impl GameApp for MyGame {
-///     fn fixed_update(&mut self, ctx: &FixedUpdateContext<'_>) -> Result<(), Self::Error> {
-///         self.fixed_schedule.run(&mut self.world);
-///         Ok(())
-///     }
-///
-///     fn render(&mut self, ...) -> Result<(), Self::Error> {
-///         self.render_schedule.run(&mut self.world);
-///         self.world.sync_scene_transforms(&mut self.scene);
-///         // ... draw calls ...
-///         Ok(())
-///     }
-/// }
+/// // Parallel (new API):
+/// let mut sched = Schedule::new();
+/// sched.add_parallel_system("integrate",  VelocityIntegrator::default());
+/// sched.add_parallel_system("health_regen", HealthRegen::default());
+/// let mut compiled = sched.build();
+/// compiled.run(&mut world);
 /// ```
 pub struct Schedule {
-    systems: Vec<(String, Box<dyn System>)>,
+    entries: Vec<ScheduleEntry>,
     /// Whether to print system names + timing to stderr each run (debug builds only).
     pub debug_timing: bool,
 }
 
+enum ScheduleEntry {
+    Serial(String, Box<dyn System>),
+    Parallel(String, Box<dyn ErasedParallelSystem>),
+}
+
 impl Schedule {
     pub fn new() -> Self {
-        Self { systems: Vec::new(), debug_timing: false }
+        Self { entries: Vec::new(), debug_timing: false }
     }
 
-    /// Append a named system.
+    /// Append a serial system (existing API — unchanged).
     ///
-    /// Systems run in insertion order. The name is used in diagnostic output.
+    /// Serial systems run with exclusive `&mut World` access and act as a full
+    /// barrier in the compiled schedule: no parallel system from an adjacent
+    /// wave will overlap with them.
     pub fn add_system(
         &mut self,
         name: impl Into<String>,
         system: impl FnMut(&mut World) + Send + Sync + 'static,
     ) -> &mut Self {
-        self.systems.push((name.into(), Box::new(system)));
+        self.entries.push(ScheduleEntry::Serial(name.into(), Box::new(system)));
         self
     }
 
-    /// Append a system that implements the `System` trait (useful for stateful systems).
+    /// Append a stateful serial system.
     pub fn add_system_obj(
         &mut self,
         name: impl Into<String>,
         system: impl System,
     ) -> &mut Self {
-        self.systems.push((name.into(), Box::new(system)));
+        self.entries.push(ScheduleEntry::Serial(name.into(), Box::new(system)));
         self
     }
 
-    /// Run all systems in order against `world`.
+    /// Append a parallel system.
+    ///
+    /// The system's `access()` declaration is read once here and used by
+    /// `build()` to determine wave membership. Systems with non-conflicting
+    /// access run concurrently in the same wave.
+    pub fn add_parallel_system(
+        &mut self,
+        name: impl Into<String>,
+        system: impl ParallelSystem,
+    ) -> &mut Self {
+        let adapter = ParallelSystemAdapter::new(system);
+        self.entries.push(ScheduleEntry::Parallel(name.into(), Box::new(adapter)));
+        self
+    }
+
+    /// Run all systems serially in insertion order.
+    ///
+    /// Parallel systems registered via `add_parallel_system` are downgraded to
+    /// serial execution here — they run with an exclusive world view.
+    /// Use `build().run()` to get actual parallel execution.
     pub fn run(&mut self, world: &mut World) {
         if self.debug_timing && cfg!(debug_assertions) {
-            for (name, system) in &mut self.systems {
+            for entry in &mut self.entries {
                 let t0 = std::time::Instant::now();
-                system.run(world);
-                eprintln!("[Schedule] {name}: {:.3}ms", t0.elapsed().as_secs_f64() * 1000.0);
+                match entry {
+                    ScheduleEntry::Serial(name, sys) => {
+                        sys.run(world);
+                        eprintln!("[Schedule] {name}: {:.3}ms", t0.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    ScheduleEntry::Parallel(name, sys) => {
+                        // Downgrade: run parallel system serially via a temporary WorldView.
+                        let mut cmds = super::world_commands::WorldCommands::new();
+                        {
+                            // SAFETY: We hold &mut World, so no other borrow exists.
+                            let view = unsafe { super::world_view::WorldView::new(world) };
+                            sys.run(&view, &mut cmds);
+                        }
+                        cmds.apply(world);
+                        eprintln!("[Schedule] {name} (parallel→serial): {:.3}ms", t0.elapsed().as_secs_f64() * 1000.0);
+                    }
+                }
             }
         } else {
-            for (_, system) in &mut self.systems {
-                system.run(world);
+            for entry in &mut self.entries {
+                match entry {
+                    ScheduleEntry::Serial(_, sys) => {
+                        sys.run(world);
+                    }
+                    ScheduleEntry::Parallel(_, sys) => {
+                        let mut cmds = super::world_commands::WorldCommands::new();
+                        {
+                            let view = unsafe { super::world_view::WorldView::new(world) };
+                            sys.run(&view, &mut cmds);
+                        }
+                        cmds.apply(world);
+                    }
+                }
             }
         }
     }
 
-    /// Number of systems in this schedule.
-    pub fn system_count(&self) -> usize { self.systems.len() }
+    /// Compile the schedule into a `CompiledSchedule` that runs parallel
+    /// systems concurrently using rayon.
+    ///
+    /// Call this once at startup (or whenever the system list changes) and keep
+    /// the result for repeated use. `build` is O(n²) in the number of systems,
+    /// but n is typically small (< 100 systems per schedule).
+    pub fn build(self) -> CompiledSchedule {
+        let mut builder = CompiledScheduleBuilder::new();
+        for entry in self.entries {
+            match entry {
+                ScheduleEntry::Serial(name, sys) => {
+                    builder.push_serial(name, sys);
+                }
+                ScheduleEntry::Parallel(name, sys) => {
+                    let access = sys.access().clone();
+                    builder.push_parallel(name, access, sys);
+                }
+            }
+        }
+        builder.finish()
+    }
 
-    /// Names of registered systems in run order.
+    /// Number of registered systems (serial + parallel).
+    pub fn system_count(&self) -> usize { self.entries.len() }
+
+    /// Names of registered systems in insertion order.
     pub fn system_names(&self) -> impl Iterator<Item = &str> {
-        self.systems.iter().map(|(name, _)| name.as_str())
+        self.entries.iter().map(|e| match e {
+            ScheduleEntry::Serial(n, _) | ScheduleEntry::Parallel(n, _) => n.as_str(),
+        })
     }
 
     /// Remove all systems.
-    pub fn clear(&mut self) { self.systems.clear(); }
+    pub fn clear(&mut self) { self.entries.clear(); }
 }
 
 impl Default for Schedule { fn default() -> Self { Self::new() } }

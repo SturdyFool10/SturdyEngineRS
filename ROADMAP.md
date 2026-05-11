@@ -104,7 +104,8 @@ Geometry
   └─ Ray tracing geometry integration (TLAS/BLAS for RT AO, shadows, reflections, GI)
 
 Engine + ECS thread safety (foundational — do alongside GPU-driven work)
-  └─ Engine::global() OnceLock accessor — any thread, zero cost
+  └─ Engine::global() OnceLock accessor ✓ — any thread, zero cost
+  └─ World resource system ✓ — insert_resource / resource / resource_mut / remove_resource
   └─ Fine-grained resource locks — image/buffer/pipeline/shader registries independent
   └─ Parallel command recording — ThreadRenderContext + secondary CBs per worker
   └─ Thread-safe Scene — atomic transforms, SceneCommands queue, SceneView
@@ -569,14 +570,15 @@ The `WorldView` type provides safe concurrent access to component storages witho
 - [ ] **Parallel query API**: `world.query_par::<Transform>(|entity, transform| { ... })` uses `rayon::par_iter` internally, splitting the dense component array across threads. No system-level scheduling required — useful for data-parallel operations within a single system (e.g., integrating 100k transform+velocity pairs).
 - [ ] **`world.spawn` / `despawn`**: these still require exclusive `&mut World`. Provide a `WorldCommands` queue — systems post deferred spawn/despawn commands; the queue is flushed between schedule waves on the main thread. This is the standard ECS command pattern.
 
-### ECS-MT-c — Resource system
+### ECS-MT-c — Resource system ✓ (serial path complete)
 
-"Resources" are singleton values in the World (not component data) — the engine reference, the time step, the event queues. They follow the same read/write access rules as components.
+"Resources" are singleton values in the World (not component data) — the engine reference, the time step, the event queues.
 
-- [ ] **`World::insert_resource<R: Send + Sync + 'static>(value: R)`**: registers a resource under its `TypeId`.
-- [ ] **`World::resource<R>() -> &R`** and **`World::resource_mut<R>() -> &mut R`**: access from serial systems.
-- [ ] **`WorldView::resource::<R>()` / `resource_mut::<R>()`**: thread-safe access from parallel systems. Resource access is declared in `SystemAccess::resources_read / resources_written` so the scheduler can detect conflicts.
-- [ ] The engine registers itself as a resource at startup: `world.insert_resource(engine.clone())`. Systems access it via `view.resource::<Engine>()` — no passing through function arguments.
+- [x] **`World::insert_resource<R: Send + Sync + 'static>(value: R)`**: stores under `TypeId`; replaces any existing value of the same type.
+- [x] **`World::resource<R>() -> Option<&R>`** / **`resource_mut<R>() -> Option<&mut R>`** / **`remove_resource<R>() -> Option<R>`** / **`has_resource<R>() -> bool`**: full serial access API. 7 tests covering all paths.
+- [x] **`World::resource_unwrap<R>()`** / **`resource_unwrap_mut<R>()`**: panicking variants with type name in the message.
+- [ ] **`WorldView::resource::<R>()` / `resource_mut::<R>()`**: thread-safe access from parallel systems, with access declared in `SystemAccess`. Requires ECS-MT-a (WorldView).
+- [ ] The engine auto-inserted as a resource at startup: `world.insert_resource(Engine::global().clone())`. Systems access via `view.resource_unwrap::<Engine>()` — no argument threading.
 
 ### ECS-MT-d — Full engine thread safety
 
@@ -597,13 +599,13 @@ Render thread (one, owns the frame)
   └── vkQueueSubmit (serialized per queue — Vulkan spec requirement)
 ```
 
-**ECS-MT-d-1: Engine global accessor and Arc architecture**
+**ECS-MT-d-1: Engine global accessor and Arc architecture** ✓
 
-- [ ] `Engine` is `Arc<EngineInner>` — `Clone` is `O(1)`, `Send + Sync + 'static` enforced at the type level. Compile-time assertion: `const _: fn() = || { fn assert_send_sync<T: Send + Sync + 'static>() {} assert_send_sync::<Engine>(); };`
-- [ ] Global accessor via `OnceLock<Arc<Engine>>`. Set once in `run_game` / `run_headless` before any app code runs. Never needs to be set manually by the user.
+- [x] `Engine: Clone + Send + Sync + 'static`. Compile-time assertion verifies this at build time.
+- [x] Global accessor via `static GLOBAL_ENGINE: OnceLock<Engine>`. Set automatically in all shell entry points (`run_game`, `run_headless`, `try_run`, `render_to_rgba8`) before any application code runs. Never set manually.
   ```rust
-  let engine = Engine::global();       // Arc<Engine> — panics if unset (startup bug)
-  let engine = Engine::try_global();   // Option<Arc<Engine>>
+  let engine = Engine::global();       // &'static Engine — zero cost, panics if unset
+  let engine = Engine::try_global();   // Option<&'static Engine>
   ```
 - [ ] All `Engine` methods take `&self` only. Any that currently take `&mut self` are refactored to use interior mutability.
 

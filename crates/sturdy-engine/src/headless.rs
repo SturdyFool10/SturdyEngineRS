@@ -76,6 +76,7 @@ pub trait HeadlessApp: Sized {
 /// frame pipelining.
 pub fn run_headless<App: HeadlessApp>() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let engine = Engine::new()?;
+    Engine::set_global(&engine);
     let mut app = App::init(&engine).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
     loop {
         let frame = engine.begin_render_frame()?;
@@ -113,6 +114,7 @@ pub fn render_to_rgba8(
     render_fn: impl FnOnce(&RenderFrame, &GraphImage, &Engine) -> Result<()>,
 ) -> Result<Vec<u8>> {
     let engine = Engine::new()?;
+    Engine::set_global(&engine);
     render_to_rgba8_with_engine(&engine, width, height, render_fn)
 }
 

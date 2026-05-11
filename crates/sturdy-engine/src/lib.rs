@@ -90,6 +90,9 @@ pub use sturdy_engine_core::{PcFieldKind, PushConstantField};
 pub use ecs::{
     // Core types
     Entity, Component, World, EntityBuilder, Schedule, System, SystemFn, run_once,
+    // Parallel scheduling
+    CompiledSchedule, ParallelSystem, SystemAccess,
+    WorldView, ComponentReadGuard, ComponentWriteGuard, WorldCommands,
     // Built-in components
     Active, Acceleration, Health, LocalTransform, Name, SceneLink, Transform, Velocity,
     // Built-in systems
@@ -166,8 +169,8 @@ pub use scene::{
     CameraConstants, CameraId, CameraOutput, DirectionalLight, DiskLight, InstanceData,
     MaterialDescriptor, MaterialDomain, MaterialExpr, MaterialInput, MeshId, ObjectId, ObjectKind,
     OrbitCamera, PointLight, RectLight, RenderState, RenderTarget, Scene, SceneCamera,
-    ShadingModel, SphereLight, SpotLight, UnifiedMaterial, UnifiedMaterialBuilder, UvSource,
-    gbuffer,
+    SceneCommands, SceneView, ShadingModel, SphereLight, SpotLight, UnifiedMaterial,
+    UnifiedMaterialBuilder, UvSource, gbuffer,
 };
 pub use screenshot::{ScreenshotCapture, ScreenshotExportReport};
 pub use shader_watcher::{Reloadable, ShaderReloadDiagnostic, ShaderWatcher};
@@ -237,6 +240,21 @@ pub use window_registry::{WindowHandle, WindowId, WindowRegistry};
 use sturdy_engine_core as core;
 use upload_arena::UploadArena;
 
+// ── Engine global ─────────────────────────────────────────────────────────────
+
+// Process-wide engine singleton, set once at shell startup.
+// All fields of Engine are Arc-backed, so clone is O(1) reference-count bumps.
+static GLOBAL_ENGINE: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
+
+// Compile-time proof that Engine is safe to share across threads.
+// If this fails, a field was added that is not Send + Sync.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync + 'static>() {}
+    assert_send_sync::<Engine>();
+};
+
+// ── Engine ────────────────────────────────────────────────────────────────────
+
 #[derive(Clone)]
 pub struct Engine {
     device: core::Device,
@@ -301,6 +319,58 @@ impl Engine {
     pub fn memory_budget(&self) -> Option<GpuMemoryBudget> {
         self.device.memory_budget()
     }
+
+    // ── Global accessor ───────────────────────────────────────────────────────
+
+    /// Set the process-global engine instance.
+    ///
+    /// Called automatically by all shell entry points (`run_game`,
+    /// `run_headless`, `try_run`, etc.) before any application code runs.
+    /// You should never need to call this manually.
+    ///
+    /// If the global is already set (e.g. in tests with multiple engines),
+    /// the call is silently ignored — the first engine wins.
+    pub(crate) fn set_global(engine: &Engine) {
+        let _ = GLOBAL_ENGINE.set(engine.clone());
+    }
+
+    /// Access the process-global engine from **any thread at any time**.
+    ///
+    /// Returns a `&'static Engine` with zero overhead — no locking, no
+    /// allocation, no indirection beyond what `Engine` already pays.
+    ///
+    /// # Panics
+    /// Panics if called before any shell entry point has run. In normal usage
+    /// this never happens: the global is set before the first `init` or
+    /// `render` callback.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // From any system, any thread, at any time:
+    /// let budget = Engine::global().memory_budget();
+    /// let buf    = Engine::global().create_buffer(desc)?;
+    /// ```
+    pub fn global() -> &'static Engine {
+        GLOBAL_ENGINE.get().expect(
+            "Engine::global() called before the engine was initialised — \
+             ensure you are inside a GameApp, HeadlessApp, or EngineApp callback.",
+        )
+    }
+
+    /// Access the global engine, returning `None` if not yet initialised.
+    ///
+    /// Prefer [`Engine::global()`] in application code. Use this in library
+    /// code or tests where the engine may not be set.
+    pub fn try_global() -> Option<&'static Engine> {
+        GLOBAL_ENGINE.get()
+    }
+
+    /// Returns `true` if the global engine has been initialised.
+    pub fn global_is_set() -> bool {
+        GLOBAL_ENGINE.get().is_some()
+    }
+
+    // ── Capabilities ──────────────────────────────────────────────────────────
 
     pub fn format_capabilities(&self, format: Format) -> FormatCapabilities {
         self.device.format_capabilities(format)

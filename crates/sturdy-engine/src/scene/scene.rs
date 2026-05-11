@@ -1,9 +1,11 @@
 use glam::{Mat4, Vec3, Vec4};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::{
     batch::InstanceBatch,
     camera::{CameraId, CameraOutput, SceneCamera},
+    commands::{SceneCommands, SceneView},
     object::{InstanceData, MeshId, ObjectId, ObjectKind, SceneObject},
 };
 use crate::{
@@ -475,13 +477,18 @@ impl CameraConstants {
 /// ```
 /// and read `instances[SV_InstanceID].model` for the per-instance model matrix.
 pub struct Scene {
-    meshes: Vec<(Mesh, MeshProgram)>,
+    pub(super) meshes: Vec<(Mesh, MeshProgram)>,
     /// Parallel to `meshes` — one material entry per registered mesh.
     materials: Vec<MeshMaterial>,
-    objects: Vec<SceneObject>,
-    cameras: Vec<SceneCamera>,
+    pub(super) objects: Vec<SceneObject>,
+    pub(super) cameras: Vec<SceneCamera>,
     batches: HashMap<u32, InstanceBatch>,
-    next_object_id: u32,
+    /// Atomic ID counter so `reserve_object_id()` works from any thread.
+    next_object_id: AtomicU32,
+    /// Atomic ID counter so `reserve_mesh_id()` works from any thread.
+    next_mesh_id: AtomicU32,
+    /// Thread-safe queue for structural mutations posted from worker threads.
+    commands: SceneCommands,
     /// Directional light applied to all rendering passes.
     pub directional_light: DirectionalLight,
     /// Point lights included in the deferred lighting pass.
@@ -514,7 +521,9 @@ impl Scene {
             objects: Vec::new(),
             cameras: Vec::new(),
             batches: HashMap::new(),
-            next_object_id: 0,
+            next_object_id: AtomicU32::new(0),
+            next_mesh_id: AtomicU32::new(0),
+            commands: SceneCommands::new(),
             directional_light: DirectionalLight::default(),
             point_lights: Vec::new(),
             spot_lights: Vec::new(),
@@ -681,7 +690,7 @@ impl Scene {
     /// A default [`MaterialDescriptor`] (white, opaque, roughness=0.5) is assigned.
     /// Override it with [`set_material`](Self::set_material).
     pub fn add_mesh(&mut self, mesh: Mesh, program: MeshProgram) -> MeshId {
-        let id = MeshId(self.meshes.len() as u32);
+        let id = MeshId(self.next_mesh_id.fetch_add(1, Ordering::Relaxed));
         self.meshes.push((mesh, program));
         self.materials.push(MeshMaterial {
             descriptor: MaterialDescriptor::default(),
@@ -788,6 +797,10 @@ impl Scene {
 
     /// Add an object instance at the world origin. Returns an `ObjectId` for later
     /// transform updates via [`set_transform`](Self::set_transform).
+    ///
+    /// Must be called from the render thread (requires `&mut self`). For
+    /// worker-thread object creation, use [`reserve_object_id`] +
+    /// [`commands().add_object`](SceneCommands::add_object) instead.
     pub fn add_object(&mut self, mesh_id: MeshId, kind: ObjectKind) -> ObjectId {
         self.add_object_at(mesh_id, Mat4::IDENTITY, kind)
     }
@@ -799,22 +812,58 @@ impl Scene {
         transform: Mat4,
         kind: ObjectKind,
     ) -> ObjectId {
-        let id = ObjectId(self.next_object_id);
-        self.next_object_id += 1;
-        self.objects
-            .push(SceneObject::new(mesh_id, transform, kind));
+        let id = ObjectId(self.next_object_id.fetch_add(1, Ordering::Relaxed));
+        self.objects.push(SceneObject::new(mesh_id, transform, kind));
         id
     }
 
-    /// Update a dynamic object's transform.
+    /// Update an object's world transform. **Callable from any thread.**
     ///
-    /// Static objects ignore this call. To move a static object, remove and re-add it.
-    pub fn set_transform(&mut self, id: ObjectId, transform: Mat4) {
+    /// Uses atomic Release/Acquire semantics — the update is visible to
+    /// `prepare()` without any lock. Multiple threads may call this for
+    /// **different** `ObjectId`s simultaneously with no contention.
+    ///
+    /// For static objects the dirty flag is set so the GPU buffer is
+    /// re-uploaded in the next `prepare()`.
+    pub fn set_transform(&self, id: ObjectId, transform: Mat4) {
+        if let Some(obj) = self.objects.get(id.0 as usize) {
+            obj.set_transform_atomic(transform);
+        }
+    }
+
+    // ── Thread-safe structural mutation API ───────────────────────────────────
+
+    /// Return the thread-safe command queue for this scene.
+    ///
+    /// Any thread can post structural mutations (add_mesh, add_object,
+    /// remove_object, set_material) here. They are applied by `prepare()`.
+    pub fn commands(&self) -> &SceneCommands {
+        &self.commands
+    }
+
+    /// Create a read-only view of the scene for worker-thread queries.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure `prepare()` is not called while the returned
+    /// `SceneView` is live, and that no structural mutations occur directly
+    /// on the scene (commands posted to `SceneCommands` are fine).
+    pub unsafe fn view(&self) -> SceneView<'_> {
+        unsafe { SceneView::new(self) }
+    }
+
+    // ── Internal: command implementations (called by SceneCommands) ──────────
+
+    /// Mark an object slot as dead so it contributes no instances.
+    ///
+    /// Uses a sentinel `MeshId(u32::MAX)` — the batch for that ID never exists,
+    /// so the object is silently skipped in `prepare()`. Slot reclamation for
+    /// ID reuse can be added later without changing the public API.
+    pub(super) fn remove_object_deferred(&mut self, id: ObjectId) {
         if let Some(obj) = self.objects.get_mut(id.0 as usize) {
-            obj.transform = transform;
-            if matches!(obj.kind, ObjectKind::Static) {
-                obj.static_dirty = true;
-            }
+            // Redirect the object to a non-existent batch by changing its mesh_id
+            // to a sentinel. The static_dirty flag no longer matters.
+            obj.mesh_id = MeshId(u32::MAX);
         }
     }
 
@@ -834,6 +883,11 @@ impl Scene {
     ///
     /// Call once per frame after all `set_transform` calls, before `render`.
     pub fn prepare(&mut self, engine: &Engine) -> Result<()> {
+        // Drain structural mutations queued from worker threads.
+        // `take_all` extracts the Vec without borrowing self, so we can then
+        // pass `&mut self` to each command.
+        for cmd in self.commands.take_all() { cmd(self); }
+
         self.gpu_cull_active = false;
 
         // Clear dynamic lists; static lists persist across frames.
@@ -842,12 +896,14 @@ impl Scene {
         }
 
         // First pass: detect which static batches are dirty.
-        for obj in &mut self.objects {
-            if matches!(obj.kind, ObjectKind::Static) && obj.static_dirty {
+        for obj in &self.objects {
+            if matches!(obj.kind, ObjectKind::Static)
+                && obj.static_dirty.load(Ordering::Acquire)
+            {
                 if let Some(batch) = self.batches.get_mut(&obj.mesh_id.0) {
                     batch.static_dirty = true;
                 }
-                obj.static_dirty = false;
+                obj.static_dirty.store(false, Ordering::Release);
             }
         }
 
@@ -859,7 +915,10 @@ impl Scene {
         }
 
         // Second pass: fill instance lists.
+        // Use atomic Acquire loads for transforms — visible to any Release store
+        // performed by worker threads via set_transform().
         for obj in &self.objects {
+            let transform = obj.transform.load();
             let batch = self
                 .batches
                 .entry(obj.mesh_id.0)
@@ -867,15 +926,11 @@ impl Scene {
             match obj.kind {
                 ObjectKind::Static => {
                     if batch.static_dirty || batch.static_instances.is_empty() {
-                        batch
-                            .static_instances
-                            .push(InstanceData::from_transform(obj.transform));
+                        batch.static_instances.push(InstanceData::from_transform(transform));
                     }
                 }
                 ObjectKind::Dynamic => {
-                    batch
-                        .dynamic_instances
-                        .push(InstanceData::from_transform(obj.transform));
+                    batch.dynamic_instances.push(InstanceData::from_transform(transform));
                 }
             }
         }

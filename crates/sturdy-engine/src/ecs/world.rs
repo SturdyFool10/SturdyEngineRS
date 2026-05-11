@@ -1,15 +1,17 @@
 // World — the root ECS container.
 //
-// Owns all entities and component storages. Provides the full API surface:
+// Owns all entities, component storages, and resources. Full API surface:
 //   - spawn / despawn / is_alive
 //   - insert / remove / get / get_mut / has  (single entity, single component)
 //   - query / query_mut                      (one component type, all entities)
 //   - query2 / query2_mut                    (two component types, filtered)
 //   - query3                                 (three component types, filtered)
 //   - entities_with                          (entity iterator for a component)
+//   - insert_resource / resource / resource_mut / remove_resource / has_resource
 //   - sync_scene_transforms                  (flush Transform+SceneLink to Scene)
 
-use std::any::TypeId;
+use std::any::{Any, TypeId};
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
 
 use super::{
@@ -44,11 +46,33 @@ use super::{
 /// // Despawn.
 /// world.despawn(player);
 /// ```
+/// # Thread safety
+///
+/// `World` is `Sync` by the manual impl below. Interior mutability of
+/// component storages uses `UnsafeCell`. Access is safe in two scenarios:
+/// 1. **Serial** (`&mut World`): exclusive — no other borrow can exist.
+/// 2. **Parallel** (`WorldView`): the scheduler's dependency graph guarantees
+///    disjoint write sets per wave, making simultaneous mutable access to
+///    *different* storages sound.
+///
+/// Nothing outside these two code paths should touch `components` directly.
 pub struct World {
     pub(super) entities: EntityAllocator,
-    /// Component storages keyed by TypeId of the component type.
-    pub(super) components: HashMap<TypeId, Box<dyn ComponentVec>>,
+    /// Component storages keyed by TypeId.
+    ///
+    /// Wrapped in `UnsafeCell` so that `WorldView` can legally produce
+    /// `&mut ComponentStorage<C>` from a shared reference during parallel
+    /// waves. The invariants are enforced by the scheduler (see above).
+    pub(super) components: HashMap<TypeId, UnsafeCell<Box<dyn ComponentVec>>>,
+    /// Singleton resources keyed by TypeId.
+    resources: HashMap<TypeId, Box<dyn Any + Send + Sync + 'static>>,
 }
+
+// SAFETY: World's UnsafeCell<...> contents are only accessed mutably under two
+// conditions enforced externally: (1) &mut World exclusivity, or (2) the
+// CompiledSchedule's wave invariant (disjoint writes). Neither condition can
+// be violated through the public API alone, so Sync is sound.
+unsafe impl Sync for World {}
 
 impl World {
     /// Create an empty world.
@@ -56,6 +80,7 @@ impl World {
         Self {
             entities: EntityAllocator::new(),
             components: HashMap::new(),
+            resources: HashMap::new(),
         }
     }
 
@@ -78,7 +103,9 @@ impl World {
         if !self.entities.free(entity) {
             return false;
         }
-        for storage in self.components.values_mut() {
+        for cell in self.components.values() {
+            // SAFETY: &mut World — exclusive access, no concurrent borrows.
+            let storage = unsafe { &mut *cell.get() };
             storage.remove_entity(entity.index);
         }
         true
@@ -106,24 +133,25 @@ impl World {
 
     /// Remove the component of type `T` from `entity`. Returns it if present.
     pub fn remove<T: Component>(&mut self, entity: Entity) -> Option<T> {
-        let storage = self.components.get_mut(&TypeId::of::<T>())?;
-        let storage = downcast_storage_mut::<T>(storage.as_mut())?;
+        let cell = self.components.get(&TypeId::of::<T>())?;
+        // SAFETY: &mut World — exclusive.
+        let storage = downcast_storage_mut::<T>(unsafe { &mut *cell.get() }.as_mut())?;
         storage.remove(entity.index)
     }
 
     /// Return an immutable reference to `entity`'s component of type `T`.
     pub fn get<T: Component>(&self, entity: Entity) -> Option<&T> {
-        let storage = downcast_storage::<T>(
-            self.components.get(&TypeId::of::<T>())?.as_ref()
-        )?;
+        let cell = self.components.get(&TypeId::of::<T>())?;
+        // SAFETY: &self World serial path — no concurrent write borrow exists.
+        let storage = downcast_storage::<T>(unsafe { &*cell.get() }.as_ref())?;
         storage.get(entity.index)
     }
 
     /// Return a mutable reference to `entity`'s component of type `T`.
     pub fn get_mut<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
-        let storage = downcast_storage_mut::<T>(
-            self.components.get_mut(&TypeId::of::<T>())?.as_mut()
-        )?;
+        let cell = self.components.get(&TypeId::of::<T>())?;
+        // SAFETY: &mut World — exclusive.
+        let storage = downcast_storage_mut::<T>(unsafe { &mut *cell.get() }.as_mut())?;
         storage.get_mut(entity.index)
     }
 
@@ -131,7 +159,8 @@ impl World {
     pub fn has<T: Component>(&self, entity: Entity) -> bool {
         self.components
             .get(&TypeId::of::<T>())
-            .and_then(|s| downcast_storage::<T>(s.as_ref()))
+            // SAFETY: &self serial path — no concurrent write borrow.
+            .and_then(|cell| downcast_storage::<T>(unsafe { &*cell.get() }.as_ref()))
             .map(|s| s.contains(entity.index))
             .unwrap_or(false)
     }
@@ -144,7 +173,8 @@ impl World {
     pub fn query<T: Component>(&self) -> Box<dyn Iterator<Item = (Entity, &T)> + '_> {
         let Some(storage) = self.components
             .get(&TypeId::of::<T>())
-            .and_then(|s| downcast_storage::<T>(s.as_ref()))
+            // SAFETY: &self serial path — no concurrent write borrow.
+            .and_then(|cell| downcast_storage::<T>(unsafe { &*cell.get() }.as_ref()))
         else {
             return Box::new(std::iter::empty());
         };
@@ -156,8 +186,9 @@ impl World {
     pub fn query_mut<T: Component>(&mut self) -> Box<dyn Iterator<Item = (Entity, &mut T)> + '_> {
         let gens: *const Vec<u32> = &self.entities.generations;
         let Some(storage) = self.components
-            .get_mut(&TypeId::of::<T>())
-            .and_then(|s| downcast_storage_mut::<T>(s.as_mut()))
+            .get(&TypeId::of::<T>())
+            // SAFETY: &mut World — exclusive.
+            .and_then(|cell| downcast_storage_mut::<T>(unsafe { &mut *cell.get() }.as_mut()))
         else {
             return Box::new(std::iter::empty())
                 as Box<dyn Iterator<Item = (Entity, &mut T)>>;
@@ -175,7 +206,8 @@ impl World {
         let gens = &self.entities.generations;
         self.components
             .get(&TypeId::of::<T>())
-            .and_then(|s| downcast_storage::<T>(s.as_ref()))
+            // SAFETY: &self serial path.
+            .and_then(|cell| downcast_storage::<T>(unsafe { &*cell.get() }.as_ref()))
             .into_iter()
             .flat_map(move |s| {
                 s.entity_of.iter().map(move |&idx| Entity {
@@ -196,11 +228,11 @@ impl World {
         let tid_a = TypeId::of::<A>();
         let tid_b = TypeId::of::<B>();
 
-        // Immutable borrows of both storages from the map.
+        // SAFETY: &self serial path — no concurrent write borrows.
         let sa = self.components.get(&tid_a)
-            .and_then(|s| downcast_storage::<A>(s.as_ref()));
+            .and_then(|cell| downcast_storage::<A>(unsafe { &*cell.get() }.as_ref()));
         let sb = self.components.get(&tid_b)
-            .and_then(|s| downcast_storage::<B>(s.as_ref()));
+            .and_then(|cell| downcast_storage::<B>(unsafe { &*cell.get() }.as_ref()));
 
         let (Some(sa), Some(sb)) = (sa, sb) else {
             return Box::new(std::iter::empty())
@@ -227,16 +259,15 @@ impl World {
         let tid_b = TypeId::of::<B>();
         assert_ne!(tid_a, tid_b, "query2_mut: A and B must be distinct component types");
 
-        // Obtain raw pointers to both storages from the HashMap.
-        // SAFETY: `tid_a != tid_b` guarantees these are different HashMap values.
-        // We access storage A mutably and storage B read-only — no aliasing.
+        // SAFETY: &mut World — exclusive. tid_a != tid_b guarantees the two
+        // UnsafeCell values are distinct HashMap entries (no aliasing).
         let sa_ptr: Option<*mut ComponentStorage<A>> = self.components
-            .get_mut(&tid_a)
-            .and_then(|s| downcast_storage_mut::<A>(s.as_mut()))
+            .get(&tid_a)
+            .and_then(|cell| downcast_storage_mut::<A>(unsafe { &mut *cell.get() }.as_mut()))
             .map(|s| s as *mut _);
         let sb_ptr: Option<*const ComponentStorage<B>> = self.components
             .get(&tid_b)
-            .and_then(|s| downcast_storage::<B>(s.as_ref()))
+            .and_then(|cell| downcast_storage::<B>(unsafe { &*cell.get() }.as_ref()))
             .map(|s| s as *const _);
 
         let (Some(sa_ptr), Some(sb_ptr)) = (sa_ptr, sb_ptr) else {
@@ -248,7 +279,6 @@ impl World {
 
         Box::new(
             // SAFETY: sa_ptr and sb_ptr point to distinct storage entries.
-            // 'a outlives the returned iterator (tied to &mut self).
             unsafe {
                 let sa: &mut ComponentStorage<A> = &mut *sa_ptr;
                 sa.entity_of.iter().zip(sa.dense.iter_mut()).filter_map(move |(&idx, a)| {
@@ -270,9 +300,10 @@ impl World {
         let tid_b = TypeId::of::<B>();
         let tid_c = TypeId::of::<C>();
 
-        let sa = self.components.get(&tid_a).and_then(|s| downcast_storage::<A>(s.as_ref()));
-        let sb = self.components.get(&tid_b).and_then(|s| downcast_storage::<B>(s.as_ref()));
-        let sc = self.components.get(&tid_c).and_then(|s| downcast_storage::<C>(s.as_ref()));
+        // SAFETY: &self serial path.
+        let sa = self.components.get(&tid_a).and_then(|cell| downcast_storage::<A>(unsafe { &*cell.get() }.as_ref()));
+        let sb = self.components.get(&tid_b).and_then(|cell| downcast_storage::<B>(unsafe { &*cell.get() }.as_ref()));
+        let sc = self.components.get(&tid_c).and_then(|cell| downcast_storage::<C>(unsafe { &*cell.get() }.as_ref()));
 
         let (Some(sa), Some(sb), Some(sc)) = (sa, sb, sc) else {
             return Box::new(std::iter::empty())
@@ -294,9 +325,11 @@ impl World {
 
     /// Get or create the storage for component type `T`.
     pub(super) fn storage_mut<T: Component>(&mut self) -> &mut ComponentStorage<T> {
-        self.components
+        let cell = self.components
             .entry(TypeId::of::<T>())
-            .or_insert_with(|| Box::new(ComponentStorage::<T>::new()))
+            .or_insert_with(|| UnsafeCell::new(Box::new(ComponentStorage::<T>::new())));
+        // SAFETY: &mut World — exclusive.
+        unsafe { &mut *cell.get() }
             .as_any_mut()
             .downcast_mut::<ComponentStorage<T>>()
             .expect("storage type mismatch — should never happen")
@@ -304,17 +337,87 @@ impl World {
 
     // ── Scene integration ─────────────────────────────────────────────────────
 
-    /// Flush all `(Transform, SceneLink)` pairs to the render `Scene`.
+    // ── Resources ─────────────────────────────────────────────────────────────
+
+    /// Insert a singleton resource into the world, replacing any existing value
+    /// of the same type.
     ///
-    /// Call once per frame, after systems have finished updating transforms and
-    /// before `scene.prepare()` / `deferred.draw()`.
+    /// Resources are global state shared across all systems — use them for
+    /// things that don't belong to any specific entity: the engine, asset
+    /// handles, a frame timer, accumulated statistics, etc.
     ///
     /// ```ignore
-    /// world.sync_scene_transforms(&mut scene);
+    /// world.insert_resource(Engine::global().clone());
+    /// world.insert_resource(my_config);
+    /// ```
+    pub fn insert_resource<R: Send + Sync + 'static>(&mut self, resource: R) {
+        self.resources.insert(TypeId::of::<R>(), Box::new(resource));
+    }
+
+    /// Borrow a resource immutably. Returns `None` if the resource was never inserted.
+    pub fn resource<R: 'static>(&self) -> Option<&R> {
+        self.resources
+            .get(&TypeId::of::<R>())
+            .and_then(|r| r.downcast_ref::<R>())
+    }
+
+    /// Borrow a resource mutably. Returns `None` if the resource was never inserted.
+    pub fn resource_mut<R: 'static>(&mut self) -> Option<&mut R> {
+        self.resources
+            .get_mut(&TypeId::of::<R>())
+            .and_then(|r| r.downcast_mut::<R>())
+    }
+
+    /// Remove and return a resource. Returns `None` if it was never inserted.
+    pub fn remove_resource<R: 'static>(&mut self) -> Option<R> {
+        self.resources
+            .remove(&TypeId::of::<R>())
+            .and_then(|r| r.downcast::<R>().ok().map(|b| *b))
+    }
+
+    /// Returns `true` if a resource of type `R` is present.
+    pub fn has_resource<R: 'static>(&self) -> bool {
+        self.resources.contains_key(&TypeId::of::<R>())
+    }
+
+    /// Borrow a resource, panicking if it is not present.
+    ///
+    /// Prefer this in systems where the resource is guaranteed to exist.
+    /// The panic message includes the type name to make misconfigurations obvious.
+    pub fn resource_unwrap<R: 'static>(&self) -> &R {
+        self.resource::<R>().unwrap_or_else(|| {
+            panic!(
+                "World::resource_unwrap::<{}>() called but resource is not present. \
+                 Insert it with world.insert_resource(...) before running this system.",
+                std::any::type_name::<R>()
+            )
+        })
+    }
+
+    /// Mutably borrow a resource, panicking if it is not present.
+    pub fn resource_unwrap_mut<R: 'static>(&mut self) -> &mut R {
+        self.resource_mut::<R>().unwrap_or_else(|| {
+            panic!(
+                "World::resource_unwrap_mut::<{}>() called but resource is not present.",
+                std::any::type_name::<R>()
+            )
+        })
+    }
+
+    // ── Scene sync ────────────────────────────────────────────────────────────
+
+    /// Flush all `(Transform, SceneLink)` pairs to the render `Scene`.
+    ///
+    /// `Scene::set_transform` is now atomic — no `&mut scene` required. Call
+    /// this from any thread (including parallel ECS systems) after transforms
+    /// have been updated.
+    ///
+    /// ```ignore
+    /// world.sync_scene_transforms(&scene);
     /// scene.prepare(&engine)?;
     /// deferred.draw(&mut scene, view, proj, &output, &frame, &engine, time)?;
     /// ```
-    pub fn sync_scene_transforms(&self, scene: &mut crate::Scene) {
+    pub fn sync_scene_transforms(&self, scene: &crate::Scene) {
         for (_, transform, link) in self.query2::<super::components::Transform, super::components::SceneLink>() {
             scene.set_transform(link.object_id, transform.to_mat4());
         }

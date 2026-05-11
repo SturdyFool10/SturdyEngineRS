@@ -1,4 +1,7 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use glam::Mat4;
+
+use super::atomic_transform::AtomicMat4;
 
 /// Stable handle to a mesh+program pair registered with a [`Scene`](super::Scene).
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -43,21 +46,45 @@ impl InstanceData {
 }
 
 /// A single renderable instance within a [`Scene`](super::Scene).
+///
+/// Transforms are stored as [`AtomicMat4`] so that [`Scene::set_transform`]
+/// can be called from any thread without locking. The dirty flag uses
+/// `AtomicBool` for the same reason.
 pub struct SceneObject {
     pub mesh_id: MeshId,
-    pub transform: Mat4,
+    /// Lock-free transform. Written by any thread via `Scene::set_transform`;
+    /// read by the render thread during `prepare()`.
+    pub(super) transform: AtomicMat4,
     pub kind: ObjectKind,
-    /// True when static instance data needs to be re-uploaded.
-    pub(super) static_dirty: bool,
+    /// True when static instance data needs to be re-uploaded to the GPU.
+    /// Set to `true` on construction and whenever the transform changes for
+    /// a static object.
+    pub(super) static_dirty: AtomicBool,
 }
 
 impl SceneObject {
     pub fn new(mesh_id: MeshId, transform: Mat4, kind: ObjectKind) -> Self {
         Self {
             mesh_id,
-            transform,
+            transform: AtomicMat4::new(transform),
             kind,
-            static_dirty: true,
+            static_dirty: AtomicBool::new(true),
+        }
+    }
+
+    /// Read the current transform. Uses Acquire ordering.
+    pub fn get_transform(&self) -> Mat4 {
+        self.transform.load()
+    }
+
+    /// Write a new transform. Uses Release ordering.
+    ///
+    /// For static objects, also marks the instance data dirty so `prepare()`
+    /// re-uploads the GPU buffer.
+    pub fn set_transform_atomic(&self, transform: Mat4) {
+        self.transform.store(transform);
+        if matches!(self.kind, ObjectKind::Static) {
+            self.static_dirty.store(true, Ordering::Release);
         }
     }
 }

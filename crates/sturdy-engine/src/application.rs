@@ -969,8 +969,10 @@ where
 {
     use winit::event_loop::{ControlFlow, EventLoop};
 
-    // Create the engine
+    // Create the engine and register it as the process-global so any thread
+    // can call Engine::global() from the first application callback onward.
     let engine = Engine::new().map_err(|error| format!("failed to create engine: {error}"))?;
+    Engine::set_global(&engine);
 
     // Create event loop
     let event_loop: EventLoop<()> =

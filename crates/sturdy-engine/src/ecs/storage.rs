@@ -39,9 +39,13 @@ pub(super) trait ComponentVec: Any + Send + Sync {
 // ── ComponentStorage<T> ───────────────────────────────────────────────────────
 
 /// Sparse-set storage for component type `T`.
-pub(super) struct ComponentStorage<T: Component> {
+///
+/// Obtained via [`ComponentReadGuard`](super::ComponentReadGuard) or
+/// [`ComponentWriteGuard`](super::ComponentWriteGuard) from a [`WorldView`](super::WorldView).
+/// The fields are implementation-internal; use the guard's query methods instead.
+pub struct ComponentStorage<T: Component> {
     /// sparse[entity_index] = dense_index (u32::MAX = absent).
-    sparse: Vec<u32>,
+    pub(super) sparse: Vec<u32>,
     /// Packed component values (dense layout, good cache performance).
     pub(super) dense: Vec<T>,
     /// dense[i] = entity_index of the component at dense[i].
@@ -120,6 +124,14 @@ impl<T: Component> ComponentStorage<T> {
             let generation = generations.get(idx as usize).copied().unwrap_or(0);
             (Entity { index: idx, generation }, val)
         })
+    }
+
+    /// Split into entity-index slice and mutable dense-data slice.
+    ///
+    /// Returns `(&entity_of, &mut dense)` as disjoint borrows. Used by
+    /// `WorldView::write_par` which needs to iterate both fields simultaneously.
+    pub(super) fn entity_and_dense_mut(&mut self) -> (&[u32], &mut Vec<T>) {
+        (&self.entity_of, &mut self.dense)
     }
 
     /// Iterate all (Entity, &mut T) pairs.

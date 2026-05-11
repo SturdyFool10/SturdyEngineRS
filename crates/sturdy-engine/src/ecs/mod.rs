@@ -75,12 +75,20 @@ mod entity;
 mod storage;
 mod world;
 mod schedule;
+mod parallel_system;
+mod world_view;
+mod world_commands;
+mod compiled_schedule;
 pub mod components;
 
 pub use entity::Entity;
 pub use storage::Component;
 pub use world::{EntityBuilder, World};
 pub use schedule::{Schedule, System, SystemFn, run_once};
+pub use parallel_system::{ParallelSystem, SystemAccess};
+pub use world_view::{WorldView, ComponentReadGuard, ComponentWriteGuard};
+pub use world_commands::WorldCommands;
+pub use compiled_schedule::CompiledSchedule;
 pub use components::{
     // Core transform + physics
     Active, Acceleration, Health, LocalTransform, Name, SceneLink, Transform, Velocity,
@@ -194,5 +202,185 @@ mod tests {
         sched.run(&mut world);
 
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn resource_insert_and_get() {
+        let mut world = World::new();
+        world.insert_resource(42u32);
+        assert_eq!(world.resource::<u32>(), Some(&42));
+        assert_eq!(world.resource::<i32>(), None); // different type
+    }
+
+    #[test]
+    fn resource_mut_modifies_in_place() {
+        let mut world = World::new();
+        world.insert_resource(0u32);
+        *world.resource_mut::<u32>().unwrap() += 1;
+        *world.resource_mut::<u32>().unwrap() += 1;
+        assert_eq!(world.resource::<u32>(), Some(&2));
+    }
+
+    #[test]
+    fn resource_insert_replaces_previous() {
+        let mut world = World::new();
+        world.insert_resource(1u32);
+        world.insert_resource(99u32);
+        assert_eq!(world.resource::<u32>(), Some(&99));
+    }
+
+    #[test]
+    fn resource_remove_returns_value() {
+        let mut world = World::new();
+        world.insert_resource(7u32);
+        let val = world.remove_resource::<u32>();
+        assert_eq!(val, Some(7));
+        assert!(!world.has_resource::<u32>());
+        // Removing again returns None.
+        assert_eq!(world.remove_resource::<u32>(), None);
+    }
+
+    #[test]
+    fn resource_has_resource() {
+        let mut world = World::new();
+        assert!(!world.has_resource::<String>());
+        world.insert_resource(String::from("hello"));
+        assert!(world.has_resource::<String>());
+    }
+
+    // ── Parallel schedule tests ───────────────────────────────────────────────
+
+    #[test]
+    fn compiled_schedule_serial_system_runs() {
+        let mut world = World::new();
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let c = counter.clone();
+        let mut sched = Schedule::new();
+        sched.add_system("bump", move |_w| { c.fetch_add(1, std::sync::atomic::Ordering::SeqCst); });
+        let mut compiled = sched.build();
+        compiled.run(&mut world);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Adds `delta` to the `x` field of every `Pos` component.
+    struct Adder(f32);
+    impl ParallelSystem for Adder {
+        fn access() -> SystemAccess {
+            SystemAccess::new().write_component::<Pos>()
+        }
+        fn run(&mut self, world: &WorldView<'_>, _commands: &mut WorldCommands) {
+            let delta = self.0;
+            world.write_par::<Pos>(|_, pos| pos.0 += delta);
+        }
+    }
+
+    #[test]
+    fn compiled_schedule_parallel_system_mutates_components() {
+        let mut world = World::new();
+        let e = world.spawn().with(Pos(1.0, 0.0)).id();
+
+        let mut sched = Schedule::new();
+        sched.add_parallel_system("add_one", Adder(1.0));
+        let mut compiled = sched.build();
+        compiled.run(&mut world);
+
+        assert_eq!(world.get::<Pos>(e), Some(&Pos(2.0, 0.0)));
+    }
+
+    /// Despawns any entity whose `Spd` is zero or negative.
+    struct Reaper;
+    impl ParallelSystem for Reaper {
+        fn access() -> SystemAccess { SystemAccess::new().read_component::<Spd>() }
+        fn run(&mut self, world: &WorldView<'_>, commands: &mut WorldCommands) {
+            let speeds = world.read::<Spd>();
+            let gens = world.generations();
+            for (entity, spd) in speeds.iter_with_entities(gens) {
+                if spd.0 <= 0.0 {
+                    commands.despawn(entity);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn world_commands_despawn_applied_after_wave() {
+        let mut world = World::new();
+        let alive = world.spawn().with(Spd(5.0)).id();
+        let dead  = world.spawn().with(Spd(0.0)).id();
+
+        let mut sched = Schedule::new();
+        sched.add_parallel_system("reap", Reaper);
+        let mut compiled = sched.build();
+        compiled.run(&mut world);
+
+        assert!(world.is_alive(alive));
+        assert!(!world.is_alive(dead));
+    }
+
+    #[test]
+    fn two_non_conflicting_parallel_systems_form_one_wave() {
+        // Adder writes Pos, Reaper reads Spd — no conflict → same wave.
+        let mut sched = Schedule::new();
+        sched.add_parallel_system("adder", Adder(1.0));
+        sched.add_parallel_system("reaper", Reaper);
+        let compiled = sched.build();
+        assert_eq!(compiled.wave_count(), 1);
+        assert_eq!(compiled.system_count(), 2);
+    }
+
+    #[test]
+    fn two_conflicting_parallel_systems_form_two_waves() {
+        // Both write Pos — conflict → separate waves.
+        let mut sched = Schedule::new();
+        sched.add_parallel_system("add_one", Adder(1.0));
+        sched.add_parallel_system("add_two", Adder(2.0));
+        let compiled = sched.build();
+        assert_eq!(compiled.wave_count(), 2);
+    }
+
+    #[test]
+    fn serial_system_between_parallel_splits_into_three_waves() {
+        let mut sched = Schedule::new();
+        sched.add_parallel_system("a", Adder(1.0));
+        sched.add_system("serial", |_w| {});
+        sched.add_parallel_system("b", Reaper);
+        let compiled = sched.build();
+        // wave 0: [a], wave 1: [serial], wave 2: [b]
+        assert_eq!(compiled.wave_count(), 3);
+    }
+
+    #[test]
+    fn schedule_run_downgrades_parallel_to_serial() {
+        // schedule.run() executes parallel systems without rayon — no panic.
+        let mut world = World::new();
+        let e = world.spawn().with(Pos(0.0, 0.0)).id();
+        let mut sched = Schedule::new();
+        sched.add_parallel_system("add_one", Adder(1.0));
+        sched.run(&mut world);
+        assert_eq!(world.get::<Pos>(e), Some(&Pos(1.0, 0.0)));
+    }
+
+    #[test]
+    fn resource_unwrap_panics_on_missing() {
+        let world = World::new();
+        let result = std::panic::catch_unwind(|| {
+            let w = World::new();
+            // This should panic — borrow the world in a closure.
+            let _ = w.resource::<u32>();
+        });
+        // No panic — just returns None.
+        assert!(result.is_ok());
+        let _ = world; // suppress warning
+    }
+
+    #[test]
+    fn resources_are_independent_of_components() {
+        let mut world = World::new();
+        // Insert a resource with a type that is also a component.
+        world.insert_resource(Pos(1.0, 2.0));
+        let e = world.spawn().with(Pos(9.0, 9.0)).id();
+        // Resource and component are separate.
+        assert_eq!(world.resource::<Pos>(), Some(&Pos(1.0, 2.0)));
+        assert_eq!(world.get::<Pos>(e), Some(&Pos(9.0, 9.0)));
     }
 }

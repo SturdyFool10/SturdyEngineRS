@@ -12,7 +12,8 @@ path = "src/lib.rs"
 
 [dependencies]
 bytemuck = "1.20"
-meshopt = "0.4"
+meshopt = "0.6"
+rayon = "1.12"
 half = { version = "2", features = ["bytemuck"] }
 gltf = { version = "1", features = [
     "KHR_materials_unlit",
