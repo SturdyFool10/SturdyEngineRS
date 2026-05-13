@@ -7,6 +7,16 @@ pub struct Limits {
     pub max_mip_levels: u32,
     pub max_push_constants_size: u32,
     pub max_bound_descriptor_sets: u32,
+    pub max_per_stage_samplers: u32,
+    pub max_per_stage_sampled_images: u32,
+    pub max_per_stage_storage_images: u32,
+    pub max_per_stage_uniform_buffers: u32,
+    pub max_per_stage_storage_buffers: u32,
+    pub max_descriptor_set_samplers: u32,
+    pub max_descriptor_set_sampled_images: u32,
+    pub max_descriptor_set_storage_images: u32,
+    pub max_descriptor_set_uniform_buffers: u32,
+    pub max_descriptor_set_storage_buffers: u32,
     pub max_color_attachments: u32,
     pub max_compute_workgroup_size: [u32; 3],
     pub max_compute_invocations: u32,
@@ -23,6 +33,16 @@ impl Default for Limits {
             max_mip_levels: 1,
             max_push_constants_size: 128,
             max_bound_descriptor_sets: 4,
+            max_per_stage_samplers: 16,
+            max_per_stage_sampled_images: 16,
+            max_per_stage_storage_images: 4,
+            max_per_stage_uniform_buffers: 12,
+            max_per_stage_storage_buffers: 4,
+            max_descriptor_set_samplers: 16,
+            max_descriptor_set_sampled_images: 16,
+            max_descriptor_set_storage_images: 4,
+            max_descriptor_set_uniform_buffers: 12,
+            max_descriptor_set_storage_buffers: 4,
             max_color_attachments: 4,
             max_compute_workgroup_size: [1, 1, 1],
             max_compute_invocations: 1,
@@ -42,6 +62,17 @@ mod tests {
         assert!(limits.max_texture_2d_size > 0);
         assert!(limits.max_texture_array_layers > 0);
         assert!(limits.max_color_attachments > 0);
+        assert!(limits.max_bound_descriptor_sets > 0);
+        assert!(limits.max_per_stage_samplers > 0);
+        assert!(limits.max_per_stage_sampled_images > 0);
+        assert!(limits.max_per_stage_storage_images > 0);
+        assert!(limits.max_per_stage_uniform_buffers > 0);
+        assert!(limits.max_per_stage_storage_buffers > 0);
+        assert!(limits.max_descriptor_set_samplers > 0);
+        assert!(limits.max_descriptor_set_sampled_images > 0);
+        assert!(limits.max_descriptor_set_storage_images > 0);
+        assert!(limits.max_descriptor_set_uniform_buffers > 0);
+        assert!(limits.max_descriptor_set_storage_buffers > 0);
         assert!(
             limits
                 .max_compute_workgroup_size

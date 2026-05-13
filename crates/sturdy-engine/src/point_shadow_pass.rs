@@ -19,6 +19,11 @@ use crate::{
 };
 use sturdy_engine_core::Extent3d;
 
+const POINT_SHADOW_DEPTH_FRAGMENT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/point_shadow_depth_fragment.slang"
+));
+
 fn engine_shader(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("shaders")
@@ -117,11 +122,7 @@ impl PointShadowPass {
                     stage: ShaderStage::Vertex,
                 }),
                 fragment: ShaderDesc {
-                    source: ShaderSource::Inline(
-                        "struct V { float4 pos : SV_POSITION; float d : TEXCOORD0; };\
-                         float main(V v) : SV_DEPTH { return v.d; }"
-                            .into(),
-                    ),
+                    source: ShaderSource::Inline(POINT_SHADOW_DEPTH_FRAGMENT.into()),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                 },

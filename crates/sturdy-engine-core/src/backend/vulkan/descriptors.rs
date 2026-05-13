@@ -3,10 +3,15 @@ use std::collections::HashMap;
 use ash::{Device, vk};
 
 use crate::{
-    BindGroupDesc, BindGroupHandle, BindingKind, CanonicalBinding, CanonicalPipelineLayout, Error,
-    PipelineLayoutHandle, ResourceBinding, Result, StageMask,
+    BINDLESS_COUNT, BindGroupDesc, BindGroupHandle, BindingKind, CanonicalBinding,
+    CanonicalGroupLayout, CanonicalPipelineLayout, Error, Limits, PipelineLayoutHandle,
+    ResourceBinding, Result, StageMask,
 };
 
+use super::bindless::{
+    BINDLESS_SAMPLED_IMAGE_BINDING, BINDLESS_SAMPLER_BINDING, BINDLESS_STORAGE_BUFFER_BINDING,
+    BINDLESS_STORAGE_IMAGE_BINDING,
+};
 use super::resources::ResourceRegistry;
 
 /// How many bind groups each pool page can hold before a new page is appended.
@@ -24,6 +29,10 @@ pub struct DescriptorRegistry {
 struct VulkanPipelineLayout {
     pipeline_layout: vk::PipelineLayout,
     set_layouts: Vec<vk::DescriptorSetLayout>,
+    owned_set_layouts: Vec<vk::DescriptorSetLayout>,
+    bind_group_set_layouts: Vec<vk::DescriptorSetLayout>,
+    bind_group_first_set: u32,
+    uses_bindless: bool,
     bindings: HashMap<String, VulkanBinding>,
     /// Per-bind-group pool sizes (counts for one allocation, not for a full page).
     pool_sizes_per_bg: Vec<vk::DescriptorPoolSize>,
@@ -33,13 +42,14 @@ struct VulkanPipelineLayout {
 
 #[derive(Copy, Clone)]
 struct VulkanBinding {
-    set_index: usize,
+    allocated_set_index: usize,
     binding_index: u32,
     descriptor_type: vk::DescriptorType,
 }
 
 struct VulkanBindGroup {
     layout: PipelineLayoutHandle,
+    first_set: u32,
     /// Pool this bind group's sets were allocated from — needed for freeing.
     pool: vk::DescriptorPool,
     sets: Vec<vk::DescriptorSet>,
@@ -176,12 +186,42 @@ impl DescriptorRegistry {
         device: &Device,
         handle: PipelineLayoutHandle,
         layout: &CanonicalPipelineLayout,
+        bindless_set_layout: Option<vk::DescriptorSetLayout>,
+        limits: &Limits,
     ) -> Result<()> {
+        validate_pipeline_layout(layout, bindless_set_layout.is_some(), limits)?;
+
         let mut set_layouts = Vec::with_capacity(layout.groups.len());
+        let mut owned_set_layouts = Vec::with_capacity(layout.groups.len());
+        let mut bind_group_set_layouts = Vec::with_capacity(layout.groups.len());
+        let mut bind_group_first_set = None;
+        let mut uses_bindless = false;
         let mut binding_map = HashMap::new();
         let mut pool_counts: HashMap<vk::DescriptorType, u32> = HashMap::new();
 
         for (set_index, group) in layout.groups.iter().enumerate() {
+            let is_bindless = group_is_bindless(group);
+            if is_bindless {
+                if set_index != 0 {
+                    destroy_set_layouts(device, &mut owned_set_layouts);
+                    return Err(Error::InvalidInput(
+                        "bindless descriptor group must be reflected at set 0".into(),
+                    ));
+                }
+                let set_layout = bindless_set_layout.ok_or_else(|| {
+                    Error::Unsupported(
+                        "pipeline layout uses bindless descriptors, but bindless is not supported by this device",
+                    )
+                })?;
+                set_layouts.push(set_layout);
+                uses_bindless = true;
+                continue;
+            }
+
+            if bind_group_first_set.is_none() {
+                bind_group_first_set = Some(set_index as u32);
+            }
+            let allocated_set_index = bind_group_set_layouts.len();
             let bindings = group
                 .bindings
                 .iter()
@@ -191,7 +231,7 @@ impl DescriptorRegistry {
                     binding_map.insert(
                         binding.path.clone(),
                         VulkanBinding {
-                            set_index,
+                            allocated_set_index,
                             binding_index,
                             descriptor_type,
                         },
@@ -205,7 +245,7 @@ impl DescriptorRegistry {
                 match device.create_descriptor_set_layout(&info, None) {
                     Ok(layout) => layout,
                     Err(error) => {
-                        destroy_set_layouts(device, &mut set_layouts);
+                        destroy_set_layouts(device, &mut owned_set_layouts);
                         return Err(Error::Backend(format!(
                             "vkCreateDescriptorSetLayout failed: {error:?}"
                         )));
@@ -213,6 +253,8 @@ impl DescriptorRegistry {
                 }
             };
             set_layouts.push(set_layout);
+            owned_set_layouts.push(set_layout);
+            bind_group_set_layouts.push(set_layout);
         }
 
         let push_constant_stages = if layout.push_constants_bytes == 0 {
@@ -237,7 +279,7 @@ impl DescriptorRegistry {
             match device.create_pipeline_layout(&info, None) {
                 Ok(layout) => layout,
                 Err(error) => {
-                    destroy_set_layouts(device, &mut set_layouts);
+                    destroy_set_layouts(device, &mut owned_set_layouts);
                     return Err(Error::Backend(format!(
                         "vkCreatePipelineLayout failed: {error:?}"
                     )));
@@ -252,13 +294,15 @@ impl DescriptorRegistry {
                 descriptor_count,
             })
             .collect::<Vec<_>>();
-        let sets_per_bg = set_layouts.len() as u32;
-
         self.layouts.insert(
             handle,
             VulkanPipelineLayout {
                 pipeline_layout,
                 set_layouts,
+                owned_set_layouts,
+                bind_group_set_layouts,
+                bind_group_first_set: bind_group_first_set.unwrap_or(0),
+                uses_bindless,
                 bindings: binding_map,
                 pool_sizes_per_bg,
                 push_constants_bytes: layout.push_constants_bytes,
@@ -270,7 +314,10 @@ impl DescriptorRegistry {
         let layout = self.layouts.get(&handle).unwrap();
         self.pool_slabs.insert(
             handle,
-            LayoutPoolSlab::new(layout.pool_sizes_per_bg.clone(), sets_per_bg),
+            LayoutPoolSlab::new(
+                layout.pool_sizes_per_bg.clone(),
+                layout.bind_group_set_layouts.len() as u32,
+            ),
         );
         Ok(())
     }
@@ -293,7 +340,7 @@ impl DescriptorRegistry {
         unsafe {
             device.destroy_pipeline_layout(layout.pipeline_layout, None);
         }
-        let mut set_layouts = layout.set_layouts;
+        let mut set_layouts = layout.owned_set_layouts;
         destroy_set_layouts(device, &mut set_layouts);
         // Destroy all pool pages for this layout.
         if let Some(mut slab) = self.pool_slabs.remove(&handle) {
@@ -311,7 +358,7 @@ impl DescriptorRegistry {
             unsafe {
                 device.destroy_pipeline_layout(layout.pipeline_layout, None);
             }
-            let mut set_layouts = layout.set_layouts;
+            let mut set_layouts = layout.owned_set_layouts;
             destroy_set_layouts(device, &mut set_layouts);
         }
     }
@@ -324,7 +371,7 @@ impl DescriptorRegistry {
         resources: &ResourceRegistry,
     ) -> Result<()> {
         let layout = self.layouts.get(&desc.layout).ok_or(Error::InvalidHandle)?;
-        let set_layouts = layout.set_layouts.clone();
+        let set_layouts = layout.bind_group_set_layouts.clone();
 
         let slab = self
             .pool_slabs
@@ -340,7 +387,7 @@ impl DescriptorRegistry {
                 ))
             })?;
             let set = sets
-                .get(binding.set_index)
+                .get(binding.allocated_set_index)
                 .copied()
                 .ok_or(Error::InvalidHandle)?;
             write_descriptor(device, set, *binding, entry.resource, resources)?;
@@ -350,6 +397,7 @@ impl DescriptorRegistry {
             handle,
             VulkanBindGroup {
                 layout: desc.layout,
+                first_set: layout.bind_group_first_set,
                 pool,
                 sets,
             },
@@ -399,6 +447,20 @@ impl DescriptorRegistry {
             .map(|group| group.sets.as_slice())
             .ok_or(Error::InvalidHandle)
     }
+
+    pub fn bind_group_first_set(&self, handle: BindGroupHandle) -> Result<u32> {
+        self.bind_groups
+            .get(&handle)
+            .map(|group| group.first_set)
+            .ok_or(Error::InvalidHandle)
+    }
+
+    pub fn pipeline_uses_bindless(&self, handle: PipelineLayoutHandle) -> Result<bool> {
+        self.layouts
+            .get(&handle)
+            .map(|layout| layout.uses_bindless)
+            .ok_or(Error::InvalidHandle)
+    }
 }
 
 impl VulkanBindGroup {
@@ -409,6 +471,232 @@ impl VulkanBindGroup {
     ) -> bool {
         self.layout == layout
     }
+}
+
+#[derive(Default)]
+struct DescriptorCounts {
+    samplers: u32,
+    sampled_images: u32,
+    storage_images: u32,
+    uniform_buffers: u32,
+    storage_buffers: u32,
+}
+
+impl DescriptorCounts {
+    fn add(&mut self, kind: BindingKind, count: u32) {
+        match kind {
+            BindingKind::Sampler => self.samplers = self.samplers.saturating_add(count),
+            BindingKind::SampledImage => {
+                self.sampled_images = self.sampled_images.saturating_add(count)
+            }
+            BindingKind::StorageImage => {
+                self.storage_images = self.storage_images.saturating_add(count)
+            }
+            BindingKind::UniformBuffer => {
+                self.uniform_buffers = self.uniform_buffers.saturating_add(count)
+            }
+            BindingKind::StorageBuffer => {
+                self.storage_buffers = self.storage_buffers.saturating_add(count)
+            }
+            BindingKind::AccelerationStructure => {}
+        }
+    }
+}
+
+fn validate_pipeline_layout(
+    layout: &CanonicalPipelineLayout,
+    bindless_supported: bool,
+    limits: &Limits,
+) -> Result<()> {
+    if layout.push_constants_bytes > limits.max_push_constants_size {
+        return Err(Error::InvalidInput(format!(
+            "pipeline layout push constants use {} bytes, exceeding backend limit {}",
+            layout.push_constants_bytes, limits.max_push_constants_size
+        )));
+    }
+    if layout.groups.len() as u32 > limits.max_bound_descriptor_sets {
+        return Err(Error::InvalidInput(format!(
+            "pipeline layout uses {} descriptor sets, exceeding backend limit {}",
+            layout.groups.len(),
+            limits.max_bound_descriptor_sets
+        )));
+    }
+
+    let mut set_totals = DescriptorCounts::default();
+    let mut stage_totals = [
+        DescriptorCounts::default(),
+        DescriptorCounts::default(),
+        DescriptorCounts::default(),
+        DescriptorCounts::default(),
+        DescriptorCounts::default(),
+        DescriptorCounts::default(),
+    ];
+
+    for (set_index, group) in layout.groups.iter().enumerate() {
+        let is_bindless = group_is_bindless(group);
+        if is_bindless {
+            if set_index != 0 {
+                return Err(Error::InvalidInput(
+                    "bindless descriptor group must be reflected at set 0".into(),
+                ));
+            }
+            if !bindless_supported {
+                return Err(Error::Unsupported(
+                    "pipeline layout uses bindless descriptors, but bindless is not supported by this device",
+                ));
+            }
+            validate_bindless_group(group)?;
+            continue;
+        }
+
+        for binding in &group.bindings {
+            let count = binding.count.max(1);
+            set_totals.add(binding.kind, count);
+            for stage_index in stage_indices(binding.stage_mask) {
+                stage_totals[stage_index].add(binding.kind, count);
+            }
+        }
+    }
+
+    validate_descriptor_counts("descriptor set", &set_totals, limits, false)?;
+    for (stage_index, counts) in stage_totals.iter().enumerate() {
+        validate_descriptor_counts(stage_label(stage_index), counts, limits, true)?;
+    }
+    Ok(())
+}
+
+fn validate_descriptor_counts(
+    scope: &str,
+    counts: &DescriptorCounts,
+    limits: &Limits,
+    per_stage: bool,
+) -> Result<()> {
+    let limit = |set_limit: u32, stage_limit: u32| {
+        if per_stage { stage_limit } else { set_limit }
+    };
+    validate_descriptor_count(
+        scope,
+        "samplers",
+        counts.samplers,
+        limit(
+            limits.max_descriptor_set_samplers,
+            limits.max_per_stage_samplers,
+        ),
+    )?;
+    validate_descriptor_count(
+        scope,
+        "sampled images",
+        counts.sampled_images,
+        limit(
+            limits.max_descriptor_set_sampled_images,
+            limits.max_per_stage_sampled_images,
+        ),
+    )?;
+    validate_descriptor_count(
+        scope,
+        "storage images",
+        counts.storage_images,
+        limit(
+            limits.max_descriptor_set_storage_images,
+            limits.max_per_stage_storage_images,
+        ),
+    )?;
+    validate_descriptor_count(
+        scope,
+        "uniform buffers",
+        counts.uniform_buffers,
+        limit(
+            limits.max_descriptor_set_uniform_buffers,
+            limits.max_per_stage_uniform_buffers,
+        ),
+    )?;
+    validate_descriptor_count(
+        scope,
+        "storage buffers",
+        counts.storage_buffers,
+        limit(
+            limits.max_descriptor_set_storage_buffers,
+            limits.max_per_stage_storage_buffers,
+        ),
+    )
+}
+
+fn validate_descriptor_count(scope: &str, label: &str, count: u32, limit: u32) -> Result<()> {
+    if count > limit {
+        return Err(Error::InvalidInput(format!(
+            "pipeline layout uses {count} {label} in {scope}, exceeding backend limit {limit}"
+        )));
+    }
+    Ok(())
+}
+
+fn stage_indices(mask: StageMask) -> impl Iterator<Item = usize> {
+    [
+        StageMask::VERTEX,
+        StageMask::FRAGMENT,
+        StageMask::COMPUTE,
+        StageMask::MESH,
+        StageMask::TASK,
+        StageMask::RAY_TRACING,
+    ]
+    .into_iter()
+    .enumerate()
+    .filter_map(move |(index, stage)| {
+        if mask.0 & stage.0 != 0 {
+            Some(index)
+        } else {
+            None
+        }
+    })
+}
+
+fn stage_label(index: usize) -> &'static str {
+    match index {
+        0 => "vertex stage",
+        1 => "fragment stage",
+        2 => "compute stage",
+        3 => "mesh stage",
+        4 => "task stage",
+        5 => "ray tracing stage",
+        _ => "unknown stage",
+    }
+}
+
+fn group_is_bindless(group: &CanonicalGroupLayout) -> bool {
+    group
+        .bindings
+        .iter()
+        .any(|binding| binding.count == BINDLESS_COUNT)
+}
+
+fn validate_bindless_group(group: &CanonicalGroupLayout) -> Result<()> {
+    for binding in &group.bindings {
+        if binding.count != BINDLESS_COUNT {
+            return Err(Error::InvalidInput(format!(
+                "bindless descriptor set cannot mix finite binding '{}' with unbounded arrays",
+                binding.path
+            )));
+        }
+        let expected_binding = match binding.kind {
+            BindingKind::Sampler => BINDLESS_SAMPLER_BINDING,
+            BindingKind::SampledImage => BINDLESS_SAMPLED_IMAGE_BINDING,
+            BindingKind::StorageImage => BINDLESS_STORAGE_IMAGE_BINDING,
+            BindingKind::StorageBuffer => BINDLESS_STORAGE_BUFFER_BINDING,
+            BindingKind::UniformBuffer | BindingKind::AccelerationStructure => {
+                return Err(Error::InvalidInput(format!(
+                    "binding '{}' uses {:?}, which is not supported by the Vulkan bindless heap",
+                    binding.path, binding.kind
+                )));
+            }
+        };
+        if binding.binding != expected_binding {
+            return Err(Error::InvalidInput(format!(
+                "bindless {:?} '{}' must use Vulkan binding {}, got {}",
+                binding.kind, binding.path, expected_binding, binding.binding
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn descriptor_set_layout_binding(
@@ -570,5 +858,133 @@ fn image_descriptor_layout(descriptor_type: vk::DescriptorType) -> vk::ImageLayo
     match descriptor_type {
         vk::DescriptorType::STORAGE_IMAGE => vk::ImageLayout::GENERAL,
         _ => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CanonicalGroupLayout, UpdateRate};
+
+    fn binding(kind: BindingKind, count: u32, stage_mask: StageMask) -> CanonicalBinding {
+        CanonicalBinding {
+            path: format!("{kind:?}"),
+            kind,
+            count,
+            stage_mask,
+            update_rate: UpdateRate::Draw,
+            binding: 0,
+        }
+    }
+
+    fn layout_with(bindings: Vec<CanonicalBinding>) -> CanonicalPipelineLayout {
+        CanonicalPipelineLayout {
+            groups: vec![CanonicalGroupLayout {
+                name: "set0".into(),
+                bindings,
+            }],
+            push_constants_bytes: 0,
+            push_constants_stage_mask: StageMask::default(),
+        }
+    }
+
+    #[test]
+    fn validates_push_constant_limit() {
+        let mut layout = CanonicalPipelineLayout::default();
+        layout.push_constants_bytes = 256;
+        let limits = Limits {
+            max_push_constants_size: 128,
+            ..Limits::default()
+        };
+
+        assert!(matches!(
+            validate_pipeline_layout(&layout, false, &limits),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn validates_per_stage_descriptor_limit() {
+        let layout = layout_with(vec![binding(
+            BindingKind::SampledImage,
+            3,
+            StageMask::FRAGMENT,
+        )]);
+        let limits = Limits {
+            max_per_stage_sampled_images: 2,
+            max_descriptor_set_sampled_images: 16,
+            ..Limits::default()
+        };
+
+        assert!(matches!(
+            validate_pipeline_layout(&layout, false, &limits),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn bindless_set_requires_bindless_support() {
+        let layout = layout_with(vec![binding(
+            BindingKind::SampledImage,
+            BINDLESS_COUNT,
+            StageMask::FRAGMENT,
+        )]);
+
+        assert!(matches!(
+            validate_pipeline_layout(&layout, false, &Limits::default()),
+            Err(Error::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn bindless_set_is_exempt_from_finite_descriptor_counts() {
+        let mut bindless = binding(
+            BindingKind::SampledImage,
+            BINDLESS_COUNT,
+            StageMask::FRAGMENT,
+        );
+        bindless.binding = BINDLESS_SAMPLED_IMAGE_BINDING;
+        let layout = layout_with(vec![bindless]);
+        let limits = Limits {
+            max_per_stage_sampled_images: 1,
+            max_descriptor_set_sampled_images: 1,
+            ..Limits::default()
+        };
+
+        assert!(validate_pipeline_layout(&layout, true, &limits).is_ok());
+    }
+
+    #[test]
+    fn bindless_set_validates_heap_binding_slots() {
+        let mut bad_binding = binding(
+            BindingKind::SampledImage,
+            BINDLESS_COUNT,
+            StageMask::FRAGMENT,
+        );
+        bad_binding.binding = 7;
+        let layout = layout_with(vec![bad_binding]);
+
+        assert!(matches!(
+            validate_pipeline_layout(&layout, true, &Limits::default()),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn bindless_set_rejects_mixed_finite_bindings() {
+        let mut finite = binding(BindingKind::Sampler, 1, StageMask::FRAGMENT);
+        finite.binding = BINDLESS_SAMPLER_BINDING;
+        let mut bindless = binding(
+            BindingKind::SampledImage,
+            BINDLESS_COUNT,
+            StageMask::FRAGMENT,
+        );
+        bindless.binding = BINDLESS_SAMPLED_IMAGE_BINDING;
+        let layout = layout_with(vec![finite, bindless]);
+
+        assert!(matches!(
+            validate_pipeline_layout(&layout, true, &Limits::default()),
+            Err(Error::InvalidInput(_))
+        ));
     }
 }

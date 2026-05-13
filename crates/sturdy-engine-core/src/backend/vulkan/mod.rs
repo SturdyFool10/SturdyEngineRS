@@ -380,7 +380,13 @@ impl Backend for VulkanBackend {
         self.descriptors
             .write()
             .expect("vulkan descriptor registry rwlock poisoned")
-            .create_pipeline_layout(&self.device, handle, layout)
+            .create_pipeline_layout(
+                &self.device,
+                handle,
+                layout,
+                self.bindless_vk_info().map(|info| info.set_layout),
+                &self.caps.limits,
+            )
     }
 
     fn destroy_pipeline_layout(&self, handle: PipelineLayoutHandle) -> Result<()> {
@@ -700,6 +706,7 @@ impl Backend for VulkanBackend {
             &descriptors,
             &mut pipelines,
             &self.debug,
+            self.bindless_vk_info(),
             wait_sem,
             signal_sem,
         )?;

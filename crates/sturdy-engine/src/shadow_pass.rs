@@ -22,6 +22,11 @@ use crate::{
 };
 use sturdy_engine_core::Extent3d;
 
+const SHADOW_DEPTH_NOOP_FRAGMENT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/shadow_depth_noop_fragment.slang"
+));
+
 fn engine_shader(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("shaders")
@@ -558,9 +563,7 @@ fn build_depth_program(engine: &Engine) -> Result<MeshProgram> {
         engine,
         MeshProgramDesc {
             fragment: ShaderDesc {
-                source: ShaderSource::Inline(
-                    "float4 main() : SV_TARGET { return float4(0,0,0,0); }".into(),
-                ),
+                source: ShaderSource::Inline(SHADOW_DEPTH_NOOP_FRAGMENT.into()),
                 entry_point: "main".to_owned(),
                 stage: ShaderStage::Fragment,
             },

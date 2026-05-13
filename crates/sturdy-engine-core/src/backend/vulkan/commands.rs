@@ -8,6 +8,7 @@ use crate::{
     PassWork, PushConstants, Result, RgState, SubmissionHandle, SubresourceRange,
 };
 
+use super::bindless::BindlessVkInfo;
 use super::debug::DebugUtils;
 use super::descriptors::DescriptorRegistry;
 use super::pipelines::PipelineRegistry;
@@ -91,6 +92,7 @@ impl CommandContext {
         descriptors: &DescriptorRegistry,
         pipelines: &mut PipelineRegistry,
         debug: &DebugUtils,
+        bindless: Option<BindlessVkInfo>,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
     ) -> Result<SubmissionHandle> {
@@ -239,7 +241,15 @@ impl CommandContext {
                         if !pass.name.is_empty() {
                             debug.begin_region(cmd, &pass.name, [0.5, 0.5, 1.0, 1.0]);
                         }
-                        self.record_pass(device, cmd, pass, resources, descriptors, pipelines)?;
+                        self.record_pass(
+                            device,
+                            cmd,
+                            pass,
+                            resources,
+                            descriptors,
+                            pipelines,
+                            bindless,
+                        )?;
                         if !pass.name.is_empty() {
                             debug.end_region(cmd);
                         }
@@ -397,6 +407,7 @@ impl CommandContext {
         resources: &ResourceRegistry,
         descriptors: &DescriptorRegistry,
         pipelines: &mut PipelineRegistry,
+        bindless: Option<BindlessVkInfo>,
     ) -> Result<()> {
         let mut bound_pipeline = None;
         if let Some(pipeline) = pass.pipeline {
@@ -404,8 +415,38 @@ impl CommandContext {
             unsafe {
                 device.cmd_bind_pipeline(command_buffer, pipeline.bind_point, pipeline.pipeline);
             }
+            if pipeline.uses_bindless {
+                let bindless = bindless.ok_or_else(|| {
+                    Error::Backend(
+                        "pipeline requires bindless descriptors but no bindless heap is available"
+                            .into(),
+                    )
+                })?;
+                unsafe {
+                    device.cmd_bind_descriptor_sets(
+                        command_buffer,
+                        pipeline.bind_point,
+                        pipeline.layout,
+                        0,
+                        &[bindless.set],
+                        &[],
+                    );
+                }
+            }
             let mut sets = Vec::new();
+            let mut first_set = None;
             for bind_group in &pass.bind_groups {
+                let group_first_set = descriptors.bind_group_first_set(*bind_group)?;
+                if let Some(first) = first_set {
+                    if first != group_first_set {
+                        return Err(Error::InvalidInput(
+                            "a pass cannot bind groups from layouts with different first set indices"
+                                .into(),
+                        ));
+                    }
+                } else {
+                    first_set = Some(group_first_set);
+                }
                 sets.extend_from_slice(descriptors.descriptor_sets(*bind_group)?);
             }
             if !sets.is_empty() {
@@ -414,7 +455,7 @@ impl CommandContext {
                         command_buffer,
                         pipeline.bind_point,
                         pipeline.layout,
-                        0,
+                        first_set.unwrap_or(0),
                         &sets,
                         &[],
                     );
@@ -1345,6 +1386,7 @@ impl FramedCommands {
         descriptors: &DescriptorRegistry,
         pipelines: &mut PipelineRegistry,
         debug: &DebugUtils,
+        bindless: Option<BindlessVkInfo>,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
     ) -> Result<SubmissionHandle> {
@@ -1359,6 +1401,7 @@ impl FramedCommands {
             descriptors,
             pipelines,
             debug,
+            bindless,
             wait_semaphore,
             signal_semaphore,
         )?;

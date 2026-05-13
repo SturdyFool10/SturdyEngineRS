@@ -1,5 +1,12 @@
 use crate::*;
 
+mod shader_fixtures {
+    pub const PUSH_CONSTANTS_FRAGMENT: &str =
+        include_str!("../shaders/tests/push_constants_fragment.slang");
+    pub const CONSTANT_RED_FRAGMENT: &str =
+        include_str!("../shaders/tests/constant_red_fragment.slang");
+}
+
 fn sampled_image_sampler_layout() -> CanonicalPipelineLayout {
     PipelineLayoutBuilder::new()
         .sampled_image(
@@ -334,178 +341,183 @@ fn shader_pass_intent_validate_reports_reflected_resource_errors_before_flush() 
     );
 }
 
-#[test]
-fn shader_pass_intent_validate_warns_when_push_constants_declared_but_not_provided() {
-    let engine = Engine::with_backend(BackendKind::Null).unwrap();
-    let program = ShaderProgram::from_inline_fragment(
-        &engine,
-        "struct Pc { float brightness; }; float4 main(uniform Pc pc) : SV_TARGET { return float4(pc.brightness, 0.0, 0.0, 1.0); }",
-    )
-    .unwrap();
-    let frame = engine.begin_render_frame().unwrap();
-    let target = frame
-        .image(
-            "target",
-            ImageDesc {
-                usage: ImageUsage::RENDER_TARGET,
-                ..small_image_desc()
-            },
+mod shader_source_tests {
+    use super::*;
+
+    #[test]
+    fn shader_pass_intent_validate_warns_when_push_constants_declared_but_not_provided() {
+        let engine = Engine::with_backend(BackendKind::Null).unwrap();
+        let program =
+            ShaderProgram::from_inline_fragment(&engine, shader_fixtures::PUSH_CONSTANTS_FRAGMENT)
+                .unwrap();
+        let frame = engine.begin_render_frame().unwrap();
+        let target = frame
+            .image(
+                "target",
+                ImageDesc {
+                    usage: ImageUsage::RENDER_TARGET,
+                    ..small_image_desc()
+                },
+            )
+            .unwrap();
+
+        frame
+            .shader_pass("push-const-pass")
+            .target(&target)
+            .fullscreen(&program)
+            .unwrap();
+
+        let diagnostics = frame.validate();
+        assert!(
+            diagnostics.iter().any(|d| {
+                d.level == DiagnosticLevel::Warning && d.message.contains("push-const-pass")
+            }),
+            "validate should warn about missing push constants, got {:?}",
+            diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn shader_pass_intent_rejects_fullscreen_target_without_render_target_usage() {
+        let engine = Engine::with_backend(BackendKind::Null).unwrap();
+        let program = ShaderProgram::passthrough(&engine).unwrap();
+        let frame = engine.begin_render_frame().unwrap();
+        let bad_target = frame
+            .image(
+                "bad_target",
+                ImageDesc {
+                    usage: ImageUsage::SAMPLED,
+                    ..small_image_desc()
+                },
+            )
+            .unwrap();
+
+        let err = frame
+            .shader_pass("bad-fullscreen")
+            .target(&bad_target)
+            .fullscreen(&program)
+            .expect_err("fullscreen should reject target without RENDER_TARGET usage");
+
+        assert!(matches!(err, Error::InvalidInput(_)));
+        assert!(
+            err.to_string().contains("bad_target"),
+            "error should name the target, got {err}"
+        );
+    }
+
+    #[test]
+    fn shader_pass_intent_rejects_compute_target_without_storage_usage() {
+        let engine = Engine::with_backend(BackendKind::Null).unwrap();
+        let program = ComputeProgram::load(
+            &engine,
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../sturdy-engine-testbed/shaders/testbed_compute.slang"),
         )
         .unwrap();
+        let frame = engine.begin_render_frame().unwrap();
+        let bad_target = frame
+            .image(
+                "bad_target",
+                ImageDesc {
+                    usage: ImageUsage::RENDER_TARGET,
+                    ..small_image_desc()
+                },
+            )
+            .unwrap();
 
-    frame
-        .shader_pass("push-const-pass")
-        .target(&target)
-        .fullscreen(&program)
-        .unwrap();
+        let err = frame
+            .shader_pass("bad-compute")
+            .target(&bad_target)
+            .compute(&program, [1, 1, 1])
+            .expect_err("compute should reject target without STORAGE usage");
 
-    let diagnostics = frame.validate();
-    assert!(
-        diagnostics.iter().any(|d| {
-            d.level == DiagnosticLevel::Warning && d.message.contains("push-const-pass")
-        }),
-        "validate should warn about missing push constants, got {:?}",
-        diagnostics
-            .iter()
-            .map(|d| d.message.as_str())
-            .collect::<Vec<_>>()
-    );
-}
+        assert!(matches!(err, Error::InvalidInput(_)));
+        assert!(
+            err.to_string().contains("bad_target"),
+            "error should name the target, got {err}"
+        );
+    }
 
-#[test]
-fn shader_pass_intent_rejects_fullscreen_target_without_render_target_usage() {
-    let engine = Engine::with_backend(BackendKind::Null).unwrap();
-    let program = ShaderProgram::passthrough(&engine).unwrap();
-    let frame = engine.begin_render_frame().unwrap();
-    let bad_target = frame
-        .image(
-            "bad_target",
-            ImageDesc {
-                usage: ImageUsage::SAMPLED,
-                ..small_image_desc()
-            },
-        )
-        .unwrap();
+    #[test]
+    fn load_slang_source_fragment_entry_creates_fullscreen_program() {
+        let engine = Engine::with_backend(BackendKind::Null).unwrap();
+        let program = engine
+            .load_slang_source(
+                ShaderName::new("test/constant-red"),
+                shader_fixtures::CONSTANT_RED_FRAGMENT,
+                SlangEntryPoints::fragment("main"),
+            )
+            .unwrap();
+        let frame = engine.begin_render_frame().unwrap();
+        let target = frame
+            .image(
+                "target",
+                ImageDesc {
+                    usage: ImageUsage::RENDER_TARGET,
+                    ..small_image_desc()
+                },
+            )
+            .unwrap();
+        frame
+            .shader_pass("red-pass")
+            .target(&target)
+            .fullscreen(&program)
+            .unwrap();
+    }
 
-    let err = frame
-        .shader_pass("bad-fullscreen")
-        .target(&bad_target)
-        .fullscreen(&program)
-        .expect_err("fullscreen should reject target without RENDER_TARGET usage");
+    #[test]
+    fn shader_compilation_cache_returns_distinct_handles_for_same_inline_source() {
+        let engine = Engine::with_backend(BackendKind::Null).unwrap();
 
-    assert!(matches!(err, Error::InvalidInput(_)));
-    assert!(
-        err.to_string().contains("bad_target"),
-        "error should name the target, got {err}"
-    );
-}
+        // Two separate ShaderProgram instances from the same inline source.
+        // The cache means Slang compiles only once; both handle creation should succeed.
+        let a =
+            ShaderProgram::from_inline_fragment(&engine, shader_fixtures::CONSTANT_RED_FRAGMENT)
+                .unwrap();
+        let b =
+            ShaderProgram::from_inline_fragment(&engine, shader_fixtures::CONSTANT_RED_FRAGMENT)
+                .unwrap();
 
-#[test]
-fn shader_pass_intent_rejects_compute_target_without_storage_usage() {
-    let engine = Engine::with_backend(BackendKind::Null).unwrap();
-    let program = ComputeProgram::load(
-        &engine,
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../sturdy-engine-testbed/shaders/testbed_compute.slang"),
-    )
-    .unwrap();
-    let frame = engine.begin_render_frame().unwrap();
-    let bad_target = frame
-        .image(
-            "bad_target",
-            ImageDesc {
-                usage: ImageUsage::RENDER_TARGET,
-                ..small_image_desc()
-            },
-        )
-        .unwrap();
+        // Each program is an independent object (different internal handles).
+        let frame = engine.begin_render_frame().unwrap();
+        let target = frame
+            .image(
+                "t",
+                ImageDesc {
+                    usage: ImageUsage::RENDER_TARGET,
+                    ..small_image_desc()
+                },
+            )
+            .unwrap();
+        // Both programs should be usable independently.
+        frame
+            .shader_pass("a")
+            .target(&target)
+            .fullscreen(&a)
+            .unwrap();
+        let _ = (a, b); // keep alive
+    }
 
-    let err = frame
-        .shader_pass("bad-compute")
-        .target(&bad_target)
-        .compute(&program, [1, 1, 1])
-        .expect_err("compute should reject target without STORAGE usage");
-
-    assert!(matches!(err, Error::InvalidInput(_)));
-    assert!(
-        err.to_string().contains("bad_target"),
-        "error should name the target, got {err}"
-    );
-}
-
-#[test]
-fn load_slang_source_fragment_entry_creates_fullscreen_program() {
-    let engine = Engine::with_backend(BackendKind::Null).unwrap();
-    let program = engine
-        .load_slang_source(
-            ShaderName::new("test/constant-red"),
-            "float4 main() : SV_TARGET { return float4(1.0, 0.0, 0.0, 1.0); }",
+    #[test]
+    fn load_slang_source_includes_shader_name_in_compile_errors() {
+        let engine = Engine::with_backend(BackendKind::Null).unwrap();
+        let result = engine.load_slang_source(
+            ShaderName::new("test/broken-shader"),
+            "this is not valid slang source;;;;;",
             SlangEntryPoints::fragment("main"),
-        )
-        .unwrap();
-    let frame = engine.begin_render_frame().unwrap();
-    let target = frame
-        .image(
-            "target",
-            ImageDesc {
-                usage: ImageUsage::RENDER_TARGET,
-                ..small_image_desc()
-            },
-        )
-        .unwrap();
-    frame
-        .shader_pass("red-pass")
-        .target(&target)
-        .fullscreen(&program)
-        .unwrap();
-}
-
-#[test]
-fn shader_compilation_cache_returns_distinct_handles_for_same_inline_source() {
-    let engine = Engine::with_backend(BackendKind::Null).unwrap();
-    let src = "float4 main() : SV_TARGET { return float4(1.0, 0.0, 0.0, 1.0); }";
-
-    // Two separate ShaderProgram instances from the same inline source.
-    // The cache means Slang compiles only once; both handle creation should succeed.
-    let a = ShaderProgram::from_inline_fragment(&engine, src).unwrap();
-    let b = ShaderProgram::from_inline_fragment(&engine, src).unwrap();
-
-    // Each program is an independent object (different internal handles).
-    let frame = engine.begin_render_frame().unwrap();
-    let target = frame
-        .image(
-            "t",
-            ImageDesc {
-                usage: ImageUsage::RENDER_TARGET,
-                ..small_image_desc()
-            },
-        )
-        .unwrap();
-    // Both programs should be usable independently.
-    frame
-        .shader_pass("a")
-        .target(&target)
-        .fullscreen(&a)
-        .unwrap();
-    let _ = (a, b); // keep alive
-}
-
-#[test]
-fn load_slang_source_includes_shader_name_in_compile_errors() {
-    let engine = Engine::with_backend(BackendKind::Null).unwrap();
-    let result = engine.load_slang_source(
-        ShaderName::new("test/broken-shader"),
-        "this is not valid slang source;;;;;",
-        SlangEntryPoints::fragment("main"),
-    );
-    let err = match result {
-        Ok(_) => panic!("compilation of invalid source should fail"),
-        Err(e) => e,
-    };
-    assert!(
-        err.to_string().contains("test/broken-shader"),
-        "error should include shader name, got: {err}"
-    );
+        );
+        let err = match result {
+            Ok(_) => panic!("compilation of invalid source should fail"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("test/broken-shader"),
+            "error should include shader name, got: {err}"
+        );
+    }
 }
 
 #[test]

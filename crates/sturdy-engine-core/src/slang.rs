@@ -1192,7 +1192,16 @@ fn append_diagnostics(message: &mut String, label: &str, diagnostics: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BINDLESS_COUNT;
     use std::path::PathBuf;
+
+    mod shader_fixtures {
+        pub const BINDLESS_ARRAYS: &str = include_str!("../shaders/tests/bindless_arrays.slang");
+        pub const MEMORY_UTF8_COMPUTE: &str =
+            include_str!("../shaders/tests/memory_utf8_compute.slang");
+        pub const MEMORY_BYTES_VERTEX: &str =
+            include_str!("../shaders/tests/memory_bytes_vertex.slang");
+    }
 
     fn testbed_shader(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1362,69 +1371,94 @@ mod tests {
         assert_eq!(diffuse_sampler.access, ShaderResourceAccess::Read);
     }
 
-    #[test]
-    fn reflect_spirv_returns_empty() {
-        let desc = ShaderDesc {
-            source: ShaderSource::Spirv(vec![0x0723_0203, 0, 0, 0, 0]),
-            entry_point: "main".into(),
-            stage: ShaderStage::Compute,
-        };
-        let reflection = reflect_pipeline_layout(&desc).expect("should not error for SPIRV source");
-        assert_eq!(reflection, ShaderReflection::default());
-    }
+    mod shader_source_tests {
+        use super::*;
 
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn embedded_str_source_compiles_and_reflects() {
-        static SOURCE: &str = r#"
-RWStructuredBuffer<float4> output_buffer : register(u0, space0);
+        #[test]
+        #[cfg(not(target_arch = "wasm32"))]
+        fn reflect_bindless_arrays_use_bindless_count() {
+            let desc = ShaderDesc {
+                source: ShaderSource::Inline(shader_fixtures::BINDLESS_ARRAYS.into()),
+                entry_point: "main".into(),
+                stage: ShaderStage::Fragment,
+            };
 
-[numthreads(8, 8, 1)]
-void main(uint3 dispatch_id : SV_DispatchThreadID) {
-  output_buffer[dispatch_id.x] = float4(dispatch_id, 1.0);
-}
-"#;
-        let desc = ShaderDesc {
-            source: ShaderSource::MemoryUtf8(SOURCE),
-            entry_point: "main".into(),
-            stage: ShaderStage::Compute,
-        };
+            let (_, reflection) =
+                compile_and_reflect(&desc, ShaderTarget::Spirv).expect("bindless shader compiles");
+            let group = reflection
+                .layout
+                .groups
+                .first()
+                .expect("bindless shader should reflect set 0");
 
-        let (_compiled, reflection) =
-            compile_and_reflect(&desc, ShaderTarget::Spirv).expect("embedded source compiles");
+            assert_eq!(group.name, "set0");
+            assert_eq!(group.bindings.len(), 2);
+            assert!(
+                group
+                    .bindings
+                    .iter()
+                    .all(|binding| binding.count == BINDLESS_COUNT),
+                "all bindless arrays should use BINDLESS_COUNT"
+            );
+            assert!(reflection.parameters.iter().any(|parameter| {
+                parameter.binding == Some(0)
+                    && parameter.count == BINDLESS_COUNT
+                    && parameter.kind == ShaderParameterKind::Resource(BindingKind::Sampler)
+            }));
+            assert!(reflection.parameters.iter().any(|parameter| {
+                parameter.binding == Some(1)
+                    && parameter.count == BINDLESS_COUNT
+                    && parameter.kind == ShaderParameterKind::Resource(BindingKind::SampledImage)
+            }));
+        }
 
-        let group = reflection
-            .layout
-            .groups
-            .first()
-            .expect("embedded source should reflect bindings");
-        assert_eq!(group.bindings[0].kind, BindingKind::StorageBuffer);
-    }
+        #[test]
+        fn reflect_spirv_returns_empty() {
+            let desc = ShaderDesc {
+                source: ShaderSource::Spirv(vec![0x0723_0203, 0, 0, 0, 0]),
+                entry_point: "main".into(),
+                stage: ShaderStage::Compute,
+            };
+            let reflection =
+                reflect_pipeline_layout(&desc).expect("should not error for SPIRV source");
+            assert_eq!(reflection, ShaderReflection::default());
+        }
 
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn memory_bytes_source_compiles_as_utf8_slang() {
-        let desc = ShaderDesc {
-            source: ShaderSource::MemoryBytes(
-                b"
-struct VSInput { float3 position : POSITION; };
-struct VSOutput { float4 position : SV_POSITION; };
-VSOutput vs_main(VSInput input) {
-  VSOutput output;
-  output.position = float4(input.position, 1.0);
-  return output;
-}
-",
-            ),
-            entry_point: "vs_main".into(),
-            stage: ShaderStage::Vertex,
-        };
+        #[test]
+        #[cfg(not(target_arch = "wasm32"))]
+        fn embedded_str_source_compiles_and_reflects() {
+            let desc = ShaderDesc {
+                source: ShaderSource::MemoryUtf8(shader_fixtures::MEMORY_UTF8_COMPUTE),
+                entry_point: "main".into(),
+                stage: ShaderStage::Compute,
+            };
 
-        let (_compiled, reflection) =
-            compile_and_reflect(&desc, ShaderTarget::Spirv).expect("memory source compiles");
+            let (_compiled, reflection) =
+                compile_and_reflect(&desc, ShaderTarget::Spirv).expect("embedded source compiles");
 
-        assert!(reflection.layout.groups.is_empty());
-        assert!(reflection.entry_points.iter().any(|ep| ep == "vs_main"));
+            let group = reflection
+                .layout
+                .groups
+                .first()
+                .expect("embedded source should reflect bindings");
+            assert_eq!(group.bindings[0].kind, BindingKind::StorageBuffer);
+        }
+
+        #[test]
+        #[cfg(not(target_arch = "wasm32"))]
+        fn memory_bytes_source_compiles_as_utf8_slang() {
+            let desc = ShaderDesc {
+                source: ShaderSource::MemoryBytes(shader_fixtures::MEMORY_BYTES_VERTEX.as_bytes()),
+                entry_point: "vs_main".into(),
+                stage: ShaderStage::Vertex,
+            };
+
+            let (_compiled, reflection) =
+                compile_and_reflect(&desc, ShaderTarget::Spirv).expect("memory source compiles");
+
+            assert!(reflection.layout.groups.is_empty());
+            assert!(reflection.entry_points.iter().any(|ep| ep == "vs_main"));
+        }
     }
 
     #[test]

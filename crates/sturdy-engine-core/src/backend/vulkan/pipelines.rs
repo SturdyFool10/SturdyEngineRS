@@ -155,6 +155,7 @@ pub struct VulkanPipeline {
     pub render_pass: vk::RenderPass,
     pub push_constants_bytes: u32,
     pub push_constant_stages: vk::ShaderStageFlags,
+    pub uses_bindless: bool,
 }
 
 impl PipelineRegistry {
@@ -173,6 +174,7 @@ impl PipelineRegistry {
             .layout
             .expect("compute pipeline layout must be resolved before backend call");
         let layout = descriptors.pipeline_layout(layout_handle)?;
+        let uses_bindless = descriptors.pipeline_uses_bindless(layout_handle)?;
         let push_constants_bytes = descriptors.push_constants_bytes(layout_handle)?;
         let push_constant_stages = descriptors.push_constant_stages(layout_handle)?;
         let entry = CString::new(shaders.entry_point(desc.shader)?).map_err(|_| {
@@ -203,6 +205,7 @@ impl PipelineRegistry {
                 render_pass: vk::RenderPass::null(),
                 push_constants_bytes,
                 push_constant_stages,
+                uses_bindless,
             },
         );
         self.note_pipeline_created();
@@ -222,6 +225,7 @@ impl PipelineRegistry {
             .layout
             .expect("graphics pipeline layout must be resolved before backend call");
         let layout = descriptors.pipeline_layout(layout_handle)?;
+        let uses_bindless = descriptors.pipeline_uses_bindless(layout_handle)?;
         let push_constants_bytes = descriptors.push_constants_bytes(layout_handle)?;
         let push_constant_stages = descriptors.push_constant_stages(layout_handle)?;
         let render_pass = create_render_pass(device, desc)?;
@@ -234,6 +238,7 @@ impl PipelineRegistry {
             render_pass,
             push_constants_bytes,
             push_constant_stages,
+            uses_bindless,
         );
         if result.is_err() {
             unsafe {
@@ -253,6 +258,7 @@ impl PipelineRegistry {
         render_pass: vk::RenderPass,
         push_constants_bytes: u32,
         push_constant_stages: vk::ShaderStageFlags,
+        uses_bindless: bool,
     ) -> Result<()> {
         let vertex_entry =
             CString::new(shaders.entry_point(desc.vertex_shader)?).map_err(|_| {
@@ -384,6 +390,7 @@ impl PipelineRegistry {
                 render_pass,
                 push_constants_bytes,
                 push_constant_stages,
+                uses_bindless,
             },
         );
         self.note_pipeline_created();
