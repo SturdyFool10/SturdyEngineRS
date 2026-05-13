@@ -71,30 +71,39 @@
 // }
 // ```
 
-mod entity;
-mod storage;
-mod world;
-mod schedule;
-mod parallel_system;
-mod world_view;
-mod world_commands;
 mod compiled_schedule;
 pub mod components;
+mod entity;
+mod parallel_system;
+mod schedule;
+mod storage;
+mod world;
+mod world_commands;
+mod world_view;
 
-pub use entity::Entity;
-pub use storage::Component;
-pub use world::{EntityBuilder, World};
-pub use schedule::{Schedule, System, SystemFn, run_once};
-pub use parallel_system::{ParallelSystem, SystemAccess};
-pub use world_view::{WorldView, ComponentReadGuard, ComponentWriteGuard};
-pub use world_commands::WorldCommands;
 pub use compiled_schedule::CompiledSchedule;
 pub use components::{
+    Acceleration,
     // Core transform + physics
-    Active, Acceleration, Health, LocalTransform, Name, SceneLink, Transform, Velocity,
+    Active,
+    Health,
+    LocalTransform,
+    Name,
+    SceneLink,
+    Transform,
+    Velocity,
     // Built-in systems
-    despawn_dead, integrate_transforms, propagate_local_transforms,
+    despawn_dead,
+    integrate_transforms,
+    propagate_local_transforms,
 };
+pub use entity::Entity;
+pub use parallel_system::{ParallelSystem, SystemAccess};
+pub use schedule::{Schedule, System, SystemFn, run_once};
+pub use storage::Component;
+pub use world::{EntityBuilder, World};
+pub use world_commands::WorldCommands;
+pub use world_view::{ComponentReadGuard, ComponentWriteGuard, WorldView};
 
 #[cfg(test)]
 mod tests {
@@ -125,10 +134,10 @@ mod tests {
         world.despawn(e1);
         // Spawn a new entity that reuses the same slot.
         let e2 = world.spawn().with(Pos(9.9, 9.9)).id();
-        assert_eq!(e1.index, e2.index);  // same slot
+        assert_eq!(e1.index, e2.index); // same slot
         assert_ne!(e1.generation, e2.generation); // different generation
         assert!(!world.is_alive(e1)); // stale handle is dead
-        assert!(world.is_alive(e2));  // new handle is live
+        assert!(world.is_alive(e2)); // new handle is live
     }
 
     #[test]
@@ -170,9 +179,10 @@ mod tests {
         let mut world = World::new();
         world.spawn().with(Pos(1.0, 0.0)).with(Spd(10.0)).id();
         world.spawn().with(Pos(2.0, 0.0)).id(); // no Spd
-        world.spawn().with(Spd(5.0)).id();       // no Pos
+        world.spawn().with(Spd(5.0)).id(); // no Pos
 
-        let pairs: Vec<(f32, f32)> = world.query2::<Pos, Spd>()
+        let pairs: Vec<(f32, f32)> = world
+            .query2::<Pos, Spd>()
             .map(|(_, p, s)| (p.0, s.0))
             .collect();
         assert_eq!(pairs, vec![(1.0, 10.0)]);
@@ -197,8 +207,12 @@ mod tests {
         let o2 = order.clone();
 
         let mut sched = Schedule::new();
-        sched.add_system("first",  move |_w| { o1.lock().unwrap().push(1); });
-        sched.add_system("second", move |_w| { o2.lock().unwrap().push(2); });
+        sched.add_system("first", move |_w| {
+            o1.lock().unwrap().push(1);
+        });
+        sched.add_system("second", move |_w| {
+            o2.lock().unwrap().push(2);
+        });
         sched.run(&mut world);
 
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
@@ -256,7 +270,9 @@ mod tests {
         let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let c = counter.clone();
         let mut sched = Schedule::new();
-        sched.add_system("bump", move |_w| { c.fetch_add(1, std::sync::atomic::Ordering::SeqCst); });
+        sched.add_system("bump", move |_w| {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
         let mut compiled = sched.build();
         compiled.run(&mut world);
         assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -290,7 +306,9 @@ mod tests {
     /// Despawns any entity whose `Spd` is zero or negative.
     struct Reaper;
     impl ParallelSystem for Reaper {
-        fn access() -> SystemAccess { SystemAccess::new().read_component::<Spd>() }
+        fn access() -> SystemAccess {
+            SystemAccess::new().read_component::<Spd>()
+        }
         fn run(&mut self, world: &WorldView<'_>, commands: &mut WorldCommands) {
             let speeds = world.read::<Spd>();
             let gens = world.generations();
@@ -306,7 +324,7 @@ mod tests {
     fn world_commands_despawn_applied_after_wave() {
         let mut world = World::new();
         let alive = world.spawn().with(Spd(5.0)).id();
-        let dead  = world.spawn().with(Spd(0.0)).id();
+        let dead = world.spawn().with(Spd(0.0)).id();
 
         let mut sched = Schedule::new();
         sched.add_parallel_system("reap", Reaper);

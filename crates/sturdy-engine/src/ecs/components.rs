@@ -8,8 +8,8 @@
 
 use glam::{Mat4, Quat, Vec3};
 
-use crate::ObjectId;
 use super::storage::Component;
+use crate::ObjectId;
 
 // ── Auto-impl Component for all suitable types ────────────────────────────────
 
@@ -52,12 +52,19 @@ impl Transform {
 
     /// Construct at `position` with identity rotation and unit scale.
     pub fn from_position(position: impl Into<Vec3>) -> Self {
-        Self { position: position.into(), ..Self::IDENTITY }
+        Self {
+            position: position.into(),
+            ..Self::IDENTITY
+        }
     }
 
     /// Construct from a full TRS triple.
     pub fn from_trs(position: Vec3, rotation: Quat, scale: Vec3) -> Self {
-        Self { position, rotation, scale }
+        Self {
+            position,
+            rotation,
+            scale,
+        }
     }
 
     /// Convert to a column-major 4×4 matrix suitable for `Scene::set_transform`.
@@ -101,7 +108,9 @@ impl Transform {
 }
 
 impl Default for Transform {
-    fn default() -> Self { Self::IDENTITY }
+    fn default() -> Self {
+        Self::IDENTITY
+    }
 }
 
 // ── LocalTransform ────────────────────────────────────────────────────────────
@@ -155,7 +164,10 @@ pub struct Velocity {
 
 impl Velocity {
     pub fn linear(linear: Vec3) -> Self {
-        Self { linear, angular: Vec3::ZERO }
+        Self {
+            linear,
+            angular: Vec3::ZERO,
+        }
     }
 }
 
@@ -200,8 +212,12 @@ pub struct SceneLink {
 pub struct Name(pub String);
 
 impl Name {
-    pub fn new(s: impl Into<String>) -> Self { Self(s.into()) }
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for Name {
@@ -221,7 +237,9 @@ impl std::fmt::Display for Name {
 pub struct Active(pub bool);
 
 impl Default for Active {
-    fn default() -> Self { Self(true) }
+    fn default() -> Self {
+        Self(true)
+    }
 }
 
 // ── Health ────────────────────────────────────────────────────────────────────
@@ -234,9 +252,15 @@ pub struct Health {
 }
 
 impl Health {
-    pub fn new(max: f32) -> Self { Self { current: max, max } }
-    pub fn is_dead(&self) -> bool { self.current <= 0.0 }
-    pub fn fraction(&self) -> f32 { (self.current / self.max).clamp(0.0, 1.0) }
+    pub fn new(max: f32) -> Self {
+        Self { current: max, max }
+    }
+    pub fn is_dead(&self) -> bool {
+        self.current <= 0.0
+    }
+    pub fn fraction(&self) -> f32 {
+        (self.current / self.max).clamp(0.0, 1.0)
+    }
 
     pub fn damage(&mut self, amount: f32) {
         self.current = (self.current - amount).max(0.0);
@@ -263,9 +287,8 @@ pub fn integrate_transforms(world: &mut World, dt: f32) {
     for (_, transform, vel) in world.query2_mut::<Transform, Velocity>() {
         transform.position += vel.linear * dt;
         if vel.angular.length_squared() > 1e-12 {
-            transform.rotation = (transform.rotation
-                * Quat::from_scaled_axis(vel.angular * dt))
-                .normalize();
+            transform.rotation =
+                (transform.rotation * Quat::from_scaled_axis(vel.angular * dt)).normalize();
         }
     }
 }
@@ -282,20 +305,20 @@ pub fn propagate_local_transforms(world: &mut World) {
         .collect();
 
     for (child, local) in children {
-        let parent_mat = local.parent
+        let parent_mat = local
+            .parent
             .and_then(|p| world.get::<Transform>(p))
             .map(|pt| pt.to_mat4())
             .unwrap_or(Mat4::IDENTITY);
 
-        let local_mat = Mat4::from_scale_rotation_translation(
-            local.scale, local.rotation, local.position,
-        );
+        let local_mat =
+            Mat4::from_scale_rotation_translation(local.scale, local.rotation, local.position);
         let world_mat = parent_mat * local_mat;
         let (scale, rotation, position) = world_mat.to_scale_rotation_translation();
         if let Some(t) = world.get_mut::<Transform>(child) {
             t.position = position;
             t.rotation = rotation;
-            t.scale    = scale;
+            t.scale = scale;
         }
     }
 }
@@ -307,5 +330,7 @@ pub fn despawn_dead(world: &mut World) {
         .filter(|(_, h)| h.is_dead())
         .map(|(e, _)| e)
         .collect();
-    for e in dead { world.despawn(e); }
+    for e in dead {
+        world.despawn(e);
+    }
 }

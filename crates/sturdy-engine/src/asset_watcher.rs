@@ -97,12 +97,16 @@ pub struct AssetWatcher {
 }
 
 impl Default for AssetWatcher {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AssetWatcher {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Watch an asset file and invoke `callback(engine, path)` each time it changes.
@@ -147,12 +151,19 @@ impl AssetWatcher {
         let path = path.into();
         let last_mtime = mtime(&path);
         // Populate the slot immediately so it's ready before the first tick.
-        if slot.lock().unwrap().is_none() {
+        let slot_is_empty = slot.lock().map(|slot| slot.is_none()).unwrap_or(false);
+        if slot_is_empty {
             if let Ok(img) = engine.load_texture_2d_blocking(&path) {
-                *slot.lock().unwrap() = Some(Arc::new(img));
+                if let Ok(mut slot) = slot.lock() {
+                    *slot = Some(Arc::new(img));
+                }
             }
         }
-        self.entries.push(WatchEntry { path, last_mtime, kind: AssetKind::Texture(slot) });
+        self.entries.push(WatchEntry {
+            path,
+            last_mtime,
+            kind: AssetKind::Texture(slot),
+        });
     }
 
     /// Remove all watched entries for a given path.
@@ -161,7 +172,9 @@ impl AssetWatcher {
     }
 
     /// Remove all watched entries.
-    pub fn clear(&mut self) { self.entries.clear(); }
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
 
     /// Poll for file changes and reload any modified assets.
     ///
@@ -178,15 +191,19 @@ impl AssetWatcher {
             entry.last_mtime = current;
 
             let result = match &mut entry.kind {
-                AssetKind::Texture(slot) => {
-                    match engine.load_texture_2d_blocking(&entry.path) {
-                        Ok(img) => {
-                            *slot.lock().unwrap() = Some(Arc::new(img));
-                            Ok(())
-                        }
-                        Err(e) => Err(e),
-                    }
-                }
+                AssetKind::Texture(slot) => match engine.load_texture_2d_blocking(&entry.path) {
+                    Ok(img) => slot
+                        .lock()
+                        .map(|mut slot| {
+                            *slot = Some(Arc::new(img));
+                        })
+                        .map_err(|_| {
+                            crate::Error::Unknown(
+                                "asset watcher texture slot mutex poisoned".into(),
+                            )
+                        }),
+                    Err(e) => Err(e),
+                },
                 AssetKind::Callback(cb) => cb(engine, &entry.path),
             };
 
@@ -201,7 +218,9 @@ impl AssetWatcher {
     }
 
     /// Number of watched entries.
-    pub fn watch_count(&self) -> usize { self.entries.len() }
+    pub fn watch_count(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 // ── Helper ────────────────────────────────────────────────────────────────────

@@ -23,16 +23,18 @@ use std::path::PathBuf;
 
 use glam::{Mat4, Vec4};
 
+use crate::scene::CameraConstants;
 use crate::{
     Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, ImageDesc, ImageDimension,
     ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind, RenderFrame, Result, ShaderDesc,
-    ShaderProgram, ShaderSource, ShaderStage, push_constants, scene::Scene,
-    shadow_pass::{CsmConfig, CsmPass},
-    environment_map::{EnvironmentMap, compute_brdf_lut, compute_e_avg_lut, SPECULAR_LAYER_COUNT},
-    oit_pass::{OitConfig, OitPass},
+    ShaderProgram, ShaderSource, ShaderStage,
+    environment_map::{EnvironmentMap, SPECULAR_LAYER_COUNT, compute_brdf_lut, compute_e_avg_lut},
     light_bvh::LightBvhBuilder,
+    oit_pass::{OitConfig, OitPass},
+    push_constants,
+    scene::Scene,
+    shadow_pass::{CsmConfig, CsmPass},
 };
-use crate::scene::CameraConstants;
 use sturdy_engine_core::Extent3d;
 
 fn engine_shader(name: &str) -> PathBuf {
@@ -44,18 +46,18 @@ fn engine_shader(name: &str) -> PathBuf {
 /// Push constants for `deferred_lighting.slang` (128 bytes = Vulkan guaranteed minimum).
 #[push_constants]
 struct DeferredLightingConstants {
-    camera_world_pos: [f32; 4],      // 16
-    ambient: [f32; 3],               // 12
-    dir_light_count: u32,            //  4  → 32
-    ibl_strength: f32,               //  4
-    ibl_max_layer: f32,              //  4
-    bvh_root: u32,                   //  4
-    sky_enabled: u32,                //  4  → 48
-    inv_view_proj: [[f32; 4]; 4],    // 64  → 112
-    sky_turbidity: f32,              //  4
-    sky_exposure: f32,               //  4
-    sky_sun_size: f32,               //  4
-    _pad: f32,                       //  4  → 128
+    camera_world_pos: [f32; 4],   // 16
+    ambient: [f32; 3],            // 12
+    dir_light_count: u32,         //  4  → 32
+    ibl_strength: f32,            //  4
+    ibl_max_layer: f32,           //  4
+    bvh_root: u32,                //  4
+    sky_enabled: u32,             //  4  → 48
+    inv_view_proj: [[f32; 4]; 4], // 64  → 112
+    sky_turbidity: f32,           //  4
+    sky_exposure: f32,            //  4
+    sky_sun_size: f32,            //  4
+    _pad: f32,                    //  4  → 128
 }
 
 /// Uniform buffer (48 bytes) bound as `"forward_lighting"` for the OIT forward lit pass.
@@ -63,13 +65,13 @@ struct DeferredLightingConstants {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct ForwardLightingUniforms {
-    camera_world_pos: [f32; 4],  // 16
-    ambient: [f32; 3],           // 12
-    dir_light_count: u32,        //  4  → 32
-    ibl_strength: f32,           //  4
-    ibl_max_layer: f32,          //  4
-    bvh_root: u32,               //  4
-    _pad: f32,                   //  4  → 48
+    camera_world_pos: [f32; 4], // 16
+    ambient: [f32; 3],          // 12
+    dir_light_count: u32,       //  4  → 32
+    ibl_strength: f32,          //  4
+    ibl_max_layer: f32,         //  4
+    bvh_root: u32,              //  4
+    _pad: f32,                  //  4  → 48
 }
 
 /// Selects how opaque geometry is rendered.
@@ -136,7 +138,12 @@ pub struct SkyConfig {
 
 impl Default for SkyConfig {
     fn default() -> Self {
-        Self { turbidity: 2.5, exposure: 1.0, sun_size_deg: 0.53, enabled: true }
+        Self {
+            turbidity: 2.5,
+            exposure: 1.0,
+            sun_size_deg: 0.53,
+            enabled: true,
+        }
     }
 }
 
@@ -229,15 +236,18 @@ impl DeferredPass {
         let lighting_program = engine.load_shader(engine_shader("deferred_lighting.slang"))?;
         let csm = CsmPass::with_config(engine, csm_config)?;
 
-        let flat_normal_map = engine.generate_texture_2d("flat_normal_map", 1, 1, |_, _| {
-            [128, 128, 255, 255]
-        })?;
+        let flat_normal_map =
+            engine.generate_texture_2d("flat_normal_map", 1, 1, |_, _| [128, 128, 255, 255])?;
 
         let brdf_lut = compute_brdf_lut(engine)?;
 
         let black_env = engine.create_image(crate::ImageDesc {
             dimension: crate::ImageDimension::D2,
-            extent: sturdy_engine_core::Extent3d { width: 1, height: 1, depth: 1 },
+            extent: sturdy_engine_core::Extent3d {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
             mip_levels: 1,
             layers: SPECULAR_LAYER_COUNT as u16,
             samples: 1,
@@ -285,11 +295,18 @@ impl DeferredPass {
         // 1×1 Depth32Float placeholder for unbound spot shadow slots.
         let black_spot_depth = engine.create_image(crate::ImageDesc {
             dimension: crate::ImageDimension::D2,
-            extent: sturdy_engine_core::Extent3d { width: 1, height: 1, depth: 1 },
-            mip_levels: 1, layers: 1, samples: 1,
+            extent: sturdy_engine_core::Extent3d {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            mip_levels: 1,
+            layers: 1,
+            samples: 1,
             format: crate::Format::Depth32Float,
             usage: crate::ImageUsage::DEPTH_STENCIL | crate::ImageUsage::SAMPLED,
-            transient: false, clear_value: None,
+            transient: false,
+            clear_value: None,
             debug_name: Some("black_spot_depth"),
         })?;
 
@@ -301,7 +318,7 @@ impl DeferredPass {
         let default_env = EnvironmentMap::studio(engine)?;
 
         let blend_sh9_buf = engine.create_buffer(crate::BufferDesc {
-            size: 9 * 16,  // 9 × float4
+            size: 9 * 16, // 9 × float4
             usage: crate::BufferUsage::STORAGE | crate::BufferUsage::COPY_DST,
         })?;
         blend_sh9_buf.write(0, &vec![0u8; 9 * 16])?;
@@ -412,8 +429,8 @@ impl DeferredPass {
     pub fn clear_environment_map(&mut self) {
         self.environment_map = None;
         self.blend_target = None;
-        self.blend_alpha  = 0.0;
-        self.blend_step   = 0.0;
+        self.blend_alpha = 0.0;
+        self.blend_step = 0.0;
     }
 
     /// Begin a smooth transition to `target` over `frames` rendered frames.
@@ -430,8 +447,8 @@ impl DeferredPass {
     pub fn blend_to_environment_map(&mut self, target: EnvironmentMap, frames: u32) {
         let frames = frames.max(1);
         self.blend_target = Some(target);
-        self.blend_alpha  = 0.0;
-        self.blend_step   = 1.0 / frames as f32;
+        self.blend_alpha = 0.0;
+        self.blend_step = 1.0 / frames as f32;
     }
 
     /// Returns `true` if a blend transition is currently in progress.
@@ -480,11 +497,11 @@ impl DeferredPass {
             return Vec::new();
         }
 
-        let lighting_path     = engine_shader("deferred_lighting.slang");
-        let gbuffer_path      = engine_shader("gbuffer_fragment.slang");
-        let forward_path      = engine_shader("forward_opaque.slang");
-        let brdf_path         = engine_shader("brdf.slang");
-        let mat_surface_path  = engine_shader("material_surface.slang");
+        let lighting_path = engine_shader("deferred_lighting.slang");
+        let gbuffer_path = engine_shader("gbuffer_fragment.slang");
+        let forward_path = engine_shader("forward_opaque.slang");
+        let brdf_path = engine_shader("brdf.slang");
+        let mat_surface_path = engine_shader("material_surface.slang");
 
         let mut diags = Vec::new();
         let mut invalidate_cache = false;
@@ -505,14 +522,19 @@ impl DeferredPass {
                     self.forward_opaque_program.reload_fragment(),
                 ] {
                     if let Err(e) = result {
-                        if error.is_none() { error = Some(e.to_string()); }
+                        if error.is_none() {
+                            error = Some(e.to_string());
+                        }
                         success = false;
                     }
                 }
             } else if path == lighting_path {
                 match self.lighting_program.reload() {
                     Ok(_) => {}
-                    Err(e) => { error = Some(e.to_string()); success = false; }
+                    Err(e) => {
+                        error = Some(e.to_string());
+                        success = false;
+                    }
                 }
             } else if path == gbuffer_path {
                 // The default G-Buffer program changed — also invalidate variants
@@ -525,11 +547,18 @@ impl DeferredPass {
             } else if path == forward_path {
                 match self.forward_opaque_program.reload_fragment() {
                     Ok(_) => {}
-                    Err(e) => { error = Some(e.to_string()); success = false; }
+                    Err(e) => {
+                        error = Some(e.to_string());
+                        success = false;
+                    }
                 }
             }
 
-            diags.push(ShaderReloadDiagnostic { path, success, error });
+            diags.push(ShaderReloadDiagnostic {
+                path,
+                success,
+                error,
+            });
         }
 
         if invalidate_cache {
@@ -616,7 +645,11 @@ impl DeferredPass {
         let ext = output.desc().extent;
         let gbuffer_img = |name: &'static str, format: Format| ImageDesc {
             dimension: ImageDimension::D2,
-            extent: Extent3d { width: ext.width, height: ext.height, depth: 1 },
+            extent: Extent3d {
+                width: ext.width,
+                height: ext.height,
+                depth: 1,
+            },
             mip_levels: 1,
             layers: 1,
             samples: 1,
@@ -630,7 +663,11 @@ impl DeferredPass {
         // for world position reconstruction.
         let depth_desc = ImageDesc {
             dimension: ImageDimension::D2,
-            extent: Extent3d { width: ext.width, height: ext.height, depth: 1 },
+            extent: Extent3d {
+                width: ext.width,
+                height: ext.height,
+                depth: 1,
+            },
             mip_levels: 1,
             layers: 1,
             samples: 1,
@@ -641,9 +678,18 @@ impl DeferredPass {
             debug_name: Some("gbuffer_depth"),
         };
 
-        let g0    = frame.image("gbuffer_albedo_metallic", gbuffer_img("gbuffer_albedo_metallic", Format::Rgba8Unorm  ))?;
-        let g1    = frame.image("gbuffer_normal_rough",    gbuffer_img("gbuffer_normal_rough",    Format::Rgba16Float ))?;
-        let g2    = frame.image("gbuffer_emissive",        gbuffer_img("gbuffer_emissive",        Format::Rgba16Float ))?;
+        let g0 = frame.image(
+            "gbuffer_albedo_metallic",
+            gbuffer_img("gbuffer_albedo_metallic", Format::Rgba8Unorm),
+        )?;
+        let g1 = frame.image(
+            "gbuffer_normal_rough",
+            gbuffer_img("gbuffer_normal_rough", Format::Rgba16Float),
+        )?;
+        let g2 = frame.image(
+            "gbuffer_emissive",
+            gbuffer_img("gbuffer_emissive", Format::Rgba16Float),
+        )?;
         // G3 (world_pos) removed — reconstructed from depth in deferred_lighting.slang.
         let depth = frame.image("gbuffer_depth", depth_desc)?;
 
@@ -658,7 +704,7 @@ impl DeferredPass {
 
         if self.render_path == RenderPath::DeferredThenForward {
             let color_targets: &[&GraphImage] = &[&g0, &g1, &g2];
-            let primary    = color_targets[0];
+            let primary = color_targets[0];
             let additional = &color_targets[1..];
 
             // Step A: collect (hash, name, source) for materials not yet compiled or failed.
@@ -668,7 +714,13 @@ impl DeferredPass {
                     let h = mat.content_hash();
                     !self.variant_cache.contains_key(&h) && !self.failed_variants.contains_key(&h)
                 })
-                .map(|mat| (mat.content_hash(), mat.name.clone(), mat.generate_gbuffer_source()))
+                .map(|mat| {
+                    (
+                        mat.content_hash(),
+                        mat.name.clone(),
+                        mat.generate_gbuffer_source(),
+                    )
+                })
                 .collect();
 
             // Step B: compile missing variants — catch errors and emit readable diagnostics.
@@ -689,7 +741,9 @@ impl DeferredPass {
                         uses_depth: true,
                     },
                 ) {
-                    Ok(program) => { self.variant_cache.insert(key, program); }
+                    Ok(program) => {
+                        self.variant_cache.insert(key, program);
+                    }
                     Err(e) => {
                         let msg = format!("{e}");
                         eprintln!(
@@ -705,13 +759,21 @@ impl DeferredPass {
 
             // Step C: draw each opaque batch into the G-Buffer.
             for (mesh_idx, instance_buf_opt, instance_count) in scene.drawable_batches() {
-                let instance_buf = match instance_buf_opt { Some(b) => b, None => continue };
-                if instance_count == 0 { continue; }
+                let instance_buf = match instance_buf_opt {
+                    Some(b) => b,
+                    None => continue,
+                };
+                if instance_count == 0 {
+                    continue;
+                }
                 let mesh = scene.mesh_at(mesh_idx);
 
-                let mat_hash = scene.unified_material_at(mesh_idx).map(|m| m.content_hash());
+                let mat_hash = scene
+                    .unified_material_at(mesh_idx)
+                    .map(|m| m.content_hash());
                 let program: &MeshProgram = match mat_hash {
-                    Some(h) => self.variant_cache
+                    Some(h) => self
+                        .variant_cache
                         .get(&h)
                         .unwrap_or(&self.default_gbuffer_program),
                     None => &self.default_gbuffer_program,
@@ -721,13 +783,20 @@ impl DeferredPass {
                 if let Some(mat_buf) = scene.material_gpu_buffer_at(mesh_idx) {
                     frame.bind_buffer("material_desc", mat_buf);
                 }
-                let nmap: &crate::Image = scene.normal_map_at(mesh_idx)
+                let nmap: &crate::Image = scene
+                    .normal_map_at(mesh_idx)
                     .map(|arc| arc.as_ref())
                     .unwrap_or(&self.flat_normal_map);
                 frame.bind_image("normal_map", nmap);
 
                 primary.draw_mesh_instanced_mrt_with_push_constants_and_depth(
-                    additional, mesh, program, instance_buf, instance_count, &constants, Some(&depth),
+                    additional,
+                    mesh,
+                    program,
+                    instance_buf,
+                    instance_count,
+                    &constants,
+                    Some(&depth),
                 )?;
             }
 
@@ -740,22 +809,32 @@ impl DeferredPass {
             // ForwardOnly: draw all opaque meshes directly into the HDR output.
             // Depth testing uses `depth` to give correct z-order.
             for (mesh_idx, instance_buf_opt, instance_count) in scene.drawable_batches() {
-                let instance_buf = match instance_buf_opt { Some(b) => b, None => continue };
-                if instance_count == 0 { continue; }
+                let instance_buf = match instance_buf_opt {
+                    Some(b) => b,
+                    None => continue,
+                };
+                if instance_count == 0 {
+                    continue;
+                }
                 let mesh = scene.mesh_at(mesh_idx);
 
                 frame.bind_buffer("instances", instance_buf);
                 if let Some(mat_buf) = scene.material_gpu_buffer_at(mesh_idx) {
                     frame.bind_buffer("material_desc", mat_buf);
                 }
-                let nmap: &crate::Image = scene.normal_map_at(mesh_idx)
+                let nmap: &crate::Image = scene
+                    .normal_map_at(mesh_idx)
                     .map(|arc| arc.as_ref())
                     .unwrap_or(&self.flat_normal_map);
                 frame.bind_image("normal_map", nmap);
 
                 output.draw_mesh_instanced_with_push_constants_and_depth(
-                    mesh, &self.forward_opaque_program,
-                    instance_buf, instance_count, &constants, Some(&depth),
+                    mesh,
+                    &self.forward_opaque_program,
+                    instance_buf,
+                    instance_count,
+                    &constants,
+                    Some(&depth),
                 )?;
             }
             depth.register_as("gbuffer_depth");
@@ -765,13 +844,17 @@ impl DeferredPass {
 
         // ── 7. Rebuild BVH if lights changed, bind IBL + BVH + run deferred ──
         // Rebuild the light BVH when the point/spot light lists change.
-        let point_offset  = 1u32;
-        let spot_offset   = point_offset  + scene.point_lights.len() as u32;
-        let rect_offset   = spot_offset   + scene.spot_lights.len() as u32;
-        let sphere_offset = rect_offset   + scene.rect_lights.len() as u32;
-        let disk_offset   = sphere_offset + scene.sphere_area_lights.len() as u32;
-        let any_bvh_lights = scene.point_lights.len() + scene.spot_lights.len()
-            + scene.rect_lights.len() + scene.sphere_area_lights.len() + scene.disk_lights.len() > 0;
+        let point_offset = 1u32;
+        let spot_offset = point_offset + scene.point_lights.len() as u32;
+        let rect_offset = spot_offset + scene.spot_lights.len() as u32;
+        let sphere_offset = rect_offset + scene.rect_lights.len() as u32;
+        let disk_offset = sphere_offset + scene.sphere_area_lights.len() as u32;
+        let any_bvh_lights = scene.point_lights.len()
+            + scene.spot_lights.len()
+            + scene.rect_lights.len()
+            + scene.sphere_area_lights.len()
+            + scene.disk_lights.len()
+            > 0;
         if self.light_bvh.dirty || any_bvh_lights {
             self.light_bvh.rebuild(
                 engine,
@@ -789,6 +872,7 @@ impl DeferredPass {
         }
 
         let (bvh_buf, bvh_root) = if !self.light_bvh.nodes.is_empty() {
+            //panic allowed, reason = "light BVH upload proved gpu_buffer exists before non-empty use"
             (self.light_bvh.gpu_buffer.as_ref().unwrap(), 0u32)
         } else {
             (&self.empty_bvh_buf, crate::light_bvh::BVH_EMPTY)
@@ -822,10 +906,10 @@ impl DeferredPass {
             frame.bind_image("point_shadow_front_1", &self.black_spot_depth);
             frame.bind_image("point_shadow_front_2", &self.black_spot_depth);
             frame.bind_image("point_shadow_front_3", &self.black_spot_depth);
-            frame.bind_image("point_shadow_back_0",  &self.black_spot_depth);
-            frame.bind_image("point_shadow_back_1",  &self.black_spot_depth);
-            frame.bind_image("point_shadow_back_2",  &self.black_spot_depth);
-            frame.bind_image("point_shadow_back_3",  &self.black_spot_depth);
+            frame.bind_image("point_shadow_back_0", &self.black_spot_depth);
+            frame.bind_image("point_shadow_back_1", &self.black_spot_depth);
+            frame.bind_image("point_shadow_back_2", &self.black_spot_depth);
+            frame.bind_image("point_shadow_back_3", &self.black_spot_depth);
         }
 
         // Advance blend transition if one is active.
@@ -835,7 +919,7 @@ impl DeferredPass {
                 // Transition complete — commit the target as the current env.
                 self.environment_map = self.blend_target.take();
                 self.blend_alpha = 0.0;
-                self.blend_step  = 0.0;
+                self.blend_step = 0.0;
             }
         }
 
@@ -864,12 +948,12 @@ impl DeferredPass {
                 self.blend_sh9_buf.write(0, &blended)?;
                 frame.bind_buffer("sh9_irradiance", &self.blend_sh9_buf);
             } else {
-                frame.bind_image("env_specular",    &env.specular);
+                frame.bind_image("env_specular", &env.specular);
                 frame.bind_buffer("sh9_irradiance", &env.sh9_buffer);
             }
             (1.0f32, (SPECULAR_LAYER_COUNT - 1) as f32)
         } else {
-            frame.bind_image("env_specular",    &self.black_env);
+            frame.bind_image("env_specular", &self.black_env);
             frame.bind_buffer("sh9_irradiance", &self.zero_sh9);
             (0.0f32, (SPECULAR_LAYER_COUNT - 1) as f32)
         };
@@ -885,7 +969,8 @@ impl DeferredPass {
             bvh_root,
             _pad: 0.0,
         };
-        self.forward_lighting_buf.write(0, bytemuck::bytes_of(&fwd_uniforms))?;
+        self.forward_lighting_buf
+            .write(0, bytemuck::bytes_of(&fwd_uniforms))?;
         frame.bind_buffer("forward_lighting", &self.forward_lighting_buf);
 
         // Deferred lighting fullscreen pass — only in DeferredThenForward mode.
@@ -902,11 +987,11 @@ impl DeferredPass {
                     ibl_strength,
                     ibl_max_layer,
                     bvh_root,
-                    sky_enabled:   sky.enabled as u32,
+                    sky_enabled: sky.enabled as u32,
                     inv_view_proj: inv_vp,
                     sky_turbidity: sky.turbidity,
-                    sky_exposure:  sky.exposure,
-                    sky_sun_size:  sun_cos,
+                    sky_exposure: sky.exposure,
+                    sky_sun_size: sun_cos,
                     _pad: 0.0,
                 },
             )?;
@@ -924,13 +1009,15 @@ impl DeferredPass {
 /// Extract camera near and far clip planes from a RH perspective projection matrix.
 fn extract_near_far(proj: Mat4) -> (f32, f32) {
     // For glam perspective_rh:  col3.z = near*far/(near-far),  col2.z = far/(near-far)
-    let a = proj.z_axis.z;   // far/(near-far)
-    let b = proj.w_axis.z;   // near*far/(near-far)
+    let a = proj.z_axis.z; // far/(near-far)
+    let b = proj.w_axis.z; // near*far/(near-far)
     // a = far/(near-far) → near-far = far/a → near = far/a + far
     // b = near*far/(near-far) = near * a_inv_... easier:
     // b/a = near → near = b/a  (note: both negative for RH looking down -Z)
-    if a.abs() < 1e-7 { return (0.1, 1000.0); } // orthographic fallback
+    if a.abs() < 1e-7 {
+        return (0.1, 1000.0);
+    } // orthographic fallback
     let near = b / a;
-    let far  = near * a / (a - 1.0 + 1e-7);
+    let far = near * a / (a - 1.0 + 1e-7);
     (near.abs().max(0.01), far.abs().max(near.abs() + 1.0))
 }

@@ -97,11 +97,17 @@ pub struct ShaderWatcher {
 }
 
 impl Default for ShaderWatcher {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ShaderWatcher {
-    pub fn new() -> Self { Self { entries: Vec::new() } }
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
 
     /// Register a shader file path for change detection.
     ///
@@ -139,7 +145,9 @@ impl ShaderWatcher {
     }
 
     /// Remove all watched entries.
-    pub fn clear(&mut self) { self.entries.clear(); }
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
 
     /// Return paths whose modification time has changed since the last poll.
     /// Updates internal timestamps so subsequent calls only report new changes.
@@ -182,9 +190,13 @@ impl ShaderWatcher {
                 if let Some(src) = program.source_path() {
                     if src == path {
                         match program.reload() {
-                            Ok(true) => { reloaded = true; }
+                            Ok(true) => {
+                                reloaded = true;
+                            }
                             Ok(false) => {}
-                            Err(e) => { last_err = Some(e.to_string()); }
+                            Err(e) => {
+                                last_err = Some(e.to_string());
+                            }
                         }
                     }
                 }

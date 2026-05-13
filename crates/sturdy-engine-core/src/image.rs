@@ -5,12 +5,81 @@ use crate::{Error, Result};
 pub enum Format {
     #[default]
     Unknown = 0,
+
+    // ── Uncompressed colour ───────────────────────────────────────────────────
     Rgba8Unorm = 1,
     Bgra8Unorm = 2,
     Rgba16Float = 3,
     Rgba32Float = 4,
+    /// Single-channel 8-bit unsigned normalised. Useful for roughness/AO
+    /// textures before BC4 compression.
+    R8Unorm = 5,
+    /// Two-channel 8-bit unsigned normalised. Useful for normal map XY channels
+    /// before BC5 compression.
+    Rg8Unorm = 6,
+
+    // ── Block-compressed formats ──────────────────────────────────────────────
+    // All BC formats require width and height that are multiples of 4.
+    // They support SAMPLED | COPY_SRC | COPY_DST usage only (not STORAGE or
+    // RENDER_TARGET). The memory layout is tightly-packed 4×4 blocks.
+    /// BC4 — one-channel, 0.5 bytes/texel. Lossless for greyscale data.
+    /// Ideal for roughness, AO, metallic, height maps. Each 4×4 block = 8 bytes.
+    Bc4Unorm = 10,
+    /// BC5 — two-channel, 1 byte/texel. XY normal maps (reconstruct Z in shader
+    /// via `z = sqrt(1 - x² - y²)`). Each 4×4 block = 16 bytes.
+    Bc5Unorm = 11,
+    /// BC3 (DXT5) — four-channel RGBA, 1 byte/texel. BC1 colour + BC4 alpha.
+    /// Good general-purpose colour+alpha compression. Use when BC7 is unavailable.
+    /// Each 4×4 block = 16 bytes.
+    Bc3Unorm = 12,
+    /// BC3 sRGB-encoded. RGB decoded as sRGB on sample. Use for sRGB albedo
+    /// textures when a BC7 encoder is not available.
+    Bc3UnormSrgb = 13,
+    /// BC7 — four-channel, 1 byte/texel. High-quality RGBA with per-block mode
+    /// selection. Best choice for albedo/diffuse/emissive (linear data).
+    /// Each 4×4 block = 16 bytes. Requires a BC7-capable encoder.
+    Bc7Unorm = 15,
+    /// BC7 sRGB-encoded. Same block layout as `Bc7Unorm` but the GPU decodes
+    /// RGB channels as sRGB. Use for sRGB albedo textures (the majority of
+    /// game-ready art assets). Requires a BC7-capable encoder.
+    Bc7UnormSrgb = 16,
+    /// BC6H unsigned float — three-channel HDR, 1 byte/texel. For emissive maps
+    /// and environment maps with values outside [0, 1]. Each 4×4 block = 16 bytes.
+    Bc6hUfloat = 17,
+
+    // ── Depth ─────────────────────────────────────────────────────────────────
     Depth32Float = 100,
     Depth24Stencil8 = 101,
+}
+
+impl Format {
+    /// Returns `true` for BC1–BC7 block-compressed formats.
+    pub fn is_block_compressed(self) -> bool {
+        matches!(
+            self,
+            Format::Bc3Unorm
+                | Format::Bc3UnormSrgb
+                | Format::Bc4Unorm
+                | Format::Bc5Unorm
+                | Format::Bc7Unorm
+                | Format::Bc7UnormSrgb
+                | Format::Bc6hUfloat
+        )
+    }
+
+    /// Bytes per 4×4 block for BC formats; 0 for non-BC formats.
+    pub fn bc_block_bytes(self) -> u64 {
+        match self {
+            Format::Bc4Unorm => 8,
+            Format::Bc3Unorm
+            | Format::Bc3UnormSrgb
+            | Format::Bc5Unorm
+            | Format::Bc7Unorm
+            | Format::Bc7UnormSrgb
+            | Format::Bc6hUfloat => 16,
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]

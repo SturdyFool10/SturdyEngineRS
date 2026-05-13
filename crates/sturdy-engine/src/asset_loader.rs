@@ -32,7 +32,97 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use crate::{Engine, FrameSyncReason, Image, Result, TextureUploadDesc};
+use crate::texture_compression::compress_texture;
+use crate::{Engine, Format, FrameSyncReason, Image, Result, TextureUploadDesc};
+
+// ── PendingUpload ─────────────────────────────────────────────────────────────
+
+/// A texture that has been decoded and compressed on a background thread and is
+/// waiting for its GPU upload to be performed on the render thread.
+///
+/// Stored in `Engine::pending_uploads`; drained by `Engine::drain_pending_uploads`.
+pub(crate) struct PendingUpload {
+    pub handle: AssetHandle<Image>,
+    pub name: String,
+    pub data: Vec<u8>,
+    pub format: Format,
+    pub width: u32,
+    pub height: u32,
+}
+
+// ── CPU-only decode+compress ──────────────────────────────────────────────────
+
+/// Decode and (optionally) compress a texture file — CPU work only, no GPU.
+///
+/// Returns a `PendingUpload` ready to be submitted to the GPU. Called from
+/// rayon worker threads by `load_texture_2d_from_path_async`.
+pub(crate) fn decode_and_compress(path: &Path, name: &str) -> Result<(Vec<u8>, Format, u32, u32)> {
+    let dyn_image = image::open(path)
+        .map_err(|e| crate::Error::Unknown(format!("failed to open '{}': {e}", path.display())))?;
+    let source_channels = dyn_image.color().channel_count() as u32;
+    let rgba = dyn_image.into_rgba8();
+    let (width, height) = (rgba.width(), rgba.height());
+    let pixels: Vec<u8> = rgba.into_raw();
+
+    if let Some(compressed) = compress_texture(
+        &pixels,
+        width,
+        height,
+        source_channels,
+        name,
+        Some(path),
+        true,
+    ) {
+        return Ok((
+            compressed.data,
+            compressed.format,
+            compressed.width,
+            compressed.height,
+        ));
+    }
+    Ok((pixels, Format::Rgba8Unorm, width, height))
+}
+
+/// Async variant of `load_texture_2d_from_path`: returns a `Loading` handle
+/// immediately and spawns a rayon task to decode+compress, then pushes to the
+/// engine's `pending_uploads` queue for GPU upload at frame-start drain.
+pub(crate) fn load_texture_2d_async(
+    path: impl AsRef<Path>,
+    pending: std::sync::Arc<std::sync::Mutex<Vec<PendingUpload>>>,
+) -> AssetHandle<Image> {
+    let path = path.as_ref().to_owned();
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("texture")
+        .to_owned();
+
+    let handle: AssetHandle<Image> = AssetHandle::new_loading();
+    let handle_bg = handle.clone();
+
+    rayon::spawn(move || match decode_and_compress(&path, &name) {
+        Ok((data, format, width, height)) => {
+            let upload = PendingUpload {
+                handle: handle_bg,
+                name,
+                data,
+                format,
+                width,
+                height,
+            };
+            //panic allowed, reason = "poisoned internal pending upload queue is unrecoverable"
+            pending
+                .lock()
+                .expect("pending_uploads mutex poisoned")
+                .push(upload);
+        }
+        Err(e) => {
+            handle_bg.set_failed(format!("load_texture_2d '{}': {e}", path.display()));
+        }
+    });
+
+    handle
+}
 
 // ── LoadState ────────────────────────────────────────────────────────────────
 
@@ -114,6 +204,7 @@ pub struct AssetHandle<T> {
 
 impl<T> AssetHandle<T> {
     /// Create a handle that immediately reports `Ready`.
+    #[allow(dead_code)]
     pub(crate) fn new_ready(value: T) -> Self {
         Self {
             inner: Arc::new(Mutex::new(LoadState::Ready(value))),
@@ -121,6 +212,7 @@ impl<T> AssetHandle<T> {
     }
 
     /// Create a handle that immediately reports `Failed`.
+    #[allow(dead_code)]
     pub(crate) fn new_failed(reason: impl Into<String>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(LoadState::Failed(reason.into()))),
@@ -149,7 +241,10 @@ impl<T> AssetHandle<T> {
 
     #[allow(dead_code)]
     pub(crate) fn set_degraded(&self, asset: T, reason: impl Into<String>) {
-        *self.lock() = LoadState::Degraded { asset, reason: reason.into() };
+        *self.lock() = LoadState::Degraded {
+            asset,
+            reason: reason.into(),
+        };
     }
 
     // ── Public state queries ───────────────────────────────────────────────
@@ -217,7 +312,9 @@ impl<T: Clone> AssetHandle<T> {
 
 impl<T> Clone for AssetHandle<T> {
     fn clone(&self) -> Self {
-        Self { inner: Arc::clone(&self.inner) }
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
     }
 }
 
@@ -252,12 +349,13 @@ impl<T: fmt::Debug> fmt::Debug for AssetHandle<T> {
 ///
 /// Supports `.hdr` (RGBE radiance format) and `.exr` (OpenEXR) via the
 /// `image` crate's `hdr` and `exr` features.
-pub(crate) fn load_hdr_texture_from_path(
-    engine: &Engine,
-    path: impl AsRef<Path>,
-) -> Result<Image> {
+pub(crate) fn load_hdr_texture_from_path(engine: &Engine, path: impl AsRef<Path>) -> Result<Image> {
     let path = path.as_ref();
-    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("hdr_tex").to_owned();
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("hdr_tex")
+        .to_owned();
     load_and_upload_hdr(engine, path, &name, false)
 }
 
@@ -267,7 +365,11 @@ pub(crate) fn load_hdr_texture_32f_from_path(
     path: impl AsRef<Path>,
 ) -> Result<Image> {
     let path = path.as_ref();
-    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("hdr_tex").to_owned();
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("hdr_tex")
+        .to_owned();
     load_and_upload_hdr(engine, path, &name, true)
 }
 
@@ -285,37 +387,25 @@ fn load_and_upload_hdr(engine: &Engine, path: &Path, name: &str, full_32f: bool)
     let image = if full_32f {
         // Full f32 — 16 bytes/pixel.
         let bytes: &[u8] = bytemuck::cast_slice(raw);
-        frame.upload_texture_2d(name, TextureUploadDesc::sampled_rgba32f(width, height), bytes)?
+        frame.upload_texture_2d(
+            name,
+            TextureUploadDesc::sampled_rgba32f(width, height),
+            bytes,
+        )?
     } else {
         // Convert f32 → f16 before upload — 8 bytes/pixel.
         let f16_pixels: Vec<half::f16> = raw.iter().map(|&v| half::f16::from_f32(v)).collect();
         let bytes: &[u8] = bytemuck::cast_slice(&f16_pixels);
-        frame.upload_texture_2d(name, TextureUploadDesc::sampled_rgba16f(width, height), bytes)?
+        frame.upload_texture_2d(
+            name,
+            TextureUploadDesc::sampled_rgba16f(width, height),
+            bytes,
+        )?
     };
     let _ = image.set_debug_name(&format!("hdr-{name}"));
     frame.flush_with_reason(FrameSyncReason::CompatibilityShim)?;
     frame.wait_with_reason(FrameSyncReason::CompatibilityShim)?;
     Ok(image)
-}
-
-pub(crate) fn load_texture_2d_from_path(
-    engine: &Engine,
-    path: impl AsRef<Path>,
-) -> AssetHandle<Image> {
-    let path = path.as_ref();
-    let name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("texture")
-        .to_owned();
-
-    match load_and_upload(engine, path, &name) {
-        Ok(image) => AssetHandle::new_ready(image),
-        Err(err) => AssetHandle::new_failed(format!(
-            "load_texture_2d '{}': {err}",
-            path.display()
-        )),
-    }
 }
 
 pub(crate) fn load_and_upload_blocking(engine: &Engine, path: &Path, name: &str) -> Result<Image> {
@@ -324,14 +414,40 @@ pub(crate) fn load_and_upload_blocking(engine: &Engine, path: &Path, name: &str)
 
 fn load_and_upload(engine: &Engine, path: &Path, name: &str) -> Result<Image> {
     // Decode via the `image` crate (handles PNG, JPEG, WebP, BMP, …)
-    let dyn_image = image::open(path).map_err(|e| {
-        crate::Error::Unknown(format!("failed to open '{}': {e}", path.display()))
-    })?;
+    let dyn_image = image::open(path)
+        .map_err(|e| crate::Error::Unknown(format!("failed to open '{}': {e}", path.display())))?;
 
+    let source_channels = dyn_image.color().channel_count() as u32;
     let rgba = dyn_image.into_rgba8();
     let (width, height) = (rgba.width(), rgba.height());
     let pixels: Vec<u8> = rgba.into_raw();
 
+    // Attempt block compression. Falls back to Rgba8Unorm on failure or for
+    // textures smaller than 4×4 pixels.
+    if let Some(compressed) = compress_texture(
+        &pixels,
+        width,
+        height,
+        source_channels,
+        name,
+        Some(path),
+        true, // prefer_compressed
+    ) {
+        let desc = TextureUploadDesc {
+            width: compressed.width,
+            height: compressed.height,
+            format: compressed.format,
+            usage: crate::ImageUsage::SAMPLED,
+        };
+        let mut frame = engine.begin_frame()?;
+        let image = frame.upload_texture_2d(name, desc, &compressed.data)?;
+        let _ = image.set_debug_name(&format!("tex2d-{name}"));
+        frame.flush_with_reason(FrameSyncReason::CompatibilityShim)?;
+        frame.wait_with_reason(FrameSyncReason::CompatibilityShim)?;
+        return Ok(image);
+    }
+
+    // Fallback: uncompressed Rgba8Unorm.
     let mut frame = engine.begin_frame()?;
     let image = frame.upload_texture_2d(
         name,
@@ -411,7 +527,9 @@ pub struct AssetCache<T> {
 impl<T> AssetCache<T> {
     /// Create an empty cache.
     pub fn new() -> Self {
-        Self { entries: HashMap::new() }
+        Self {
+            entries: HashMap::new(),
+        }
     }
 
     /// Return an existing handle for `path`, or `None` if not cached.
@@ -474,6 +592,68 @@ impl<T: fmt::Debug> fmt::Debug for AssetCache<T> {
     }
 }
 
-fn canonical(path: impl AsRef<Path>) -> PathBuf {
+pub(crate) fn canonical(path: impl AsRef<Path>) -> PathBuf {
     std::fs::canonicalize(&path).unwrap_or_else(|_| path.as_ref().to_path_buf())
+}
+
+// ── Async HDR loading ─────────────────────────────────────────────────────────
+
+/// Async variant of `load_hdr_texture`: returns an `AssetHandle<Image>` in the
+/// `Loading` state immediately and spawns a rayon worker to decode the HDR/EXR
+/// file and push it to the pending upload queue.
+pub(crate) fn load_hdr_texture_async(
+    path: impl AsRef<Path>,
+    pending: std::sync::Arc<std::sync::Mutex<Vec<PendingUpload>>>,
+    full_32f: bool,
+) -> AssetHandle<Image> {
+    let path = path.as_ref().to_owned();
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("hdr_tex")
+        .to_owned();
+
+    let handle: AssetHandle<Image> = AssetHandle::new_loading();
+    let handle_bg = handle.clone();
+
+    rayon::spawn(move || match decode_hdr(&path, &name, full_32f) {
+        Ok((data, format, width, height)) => {
+            let upload = PendingUpload {
+                handle: handle_bg,
+                name,
+                data,
+                format,
+                width,
+                height,
+            };
+            //panic allowed, reason = "poisoned internal pending upload queue is unrecoverable"
+            pending
+                .lock()
+                .expect("pending_uploads mutex poisoned")
+                .push(upload);
+        }
+        Err(e) => {
+            handle_bg.set_failed(format!("load_hdr_texture '{}': {e}", path.display()));
+        }
+    });
+
+    handle
+}
+
+fn decode_hdr(path: &Path, _name: &str, full_32f: bool) -> Result<(Vec<u8>, Format, u32, u32)> {
+    let dyn_image = image::open(path).map_err(|e| {
+        crate::Error::Unknown(format!("failed to open hdr '{}': {e}", path.display()))
+    })?;
+    let rgba_f32 = dyn_image.into_rgba32f();
+    let (width, height) = (rgba_f32.width(), rgba_f32.height());
+    let raw: &[f32] = rgba_f32.as_raw();
+
+    if full_32f {
+        let bytes: Vec<u8> = bytemuck::cast_slice(raw).to_vec();
+        Ok((bytes, Format::Rgba32Float, width, height))
+    } else {
+        let f16_pixels: Vec<half::f16> = raw.iter().map(|&v| half::f16::from_f32(v)).collect();
+        let bytes: Vec<u8> = bytemuck::cast_slice(&f16_pixels).to_vec();
+        Ok((bytes, Format::Rgba16Float, width, height))
+    }
 }

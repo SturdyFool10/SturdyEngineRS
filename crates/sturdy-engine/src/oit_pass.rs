@@ -14,9 +14,8 @@ use std::path::PathBuf;
 
 use crate::{
     Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, Image, ImageDesc, ImageDimension,
-    ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind, RenderFrame, Result,
-    ShaderDesc, ShaderProgram, ShaderSource, ShaderStage, push_constants,
-    scene::Scene,
+    ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind, RenderFrame, Result, ShaderDesc,
+    ShaderProgram, ShaderSource, ShaderStage, push_constants, scene::Scene,
 };
 use glam::Mat4;
 use sturdy_engine_core::Extent3d;
@@ -33,10 +32,10 @@ fn engine_shader(name: &str) -> PathBuf {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuOitFragment {
-    color_rg: u32,  // f16 R (bits 0-15) + f16 G (bits 16-31)
-    color_ba: u32,  // f16 B (bits 0-15) + f16 A (bits 16-31)
+    color_rg: u32, // f16 R (bits 0-15) + f16 G (bits 16-31)
+    color_ba: u32, // f16 B (bits 0-15) + f16 A (bits 16-31)
     depth: f32,
-    next: u32,      // OIT_INVALID = 0xFFFFFFFF
+    next: u32, // OIT_INVALID = 0xFFFFFFFF
 }
 
 /// Push constants for the OIT collect pass.
@@ -106,10 +105,10 @@ pub struct OitPass {
     flat_normal_map: Image,
 
     /// Persistent buffers, rebuilt when the framebuffer size changes.
-    head_buf:  Option<Buffer>,
+    head_buf: Option<Buffer>,
     frag_pool: Option<Buffer>,
-    counter:   Option<Buffer>,
-    current_width:  u32,
+    counter: Option<Buffer>,
+    current_width: u32,
     current_height: u32,
 }
 
@@ -127,18 +126,17 @@ impl OitPass {
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                 },
-                vertex: None,                    // uses mesh_vertex_3d.slang
+                vertex: None, // uses mesh_vertex_3d.slang
                 vertex_kind: MeshVertexKind::V3d,
-                alpha_blend: false,              // OIT handles blending itself
-                uses_depth: true,                // depth test against opaque geometry
+                alpha_blend: false, // OIT handles blending itself
+                uses_depth: true,   // depth test against opaque geometry
             },
         )?;
 
         let resolve_program = engine.load_shader(engine_shader("oit_resolve.slang"))?;
 
-        let flat_normal_map = engine.generate_texture_2d("oit_flat_normal_map", 1, 1, |_, _| {
-            [128, 128, 255, 255]
-        })?;
+        let flat_normal_map =
+            engine.generate_texture_2d("oit_flat_normal_map", 1, 1, |_, _| [128, 128, 255, 255])?;
 
         Ok(Self {
             collect_program,
@@ -160,10 +158,10 @@ impl OitPass {
         }
 
         let pixel_count = width as u64 * height as u64;
-        let pool_size   = pixel_count * self.config.average_layers as u64;
+        let pool_size = pixel_count * self.config.average_layers as u64;
 
         self.head_buf = Some(engine.create_buffer(BufferDesc {
-            size: pixel_count * 4,     // one uint per pixel
+            size: pixel_count * 4, // one uint per pixel
             usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
         })?);
         self.frag_pool = Some(engine.create_buffer(BufferDesc {
@@ -171,11 +169,11 @@ impl OitPass {
             usage: BufferUsage::STORAGE,
         })?);
         self.counter = Some(engine.create_buffer(BufferDesc {
-            size: 4,   // single uint
+            size: 4, // single uint
             usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
         })?);
 
-        self.current_width  = width;
+        self.current_width = width;
         self.current_height = height;
         Ok(())
     }
@@ -218,10 +216,13 @@ impl OitPass {
         self.ensure_buffers(engine, w, h)?;
         self.reset_buffers()?;
 
-        let head_buf   = self.head_buf.as_ref().unwrap();
-        let frag_pool  = self.frag_pool.as_ref().unwrap();
-        let counter    = self.counter.as_ref().unwrap();
-        let pool_size  = (w as u64 * h as u64 * self.config.average_layers as u64) as u32;
+        //panic allowed, reason = "ensure_buffers proves OIT head buffer exists"
+        let head_buf = self.head_buf.as_ref().unwrap();
+        //panic allowed, reason = "ensure_buffers proves OIT fragment pool exists"
+        let frag_pool = self.frag_pool.as_ref().unwrap();
+        //panic allowed, reason = "ensure_buffers proves OIT counter buffer exists"
+        let counter = self.counter.as_ref().unwrap();
+        let pool_size = (w as u64 * h as u64 * self.config.average_layers as u64) as u32;
 
         // ── 1. Depth-only prepass to populate Z (reuse the opaque depth if bound) ──
         // (The collect pass uses depth test via the depth attachment — whatever
@@ -239,9 +240,9 @@ impl OitPass {
             _pad_oit: [0.0; 2],
         };
 
-        frame.bind_buffer("oit_head_buf",  head_buf);
+        frame.bind_buffer("oit_head_buf", head_buf);
         frame.bind_buffer("oit_frag_pool", frag_pool);
-        frame.bind_buffer("oit_counter",   counter);
+        frame.bind_buffer("oit_counter", counter);
 
         // Allocate a depth-only image for the collect pass depth test.
         // Ideally we'd reuse the G-Buffer depth, but that requires the depth
@@ -249,8 +250,14 @@ impl OitPass {
         // the depth buffer is cheap and the collect pass writes no colour.
         let depth_desc = ImageDesc {
             dimension: ImageDimension::D2,
-            extent: Extent3d { width: w, height: h, depth: 1 },
-            mip_levels: 1, layers: 1, samples: 1,
+            extent: Extent3d {
+                width: w,
+                height: h,
+                depth: 1,
+            },
+            mip_levels: 1,
+            layers: 1,
+            samples: 1,
             format: Format::Depth32Float,
             usage: ImageUsage::DEPTH_STENCIL,
             transient: false,
@@ -260,8 +267,13 @@ impl OitPass {
         let oit_depth = frame.image("oit_depth", depth_desc)?;
 
         for (mesh_idx, instance_buf_opt, instance_count) in scene.translucent_batches() {
-            let instance_buf = match instance_buf_opt { Some(b) => b, None => continue };
-            if instance_count == 0 { continue; }
+            let instance_buf = match instance_buf_opt {
+                Some(b) => b,
+                None => continue,
+            };
+            if instance_count == 0 {
+                continue;
+            }
             let mesh = scene.mesh_at(mesh_idx);
 
             frame.bind_buffer("instances", instance_buf);
@@ -270,7 +282,8 @@ impl OitPass {
             }
 
             // Bind normal map: per-mesh override, or flat fallback.
-            let nmap: &Image = scene.normal_map_at(mesh_idx)
+            let nmap: &Image = scene
+                .normal_map_at(mesh_idx)
                 .map(|arc| arc.as_ref())
                 .unwrap_or(&self.flat_normal_map);
             frame.bind_image("normal_map", nmap);
@@ -290,17 +303,14 @@ impl OitPass {
 
         // ── 3. Resolve — sort + composite over the opaque HDR target ───────────
         hdr_target.register_as("opaque_hdr");
-        frame.bind_buffer("oit_head_buf",  head_buf);
+        frame.bind_buffer("oit_head_buf", head_buf);
         frame.bind_buffer("oit_frag_pool", frag_pool);
 
         let resolve_constants = OitResolveConstants {
             fb_width: w,
             _pad: [0.0; 3],
         };
-        hdr_target.execute_shader_with_constants_auto(
-            &self.resolve_program,
-            &resolve_constants,
-        )?;
+        hdr_target.execute_shader_with_constants_auto(&self.resolve_program, &resolve_constants)?;
 
         Ok(())
     }

@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use glam::Mat4;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::atomic_transform::AtomicMat4;
 

@@ -1,6 +1,7 @@
 mod adapter;
 mod alias_heaps;
 mod allocator;
+pub(crate) mod bindless;
 mod caps;
 mod commands;
 mod config;
@@ -30,6 +31,7 @@ use crate::{
     SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
 };
 
+pub use bindless::BindlessVkInfo;
 pub use config::VulkanBackendConfig;
 use device::{DeviceSelection, create_logical_device};
 use instance::{create_instance, load_entry};
@@ -56,6 +58,8 @@ pub struct VulkanBackend {
     alias_heaps: Mutex<alias_heaps::AliasHeapRegistry>,
     /// Surface whose image was most recently acquired; cleared after present.
     active_surface: Mutex<Option<SurfaceHandle>>,
+    /// Global bindless descriptor heap. `None` when `Caps::supports_bindless` is false.
+    bindless_heap: Option<bindless::BindlessHeap>,
 }
 
 impl VulkanBackend {
@@ -89,6 +93,22 @@ impl VulkanBackend {
             pipelines::PipelineRegistry::create(&logical.device, cache_data.as_deref())?;
 
         let debug_utils = debug::DebugUtils::new(&instance, &logical.device);
+
+        // Create the bindless heap if the device supports descriptor_indexing.
+        let bindless_heap = if caps.supports_bindless {
+            match bindless::BindlessHeap::create(&logical.device) {
+                Ok(heap) => Some(heap),
+                Err(e) => {
+                    eprintln!(
+                        "[SturdyEngine] bindless heap creation failed (grouped-descriptor fallback): {e}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             _entry: entry,
             instance,
@@ -106,6 +126,7 @@ impl VulkanBackend {
             surfaces: Mutex::new(surfaces::SurfaceRegistry::default()),
             alias_heaps: Mutex::new(alias_heaps::AliasHeapRegistry::default()),
             active_surface: Mutex::new(None),
+            bindless_heap,
         })
     }
 
@@ -115,6 +136,60 @@ impl VulkanBackend {
 
     pub fn graphics_queue_family(&self) -> u32 {
         self.queue_families.graphics
+    }
+
+    // ── Bindless registration ─────────────────────────────────────────────────
+
+    /// Register a sampled image in the bindless heap.
+    ///
+    /// Returns the stable `u32` index to embed in push constants or a draw-data
+    /// buffer. Returns `None` when bindless is unsupported or capacity is full.
+    pub fn register_bindless_sampled_image(&self, handle: ImageHandle) -> Option<u32> {
+        let heap = self.bindless_heap.as_ref()?;
+        let resources = self.resources.read().ok()?;
+        let view = resources.image_view(handle).ok()?;
+        heap.register_sampled_image(view)
+    }
+
+    /// Register a sampler in the bindless heap.
+    pub fn register_bindless_sampler(&self, handle: SamplerHandle) -> Option<u32> {
+        let heap = self.bindless_heap.as_ref()?;
+        let resources = self.resources.read().ok()?;
+        let sampler = resources.sampler(handle).ok()?;
+        heap.register_sampler(sampler)
+    }
+
+    /// Register a storage image in the bindless heap.
+    pub fn register_bindless_storage_image(&self, handle: ImageHandle) -> Option<u32> {
+        let heap = self.bindless_heap.as_ref()?;
+        let resources = self.resources.read().ok()?;
+        let view = resources.image_view(handle).ok()?;
+        heap.register_storage_image(view)
+    }
+
+    /// Register a storage buffer in the bindless heap.
+    pub fn register_bindless_storage_buffer(&self, handle: BufferHandle) -> Option<u32> {
+        let heap = self.bindless_heap.as_ref()?;
+        let resources = self.resources.read().ok()?;
+        let buf = resources.buffer(handle).ok()?;
+        // VK_WHOLE_SIZE (u64::MAX) means "bind the full buffer from offset 0".
+        heap.register_storage_buffer(buf, 0, u64::MAX)
+    }
+
+    /// Returns Vulkan-level info about the bindless heap for command binding.
+    ///
+    /// Used by the command recording layer to bind set 0 before draw calls
+    /// that use bindless resources. `None` when not supported.
+    pub fn bindless_vk_info(&self) -> Option<BindlessVkInfo> {
+        let heap = self.bindless_heap.as_ref()?;
+        Some(BindlessVkInfo {
+            set: heap.set,
+            set_layout: heap.set_layout,
+        })
+    }
+
+    pub fn bindless_supported(&self) -> bool {
+        self.bindless_heap.is_some()
     }
 }
 
@@ -136,17 +211,39 @@ impl Backend for VulkanBackend {
     }
 
     fn memory_budget(&self) -> Option<crate::GpuMemoryBudget> {
-        let stats = self.resources
+        //panic allowed, reason = "poisoned vulkan resource registry is unrecoverable"
+        let stats = self
+            .resources
             .read()
             .expect("vulkan resource registry rwlock poisoned")
             .allocator_stats();
         Some(crate::GpuMemoryBudget {
-            device_local_used_bytes:     stats.device_local_used_bytes,
+            device_local_used_bytes: stats.device_local_used_bytes,
             device_local_capacity_bytes: stats.device_local_capacity_bytes,
-            host_visible_used_bytes:     stats.host_visible_used_bytes,
+            host_visible_used_bytes: stats.host_visible_used_bytes,
             host_visible_capacity_bytes: stats.host_visible_capacity_bytes,
-            block_count:                 stats.block_count,
+            block_count: stats.block_count,
         })
+    }
+
+    fn register_bindless_sampled_image(&self, handle: ImageHandle) -> Option<u32> {
+        VulkanBackend::register_bindless_sampled_image(self, handle)
+    }
+
+    fn register_bindless_sampler(&self, handle: SamplerHandle) -> Option<u32> {
+        VulkanBackend::register_bindless_sampler(self, handle)
+    }
+
+    fn register_bindless_storage_image(&self, handle: ImageHandle) -> Option<u32> {
+        VulkanBackend::register_bindless_storage_image(self, handle)
+    }
+
+    fn register_bindless_storage_buffer(&self, handle: BufferHandle) -> Option<u32> {
+        VulkanBackend::register_bindless_storage_buffer(self, handle)
+    }
+
+    fn bindless_supported(&self) -> bool {
+        VulkanBackend::bindless_supported(self)
     }
 
     fn create_image(&self, handle: ImageHandle, desc: ImageDesc) -> Result<()> {
@@ -634,7 +731,6 @@ impl Backend for VulkanBackend {
             .expect("vulkan command context mutex poisoned")
             .wait_for_submission(&self.device, token)
     }
-
 
     fn present(&self) -> Result<()> {
         Err(Error::Unsupported(

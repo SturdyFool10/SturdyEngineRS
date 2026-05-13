@@ -280,25 +280,49 @@ fn buffer_compatibility(usage: BufferUsage) -> AliasCompatibilityClass {
 }
 
 fn image_size(desc: ImageDesc) -> u64 {
-    let texel_size = format_texel_size(desc.format);
-    let mut total_texels = 0u64;
+    let mut total_bytes = 0u64;
     for mip in 0..desc.mip_levels {
-        total_texels += mip_extent(desc.extent.width, mip as u32) as u64
-            * mip_extent(desc.extent.height, mip as u32) as u64
-            * mip_extent(desc.extent.depth, mip as u32) as u64
-            * desc.layers as u64
-            * desc.samples as u64;
+        let width = mip_extent(desc.extent.width, mip as u32) as u64;
+        let height = mip_extent(desc.extent.height, mip as u32) as u64;
+        let depth = mip_extent(desc.extent.depth, mip as u32) as u64;
+        let mip_bytes = if desc.format.is_block_compressed() {
+            width
+                .div_ceil(4)
+                .saturating_mul(height.div_ceil(4))
+                .saturating_mul(depth)
+                .saturating_mul(desc.layers as u64)
+                .saturating_mul(desc.samples as u64)
+                .saturating_mul(desc.format.bc_block_bytes())
+        } else {
+            width
+                .saturating_mul(height)
+                .saturating_mul(depth)
+                .saturating_mul(desc.layers as u64)
+                .saturating_mul(desc.samples as u64)
+                .saturating_mul(format_texel_size(desc.format))
+        };
+        total_bytes = total_bytes.saturating_add(mip_bytes);
     }
-    total_texels.saturating_mul(texel_size)
+    total_bytes
 }
 
 fn format_texel_size(format: Format) -> u64 {
     match format {
         Format::Unknown => 1,
         Format::Rgba8Unorm | Format::Bgra8Unorm => 4,
+        Format::R8Unorm => 1,
+        Format::Rg8Unorm => 2,
         Format::Rgba16Float => 8,
         Format::Rgba32Float => 16,
         Format::Depth32Float | Format::Depth24Stencil8 => 4,
+        // BC formats handled above.
+        Format::Bc3Unorm
+        | Format::Bc3UnormSrgb
+        | Format::Bc4Unorm
+        | Format::Bc5Unorm
+        | Format::Bc7Unorm
+        | Format::Bc7UnormSrgb
+        | Format::Bc6hUfloat => unreachable!("BC formats are sized by image_size"),
     }
 }
 
@@ -669,5 +693,24 @@ mod tests {
             plan.image_savings_bytes, 16_384,
             "savings = small image size"
         );
+    }
+
+    #[test]
+    fn image_size_uses_bc_block_bytes() {
+        let mut desc = desc_defaults();
+        desc.extent = Extent3d {
+            width: 4,
+            height: 4,
+            depth: 1,
+        };
+        desc.format = Format::Bc4Unorm;
+        assert_eq!(image_size(desc), 8);
+
+        desc.extent.width = 5;
+        assert_eq!(image_size(desc), 16);
+
+        desc.extent.height = 9;
+        desc.layers = 2;
+        assert_eq!(image_size(desc), 96);
     }
 }

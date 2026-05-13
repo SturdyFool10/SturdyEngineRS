@@ -58,11 +58,14 @@ pub enum PcFieldKind {
 impl PcFieldKind {
     pub fn byte_size(&self) -> u32 {
         match self {
-            Self::Float  => 4,  Self::Int  => 4, Self::Uint => 4, Self::Bool => 4,
+            Self::Float => 4,
+            Self::Int => 4,
+            Self::Uint => 4,
+            Self::Bool => 4,
             Self::Float2 => 8,
             Self::Float3 => 12,
             Self::Float4 => 16,
-            Self::Mat4   => 64,
+            Self::Mat4 => 64,
             Self::Other { byte_size } => *byte_size,
         }
     }
@@ -101,11 +104,11 @@ pub struct PushConstantReflection {
 enum Type {
     Void,
     Bool,
-    Int  { bytes: u32, signed: bool },
+    Int { bytes: u32, signed: bool },
     Float { bytes: u32 },
     Vector { component_id: u32, count: u32 },
     Matrix { column_type_id: u32, count: u32 },
-    Array  { element_id: u32, length_id: u32 },
+    Array { element_id: u32, length_id: u32 },
     RuntimeArray { element_id: u32 },
     Struct { member_ids: Vec<u32> },
     Pointer { pointee_id: u32 },
@@ -125,7 +128,7 @@ struct Module {
     types: BTreeMap<u32, Type>,
     constants: BTreeMap<u32, u32>,
     member_layouts: BTreeMap<(u32, u32), MemberLayout>,
-    push_constant_variables: Vec<(u32, u32)>,  // (pointee_type_id, variable_id)
+    push_constant_variables: Vec<(u32, u32)>, // (pointee_type_id, variable_id)
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -170,17 +173,23 @@ fn extract_fields(module: &Module, block_type_id: u32) -> Vec<PushConstantField>
     let mut fields = Vec::new();
     for (idx, &member_type_id) in member_ids.iter().enumerate() {
         let idx_u32 = idx as u32;
-        let name = module.member_names
+        let name = module
+            .member_names
             .get(&(struct_id, idx_u32))
             .cloned()
             .unwrap_or_else(|| format!("_field{idx}"));
-        let layout = module.member_layouts
+        let layout = module
+            .member_layouts
             .get(&(struct_id, idx_u32))
             .copied()
             .unwrap_or_default();
         let byte_offset = layout.offset.unwrap_or(0);
         let kind = classify_type(module, member_type_id);
-        fields.push(PushConstantField { name, kind, byte_offset });
+        fields.push(PushConstantField {
+            name,
+            kind,
+            byte_offset,
+        });
     }
     fields
 }
@@ -188,19 +197,27 @@ fn extract_fields(module: &Module, block_type_id: u32) -> Vec<PushConstantField>
 fn classify_type(module: &Module, type_id: u32) -> PcFieldKind {
     match module.types.get(&type_id) {
         Some(Type::Bool) => PcFieldKind::Bool,
-        Some(Type::Int { signed: true,  .. }) => PcFieldKind::Int,
+        Some(Type::Int { signed: true, .. }) => PcFieldKind::Int,
         Some(Type::Int { signed: false, .. }) => PcFieldKind::Uint,
         Some(Type::Float { .. }) => PcFieldKind::Float,
-        Some(Type::Vector { component_id, count }) => {
+        Some(Type::Vector {
+            component_id,
+            count,
+        }) => {
             let comp = *component_id;
             match (module.types.get(&comp), *count) {
                 (Some(Type::Float { .. }), 2) => PcFieldKind::Float2,
                 (Some(Type::Float { .. }), 3) => PcFieldKind::Float3,
                 (Some(Type::Float { .. }), 4) => PcFieldKind::Float4,
-                _ => PcFieldKind::Other { byte_size: type_size(module, type_id, None).unwrap_or(0) },
+                _ => PcFieldKind::Other {
+                    byte_size: type_size(module, type_id, None).unwrap_or(0),
+                },
             }
         }
-        Some(Type::Matrix { column_type_id, count }) => {
+        Some(Type::Matrix {
+            column_type_id,
+            count,
+        }) => {
             // float4x4 — 4 columns each of float4
             let ct = *column_type_id;
             if *count == 4 {
@@ -208,9 +225,13 @@ fn classify_type(module: &Module, type_id: u32) -> PcFieldKind {
                     return PcFieldKind::Mat4;
                 }
             }
-            PcFieldKind::Other { byte_size: type_size(module, type_id, None).unwrap_or(0) }
+            PcFieldKind::Other {
+                byte_size: type_size(module, type_id, None).unwrap_or(0),
+            }
         }
-        _ => PcFieldKind::Other { byte_size: type_size(module, type_id, None).unwrap_or(0) },
+        _ => PcFieldKind::Other {
+            byte_size: type_size(module, type_id, None).unwrap_or(0),
+        },
     }
 }
 
@@ -241,7 +262,9 @@ fn parse_module(words: &[u32]) -> Option<Module> {
 fn parse_instruction(module: &mut Module, opcode: u16, operands: &[u32]) {
     match opcode {
         OP_NAME if operands.len() >= 2 => {
-            module.names.insert(operands[0], decode_spirv_string(&operands[1..]));
+            module
+                .names
+                .insert(operands[0], decode_spirv_string(&operands[1..]));
         }
         OP_MEMBER_NAME if operands.len() >= 3 => {
             // operands: [struct_id, member_index, ...string]
@@ -249,10 +272,18 @@ fn parse_instruction(module: &mut Module, opcode: u16, operands: &[u32]) {
             module.member_names.insert((operands[0], operands[1]), name);
         }
         OP_MEMBER_DECORATE if operands.len() >= 4 && operands[2] == DECORATION_OFFSET => {
-            module.member_layouts.entry((operands[0], operands[1])).or_default().offset = Some(operands[3]);
+            module
+                .member_layouts
+                .entry((operands[0], operands[1]))
+                .or_default()
+                .offset = Some(operands[3]);
         }
         OP_MEMBER_DECORATE if operands.len() >= 4 && operands[2] == DECORATION_MATRIX_STRIDE => {
-            module.member_layouts.entry((operands[0], operands[1])).or_default().matrix_stride = Some(operands[3]);
+            module
+                .member_layouts
+                .entry((operands[0], operands[1]))
+                .or_default()
+                .matrix_stride = Some(operands[3]);
         }
         OP_TYPE_VOID if !operands.is_empty() => {
             module.types.insert(operands[0], Type::Void);
@@ -262,37 +293,80 @@ fn parse_instruction(module: &mut Module, opcode: u16, operands: &[u32]) {
         }
         OP_TYPE_INT if operands.len() >= 3 => {
             // operands: [result_id, width, signedness]
-            module.types.insert(operands[0], Type::Int {
-                bytes: operands[1] / 8,
-                signed: operands[2] != 0,
-            });
+            module.types.insert(
+                operands[0],
+                Type::Int {
+                    bytes: operands[1] / 8,
+                    signed: operands[2] != 0,
+                },
+            );
         }
         OP_TYPE_FLOAT if operands.len() >= 2 => {
-            module.types.insert(operands[0], Type::Float { bytes: operands[1] / 8 });
+            module.types.insert(
+                operands[0],
+                Type::Float {
+                    bytes: operands[1] / 8,
+                },
+            );
         }
         OP_TYPE_VECTOR if operands.len() >= 3 => {
-            module.types.insert(operands[0], Type::Vector { component_id: operands[1], count: operands[2] });
+            module.types.insert(
+                operands[0],
+                Type::Vector {
+                    component_id: operands[1],
+                    count: operands[2],
+                },
+            );
         }
         OP_TYPE_MATRIX if operands.len() >= 3 => {
-            module.types.insert(operands[0], Type::Matrix { column_type_id: operands[1], count: operands[2] });
+            module.types.insert(
+                operands[0],
+                Type::Matrix {
+                    column_type_id: operands[1],
+                    count: operands[2],
+                },
+            );
         }
         OP_TYPE_ARRAY if operands.len() >= 3 => {
-            module.types.insert(operands[0], Type::Array { element_id: operands[1], length_id: operands[2] });
+            module.types.insert(
+                operands[0],
+                Type::Array {
+                    element_id: operands[1],
+                    length_id: operands[2],
+                },
+            );
         }
         OP_TYPE_RUNTIME_ARRAY if operands.len() >= 2 => {
-            module.types.insert(operands[0], Type::RuntimeArray { element_id: operands[1] });
+            module.types.insert(
+                operands[0],
+                Type::RuntimeArray {
+                    element_id: operands[1],
+                },
+            );
         }
         OP_TYPE_STRUCT if !operands.is_empty() => {
-            module.types.insert(operands[0], Type::Struct { member_ids: operands[1..].to_vec() });
+            module.types.insert(
+                operands[0],
+                Type::Struct {
+                    member_ids: operands[1..].to_vec(),
+                },
+            );
         }
         OP_TYPE_POINTER if operands.len() >= 3 => {
-            module.types.insert(operands[0], Type::Pointer { pointee_id: operands[2] });
+            module.types.insert(
+                operands[0],
+                Type::Pointer {
+                    pointee_id: operands[2],
+                },
+            );
         }
         OP_CONSTANT if operands.len() >= 3 => {
             module.constants.insert(operands[1], operands[2]);
         }
         OP_VARIABLE if operands.len() >= 3 && operands[2] == STORAGE_CLASS_PUSH_CONSTANT => {
-            module.push_constant_variables.push((operands[0], operands[1]));
+            module
+                .push_constant_variables
+                .push((operands[0], operands[1]));
         }
         _ => {}
     }
@@ -301,24 +375,33 @@ fn parse_instruction(module: &mut Module, opcode: u16, operands: &[u32]) {
 fn type_size(module: &Module, type_id: u32, member_layout: Option<MemberLayout>) -> Option<u32> {
     match module.types.get(&type_id)? {
         Type::Void | Type::Bool => Some(4),
-        Type::Int   { bytes, .. } => Some(*bytes),
-        Type::Float { bytes }     => Some(*bytes),
-        Type::Vector { component_id, count } => {
-            Some(type_size(module, *component_id, None)? * *count)
-        }
-        Type::Matrix { column_type_id, count } => {
+        Type::Int { bytes, .. } => Some(*bytes),
+        Type::Float { bytes } => Some(*bytes),
+        Type::Vector {
+            component_id,
+            count,
+        } => Some(type_size(module, *component_id, None)? * *count),
+        Type::Matrix {
+            column_type_id,
+            count,
+        } => {
             let col = type_size(module, *column_type_id, None)?;
             let stride = member_layout.and_then(|l| l.matrix_stride).unwrap_or(col);
             Some(stride * *count)
         }
-        Type::Array { element_id, length_id } => {
-            Some(type_size(module, *element_id, None)? * *module.constants.get(length_id)?)
-        }
+        Type::Array {
+            element_id,
+            length_id,
+        } => Some(type_size(module, *element_id, None)? * *module.constants.get(length_id)?),
         Type::RuntimeArray { element_id } => type_size(module, *element_id, None),
         Type::Struct { member_ids } => {
             let mut size = 0;
             for (i, &mid) in member_ids.iter().enumerate() {
-                let layout = module.member_layouts.get(&(type_id, i as u32)).copied().unwrap_or_default();
+                let layout = module
+                    .member_layouts
+                    .get(&(type_id, i as u32))
+                    .copied()
+                    .unwrap_or_default();
                 let offset = layout.offset.unwrap_or(0);
                 size = size.max(offset + type_size(module, mid, Some(layout))?);
             }
@@ -332,7 +415,9 @@ fn decode_spirv_string(words: &[u32]) -> String {
     let mut bytes = Vec::new();
     for word in words {
         for byte in word.to_le_bytes() {
-            if byte == 0 { return String::from_utf8_lossy(&bytes).into_owned(); }
+            if byte == 0 {
+                return String::from_utf8_lossy(&bytes).into_owned();
+            }
             bytes.push(byte);
         }
     }

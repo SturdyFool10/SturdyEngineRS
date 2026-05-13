@@ -3,61 +3,65 @@
 //! Use this crate from Rust applications. It wraps the core handle-oriented API
 //! with RAII resource types and builder-style descriptors while keeping the
 //! lower-level `sturdy-engine-core` crate available for engine internals.
+#![allow(dead_code)]
+
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
 pub mod animation;
-mod asset_watcher;
-pub mod ecs;
-mod environment_map;
-mod shader_playground;
-mod headless;
-mod sprite_batch;
-mod gltf_animation;
-mod light_bvh;
-mod oit_pass;
-mod game_shell;
-mod asset_loader;
-mod gltf_loader;
-mod mesh_loader;
-mod obj_loader;
-mod stl_loader;
 mod anti_aliasing_pass;
 mod antialiasing;
 mod application;
+mod asset_loader;
+mod asset_watcher;
 mod bind_group;
+mod bindless;
 mod bloom_pass;
 mod compute_program;
 mod debug_draw_2d;
-mod deferred_pass;
-mod shadow_pass;
-mod spot_shadow_pass;
-mod point_shadow_pass;
-mod geometry;
 mod debug_overlay;
 mod debug_view_picker;
+mod deferred_pass;
 mod device_manager;
+pub mod ecs;
+mod environment_map;
 mod frame_clock;
 mod frontend_graph;
+mod game_shell;
+mod geometry;
+mod gltf_animation;
+mod gltf_loader;
 mod gpu_procedural_texture;
 mod graph_frame;
 mod hdr_pipeline;
+mod headless;
 mod input;
+mod light_bvh;
 mod mesh;
+mod mesh_loader;
 mod mesh_program;
 mod mip_pyramid;
 mod motion_vector_debug;
+mod obj_loader;
+mod oit_pass;
 mod pipeline_layout;
 mod plot2d;
+mod point_shadow_pass;
+mod post_process;
 mod procedural_texture;
 mod quad_batch;
 mod runtime;
 mod sampler_catalog;
 mod scene;
 mod screenshot;
+mod shader_playground;
 mod shader_watcher;
+mod shadow_pass;
+mod spot_shadow_pass;
+mod sprite_batch;
+mod stl_loader;
 #[cfg(test)]
 mod tests;
 mod text_draw;
@@ -65,12 +69,14 @@ mod text_engine;
 mod text_overlay;
 mod text_tiling;
 mod texture;
+mod texture_compression;
 mod upload_arena;
 mod window_registry;
 
+pub use animation::{
+    AnimationChannel, AnimationClip, AnimationPlayer, AnimationProperty, GltfSkin, Interpolation,
+};
 pub use anti_aliasing_pass::{AntiAliasingPass, taa_jitter_uv, taa_jittered_projection};
-pub use asset_loader::{AssetCache, AssetHandle, LoadState};
-pub use mesh_loader::{MeshAlphaMode, MeshMaterialParams, MeshPrimitive, MeshTextures};
 pub use antialiasing::{
     AntiAliasingConfig, AntiAliasingDial, AntiAliasingMode, FxaaSettings, MsaaSettings, TaaSettings,
 };
@@ -80,25 +86,8 @@ pub use application::{
     RuntimePostProcessDesc, RuntimePostProcessOutput, ShellFrame, WindowConfig, WindowDesc, run,
     try_run,
 };
-#[cfg(not(target_arch = "wasm32"))]
-pub use game_shell::{
-    FixedUpdateContext, GameApp, GameConfig, GameContext, run_game, try_run_game,
-};
-pub use headless::{HeadlessApp, render_to_rgba8, render_to_rgba8_with_engine, run_headless};
-pub use shader_playground::{PlaygroundParam, PlaygroundPreset, PlaygroundValue, ShaderPlayground};
-pub use sturdy_engine_core::{PcFieldKind, PushConstantField};
-pub use ecs::{
-    // Core types
-    Entity, Component, World, EntityBuilder, Schedule, System, SystemFn, run_once,
-    // Parallel scheduling
-    CompiledSchedule, ParallelSystem, SystemAccess,
-    WorldView, ComponentReadGuard, ComponentWriteGuard, WorldCommands,
-    // Built-in components
-    Active, Acceleration, Health, LocalTransform, Name, SceneLink, Transform, Velocity,
-    // Built-in systems
-    despawn_dead, integrate_transforms, propagate_local_transforms,
-};
-pub use sprite_batch::{Sprite, SpriteBatch, SpriteRenderer};
+pub use asset_loader::{AssetCache, AssetHandle, LoadState};
+pub use asset_watcher::{AssetReloadDiagnostic, AssetWatcher};
 pub use bloom_pass::{
     BloomCompositeConstants, BloomConfig, BloomPass, BrightPassConstants, DownsampleConstants,
     UpsampleConstants,
@@ -109,31 +98,51 @@ pub use clay_ui::{
     surface_to_ndc, ui_to_surface, window_logical_to_surface, window_logical_to_ui,
 };
 pub use compute_program::ComputeProgram;
-pub use deferred_pass::{DeferredPass, RenderPath, SkyConfig};
-pub use environment_map::EnvironmentMap;
-pub use light_bvh::{GpuBvhNode, LightBvhBuilder, LEAF_FLAG, BVH_EMPTY};
-pub use oit_pass::{OitConfig, OitPass};
-pub use shadow_pass::{
-    CsmConfig, CsmOutput, CsmPass, GpuCsmData, MAX_CASCADES,
-    ShadowConfig, ShadowOutput, ShadowPass,
-};
-pub use spot_shadow_pass::{GpuSpotShadowData, MAX_SPOT_SHADOWS, SpotShadowConfig, SpotShadowPass};
-pub use point_shadow_pass::{GpuPointShadowData, MAX_POINT_SHADOWS, PointShadowConfig, PointShadowPass};
 pub use debug_draw_2d::{DebugDraw2d, DebugDrawStyle};
 pub use debug_overlay::{
     DebugHitRegion, DebugOverlay, DebugOverlayAntialiasing, DebugOverlayConfig,
     DebugOverlayRenderer, DebugOverlayTransform,
 };
 pub use debug_view_picker::DebugViewPicker;
+pub use deferred_pass::{DeferredPass, RenderPath, SkyConfig};
 pub use device_manager::{AdapterEntry, DeviceManager};
+pub use ecs::{
+    Acceleration,
+    // Built-in components
+    Active,
+    // Parallel scheduling
+    CompiledSchedule,
+    Component,
+    ComponentReadGuard,
+    ComponentWriteGuard,
+    // Core types
+    Entity,
+    EntityBuilder,
+    Health,
+    LocalTransform,
+    Name,
+    ParallelSystem,
+    SceneLink,
+    Schedule,
+    System,
+    SystemAccess,
+    SystemFn,
+    Transform,
+    Velocity,
+    World,
+    WorldCommands,
+    WorldView,
+    // Built-in systems
+    despawn_dead,
+    integrate_transforms,
+    propagate_local_transforms,
+    run_once,
+};
+pub use environment_map::EnvironmentMap;
 pub use frame_clock::{FrameClock, FrameTime};
-pub use gpu_procedural_texture::GpuProceduralTexture;
-pub use graph_frame::{FullscreenPassBuilder, GraphFrame, ImageNode};
-pub use hdr_pipeline::{HdrMode, HdrPipelineDesc, HdrPreference, ToneMappingOp};
-pub use input::{
-    ActionAxisDirection, ActionBinding, ActionBindingRegistry, ActionMap, BindingChange,
-    GamepadAxis, GamepadAxisInput, GamepadButton, GamepadButtonInput, GamepadId, InputHub,
-    KeyInput, KeyInputState, KeyModifier, KeyModifiers, KeyToken, Keybind, KeybindCapture,
+#[cfg(not(target_arch = "wasm32"))]
+pub use game_shell::{
+    FixedUpdateContext, GameApp, GameConfig, GameContext, run_game, try_run_game,
 };
 pub use geometry::{
     BoundingSphere, DispatchIndirectCommand, DrawIndexedIndirectCommand, DrawIndirectCommand,
@@ -141,15 +150,29 @@ pub use geometry::{
     MAX_MESHLET_TRIANGLES, MAX_MESHLET_VERTICES, Meshlet, MeshletBounds, MeshletGroup, SubMesh,
     VirtualMesh, VirtualMeshBuilder, VirtualMeshProxy,
 };
-pub use animation::{AnimationChannel, AnimationClip, AnimationPlayer, AnimationProperty,
-                    GltfSkin, Interpolation};
-pub use gltf_animation::{load_skins_and_animations, load_skins, load_animations,
-                          load_skinned_vertices};
+pub use gltf_animation::{
+    load_animations, load_skinned_vertices, load_skins, load_skins_and_animations,
+};
+pub use gpu_procedural_texture::GpuProceduralTexture;
+pub use graph_frame::{FullscreenPassBuilder, GraphFrame, ImageNode};
+pub use hdr_pipeline::{HdrMode, HdrPipelineDesc, HdrPreference, ToneMappingOp};
+pub use headless::{HeadlessApp, render_to_rgba8, render_to_rgba8_with_engine, run_headless};
+pub use input::{
+    ActionAxisDirection, ActionBinding, ActionBindingRegistry, ActionMap, BindingChange,
+    GamepadAxis, GamepadAxisInput, GamepadButton, GamepadButtonInput, GamepadId, InputHub,
+    KeyInput, KeyInputState, KeyModifier, KeyModifiers, KeyToken, Keybind, KeybindCapture,
+};
+pub use light_bvh::{BVH_EMPTY, GpuBvhNode, LEAF_FLAG, LightBvhBuilder};
 pub use mesh::{Mesh, SkinnedVertex3d, Vertex2d, Vertex3d};
+pub use mesh_loader::{MeshAlphaMode, MeshMaterialParams, MeshPrimitive, MeshTextures};
 pub use mesh_program::{MeshProgram, MeshProgramDesc, MeshVertexKind};
 pub use mip_pyramid::MipPyramid;
 pub use motion_vector_debug::MotionVectorDebugPass;
+pub use oit_pass::{OitConfig, OitPass};
 pub use plot2d::{Plot2d, PlotBar, PlotInspection, PlotRange, PlotScale, PlotTheme, PlotView};
+pub use point_shadow_pass::{
+    GpuPointShadowData, MAX_POINT_SHADOWS, PointShadowConfig, PointShadowPass,
+};
 pub use procedural_texture::{
     CpuProceduralTexture2d, ProceduralTextureRecipe, ProceduralTextureUpdatePolicy,
 };
@@ -173,8 +196,14 @@ pub use scene::{
     UnifiedMaterialBuilder, UvSource, gbuffer,
 };
 pub use screenshot::{ScreenshotCapture, ScreenshotExportReport};
+pub use shader_playground::{PlaygroundParam, PlaygroundPreset, PlaygroundValue, ShaderPlayground};
 pub use shader_watcher::{Reloadable, ShaderReloadDiagnostic, ShaderWatcher};
-pub use asset_watcher::{AssetReloadDiagnostic, AssetWatcher};
+pub use shadow_pass::{
+    CsmConfig, CsmOutput, CsmPass, GpuCsmData, MAX_CASCADES, ShadowConfig, ShadowOutput, ShadowPass,
+};
+pub use spot_shadow_pass::{GpuSpotShadowData, MAX_SPOT_SHADOWS, SpotShadowConfig, SpotShadowPass};
+pub use sprite_batch::{Sprite, SpriteBatch, SpriteRenderer};
+pub use sturdy_engine_core::{PcFieldKind, PushConstantField};
 pub use text_draw::{
     TextAtlasContentMode, TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput,
     TextPlacement, TextRenderer, TextScene, TextSceneQuad, TextTypography,
@@ -186,6 +215,7 @@ pub use text_overlay::TextOverlay;
 pub use text_tiling::{TiledTextAtlasPage, TiledTextEngineFrame};
 
 pub use bind_group::BindGroupBuilder;
+pub use bindless::BindlessHandle;
 pub use frontend_graph::{
     DiagnosticLevel, GraphDiagnostic, GraphImage, GraphImageCacheKey, GraphImageInfo,
     GraphImageView, GraphPassInfo, GraphReport, PassKind, RenderFrame, ShaderName,
@@ -193,6 +223,10 @@ pub use frontend_graph::{
 };
 pub use glam::{Vec2, Vec3};
 pub use pipeline_layout::PipelineLayoutBuilder;
+pub use post_process::{
+    AutoExposureConfig, CaConfig, CaPass, GrainConfig, GrainPass, LensConfig, PostProcessConfig,
+    PostProcessPasses, VignetteConfig, VignettePass,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use sturdy_engine_core::NativeSurfaceDesc;
 pub use sturdy_engine_core::ShaderReflection;
@@ -205,9 +239,9 @@ pub use sturdy_engine_core::{
     D3d12RawCapabilities, DispatchDesc, DispatchIndirectDesc, DrawDesc, DrawIndirectDesc,
     DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, Error, ErrorCategory, Extent3d,
     ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode,
-    Format, FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GpuMemoryBudget, GraphicsPipelineDesc,
-    ImageBuilder, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse, IndexBufferBinding,
-    IndexFormat, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
+    Format, FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GpuMemoryBudget,
+    GraphicsPipelineDesc, ImageBuilder, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse,
+    IndexBufferBinding, IndexFormat, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
     NativeHandleCapability, NativeHandleKind, NativeHandleOwnership, PassDesc, PassWork,
     PrimitiveTopology, PushConstants, QueueType, RasterState, ResolveImageDesc, ResourceBinding,
     Result, RgState, SamplerDesc, ShaderDesc, ShaderParameterKind, ShaderParameterReflection,
@@ -215,8 +249,8 @@ pub use sturdy_engine_core::{
     SubresourceRange, SurfaceCapabilities, SurfaceColorSpace, SurfaceEvent, SurfaceFormatInfo,
     SurfaceHdrCaps, SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc,
     UpdateRate, VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout, VertexFormat,
-    VertexInputRate, VertexInputReflection, VulkanExternalBuffer, VulkanExternalImage, VulkanRawCapabilities,
-    compile_slang, compile_slang_to_file, compile_slang_to_spirv,
+    VertexInputRate, VertexInputReflection, VulkanExternalBuffer, VulkanExternalImage,
+    VulkanRawCapabilities, compile_slang, compile_slang_to_file, compile_slang_to_spirv,
     native_handle_capabilities_for_backend, spirv_words_from_bytes,
 };
 pub use sturdy_engine_core::{
@@ -235,6 +269,7 @@ pub use sturdy_engine_platform::{
     current_window_appearance_caps, native_window_appearance_protocol, requested_backdrop_name,
 };
 pub use texture::{ImageCopyRegion, TextureUploadDesc};
+pub use texture_compression::{CompressedTexture, TextureKind, compress_texture};
 pub use window_registry::{WindowHandle, WindowId, WindowRegistry};
 
 use sturdy_engine_core as core;
@@ -260,6 +295,15 @@ pub struct Engine {
     device: core::Device,
     graph_image_cache: Arc<Mutex<HashMap<GraphImageCacheKey, Image>>>,
     sampler_catalog: Arc<sampler_catalog::SamplerCatalog>,
+    /// Textures decoded and compressed on rayon workers, waiting for GPU upload.
+    /// Drained once per frame by [`Engine::drain_pending_uploads`].
+    pending_uploads: Arc<Mutex<Vec<asset_loader::PendingUpload>>>,
+    /// Global texture cache: canonical path → handle. Prevents duplicate loads
+    /// when the same path is passed to `load_texture_2d` multiple times.
+    texture_cache: Arc<Mutex<HashMap<std::path::PathBuf, AssetHandle<Image>>>>,
+    /// Unix-second timestamp of the last VRAM over-budget log line.
+    /// Used to throttle the warning to at most once per 5 seconds.
+    last_budget_warn_secs: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Engine {
@@ -276,6 +320,10 @@ impl Engine {
         };
         desc.optional_features
             .push("sampler_anisotropy".to_string());
+        // Enable bindless descriptor indexing if supported (Track 8a).
+        // "bindless_resources" is an alias for "descriptor_indexing" in the device builder.
+        desc.optional_features
+            .push("bindless_resources".to_string());
         Self::with_desc(desc)
     }
 
@@ -285,6 +333,9 @@ impl Engine {
             device,
             graph_image_cache: Arc::new(Mutex::new(HashMap::new())),
             sampler_catalog: Arc::new(sampler_catalog::SamplerCatalog::empty()),
+            pending_uploads: Arc::new(Mutex::new(Vec::new())),
+            texture_cache: Arc::new(Mutex::new(HashMap::new())),
+            last_budget_warn_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let catalog = sampler_catalog::SamplerCatalog::build(&engine)?;
         engine.sampler_catalog = Arc::new(catalog);
@@ -351,6 +402,7 @@ impl Engine {
     /// let buf    = Engine::global().create_buffer(desc)?;
     /// ```
     pub fn global() -> &'static Engine {
+        //panic allowed, reason = "explicit global-engine accessor requires shell initialization by contract"
         GLOBAL_ENGINE.get().expect(
             "Engine::global() called before the engine was initialised — \
              ensure you are inside a GameApp, HeadlessApp, or EngineApp callback.",
@@ -535,7 +587,11 @@ impl Engine {
     /// thumbnails, and test fixtures — not for the real-time render loop. The closure
     /// receives a `&RenderFrame` for recording passes; the frame is flushed and
     /// GPU-waited before `render_image` returns.
-    pub fn render_image(&self, image: &Image, render: impl FnOnce(&RenderFrame) -> Result<()>) -> Result<()> {
+    pub fn render_image(
+        &self,
+        image: &Image,
+        render: impl FnOnce(&RenderFrame) -> Result<()>,
+    ) -> Result<()> {
         let frame = self.begin_render_frame()?;
         frame.import_image("render_target", image)?;
         render(&frame)?;
@@ -727,21 +783,128 @@ impl Engine {
 
     /// Load a texture from `path` and upload it to the GPU.
     ///
-    /// Supports PNG, JPEG, WebP, and BMP. The returned [`AssetHandle`] is
-    /// immediately `Ready` on success or `Failed` on error — no panic.
+    /// **Non-blocking.** Returns an [`AssetHandle`] immediately in the `Loading`
+    /// state. Decoding and block compression happen on a rayon worker thread;
+    /// the GPU upload is performed the next time [`drain_pending_uploads`] runs
+    /// (automatically at frame-start in all shell entry points).
     ///
-    /// Use [`Engine::checkerboard_texture`] as a fallback while a texture is
-    /// unavailable, rather than unwrapping the handle unconditionally.
+    /// The handle transitions to `Ready` after the first frame that drains
+    /// uploads, or to `Failed` if the file is unreadable or corrupt — no panic.
     ///
     /// ```ignore
     /// let tex = engine.load_texture_2d("assets/rock.png");
-    /// // In render:
-    /// if let Some(img) = tex.with(|image| image.handle()) {
-    ///     frame.bind_image_handle("albedo", img);
-    /// }
+    /// // In render — use a checkerboard fallback until Ready:
+    /// let img = tex.with(|i| i.handle()).unwrap_or_else(|| fallback.handle());
+    /// frame.bind_image_handle("albedo", img);
     /// ```
+    ///
+    /// [`drain_pending_uploads`]: Engine::drain_pending_uploads
     pub fn load_texture_2d(&self, path: impl AsRef<std::path::Path>) -> AssetHandle<Image> {
-        asset_loader::load_texture_2d_from_path(self, path)
+        let key = asset_loader::canonical(&path);
+        // Return the existing handle if this path was already requested.
+        // The handle may still be `Loading` if the worker hasn't finished;
+        // the caller waits via `with()` or polls `is_ready()` each frame.
+        {
+            //panic allowed, reason = "poisoned internal texture cache is unrecoverable"
+            let cache = self
+                .texture_cache
+                .lock()
+                .expect("texture_cache mutex poisoned");
+            if let Some(handle) = cache.get(&key) {
+                return handle.clone();
+            }
+        }
+        let handle = asset_loader::load_texture_2d_async(&path, self.pending_uploads.clone());
+        //panic allowed, reason = "poisoned internal texture cache is unrecoverable"
+        self.texture_cache
+            .lock()
+            .expect("texture_cache mutex poisoned")
+            .insert(key, handle.clone());
+        handle
+    }
+
+    /// Load an HDR or EXR texture in the background.
+    ///
+    /// **Non-blocking.** Returns an `AssetHandle<Image>` in the `Loading` state
+    /// immediately. The file is decoded on a rayon worker thread; the GPU upload
+    /// happens at the next [`drain_pending_uploads`] call (frame-start in all shells).
+    ///
+    /// Output format is `Rgba16Float`. Use `load_hdr_texture_32f_async` for full
+    /// 32-bit precision.
+    ///
+    /// [`drain_pending_uploads`]: Engine::drain_pending_uploads
+    pub fn load_hdr_texture_async(&self, path: impl AsRef<std::path::Path>) -> AssetHandle<Image> {
+        asset_loader::load_hdr_texture_async(path, self.pending_uploads.clone(), false)
+    }
+
+    /// Load an HDR or EXR texture in the background at full 32-bit float precision.
+    pub fn load_hdr_texture_32f_async(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> AssetHandle<Image> {
+        asset_loader::load_hdr_texture_async(path, self.pending_uploads.clone(), true)
+    }
+
+    /// Upload all textures that background workers have finished decoding.
+    ///
+    /// Called automatically at frame-start by every shell entry point
+    /// (`run_game`, `run_headless`, `try_run`). Only call this manually when
+    /// using a custom render loop that bypasses the built-in shells.
+    ///
+    /// Performs a single GPU submission for all pending textures; no-ops if
+    /// the queue is empty.
+    pub fn drain_pending_uploads(&self) -> Result<()> {
+        // Warn once per 5 seconds when VRAM pressure exceeds 80 %.
+        if let Some(budget) = self.memory_budget() {
+            if budget.over_budget() {
+                use std::sync::atomic::Ordering;
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let now_secs = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let last = self.last_budget_warn_secs.load(Ordering::Relaxed);
+                if now_secs.saturating_sub(last) >= 5 {
+                    self.last_budget_warn_secs
+                        .store(now_secs, Ordering::Relaxed);
+                    eprintln!("[SturdyEngine] VRAM pressure: {}", budget.summary());
+                }
+            }
+        }
+
+        let uploads: Vec<asset_loader::PendingUpload> = {
+            //panic allowed, reason = "poisoned internal pending upload queue is unrecoverable"
+            let mut lock = self
+                .pending_uploads
+                .lock()
+                .expect("pending_uploads mutex poisoned");
+            std::mem::take(&mut *lock)
+        };
+        if uploads.is_empty() {
+            return Ok(());
+        }
+
+        let mut frame = self.begin_frame()?;
+        let mut results: Vec<Result<Image>> = Vec::with_capacity(uploads.len());
+        for u in &uploads {
+            let desc = TextureUploadDesc {
+                width: u.width,
+                height: u.height,
+                format: u.format,
+                usage: ImageUsage::SAMPLED,
+            };
+            results.push(frame.upload_texture_2d(&u.name, desc, &u.data));
+        }
+        frame.flush_with_reason(FrameSyncReason::CompatibilityShim)?;
+        frame.wait_with_reason(FrameSyncReason::CompatibilityShim)?;
+
+        for (upload, result) in uploads.into_iter().zip(results) {
+            match result {
+                Ok(image) => upload.handle.set_ready(image),
+                Err(e) => upload.handle.set_failed(e.to_string()),
+            }
+        }
+        Ok(())
     }
 
     /// Synchronous variant of `load_texture_2d` that returns `Result<Image>` directly.
@@ -750,7 +913,10 @@ impl Engine {
     /// hot-reload callbacks where you need the new image before the next frame.
     pub fn load_texture_2d_blocking(&self, path: impl AsRef<std::path::Path>) -> Result<Image> {
         let path = path.as_ref();
-        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("texture");
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("texture");
         asset_loader::load_and_upload_blocking(self, path, name)
     }
 
@@ -772,10 +938,7 @@ impl Engine {
     ///     scene.set_material(id, prim.material_params.to_material_descriptor());
     /// }
     /// ```
-    pub fn load_mesh(
-        &self,
-        path: impl AsRef<std::path::Path>,
-    ) -> Result<Vec<MeshPrimitive>> {
+    pub fn load_mesh(&self, path: impl AsRef<std::path::Path>) -> Result<Vec<MeshPrimitive>> {
         mesh_loader::load_mesh_from_path(self, path.as_ref())
     }
 
@@ -803,6 +966,56 @@ impl Engine {
     /// in a rendered scene, making missing asset bugs obvious at a glance.
     pub fn checkerboard_texture(&self, size: u32, tile_size: u32) -> Result<Image> {
         asset_loader::make_checkerboard(self, size, tile_size)
+    }
+
+    // ── Bindless descriptor heap (Track 8a) ───────────────────────────────────
+
+    /// Returns `true` when the GPU supports the bindless descriptor heap.
+    ///
+    /// Requires `VK_EXT_descriptor_indexing` with runtime descriptor arrays.
+    /// All discrete GPUs since ~2016 and most mobile GPUs since 2020 support this.
+    pub fn bindless_supported(&self) -> bool {
+        self.device.bindless_supported()
+    }
+
+    /// Register a 2-D texture (sampled image) in the global bindless heap.
+    ///
+    /// Returns a `BindlessHandle<Image>` whose `.index()` can be embedded in
+    /// push constants or a per-draw data buffer for use in any shader that
+    /// includes `bindless.slang`.
+    ///
+    /// The handle is valid for the lifetime of the `Image` (and the engine).
+    /// The caller must ensure the image outlives any GPU work that uses the index.
+    ///
+    /// Returns `None` when bindless is not supported or the heap is full.
+    pub fn register_bindless_image(&self, image: &Image) -> Option<BindlessHandle<Image>> {
+        self.device
+            .register_bindless_sampled_image(image.handle())
+            .map(BindlessHandle::from_raw)
+    }
+
+    /// Register a sampler in the global bindless heap.
+    pub fn register_bindless_sampler(&self, sampler: &Sampler) -> Option<BindlessHandle<Sampler>> {
+        self.device
+            .register_bindless_sampler(sampler.handle())
+            .map(BindlessHandle::from_raw)
+    }
+
+    /// Register a storage (read-write) image in the global bindless heap.
+    pub fn register_bindless_storage_image(&self, image: &Image) -> Option<BindlessHandle<Image>> {
+        self.device
+            .register_bindless_storage_image(image.handle())
+            .map(BindlessHandle::from_raw)
+    }
+
+    /// Register a storage buffer in the global bindless heap.
+    pub fn register_bindless_storage_buffer(
+        &self,
+        buffer: &Buffer,
+    ) -> Option<BindlessHandle<Buffer>> {
+        self.device
+            .register_bindless_storage_buffer(buffer.handle())
+            .map(BindlessHandle::from_raw)
     }
 
     pub fn wait_idle(&self) -> Result<()> {
@@ -1685,7 +1898,10 @@ impl Frame {
     pub fn generate_mipmaps(&mut self, image: &Image) -> Result<()> {
         self.import_image(image)?;
         self.add_pass(PassDesc {
-            name: format!("generate_mipmaps({})", image.desc().debug_name.unwrap_or("image")),
+            name: format!(
+                "generate_mipmaps({})",
+                image.desc().debug_name.unwrap_or("image")
+            ),
             queue: QueueType::Graphics,
             shader: None,
             pipeline: None,

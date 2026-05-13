@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod capability;
 mod native_window_appearance;
 mod platform;

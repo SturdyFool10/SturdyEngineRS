@@ -103,16 +103,27 @@ impl<T: Component> ComponentStorage<T> {
 
     pub fn get(&self, entity_index: u32) -> Option<&T> {
         let slot = *self.sparse.get(entity_index as usize)?;
-        if slot == u32::MAX { None } else { Some(&self.dense[slot as usize]) }
+        if slot == u32::MAX {
+            None
+        } else {
+            Some(&self.dense[slot as usize])
+        }
     }
 
     pub fn get_mut(&mut self, entity_index: u32) -> Option<&mut T> {
         let slot = *self.sparse.get(entity_index as usize)?;
-        if slot == u32::MAX { None } else { Some(&mut self.dense[slot as usize]) }
+        if slot == u32::MAX {
+            None
+        } else {
+            Some(&mut self.dense[slot as usize])
+        }
     }
 
     pub fn contains(&self, entity_index: u32) -> bool {
-        self.sparse.get(entity_index as usize).map(|&s| s != u32::MAX).unwrap_or(false)
+        self.sparse
+            .get(entity_index as usize)
+            .map(|&s| s != u32::MAX)
+            .unwrap_or(false)
     }
 
     /// Iterate all (Entity, &T) pairs. Caller supplies generation table for Entity construction.
@@ -120,10 +131,19 @@ impl<T: Component> ComponentStorage<T> {
         &'a self,
         generations: &'a [u32],
     ) -> impl Iterator<Item = (Entity, &'a T)> + 'a {
-        self.entity_of.iter().zip(self.dense.iter()).map(|(&idx, val)| {
-            let generation = generations.get(idx as usize).copied().unwrap_or(0);
-            (Entity { index: idx, generation }, val)
-        })
+        self.entity_of
+            .iter()
+            .zip(self.dense.iter())
+            .map(|(&idx, val)| {
+                let generation = generations.get(idx as usize).copied().unwrap_or(0);
+                (
+                    Entity {
+                        index: idx,
+                        generation,
+                    },
+                    val,
+                )
+            })
     }
 
     /// Split into entity-index slice and mutable dense-data slice.
@@ -139,10 +159,19 @@ impl<T: Component> ComponentStorage<T> {
         &'a mut self,
         generations: &'a [u32],
     ) -> impl Iterator<Item = (Entity, &'a mut T)> + 'a {
-        self.entity_of.iter().zip(self.dense.iter_mut()).map(|(&idx, val)| {
-            let generation = generations.get(idx as usize).copied().unwrap_or(0);
-            (Entity { index: idx, generation }, val)
-        })
+        self.entity_of
+            .iter()
+            .zip(self.dense.iter_mut())
+            .map(|(&idx, val)| {
+                let generation = generations.get(idx as usize).copied().unwrap_or(0);
+                (
+                    Entity {
+                        index: idx,
+                        generation,
+                    },
+                    val,
+                )
+            })
     }
 }
 
@@ -152,8 +181,12 @@ impl<T: Component> ComponentVec for ComponentStorage<T> {
         self.remove(entity_index);
     }
 
-    fn as_any(&self) -> &dyn Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
 // ── Casting helpers ───────────────────────────────────────────────────────────

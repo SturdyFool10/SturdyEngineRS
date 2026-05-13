@@ -35,8 +35,8 @@
 use std::any::TypeId;
 use std::collections::HashSet;
 
-use super::world_view::WorldView;
 use super::world_commands::WorldCommands;
+use super::world_view::WorldView;
 
 // ── SystemAccess ──────────────────────────────────────────────────────────────
 
@@ -105,8 +105,6 @@ impl SystemAccess {
             || !self.resource_writes.is_disjoint(&other.resource_reads)
             || !self.resource_reads.is_disjoint(&other.resource_writes)
     }
-
-
 }
 
 // ── ParallelSystem trait ──────────────────────────────────────────────────────

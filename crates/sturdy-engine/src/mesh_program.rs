@@ -12,7 +12,9 @@ use crate::{
     ColorTargetDesc, CullMode, Engine, Error, Format, FrontFace, GraphicsPipelineDesc, Pipeline,
     PipelineLayout, PrimitiveTopology, RasterState, Result, Shader, ShaderDesc, ShaderReflection,
     ShaderSource, ShaderStage, VertexAttributeDesc, VertexBufferLayout, VertexInputRate,
-    mesh::{Vertex2d, Vertex3d, vertex2d_attributes, vertex3d_attributes, skinned_vertex3d_attributes},
+    mesh::{
+        Vertex2d, Vertex3d, skinned_vertex3d_attributes, vertex2d_attributes, vertex3d_attributes,
+    },
 };
 
 const DEFAULT_VERTEX_2D: &str = include_str!(concat!(
@@ -199,8 +201,8 @@ impl MeshProgram {
 
     pub fn new(engine: &Engine, desc: MeshProgramDesc) -> Result<Self> {
         let default_vertex_src = match desc.vertex_kind {
-            MeshVertexKind::V2d       => DEFAULT_VERTEX_2D,
-            MeshVertexKind::V3d       => DEFAULT_VERTEX_3D,
+            MeshVertexKind::V2d => DEFAULT_VERTEX_2D,
+            MeshVertexKind::V3d => DEFAULT_VERTEX_3D,
             MeshVertexKind::V3dSkinned => DEFAULT_VERTEX_3D_SKINNED,
         };
         let vertex_path = desc.vertex.as_ref().and_then(|v| match &v.source {
@@ -220,8 +222,8 @@ impl MeshProgram {
         let fragment = engine.create_shader(desc.fragment)?;
         let reflection = engine.graphics_shader_reflection(&vertex, Some(&fragment))?;
         let expected_attributes = match desc.vertex_kind {
-            MeshVertexKind::V2d        => vertex2d_attributes(),
-            MeshVertexKind::V3d        => vertex3d_attributes(),
+            MeshVertexKind::V2d => vertex2d_attributes(),
+            MeshVertexKind::V3d => vertex3d_attributes(),
             MeshVertexKind::V3dSkinned => skinned_vertex3d_attributes(),
         };
         validate_vertex_inputs_match_layout(&reflection, &expected_attributes)?;
@@ -285,6 +287,7 @@ impl MeshProgram {
             .lock()
             .expect("mesh program pipeline mutex poisoned")
             .clear();
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines_mrt
             .lock()
             .expect("mesh program MRT pipeline mutex poisoned")
@@ -320,6 +323,7 @@ impl MeshProgram {
             .lock()
             .expect("mesh program pipeline mutex poisoned")
             .clear();
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines_mrt
             .lock()
             .expect("mesh program MRT pipeline mutex poisoned")
@@ -399,6 +403,7 @@ impl MeshProgram {
         color_formats: &[Format],
         samples: u8,
     ) -> Result<core::PipelineHandle> {
+        //panic allowed, reason = "poisoned mesh program MRT pipeline cache is unrecoverable"
         let mut pipelines = self
             .pipelines_mrt
             .lock()

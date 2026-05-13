@@ -150,8 +150,14 @@ mod tests {
                 Error::ResourceStateCorruption("missing allocation".into()),
                 ErrorCategory::ResourceStateCorruption,
             ),
-            (Error::DeviceLost("gpu hang".into()), ErrorCategory::DeviceLost),
-            (Error::SurfaceLost("out of date".into()), ErrorCategory::SurfaceLost),
+            (
+                Error::DeviceLost("gpu hang".into()),
+                ErrorCategory::DeviceLost,
+            ),
+            (
+                Error::SurfaceLost("out of date".into()),
+                ErrorCategory::SurfaceLost,
+            ),
             (Error::Unknown("mystery".into()), ErrorCategory::Unknown),
         ];
 

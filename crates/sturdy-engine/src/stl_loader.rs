@@ -8,18 +8,16 @@
 
 use std::{fs::File, io::BufReader, path::Path};
 
-use crate::{Engine, Mesh, Result, Vertex3d};
 use crate::mesh_loader::{MeshMaterialParams, MeshPrimitive, MeshTextures};
+use crate::{Engine, Mesh, Result, Vertex3d};
 
 pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
-    let file = File::open(path).map_err(|e| {
-        crate::Error::Unknown(format!("stl open '{}': {e}", path.display()))
-    })?;
+    let file = File::open(path)
+        .map_err(|e| crate::Error::Unknown(format!("stl open '{}': {e}", path.display())))?;
     let mut reader = BufReader::new(file);
 
-    let stl = stl_io::read_stl(&mut reader).map_err(|e| {
-        crate::Error::Unknown(format!("stl parse '{}': {e}", path.display()))
-    })?;
+    let stl = stl_io::read_stl(&mut reader)
+        .map_err(|e| crate::Error::Unknown(format!("stl parse '{}': {e}", path.display())))?;
 
     // Each STL triangle has 3 vertices and one face normal shared by all 3.
     // We de-duplicate by building unique vertices (pos + normal) and an index buffer.

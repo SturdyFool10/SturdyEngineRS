@@ -61,11 +61,17 @@ pub struct SceneCommands {
 
 impl SceneCommands {
     pub(super) fn new() -> Self {
-        Self { queue: Mutex::new(Vec::new()) }
+        Self {
+            queue: Mutex::new(Vec::new()),
+        }
     }
 
     fn push(&self, cmd: impl FnOnce(&mut Scene) + Send + 'static) {
-        self.queue.lock().expect("scene commands mutex poisoned").push(Box::new(cmd));
+        //panic allowed, reason = "poisoned internal scene command queue is unrecoverable"
+        self.queue
+            .lock()
+            .expect("scene commands mutex poisoned")
+            .push(Box::new(cmd));
     }
 
     // ── Structural mutations — safe to call from any thread ───────────────────
@@ -81,7 +87,9 @@ impl SceneCommands {
     ///
     /// The GPU buffer is re-uploaded in the same `prepare()` that drains this command.
     pub fn set_material(&self, id: MeshId, descriptor: super::MaterialDescriptor) {
-        self.push(move |scene| { scene.set_material(id, descriptor); });
+        self.push(move |scene| {
+            scene.set_material(id, descriptor);
+        });
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────
@@ -92,6 +100,7 @@ impl SceneCommands {
     /// take from the apply avoids a borrow conflict when `scene` itself owns
     /// the `SceneCommands`.
     pub(super) fn take_all(&self) -> Vec<CommandFn> {
+        //panic allowed, reason = "poisoned internal scene command queue is unrecoverable"
         let mut lock = self.queue.lock().expect("scene commands mutex poisoned");
         std::mem::take(&mut *lock)
     }
@@ -144,7 +153,9 @@ impl<'s> SceneView<'s> {
     /// out of range or the object slot is vacant.
     pub fn get_transform(&self, id: ObjectId) -> Option<Mat4> {
         let scene = unsafe { self.scene.as_ref() };
-        scene.objects.get(id.0 as usize)
+        scene
+            .objects
+            .get(id.0 as usize)
             .filter(|o| !matches!(o.kind, _) || true) // all live slots
             .map(|o| o.get_transform())
     }

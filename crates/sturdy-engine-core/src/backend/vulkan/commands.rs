@@ -101,7 +101,9 @@ impl CommandContext {
                     .wait_for_fences(&[self.frame_fence], true, u64::MAX)
                     .map_err(|e| {
                         if e == ash::vk::Result::ERROR_DEVICE_LOST {
-                            Error::DeviceLost("vkWaitForFences returned VK_ERROR_DEVICE_LOST".into())
+                            Error::DeviceLost(
+                                "vkWaitForFences returned VK_ERROR_DEVICE_LOST".into(),
+                            )
                         } else {
                             Error::Backend(format!("vkWaitForFences failed: {e:?}"))
                         }
@@ -124,13 +126,14 @@ impl CommandContext {
                 };
                 if result.is_ok() {
                     let period = self.timestamp_period_ns;
-                    self.pass_timings = self.pending_pass_names
+                    self.pass_timings = self
+                        .pending_pass_names
                         .iter()
                         .enumerate()
                         .map(|(i, name)| {
                             let start = raw[i * 2];
-                            let end   = raw[i * 2 + 1];
-                            let ms    = (end.saturating_sub(start)) as f32 * period / 1_000_000.0;
+                            let end = raw[i * 2 + 1];
+                            let ms = (end.saturating_sub(start)) as f32 * period / 1_000_000.0;
                             (name.clone(), ms)
                         })
                         .collect();
@@ -191,7 +194,10 @@ impl CommandContext {
                 if !reset_done {
                     unsafe {
                         device.cmd_reset_query_pool(
-                            cmd, self.timestamp_pool, 0, MAX_TIMESTAMP_PASSES * 2,
+                            cmd,
+                            self.timestamp_pool,
+                            0,
+                            MAX_TIMESTAMP_PASSES * 2,
                         );
                     }
                     reset_done = true;
@@ -337,7 +343,9 @@ impl CommandContext {
                     .wait_for_fences(&[self.frame_fence], true, u64::MAX)
                     .map_err(|e| {
                         if e == ash::vk::Result::ERROR_DEVICE_LOST {
-                            Error::DeviceLost("vkWaitForFences returned VK_ERROR_DEVICE_LOST".into())
+                            Error::DeviceLost(
+                                "vkWaitForFences returned VK_ERROR_DEVICE_LOST".into(),
+                            )
                         } else {
                             Error::Backend(format!("vkWaitForFences failed: {e:?}"))
                         }
@@ -591,7 +599,11 @@ impl CommandContext {
                 let indirect_buf = resources.buffer(desc.indirect_buffer)?;
                 let vertex_buffer = desc
                     .vertex_buffer
-                    .map(|b| resources.buffer(b.buffer).map(|vb| (b.binding, vb, b.offset)))
+                    .map(|b| {
+                        resources
+                            .buffer(b.buffer)
+                            .map(|vb| (b.binding, vb, b.offset))
+                    })
                     .transpose()?;
                 let index_buffer = desc
                     .index_buffer
@@ -619,12 +631,7 @@ impl CommandContext {
                             );
                         }
                         if let Some((ib, offset, index_type)) = index_buffer {
-                            device.cmd_bind_index_buffer(
-                                command_buffer,
-                                ib,
-                                offset,
-                                index_type,
-                            );
+                            device.cmd_bind_index_buffer(command_buffer, ib, offset, index_type);
                             device.cmd_draw_indexed_indirect(
                                 command_buffer,
                                 indirect_buf,
@@ -648,7 +655,10 @@ impl CommandContext {
             PassWork::DrawMeshShader(_) | PassWork::DrawMeshShaderIndirect(_) => {
                 // TODO(Track 7d): emit vkCmdDrawMeshTasksEXT / vkCmdDrawMeshTasksIndirectEXT
             }
-            PassWork::GenerateMipmaps { image: img_handle, mip_count } => unsafe {
+            PassWork::GenerateMipmaps {
+                image: img_handle,
+                mip_count,
+            } => unsafe {
                 let vk_image = resources.image(img_handle)?;
                 let img_desc = resources.image_desc(img_handle)?;
                 let aspect = image_aspect_mask(img_desc.format);
@@ -673,14 +683,16 @@ impl CommandContext {
                     vk::PipelineStageFlags::FRAGMENT_SHADER,
                     vk::PipelineStageFlags::TRANSFER,
                     vk::DependencyFlags::empty(),
-                    &[], &[], &[src_barrier],
+                    &[],
+                    &[],
+                    &[src_barrier],
                 );
 
                 for mip in 1..mips {
-                    let src_w = (img_desc.extent.width  >> (mip - 1)).max(1) as i32;
+                    let src_w = (img_desc.extent.width >> (mip - 1)).max(1) as i32;
                     let src_h = (img_desc.extent.height >> (mip - 1)).max(1) as i32;
-                    let dst_w = (img_desc.extent.width  >>  mip      ).max(1) as i32;
-                    let dst_h = (img_desc.extent.height >>  mip      ).max(1) as i32;
+                    let dst_w = (img_desc.extent.width >> mip).max(1) as i32;
+                    let dst_h = (img_desc.extent.height >> mip).max(1) as i32;
 
                     // Transition destination mip to TRANSFER_DST.
                     let dst_barrier = vk::ImageMemoryBarrier::default()
@@ -701,7 +713,9 @@ impl CommandContext {
                         vk::PipelineStageFlags::TRANSFER,
                         vk::PipelineStageFlags::TRANSFER,
                         vk::DependencyFlags::empty(),
-                        &[], &[], &[dst_barrier],
+                        &[],
+                        &[],
+                        &[dst_barrier],
                     );
 
                     // Blit mip-1 → mip.
@@ -714,7 +728,11 @@ impl CommandContext {
                         })
                         .src_offsets([
                             vk::Offset3D { x: 0, y: 0, z: 0 },
-                            vk::Offset3D { x: src_w, y: src_h, z: 1 },
+                            vk::Offset3D {
+                                x: src_w,
+                                y: src_h,
+                                z: 1,
+                            },
                         ])
                         .dst_subresource(vk::ImageSubresourceLayers {
                             aspect_mask: aspect,
@@ -724,12 +742,18 @@ impl CommandContext {
                         })
                         .dst_offsets([
                             vk::Offset3D { x: 0, y: 0, z: 0 },
-                            vk::Offset3D { x: dst_w, y: dst_h, z: 1 },
+                            vk::Offset3D {
+                                x: dst_w,
+                                y: dst_h,
+                                z: 1,
+                            },
                         ]);
                     device.cmd_blit_image(
                         command_buffer,
-                        vk_image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                        vk_image, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        vk_image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        vk_image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                         &[blit],
                         vk::Filter::LINEAR,
                     );
@@ -753,7 +777,9 @@ impl CommandContext {
                         vk::PipelineStageFlags::TRANSFER,
                         vk::PipelineStageFlags::TRANSFER,
                         vk::DependencyFlags::empty(),
-                        &[], &[], &[to_src],
+                        &[],
+                        &[],
+                        &[to_src],
                     );
                 }
 
@@ -774,41 +800,63 @@ impl CommandContext {
                 device.cmd_pipeline_barrier(
                     command_buffer,
                     vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER
+                        | vk::PipelineStageFlags::COMPUTE_SHADER,
                     vk::DependencyFlags::empty(),
-                    &[], &[], &[final_barrier],
+                    &[],
+                    &[],
+                    &[final_barrier],
                 );
             },
 
-            PassWork::BlitMip { image, src_mip, dst_mip, src_width, src_height, dst_width, dst_height, .. } => unsafe {
+            PassWork::BlitMip {
+                image,
+                src_mip,
+                dst_mip,
+                src_width,
+                src_height,
+                dst_width,
+                dst_height,
+                ..
+            } => unsafe {
                 let vk_image = resources.image(image)?;
                 let img_desc = resources.image_desc(image)?;
                 let aspect = image_aspect_mask(img_desc.format);
                 let blit = vk::ImageBlit::default()
                     .src_subresource(vk::ImageSubresourceLayers {
                         aspect_mask: aspect,
-                        mip_level:   src_mip,
+                        mip_level: src_mip,
                         base_array_layer: 0,
                         layer_count: 1,
                     })
                     .src_offsets([
                         vk::Offset3D { x: 0, y: 0, z: 0 },
-                        vk::Offset3D { x: src_width as i32, y: src_height as i32, z: 1 },
+                        vk::Offset3D {
+                            x: src_width as i32,
+                            y: src_height as i32,
+                            z: 1,
+                        },
                     ])
                     .dst_subresource(vk::ImageSubresourceLayers {
                         aspect_mask: aspect,
-                        mip_level:   dst_mip,
+                        mip_level: dst_mip,
                         base_array_layer: 0,
                         layer_count: 1,
                     })
                     .dst_offsets([
                         vk::Offset3D { x: 0, y: 0, z: 0 },
-                        vk::Offset3D { x: dst_width as i32, y: dst_height as i32, z: 1 },
+                        vk::Offset3D {
+                            x: dst_width as i32,
+                            y: dst_height as i32,
+                            z: 1,
+                        },
                     ]);
                 device.cmd_blit_image(
                     command_buffer,
-                    vk_image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    vk_image, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk_image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk_image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                     &[blit],
                     vk::Filter::LINEAR,
                 );
@@ -887,6 +935,7 @@ impl CommandContext {
             let layers = subresource_layer_count(first_desc.layers, color_uses[0].subresource);
             (ext, layers)
         } else {
+            //panic allowed, reason = "empty color target path is entered only after depth_use was proven Some"
             let du = depth_use.unwrap(); // safe: checked above
             let desc = resources.image_desc(du.image)?;
             let ext = mip_extent(desc.extent, du.subresource.base_mip);
@@ -940,12 +989,35 @@ impl CommandContext {
             .clear_values(&clear_values);
         let (vp, scissor) = match viewport_override {
             Some([x, y, w, h]) => {
-                let vp = vk::Viewport { x: x as f32, y: y as f32, width: w as f32, height: h as f32, min_depth: 0.0, max_depth: 1.0 };
-                let sc = vk::Rect2D { offset: vk::Offset2D { x: x as i32, y: y as i32 }, extent: vk::Extent2D { width: w, height: h } };
+                let vp = vk::Viewport {
+                    x: x as f32,
+                    y: y as f32,
+                    width: w as f32,
+                    height: h as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                };
+                let sc = vk::Rect2D {
+                    offset: vk::Offset2D {
+                        x: x as i32,
+                        y: y as i32,
+                    },
+                    extent: vk::Extent2D {
+                        width: w,
+                        height: h,
+                    },
+                };
                 (vp, sc)
             }
             None => {
-                let vp = vk::Viewport { x: 0.0, y: 0.0, width: first_extent.width as f32, height: first_extent.height as f32, min_depth: 0.0, max_depth: 1.0 };
+                let vp = vk::Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: first_extent.width as f32,
+                    height: first_extent.height as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                };
                 (vp, render_area)
             }
         };
@@ -1246,7 +1318,11 @@ impl FramedCommands {
     ) -> Result<Self> {
         let mut contexts = Vec::with_capacity(FRAMES_IN_FLIGHT);
         for _ in 0..FRAMES_IN_FLIGHT {
-            contexts.push(CommandContext::create(device, queue_families, timestamp_period_ns)?);
+            contexts.push(CommandContext::create(
+                device,
+                queue_families,
+                timestamp_period_ns,
+            )?);
         }
         Ok(Self {
             contexts,
@@ -1310,7 +1386,9 @@ impl FramedCommands {
                     .wait_for_fences(&[ctx.frame_fence], true, u64::MAX)
                     .map_err(|e| {
                         if e == ash::vk::Result::ERROR_DEVICE_LOST {
-                            Error::DeviceLost("vkWaitForFences returned VK_ERROR_DEVICE_LOST".into())
+                            Error::DeviceLost(
+                                "vkWaitForFences returned VK_ERROR_DEVICE_LOST".into(),
+                            )
                         } else {
                             Error::Backend(format!("vkWaitForFences failed: {e:?}"))
                         }
@@ -1336,7 +1414,9 @@ impl FramedCommands {
                     .wait_for_fences(&fences, true, u64::MAX)
                     .map_err(|e| {
                         if e == ash::vk::Result::ERROR_DEVICE_LOST {
-                            Error::DeviceLost("vkWaitForFences returned VK_ERROR_DEVICE_LOST".into())
+                            Error::DeviceLost(
+                                "vkWaitForFences returned VK_ERROR_DEVICE_LOST".into(),
+                            )
                         } else {
                             Error::Backend(format!("vkWaitForFences failed: {e:?}"))
                         }

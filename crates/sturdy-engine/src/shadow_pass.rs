@@ -18,8 +18,7 @@ use glam::{Mat4, Vec3, Vec4};
 use crate::{
     Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, ImageDesc, ImageDimension,
     ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind, RenderFrame, Result, ShaderDesc,
-    ShaderSource, ShaderStage, push_constants,
-    scene::Scene,
+    ShaderSource, ShaderStage, push_constants, scene::Scene,
 };
 use sturdy_engine_core::Extent3d;
 
@@ -56,7 +55,13 @@ pub struct ShadowConfig {
 
 impl Default for ShadowConfig {
     fn default() -> Self {
-        Self { resolution: 2048, half_size: 50.0, near: 1.0, far: 200.0, depth_bias: 0.005 }
+        Self {
+            resolution: 2048,
+            half_size: 50.0,
+            near: 1.0,
+            far: 200.0,
+            depth_bias: 0.005,
+        }
     }
 }
 
@@ -82,11 +87,19 @@ impl ShadowPass {
     pub fn with_config(engine: &Engine, config: ShadowConfig) -> Result<Self> {
         let depth_program = build_depth_program(engine)?;
         let masked_depth_program = build_masked_depth_program(engine)?;
-        Ok(Self { depth_program, masked_depth_program, config })
+        Ok(Self {
+            depth_program,
+            masked_depth_program,
+            config,
+        })
     }
 
     pub fn light_matrix(&self, light_direction: Vec3) -> Mat4 {
-        let up = if light_direction.y.abs() < 0.99 { Vec3::Y } else { Vec3::Z };
+        let up = if light_direction.y.abs() < 0.99 {
+            Vec3::Y
+        } else {
+            Vec3::Z
+        };
         let eye = -(light_direction.normalize()) * (self.config.far * 0.5);
         let view = Mat4::look_at_rh(eye, Vec3::ZERO, up);
         let hs = self.config.half_size;
@@ -94,15 +107,30 @@ impl ShadowPass {
         proj * view
     }
 
-    pub fn draw(&self, scene: &Scene, frame: &RenderFrame, _engine: &Engine) -> Result<ShadowOutput> {
+    pub fn draw(
+        &self,
+        scene: &Scene,
+        frame: &RenderFrame,
+        _engine: &Engine,
+    ) -> Result<ShadowOutput> {
         let res = self.config.resolution;
         let desc = shadow_image_desc(res, "shadow_map");
         let shadow_image = frame.image("shadow_map", desc)?;
         let light_view_proj = self.light_matrix(scene.directional_light.direction);
-        draw_shadow_batches(scene, frame, &shadow_image,
-                            &self.depth_program, &self.masked_depth_program, light_view_proj)?;
+        draw_shadow_batches(
+            scene,
+            frame,
+            &shadow_image,
+            &self.depth_program,
+            &self.masked_depth_program,
+            light_view_proj,
+        )?;
         shadow_image.register_as("shadow_map");
-        Ok(ShadowOutput { image: shadow_image, light_view_proj, depth_bias: self.config.depth_bias })
+        Ok(ShadowOutput {
+            image: shadow_image,
+            light_view_proj,
+            depth_bias: self.config.depth_bias,
+        })
     }
 }
 
@@ -177,22 +205,22 @@ pub const ATLAS_ROWS: u32 = 2;
 pub struct GpuCsmData {
     /// Per-cascade light view-projection matrices (up to 4). Unused slots are
     /// copies of the last valid cascade.
-    pub matrices: [[[f32; 4]; 4]; MAX_CASCADES],   // 256 bytes
+    pub matrices: [[[f32; 4]; 4]; MAX_CASCADES], // 256 bytes
     /// View-space (linear) distances where each cascade begins.
-    pub split_distances: [f32; MAX_CASCADES],        //  16 bytes
+    pub split_distances: [f32; MAX_CASCADES], //  16 bytes
     /// Number of active cascades (≤ MAX_CASCADES).
-    pub cascade_count: u32,                          //   4 bytes
+    pub cascade_count: u32, //   4 bytes
     /// Constant depth bias applied in the PCF comparison.
-    pub depth_bias: f32,                             //   4 bytes
+    pub depth_bias: f32, //   4 bytes
     /// Fraction of each cascade range used for blending with the next.
-    pub blend_range: f32,                            //   4 bytes
+    pub blend_range: f32, //   4 bytes
     /// 1 = PCSS enabled, 0 = regular 3×3 PCF.
-    pub pcss_enabled: u32,                           //   4 bytes → 288 bytes
+    pub pcss_enabled: u32, //   4 bytes → 288 bytes
     /// Per-cascade atlas UV tile bounds: [x_min, y_min, x_max, y_max] in [0,1].
-    pub atlas_tiles: [[f32; 4]; MAX_CASCADES],       //  64 bytes → 352 bytes
+    pub atlas_tiles: [[f32; 4]; MAX_CASCADES], //  64 bytes → 352 bytes
     /// Per-cascade light source size in atlas UV space for PCSS blocker search.
     /// = world_light_size / cascade_world_width * tile_scale.
-    pub pcss_light_size_uv: [f32; MAX_CASCADES],     //  16 bytes → 368 bytes
+    pub pcss_light_size_uv: [f32; MAX_CASCADES], //  16 bytes → 368 bytes
 }
 
 /// Per-frame output of `CsmPass::draw`.
@@ -235,7 +263,12 @@ impl CsmPass {
             size: std::mem::size_of::<GpuCsmData>() as u64,
             usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
         })?;
-        Ok(Self { depth_program, masked_depth_program, config, csm_buffer })
+        Ok(Self {
+            depth_program,
+            masked_depth_program,
+            config,
+            csm_buffer,
+        })
     }
 
     /// Render all cascade shadow maps and return the output.
@@ -259,11 +292,15 @@ impl CsmPass {
         // Build cascade matrices from tight frustum fitting.
         let mut matrices = [Mat4::IDENTITY; MAX_CASCADES];
         let mut pcss_light_size_uv = [0.0f32; MAX_CASCADES];
-        let tile_scale = 1.0 / ATLAS_COLS as f32;  // 0.5 for a 2×2 atlas
+        let tile_scale = 1.0 / ATLAS_COLS as f32; // 0.5 for a 2×2 atlas
         for i in 0..n {
             let (mat, world_width) = cascade_light_matrix(
-                view, proj, near, far,
-                splits[i], splits[i + 1],
+                view,
+                proj,
+                near,
+                far,
+                splits[i],
+                splits[i + 1],
                 light_dir,
                 res,
                 self.config.z_extension,
@@ -272,7 +309,8 @@ impl CsmPass {
             matrices[i] = mat;
             // UV-space size of the light source within this cascade's atlas tile.
             // Clamped to reasonable range to avoid huge kernels on tiny cascades.
-            pcss_light_size_uv[i] = (self.config.pcss_light_size / world_width.max(1e-3) * tile_scale)
+            pcss_light_size_uv[i] = (self.config.pcss_light_size / world_width.max(1e-3)
+                * tile_scale)
                 .clamp(0.001, 0.25);
         }
         // Fill unused cascade slots with the last valid cascade.
@@ -292,11 +330,18 @@ impl CsmPass {
         let atlas_h = res * ATLAS_ROWS;
         let atlas_desc = ImageDesc {
             dimension: ImageDimension::D2,
-            extent: Extent3d { width: atlas_w, height: atlas_h, depth: 1 },
-            mip_levels: 1, layers: 1, samples: 1,
+            extent: Extent3d {
+                width: atlas_w,
+                height: atlas_h,
+                depth: 1,
+            },
+            mip_levels: 1,
+            layers: 1,
+            samples: 1,
             format: Format::Depth32Float,
             usage: ImageUsage::DEPTH_STENCIL | ImageUsage::SAMPLED,
-            transient: false, clear_value: None,
+            transient: false,
+            clear_value: None,
             debug_name: Some("shadow_atlas"),
         };
         let shadow_atlas = frame.image("shadow_atlas", atlas_desc)?;
@@ -322,8 +367,11 @@ impl CsmPass {
 
             // Render this cascade into its tile using a viewport override.
             draw_shadow_batches_viewport(
-                scene, frame, &shadow_atlas,
-                &self.depth_program, &self.masked_depth_program,
+                scene,
+                frame,
+                &shadow_atlas,
+                &self.depth_program,
+                &self.masked_depth_program,
                 matrices[i],
                 [tile_x, tile_y, res, res],
             )?;
@@ -341,7 +389,6 @@ impl CsmPass {
             let name = format!("shadow_map_{i}");
             shadow_atlas.register_as(&name);
         }
-
 
         // Pack split distances (view-space linear depth of each cascade start).
         let mut split_dists = [0.0f32; MAX_CASCADES];
@@ -363,10 +410,15 @@ impl CsmPass {
         // Upload to the persistent GPU buffer.
         self.csm_buffer.write(0, bytemuck::bytes_of(&gpu_data))?;
 
-        let shadow_atlas = frame.find_image_by_name("shadow_atlas")
+        let shadow_atlas = frame
+            .find_image_by_name("shadow_atlas")
+            //panic allowed, reason = "draw_shadow_batches_viewport creates shadow_atlas before lookup"
             .expect("shadow_atlas must exist after draw_shadow_batches_viewport");
 
-        Ok(CsmOutput { shadow_atlas, gpu_data })
+        Ok(CsmOutput {
+            shadow_atlas,
+            gpu_data,
+        })
     }
 }
 
@@ -393,24 +445,32 @@ fn view_depth_to_ndc_z(proj: Mat4, d: f32) -> f32 {
     // clip_z = proj[2][2] * (-d) + proj[3][2]
     // clip_w = proj[2][3] * (-d) + proj[3][3]  = -(-d)... wait
     // Using glam column-major: proj.z_axis is col 2, proj.w_axis is col 3.
-    let a = proj.z_axis.z;   // col2 row2
-    let b = proj.w_axis.z;   // col3 row2
-    let c = proj.z_axis.w;   // col2 row3
-    let e = proj.w_axis.w;   // col3 row3  (= 0 for perspective)
+    let a = proj.z_axis.z; // col2 row2
+    let b = proj.w_axis.z; // col3 row2
+    let c = proj.z_axis.w; // col2 row3
+    let e = proj.w_axis.w; // col3 row3  (= 0 for perspective)
     let view_z = -d;
     let clip_z = a * view_z + b;
     let clip_w = c * view_z + e;
-    if clip_w.abs() < 1e-7 { 0.0 } else { clip_z / clip_w }
+    if clip_w.abs() < 1e-7 {
+        0.0
+    } else {
+        clip_z / clip_w
+    }
 }
 
 /// Compute the 8 world-space corners of the cascade sub-frustum.
 /// `z_near_ndc` and `z_far_ndc` are the NDC Z values for the cascade depth range.
 fn cascade_world_corners(inv_vp: Mat4, z_near_ndc: f32, z_far_ndc: f32) -> [Vec3; 8] {
     let ndc_pts: [[f32; 4]; 8] = [
-        [-1.0, -1.0, z_near_ndc, 1.0], [ 1.0, -1.0, z_near_ndc, 1.0],
-        [-1.0,  1.0, z_near_ndc, 1.0], [ 1.0,  1.0, z_near_ndc, 1.0],
-        [-1.0, -1.0, z_far_ndc,  1.0], [ 1.0, -1.0, z_far_ndc,  1.0],
-        [-1.0,  1.0, z_far_ndc,  1.0], [ 1.0,  1.0, z_far_ndc,  1.0],
+        [-1.0, -1.0, z_near_ndc, 1.0],
+        [1.0, -1.0, z_near_ndc, 1.0],
+        [-1.0, 1.0, z_near_ndc, 1.0],
+        [1.0, 1.0, z_near_ndc, 1.0],
+        [-1.0, -1.0, z_far_ndc, 1.0],
+        [1.0, -1.0, z_far_ndc, 1.0],
+        [-1.0, 1.0, z_far_ndc, 1.0],
+        [1.0, 1.0, z_far_ndc, 1.0],
     ];
     let mut out = [Vec3::ZERO; 8];
     for (i, p) in ndc_pts.iter().enumerate() {
@@ -437,11 +497,15 @@ fn cascade_light_matrix(
 ) -> (Mat4, f32) {
     let inv_vp = (proj * view).inverse();
     let z_near_ndc = view_depth_to_ndc_z(proj, cascade_near.max(cam_near));
-    let z_far_ndc  = view_depth_to_ndc_z(proj, cascade_far.min(cam_far));
-    let corners    = cascade_world_corners(inv_vp, z_near_ndc, z_far_ndc);
+    let z_far_ndc = view_depth_to_ndc_z(proj, cascade_far.min(cam_far));
+    let corners = cascade_world_corners(inv_vp, z_near_ndc, z_far_ndc);
 
     // Build a light-view matrix looking from light direction.
-    let up = if light_dir.y.abs() < 0.99 { Vec3::Y } else { Vec3::Z };
+    let up = if light_dir.y.abs() < 0.99 {
+        Vec3::Y
+    } else {
+        Vec3::Z
+    };
     let centroid: Vec3 = corners.iter().sum::<Vec3>() / 8.0;
     let light_view = Mat4::look_at_rh(centroid - light_dir, centroid, up);
 
@@ -476,9 +540,8 @@ fn cascade_light_matrix(
     // Light-space orthographic projection (Z range: min_ls.z → max_ls.z, depth 0..1).
     let world_width = max_ls.x - min_ls.x;
     let light_proj = Mat4::orthographic_rh(
-        min_ls.x, max_ls.x,
-        min_ls.y, max_ls.y,
-        -max_ls.z, -min_ls.z, // light looks toward -Z; negate to get near/far
+        min_ls.x, max_ls.x, min_ls.y, max_ls.y, -max_ls.z,
+        -min_ls.z, // light looks toward -Z; negate to get near/far
     );
 
     (light_proj * light_view, world_width)
@@ -516,7 +579,11 @@ fn build_depth_program(engine: &Engine) -> Result<MeshProgram> {
 fn shadow_image_desc(resolution: u32, debug_name: &'static str) -> ImageDesc {
     ImageDesc {
         dimension: ImageDimension::D2,
-        extent: Extent3d { width: resolution, height: resolution, depth: 1 },
+        extent: Extent3d {
+            width: resolution,
+            height: resolution,
+            depth: 1,
+        },
         mip_levels: 1,
         layers: 1,
         samples: 1,
@@ -541,12 +608,21 @@ fn draw_shadow_batches_viewport(
     viewport: [u32; 4],
 ) -> Result<()> {
     use crate::scene::material::MaterialDomain;
-    let constants = ShadowDepthConstants { light_view_proj: light_view_proj.to_cols_array_2d() };
+    let constants = ShadowDepthConstants {
+        light_view_proj: light_view_proj.to_cols_array_2d(),
+    };
     for (mesh_idx, instance_buf_opt, instance_count) in scene.drawable_batches() {
-        let instance_buf = match instance_buf_opt { Some(b) => b, None => continue };
-        if instance_count == 0 { continue; }
+        let instance_buf = match instance_buf_opt {
+            Some(b) => b,
+            None => continue,
+        };
+        if instance_count == 0 {
+            continue;
+        }
         let domain = scene.domain_at(mesh_idx);
-        if domain == MaterialDomain::Translucent { continue; }
+        if domain == MaterialDomain::Translucent {
+            continue;
+        }
         let mesh = scene.mesh_at(mesh_idx);
         frame.bind_buffer("instances", instance_buf);
         let prog = if domain == MaterialDomain::Masked {
@@ -554,9 +630,16 @@ fn draw_shadow_batches_viewport(
                 frame.bind_buffer("material_desc", mb);
             }
             masked_program
-        } else { program };
+        } else {
+            program
+        };
         shadow_image.draw_mesh_depth_only_with_push_constants_and_viewport(
-            mesh, prog, instance_buf, instance_count, &constants, viewport,
+            mesh,
+            prog,
+            instance_buf,
+            instance_count,
+            &constants,
+            viewport,
         )?;
     }
     Ok(())
@@ -581,12 +664,17 @@ fn draw_shadow_batches(
         light_view_proj: light_view_proj.to_cols_array_2d(),
     };
     for (mesh_idx, instance_buf_opt, instance_count) in scene.drawable_batches() {
-        let instance_buf = match instance_buf_opt { Some(b) => b, None => continue };
-        if instance_count == 0 { continue; }
+        let instance_buf = match instance_buf_opt {
+            Some(b) => b,
+            None => continue,
+        };
+        if instance_count == 0 {
+            continue;
+        }
 
         let domain = scene.domain_at(mesh_idx);
         if domain == MaterialDomain::Translucent {
-            continue;  // translucent objects don't cast hard shadows
+            continue; // translucent objects don't cast hard shadows
         }
 
         let mesh = scene.mesh_at(mesh_idx);
@@ -599,11 +687,19 @@ fn draw_shadow_batches(
                 frame.bind_buffer("material_desc", mat_buf);
             }
             shadow_image.draw_mesh_depth_only_with_push_constants(
-                mesh, masked_program, instance_buf, instance_count, &constants,
+                mesh,
+                masked_program,
+                instance_buf,
+                instance_count,
+                &constants,
             )?;
         } else {
             shadow_image.draw_mesh_depth_only_with_push_constants(
-                mesh, program, instance_buf, instance_count, &constants,
+                mesh,
+                program,
+                instance_buf,
+                instance_count,
+                &constants,
             )?;
         }
     }

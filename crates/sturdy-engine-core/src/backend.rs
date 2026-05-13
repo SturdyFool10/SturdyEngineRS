@@ -102,6 +102,38 @@ pub trait Backend: Send + Sync {
     fn memory_budget(&self) -> Option<GpuMemoryBudget> {
         None
     }
+
+    // ── Bindless descriptor heap (Track 8a) ───────────────────────────────────
+
+    /// Register a sampled (read-only) image in the bindless heap.
+    ///
+    /// Returns the stable `u32` index to embed in push constants or a per-draw
+    /// data buffer. Returns `None` when bindless is not supported or capacity
+    /// is exhausted. Never returns the same index twice.
+    fn register_bindless_sampled_image(&self, _handle: ImageHandle) -> Option<u32> {
+        None
+    }
+
+    /// Register a sampler in the bindless heap.
+    fn register_bindless_sampler(&self, _handle: SamplerHandle) -> Option<u32> {
+        None
+    }
+
+    /// Register a storage (read-write) image in the bindless heap.
+    fn register_bindless_storage_image(&self, _handle: ImageHandle) -> Option<u32> {
+        None
+    }
+
+    /// Register a storage buffer in the bindless heap.
+    fn register_bindless_storage_buffer(&self, _handle: BufferHandle) -> Option<u32> {
+        None
+    }
+
+    /// Returns `true` when the bindless heap is available on this backend.
+    fn bindless_supported(&self) -> bool {
+        false
+    }
+
     fn native_handle_capabilities(&self) -> NativeHandleCapabilities {
         native_handle_capabilities_for_backend(self.kind())
     }

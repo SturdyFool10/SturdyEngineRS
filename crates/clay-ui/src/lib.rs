@@ -3,6 +3,7 @@
 //! This crate intentionally sits above graphics backends. It resolves UI trees
 //! into draw items, batches, text scenes, and render-graph pass descriptions
 //! without recording API-specific commands.
+#![allow(dead_code)]
 
 pub mod batch;
 pub mod color;

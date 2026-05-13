@@ -20,8 +20,10 @@
 
 use std::path::Path;
 
-use crate::{Buffer, BufferDesc, BufferUsage, Engine, FrameSyncReason, Image, ImageDesc,
-            ImageDimension, ImageUsage, Result, TextureUploadDesc};
+use crate::{
+    Buffer, BufferDesc, BufferUsage, Engine, FrameSyncReason, Image, ImageDesc, ImageDimension,
+    ImageUsage, Result, TextureUploadDesc,
+};
 use sturdy_engine_core::Extent3d;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -78,7 +80,8 @@ impl EnvironmentMap {
         })?;
         let rgba32 = dyn_image.into_rgba32f();
         let (w, h) = (rgba32.width() as usize, rgba32.height() as usize);
-        let pixels: Vec<[f32; 4]> = rgba32.as_raw()
+        let pixels: Vec<[f32; 4]> = rgba32
+            .as_raw()
             .chunks(4)
             .map(|c| [c[0], c[1], c[2], c[3]])
             .collect();
@@ -104,11 +107,11 @@ impl EnvironmentMap {
         for y in 0..H {
             for x in 0..W {
                 // Equirectangular: phi ∈ [0, 2π], theta ∈ [0, π]
-                let phi   = (x as f32 + 0.5) / W as f32 * std::f32::consts::TAU;
+                let phi = (x as f32 + 0.5) / W as f32 * std::f32::consts::TAU;
                 let theta = (y as f32 + 0.5) / H as f32 * std::f32::consts::PI;
                 // Sphere direction (Y-up convention)
                 let dx = theta.sin() * phi.cos();
-                let dy = theta.cos();           // 1 at top, -1 at bottom
+                let dy = theta.cos(); // 1 at top, -1 at bottom
                 let dz = theta.sin() * phi.sin();
 
                 // Key light: bright white from above
@@ -116,16 +119,21 @@ impl EnvironmentMap {
                 let key = [2.4 * key_atten, 2.3 * key_atten, 2.2 * key_atten];
 
                 // Fill light: warm tint from front (+z)
-                let fill_atten = (dz * 0.5 + 0.5).clamp(0.0, 1.0) * ((-dy).clamp(0.0, 1.0) + 0.3).clamp(0.0, 1.0);
+                let fill_atten = (dz * 0.5 + 0.5).clamp(0.0, 1.0)
+                    * ((-dy).clamp(0.0, 1.0) + 0.3).clamp(0.0, 1.0);
                 let fill = [0.5 * fill_atten, 0.45 * fill_atten, 0.35 * fill_atten];
 
                 // Rim: cool blue from behind/below
-                let rim_atten  = ((-dz * 0.6 - dy * 0.4).clamp(0.0, 1.0)).powf(3.0);
+                let rim_atten = ((-dz * 0.6 - dy * 0.4).clamp(0.0, 1.0)).powf(3.0);
                 let rim = [0.3 * rim_atten, 0.4 * rim_atten, 0.7 * rim_atten];
 
                 // Ground: very dark neutral bounce
                 let ground_atten = ((-dy).clamp(0.0, 1.0)).powf(2.0);
-                let ground = [0.04 * ground_atten, 0.04 * ground_atten, 0.04 * ground_atten];
+                let ground = [
+                    0.04 * ground_atten,
+                    0.04 * ground_atten,
+                    0.04 * ground_atten,
+                ];
 
                 let r = key[0] + fill[0] + rim[0] + ground[0];
                 let g = key[1] + fill[1] + rim[1] + ground[1];
@@ -139,25 +147,45 @@ impl EnvironmentMap {
     }
 
     /// Precompute IBL from already-decoded f32 RGBA pixels (row-major, equirectangular).
-    pub fn from_cpu_pixels(engine: &Engine, pixels: &[[f32; 4]], width: usize, height: usize) -> Result<Self> {
+    pub fn from_cpu_pixels(
+        engine: &Engine,
+        pixels: &[[f32; 4]],
+        width: usize,
+        height: usize,
+    ) -> Result<Self> {
         let sh9_coefficients = compute_sh9(pixels, width, height);
-        let sh9_buffer       = upload_sh9_buffer(engine, &sh9_coefficients)?;
-        let specular         = prefilter_specular_cpu(engine, pixels, width, height)?;
-        let equirectangular  = upload_equirectangular(engine, pixels, width, height)?;
+        let sh9_buffer = upload_sh9_buffer(engine, &sh9_coefficients)?;
+        let specular = prefilter_specular_cpu(engine, pixels, width, height)?;
+        let equirectangular = upload_equirectangular(engine, pixels, width, height)?;
 
-        Ok(Self { equirectangular, specular, sh9_buffer, sh9_coefficients })
+        Ok(Self {
+            equirectangular,
+            specular,
+            sh9_buffer,
+            sh9_coefficients,
+        })
     }
 }
 
 // ── Equirectangular upload ────────────────────────────────────────────────────
 
-fn upload_equirectangular(engine: &Engine, pixels: &[[f32; 4]], w: usize, h: usize) -> Result<Image> {
-    let f16: Vec<u8> = pixels.iter()
+fn upload_equirectangular(
+    engine: &Engine,
+    pixels: &[[f32; 4]],
+    w: usize,
+    h: usize,
+) -> Result<Image> {
+    let f16: Vec<u8> = pixels
+        .iter()
         .flat_map(|p| {
-            [half::f16::from_f32(p[0]), half::f16::from_f32(p[1]),
-             half::f16::from_f32(p[2]), half::f16::from_f32(p[3])]
-                .map(|v| v.to_le_bytes())
-                .concat()
+            [
+                half::f16::from_f32(p[0]),
+                half::f16::from_f32(p[1]),
+                half::f16::from_f32(p[2]),
+                half::f16::from_f32(p[3]),
+            ]
+            .map(|v| v.to_le_bytes())
+            .concat()
         })
         .collect();
 
@@ -183,8 +211,8 @@ fn prefilter_specular_cpu(
     src_h: usize,
 ) -> Result<Image> {
     let layers = SPECULAR_LAYER_COUNT as usize;
-    let out_w  = SPECULAR_WIDTH  as usize;
-    let out_h  = SPECULAR_HEIGHT as usize;
+    let out_w = SPECULAR_WIDTH as usize;
+    let out_h = SPECULAR_HEIGHT as usize;
     let bytes_per_layer = out_w * out_h * 8; // RGBA16Float = 8 bytes/texel
 
     // Compute all layers on CPU.
@@ -195,7 +223,15 @@ fn prefilter_specular_cpu(
         } else {
             layer as f32 / (layers - 1) as f32
         };
-        let layer_pixels = prefilter_layer(src_pixels, src_w, src_h, out_w, out_h, roughness, SPECULAR_SAMPLES);
+        let layer_pixels = prefilter_layer(
+            src_pixels,
+            src_w,
+            src_h,
+            out_w,
+            out_h,
+            roughness,
+            SPECULAR_SAMPLES,
+        );
         for p in &layer_pixels {
             for &ch in p {
                 let f16 = half::f16::from_f32(ch);
@@ -207,7 +243,11 @@ fn prefilter_specular_cpu(
     // Create the array image.
     let image = engine.create_image(ImageDesc {
         dimension: ImageDimension::D2,
-        extent: Extent3d { width: out_w as u32, height: out_h as u32, depth: 1 },
+        extent: Extent3d {
+            width: out_w as u32,
+            height: out_h as u32,
+            depth: 1,
+        },
         mip_levels: 1,
         layers: SPECULAR_LAYER_COUNT as u16,
         samples: 1,
@@ -247,7 +287,12 @@ fn prefilter_specular_cpu(
     }
 
     // Transition to ShaderRead so the image is sampeable in the render frame.
-    let subresource = crate::SubresourceRange { base_mip: 0, mip_count: 1, base_layer: 0, layer_count: SPECULAR_LAYER_COUNT as u16 };
+    let subresource = crate::SubresourceRange {
+        base_mip: 0,
+        mip_count: 1,
+        base_layer: 0,
+        layer_count: SPECULAR_LAYER_COUNT as u16,
+    };
     frame.add_pass(crate::PassDesc {
         name: "env-specular-shader-read".into(),
         queue: crate::QueueType::Graphics,
@@ -318,12 +363,12 @@ fn prefilter_texel(
 
     for i in 0..samples {
         let xi = hammersley(i, samples);
-        let h  = importance_sample_ggx(xi, n, roughness);
-        let l  = reflect_dir(v, h);
+        let h = importance_sample_ggx(xi, n, roughness);
+        let l = reflect_dir(v, h);
         let n_dot_l = dot3(n, l).max(0.0);
         if n_dot_l > 0.0 {
             let uv = dir_to_latlong(l);
-            let c  = sample_latlong(src, src_w, src_h, uv);
+            let c = sample_latlong(src, src_w, src_h, uv);
             acc[0] += c[0] * n_dot_l;
             acc[1] += c[1] * n_dot_l;
             acc[2] += c[2] * n_dot_l;
@@ -331,7 +376,11 @@ fn prefilter_texel(
         }
     }
     if total_weight > 1e-6 {
-        [acc[0] / total_weight, acc[1] / total_weight, acc[2] / total_weight]
+        [
+            acc[0] / total_weight,
+            acc[1] / total_weight,
+            acc[2] / total_weight,
+        ]
     } else {
         [0.0; 3]
     }
@@ -423,7 +472,7 @@ pub fn compute_brdf_lut(engine: &Engine) -> Result<Image> {
             let s16 = half::f16::from_f32(scale.clamp(0.0, 1.0));
             let b16 = half::f16::from_f32(bias.clamp(0.0, 1.0));
             let e16 = half::f16::from_f32(e_s_white);
-            pixels[offset    ..offset + 2].copy_from_slice(&s16.to_le_bytes());
+            pixels[offset..offset + 2].copy_from_slice(&s16.to_le_bytes());
             pixels[offset + 2..offset + 4].copy_from_slice(&b16.to_le_bytes());
             pixels[offset + 4..offset + 6].copy_from_slice(&e16.to_le_bytes());
             // A channel left as 0
@@ -480,21 +529,21 @@ fn integrate_brdf(n_dot_v: f32, roughness: f32, samples: u32) -> (f32, f32) {
     // V in tangent space, N = (0,0,1).
     let v = [f32::sqrt(1.0 - n_dot_v * n_dot_v), 0.0, n_dot_v];
     let mut scale = 0.0f32;
-    let mut bias  = 0.0f32;
+    let mut bias = 0.0f32;
 
     for i in 0..samples {
         let xi = hammersley(i, samples);
-        let h  = ggx_sample_tangent(xi, roughness);
-        let l  = reflect_dir(v, h);
+        let h = ggx_sample_tangent(xi, roughness);
+        let l = reflect_dir(v, h);
         let n_dot_l = l[2].max(0.0);
         let n_dot_h = h[2].max(0.0);
         let v_dot_h = dot3(v, h).max(0.0);
         if n_dot_l > 0.0 {
-            let g   = g_smith(n_dot_v, n_dot_l, roughness);
+            let g = g_smith(n_dot_v, n_dot_l, roughness);
             let g_vis = g * v_dot_h / (n_dot_h * n_dot_v + 1e-7);
-            let fc  = (1.0 - v_dot_h).powi(5);
+            let fc = (1.0 - v_dot_h).powi(5);
             scale += (1.0 - fc) * g_vis;
-            bias  += fc * g_vis;
+            bias += fc * g_vis;
         }
     }
     (scale / samples as f32, bias / samples as f32)
@@ -538,9 +587,13 @@ fn ggx_sample_tangent(xi: [f32; 2], roughness: f32) -> [f32; 3] {
 fn importance_sample_ggx(xi: [f32; 2], n: [f32; 3], roughness: f32) -> [f32; 3] {
     let h_tan = ggx_sample_tangent(xi, roughness);
     // Build a TBN frame around N.
-    let up = if n[2].abs() < 0.999 { [0.0f32, 0.0, 1.0] } else { [1.0, 0.0, 0.0] };
+    let up = if n[2].abs() < 0.999 {
+        [0.0f32, 0.0, 1.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
     let right = normalize3(cross3(up, n));
-    let fwd   = cross3(n, right);
+    let fwd = cross3(n, right);
     normalize3([
         right[0] * h_tan[0] + fwd[0] * h_tan[1] + n[0] * h_tan[2],
         right[1] * h_tan[0] + fwd[1] * h_tan[1] + n[1] * h_tan[2],
@@ -549,7 +602,11 @@ fn importance_sample_ggx(xi: [f32; 2], n: [f32; 3], roughness: f32) -> [f32; 3] 
 }
 
 fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]]
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 
 /// Smith G term (Schlick-GGX for IBL — k = roughness²/2).
@@ -565,9 +622,13 @@ fn g_smith(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
 // ── Equirectangular sampling ──────────────────────────────────────────────────
 
 fn latlong_to_dir(u: f32, v: f32) -> [f32; 3] {
-    let phi   = (u - 0.5) * 2.0 * std::f32::consts::PI;
+    let phi = (u - 0.5) * 2.0 * std::f32::consts::PI;
     let theta = v * std::f32::consts::PI;
-    [theta.sin() * phi.cos(), theta.cos(), theta.sin() * phi.sin()]
+    [
+        theta.sin() * phi.cos(),
+        theta.cos(),
+        theta.sin() * phi.sin(),
+    ]
 }
 
 fn dir_to_latlong(d: [f32; 3]) -> [f32; 2] {
@@ -594,10 +655,14 @@ fn sample_latlong(src: &[[f32; 4]], w: usize, h: usize, uv: [f32; 2]) -> [f32; 3
     };
 
     let lerp1 = |a: [f32; 3], b: [f32; 3], t: f32| -> [f32; 3] {
-        [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+        [
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+        ]
     };
 
-    let top    = lerp1(s(x0, y0), s(x1, y0), fx);
+    let top = lerp1(s(x0, y0), s(x1, y0), fx);
     let bottom = lerp1(s(x0, y1), s(x1, y1), fx);
     lerp1(top, bottom, fy)
 }
@@ -612,8 +677,8 @@ fn sh2_basis(d: [f64; 3]) -> [f64; 9] {
         0.488603 * x,                   // l=1 m=1
         1.092548 * x * y,               // l=2 m=-2
         1.092548 * y * z,               // l=2 m=-1
-        0.315392 * (3.0*z*z - 1.0),    // l=2 m=0
+        0.315392 * (3.0 * z * z - 1.0), // l=2 m=0
         1.092548 * x * z,               // l=2 m=1
-        0.546274 * (x*x - y*y),         // l=2 m=2
+        0.546274 * (x * x - y * y),     // l=2 m=2
     ]
 }

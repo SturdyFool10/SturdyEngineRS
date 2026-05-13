@@ -65,12 +65,18 @@ impl GeometryBackend {
 
     /// Returns `true` when this backend requires ray tracing hardware.
     pub fn requires_ray_tracing(self) -> bool {
-        matches!(self, Self::RayTracingFallback | Self::RayTracingSelectedClusters)
+        matches!(
+            self,
+            Self::RayTracingFallback | Self::RayTracingSelectedClusters
+        )
     }
 
     /// Returns `true` when this backend requires a pre-built cluster hierarchy.
     pub fn requires_cluster_hierarchy(self) -> bool {
-        matches!(self, Self::VirtualizedRaster | Self::RayTracingSelectedClusters)
+        matches!(
+            self,
+            Self::VirtualizedRaster | Self::RayTracingSelectedClusters
+        )
     }
 }
 
@@ -90,7 +96,7 @@ impl GeometryRendererCaps {
         Self {
             mesh_shading: caps.supports_mesh_shading,
             task_shading: caps.supports_mesh_shading, // task is part of EXT_mesh_shader
-            compute_indirect: true,                    // always available with compute
+            compute_indirect: true,                   // always available with compute
             indirect_draw: true,
             ray_tracing: caps.supports_raytracing,
         }
@@ -144,7 +150,10 @@ pub struct BoundingSphere {
 }
 
 impl BoundingSphere {
-    pub const EMPTY: Self = Self { center: Vec3::ZERO, radius: 0.0 };
+    pub const EMPTY: Self = Self {
+        center: Vec3::ZERO,
+        radius: 0.0,
+    };
 
     /// Compute a tight bounding sphere from a flat vertex position list.
     /// Uses Ritter's algorithm: fast, one pass, radius slightly conservative.
@@ -168,13 +177,17 @@ impl BoundingSphere {
     /// The radius is scaled by the maximum column-length of the 3×3 rotation+scale
     /// sub-matrix, giving a conservative world-space sphere.
     pub fn transform(&self, model: Mat4) -> Self {
-        let world_center = (model * Vec4::new(self.center.x, self.center.y, self.center.z, 1.0)).truncate();
+        let world_center =
+            (model * Vec4::new(self.center.x, self.center.y, self.center.z, 1.0)).truncate();
         // Maximum scale along any axis (largest column magnitude of the 3×3 part).
         let sx = Vec3::new(model.x_axis.x, model.y_axis.x, model.z_axis.x).length();
         let sy = Vec3::new(model.x_axis.y, model.y_axis.y, model.z_axis.y).length();
         let sz = Vec3::new(model.x_axis.z, model.y_axis.z, model.z_axis.z).length();
         let max_scale = sx.max(sy).max(sz);
-        Self { center: world_center, radius: self.radius * max_scale }
+        Self {
+            center: world_center,
+            radius: self.radius * max_scale,
+        }
     }
 }
 
@@ -196,7 +209,10 @@ impl Frustum {
         // Gribb-Hartmann: row vectors of the matrix are r0..r3.
         // m[col][row] → row r = (m[0][r], m[1][r], m[2][r], m[3][r])
         let r = |row: usize| Vec4::new(m[0][row], m[1][row], m[2][row], m[3][row]);
-        let r0 = r(0); let r1 = r(1); let r2 = r(2); let r3 = r(3);
+        let r0 = r(0);
+        let r1 = r(1);
+        let r2 = r(2);
+        let r3 = r(3);
         let mut planes = [
             r3 + r0, // left
             r3 - r0, // right
@@ -232,7 +248,9 @@ impl Frustum {
     #[inline]
     pub fn contains_sphere(&self, sphere: &BoundingSphere) -> bool {
         let p = Vec4::new(sphere.center.x, sphere.center.y, sphere.center.z, 1.0);
-        self.planes.iter().all(|plane| plane.dot(p) >= sphere.radius)
+        self.planes
+            .iter()
+            .all(|plane| plane.dot(p) >= sphere.radius)
     }
 
     /// Return the six frustum planes as raw `Vec4` values.
@@ -442,7 +460,11 @@ impl VirtualMesh {
             meshlet_vertices: Vec::new(),
             meshlet_triangles: Vec::new(),
             meshlet_groups: Vec::new(),
-            sub_meshes: vec![SubMesh { index_offset: 0, index_count, material_index }],
+            sub_meshes: vec![SubMesh {
+                index_offset: 0,
+                index_count,
+                material_index,
+            }],
             rt_proxy: None,
         }
     }
@@ -498,20 +520,17 @@ impl VirtualMesh {
     /// - `max_vertices`: maximum vertices per meshlet (≤ 255). Default: `MAX_MESHLET_VERTICES`.
     /// - `max_triangles`: maximum triangles per meshlet (≤ 511). Default: `MAX_MESHLET_TRIANGLES`.
     /// - `cone_weight`: backface-cone weight for better culling (0.0–1.0). Default: 0.5.
-    pub fn build_meshlets(
-        &mut self,
-        max_vertices:  usize,
-        max_triangles: usize,
-        cone_weight:   f32,
-    ) {
-        use meshopt::{build_meshlets as mo_build, compute_meshlet_bounds, VertexDataAdapter};
+    pub fn build_meshlets(&mut self, max_vertices: usize, max_triangles: usize, cone_weight: f32) {
+        use meshopt::{VertexDataAdapter, build_meshlets as mo_build, compute_meshlet_bounds};
 
         let positions: Vec<[f32; 3]> = self.vertices.iter().map(|v| v.position).collect();
         let adapter = VertexDataAdapter::new(
             bytemuck::cast_slice(&positions),
             std::mem::size_of::<[f32; 3]>(),
             0,
-        ).expect("vertex adapter");
+        )
+        //panic allowed, reason = "adapter input uses contiguous [f32; 3] data with matching stride and zero offset"
+        .expect("vertex adapter");
 
         let result = mo_build(
             &self.indices,
@@ -521,8 +540,8 @@ impl VirtualMesh {
             cone_weight,
         );
 
-        self.meshlets          = Vec::with_capacity(result.meshlets.len());
-        self.meshlet_vertices  = result.vertices.clone();
+        self.meshlets = Vec::with_capacity(result.meshlets.len());
+        self.meshlet_vertices = result.vertices.clone();
         self.meshlet_triangles = result.triangles.clone();
 
         for mo_m in result.iter() {
@@ -531,16 +550,24 @@ impl VirtualMesh {
             let m = mo_m.vertices.len() as u32;
             let t = (mo_m.triangles.len() / 3) as u32;
             // Offsets computed from cumulative counts:
-            let voff = self.meshlets.last().map(|last| last.vertex_offset + last.vertex_count).unwrap_or(0);
-            let toff = self.meshlets.last().map(|last| last.triangle_offset + last.triangle_count).unwrap_or(0);
+            let voff = self
+                .meshlets
+                .last()
+                .map(|last| last.vertex_offset + last.vertex_count)
+                .unwrap_or(0);
+            let toff = self
+                .meshlets
+                .last()
+                .map(|last| last.triangle_offset + last.triangle_count)
+                .unwrap_or(0);
             self.meshlets.push(Meshlet {
-                vertex_offset:   voff,
-                vertex_count:    m,
+                vertex_offset: voff,
+                vertex_count: m,
                 triangle_offset: toff,
-                triangle_count:  t,
+                triangle_count: t,
                 bounds: MeshletBounds {
-                    center:    bounds.center,
-                    radius:    bounds.radius,
+                    center: bounds.center,
+                    radius: bounds.radius,
                     cone_apex: bounds.cone_apex,
                     lod_error: 0.0,
                     // meshopt returns f32 cone axis/cutoff; quantise to i8.
@@ -564,14 +591,16 @@ impl VirtualMesh {
     ///
     /// Returns the achieved triangle count and the actual error.
     pub fn build_rt_proxy(&mut self, target_ratio: f32, target_error: f32) -> (u32, f32) {
-        use meshopt::{simplify, SimplifyOptions, VertexDataAdapter};
+        use meshopt::{SimplifyOptions, VertexDataAdapter, simplify};
 
         let positions: Vec<[f32; 3]> = self.vertices.iter().map(|v| v.position).collect();
         let adapter = VertexDataAdapter::new(
             bytemuck::cast_slice(&positions),
             std::mem::size_of::<[f32; 3]>(),
             0,
-        ).expect("vertex adapter");
+        )
+        //panic allowed, reason = "adapter input uses contiguous [f32; 3] data with matching stride and zero offset"
+        .expect("vertex adapter");
 
         let target_count = ((self.indices.len() as f32 * target_ratio) as usize / 3 * 3).max(3);
         let mut actual_error = 0.0f32;
@@ -585,15 +614,19 @@ impl VirtualMesh {
         );
 
         let achieved = proxy_indices.len() as u32 / 3;
-        let error    = actual_error;
+        let error = actual_error;
 
         self.rt_proxy = Some(Box::new(VirtualMeshProxy {
-            vertices:  self.vertices.clone(),
-            indices:   proxy_indices,
+            vertices: self.vertices.clone(),
+            indices: proxy_indices,
             sub_meshes: vec![SubMesh {
-                index_offset:   0,
-                index_count:    achieved * 3,
-                material_index: self.sub_meshes.first().map(|s| s.material_index).unwrap_or(0),
+                index_offset: 0,
+                index_count: achieved * 3,
+                material_index: self
+                    .sub_meshes
+                    .first()
+                    .map(|s| s.material_index)
+                    .unwrap_or(0),
             }],
         }));
 
@@ -643,7 +676,7 @@ impl VirtualMesh {
         VirtualMesh {
             name,
             vertices: Vec::new(),
-            indices:  Vec::new(),
+            indices: Vec::new(),
             meshlets: Vec::new(),
             meshlet_vertices: Vec::new(),
             meshlet_triangles: Vec::new(),
@@ -678,14 +711,14 @@ impl VirtualMesh {
 ///     .build();
 /// ```
 pub struct VirtualMeshBuilder {
-    name:      String,
-    vertices:  Vec<Vertex3d>,
-    indices:   Vec<u32>,
+    name: String,
+    vertices: Vec<Vertex3d>,
+    indices: Vec<u32>,
     sub_meshes: Vec<SubMesh>,
     /// Whether to run `build_meshlets` at `.build()` time.
     gen_meshlets: bool,
     meshlet_max_verts: usize,
-    meshlet_max_tris:  usize,
+    meshlet_max_tris: usize,
     meshlet_cone_weight: f32,
     /// Whether to run `build_rt_proxy` at `.build()` time.
     gen_rt_proxy: bool,
@@ -699,11 +732,11 @@ impl VirtualMeshBuilder {
         Self {
             name: name.into(),
             vertices: Vec::new(),
-            indices:  Vec::new(),
+            indices: Vec::new(),
             sub_meshes: Vec::new(),
             gen_meshlets: false,
             meshlet_max_verts: MAX_MESHLET_VERTICES as usize,
-            meshlet_max_tris:  MAX_MESHLET_TRIANGLES as usize,
+            meshlet_max_tris: MAX_MESHLET_TRIANGLES as usize,
             meshlet_cone_weight: 0.5,
             gen_rt_proxy: false,
             rt_proxy_ratio: 0.1,
@@ -728,14 +761,16 @@ impl VirtualMeshBuilder {
     /// If no sub-meshes are added before `build()`, a single sub-mesh covering
     /// the entire index buffer is automatically created with `material_index = 0`.
     pub fn sub_mesh(mut self, material_index: u32) -> Self {
-        let start = self.sub_meshes.last()
+        let start = self
+            .sub_meshes
+            .last()
             .map(|s| s.index_offset + s.index_count)
             .unwrap_or(0);
         let end = self.indices.len() as u32;
         if end > start {
             self.sub_meshes.push(SubMesh {
-                index_offset:  start,
-                index_count:   end - start,
+                index_offset: start,
+                index_count: end - start,
                 material_index,
             });
         }
@@ -755,10 +790,15 @@ impl VirtualMeshBuilder {
     /// - `max_vertices` ≤ 255 (default: `MAX_MESHLET_VERTICES`)
     /// - `max_triangles` ≤ 511 (default: `MAX_MESHLET_TRIANGLES`)
     /// - `cone_weight` ∈ [0, 1] — backface-cone culling weight (default: 0.5)
-    pub fn build_meshlets_with(mut self, max_vertices: usize, max_triangles: usize, cone_weight: f32) -> Self {
+    pub fn build_meshlets_with(
+        mut self,
+        max_vertices: usize,
+        max_triangles: usize,
+        cone_weight: f32,
+    ) -> Self {
         self.gen_meshlets = true;
-        self.meshlet_max_verts   = max_vertices;
-        self.meshlet_max_tris    = max_triangles;
+        self.meshlet_max_verts = max_vertices;
+        self.meshlet_max_tris = max_triangles;
         self.meshlet_cone_weight = cone_weight;
         self
     }
@@ -768,9 +808,9 @@ impl VirtualMeshBuilder {
     /// - `target_ratio`: fraction of triangles to keep (e.g. 0.1 = 10%). Default 0.1.
     /// - `target_error`: maximum geometric error in object-space units. Default 0.01.
     pub fn build_rt_proxy(mut self, target_ratio: f32, target_error: f32) -> Self {
-        self.gen_rt_proxy    = true;
-        self.rt_proxy_ratio  = target_ratio;
-        self.rt_proxy_error  = target_error;
+        self.gen_rt_proxy = true;
+        self.rt_proxy_ratio = target_ratio;
+        self.rt_proxy_error = target_error;
         self
     }
 
@@ -786,8 +826,8 @@ impl VirtualMeshBuilder {
         // Auto sub-mesh if none was explicitly added.
         if self.sub_meshes.is_empty() && !self.indices.is_empty() {
             self.sub_meshes.push(SubMesh {
-                index_offset:  0,
-                index_count:   self.indices.len() as u32,
+                index_offset: 0,
+                index_count: self.indices.len() as u32,
                 material_index: 0,
             });
         }
@@ -801,7 +841,11 @@ impl VirtualMeshBuilder {
         vm.sub_meshes = self.sub_meshes;
 
         if self.gen_meshlets && vm.triangle_count() > 0 {
-            vm.build_meshlets(self.meshlet_max_verts, self.meshlet_max_tris, self.meshlet_cone_weight);
+            vm.build_meshlets(
+                self.meshlet_max_verts,
+                self.meshlet_max_tris,
+                self.meshlet_cone_weight,
+            );
         }
         if self.gen_rt_proxy && vm.triangle_count() > 0 {
             vm.build_rt_proxy(self.rt_proxy_ratio, self.rt_proxy_error);

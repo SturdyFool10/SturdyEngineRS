@@ -122,7 +122,12 @@ pub enum UvSource {
     /// Uses `cam.time`. Equivalent to Blender's "Mapping" node animated via drivers.
     Scrolled { speed_u: f32, speed_v: f32 },
     /// Tiled and scrolled simultaneously.
-    TiledScrolled { u: f32, v: f32, speed_u: f32, speed_v: f32 },
+    TiledScrolled {
+        u: f32,
+        v: f32,
+        speed_u: f32,
+        speed_v: f32,
+    },
     /// Arbitrary Slang expression returning `float2`.
     ///
     /// `v` is the `VSOut` struct (position, normal, uv, world_pos, tangent).
@@ -149,7 +154,12 @@ impl UvSource {
 
     /// Tile and scroll simultaneously.
     pub fn tiled_scrolled(u: f32, v: f32, speed_u: f32, speed_v: f32) -> Self {
-        Self::TiledScrolled { u, v, speed_u, speed_v }
+        Self::TiledScrolled {
+            u,
+            v,
+            speed_u,
+            speed_v,
+        }
     }
 
     /// Custom Slang expression for the UV. `v.uv`, `v.world_pos`, `cam.time` are in scope.
@@ -165,7 +175,12 @@ impl UvSource {
             Self::Scrolled { speed_u, speed_v } => {
                 format!("(v.uv + float2({speed_u:.6}, {speed_v:.6}) * cam.time)")
             }
-            Self::TiledScrolled { u, v, speed_u, speed_v } => {
+            Self::TiledScrolled {
+                u,
+                v,
+                speed_u,
+                speed_v,
+            } => {
                 format!(
                     "(v.uv * float2({u:.6}, {v:.6}) + float2({speed_u:.6}, {speed_v:.6}) * cam.time)"
                 )
@@ -287,22 +302,37 @@ pub enum MaterialExpr<T: Clone> {
 impl<T: Clone> MaterialExpr<T> {
     /// Sample a 2D texture at the default UV (UV0).
     pub fn texture(name: impl Into<String>) -> Self {
-        Self::Texture { name: name.into(), uv: UvSource::MeshUv0 }
+        Self::Texture {
+            name: name.into(),
+            uv: UvSource::MeshUv0,
+        }
     }
 
     /// Sample a 2D texture with an explicit UV source.
     pub fn texture_uv(name: impl Into<String>, uv: UvSource) -> Self {
-        Self::Texture { name: name.into(), uv }
+        Self::Texture {
+            name: name.into(),
+            uv,
+        }
     }
 
     /// Sample a 2D texture and multiply by a constant factor.
     pub fn texture_factor(name: impl Into<String>, factor: T) -> Self {
-        Self::TextureFactor { name: name.into(), uv: UvSource::MeshUv0, factor }
+        Self::TextureFactor {
+            name: name.into(),
+            uv: UvSource::MeshUv0,
+            factor,
+        }
     }
 
     /// Animated Texture2DArray sequence cycling at `fps` frames/second.
     pub fn image_sequence(name: impl Into<String>, frame_count: u32, fps: f32) -> Self {
-        Self::ImageSequence { name: name.into(), frame_count, fps, uv: UvSource::MeshUv0 }
+        Self::ImageSequence {
+            name: name.into(),
+            frame_count,
+            fps,
+            uv: UvSource::MeshUv0,
+        }
     }
 
     /// Animated sequence with explicit UV source.
@@ -312,7 +342,12 @@ impl<T: Clone> MaterialExpr<T> {
         fps: f32,
         uv: UvSource,
     ) -> Self {
-        Self::ImageSequence { name: name.into(), frame_count, fps, uv }
+        Self::ImageSequence {
+            name: name.into(),
+            frame_count,
+            fps,
+            uv,
+        }
     }
 
     /// Arbitrary Slang expression string (returns type T).
@@ -332,12 +367,20 @@ impl<T: Clone> MaterialExpr<T> {
 
     /// Linear interpolation.
     pub fn mix(a: MaterialExpr<T>, b: MaterialExpr<T>, t: MaterialExpr<f32>) -> Self {
-        Self::Mix { a: Box::new(a), b: Box::new(b), t: Box::new(t) }
+        Self::Mix {
+            a: Box::new(a),
+            b: Box::new(b),
+            t: Box::new(t),
+        }
     }
 
     /// Clamp to [min, max].
     pub fn clamp(value: MaterialExpr<T>, min: T, max: T) -> Self {
-        Self::Clamp { value: Box::new(value), min, max }
+        Self::Clamp {
+            value: Box::new(value),
+            min,
+            max,
+        }
     }
 }
 
@@ -384,8 +427,10 @@ impl<T: Clone> MaterialExpr<T> {
 
 #[allow(dead_code)]
 fn uv_uses_time(uv: &UvSource) -> bool {
-    matches!(uv, UvSource::Scrolled { .. } | UvSource::TiledScrolled { .. })
-        || matches!(uv, UvSource::Custom(s) if s.contains("cam.time"))
+    matches!(
+        uv,
+        UvSource::Scrolled { .. } | UvSource::TiledScrolled { .. }
+    ) || matches!(uv, UvSource::Custom(s) if s.contains("cam.time"))
 }
 
 // ── Slang codegen ─────────────────────────────────────────────────────────────
@@ -397,27 +442,39 @@ pub trait SlangType {
 }
 
 impl SlangType for f32 {
-    fn constant_expr(v: &Self) -> String { format!("{v:.6}") }
-    fn slang_type_name() -> &'static str { "float" }
+    fn constant_expr(v: &Self) -> String {
+        format!("{v:.6}")
+    }
+    fn slang_type_name() -> &'static str {
+        "float"
+    }
 }
 
 impl SlangType for [f32; 2] {
-    fn constant_expr(v: &Self) -> String { format!("float2({:.6}, {:.6})", v[0], v[1]) }
-    fn slang_type_name() -> &'static str { "float2" }
+    fn constant_expr(v: &Self) -> String {
+        format!("float2({:.6}, {:.6})", v[0], v[1])
+    }
+    fn slang_type_name() -> &'static str {
+        "float2"
+    }
 }
 
 impl SlangType for [f32; 3] {
     fn constant_expr(v: &Self) -> String {
         format!("float3({:.6}, {:.6}, {:.6})", v[0], v[1], v[2])
     }
-    fn slang_type_name() -> &'static str { "float3" }
+    fn slang_type_name() -> &'static str {
+        "float3"
+    }
 }
 
 impl SlangType for [f32; 4] {
     fn constant_expr(v: &Self) -> String {
         format!("float4({:.6}, {:.6}, {:.6}, {:.6})", v[0], v[1], v[2], v[3])
     }
-    fn slang_type_name() -> &'static str { "float4" }
+    fn slang_type_name() -> &'static str {
+        "float4"
+    }
 }
 
 impl<T: Clone + SlangType> MaterialExpr<T> {
@@ -441,7 +498,12 @@ impl<T: Clone + SlangType> MaterialExpr<T> {
                 format!("({sample} * {fact})")
             }
 
-            Self::ImageSequence { name, frame_count, fps, uv } => {
+            Self::ImageSequence {
+                name,
+                frame_count,
+                fps,
+                uv,
+            } => {
                 let uv_expr = uv.to_slang();
                 let fc = frame_count;
                 let fps_val = fps;
@@ -473,7 +535,7 @@ impl<T: Clone + SlangType> MaterialExpr<T> {
             Self::Clamp { value, min, max } => {
                 format!(
                     "clamp(({v}), {mn}, {mx})",
-                    v  = value.to_slang_expr(),
+                    v = value.to_slang_expr(),
                     mn = T::constant_expr(min),
                     mx = T::constant_expr(max),
                 )
@@ -488,7 +550,9 @@ impl<T: Clone + SlangType> MaterialExpr<T> {
     /// Collect all `Texture2DArray` binding names (from `ImageSequence` nodes).
     pub(crate) fn collect_array_textures(&self, out: &mut HashSet<String>) {
         match self {
-            Self::ImageSequence { name, .. } => { out.insert(name.clone()); }
+            Self::ImageSequence { name, .. } => {
+                out.insert(name.clone());
+            }
             Self::Multiply(a, b) | Self::Add(a, b) => {
                 a.collect_array_textures(out);
                 b.collect_array_textures(out);
@@ -509,10 +573,10 @@ fn texture_sample_expr(name: &str, uv_expr: &str, ty: &str) -> String {
     // Texture2D.Sample returns float4; swizzle to target type.
     let sample = format!("{name}.Sample(material_sampler, {uv_expr})");
     match ty {
-        "float"  => format!("({sample}.r)"),
+        "float" => format!("({sample}.r)"),
         "float2" => format!("({sample}.rg)"),
         "float3" => format!("({sample}.rgb)"),
-        _        => format!("({sample})"),  // float4 — no swizzle
+        _ => format!("({sample})"), // float4 — no swizzle
     }
 }
 
@@ -578,18 +642,18 @@ pub struct UnifiedMaterial {
     pub render_state: RenderState,
 
     pub base_color: MaterialExpr<[f32; 4]>,
-    pub metallic:   MaterialExpr<f32>,
-    pub roughness:  MaterialExpr<f32>,
+    pub metallic: MaterialExpr<f32>,
+    pub roughness: MaterialExpr<f32>,
     /// Tangent-space normal. Use `MaterialExpr::texture("normal_map")` here;
     /// the G-Buffer shader applies the TBN transform automatically.
     /// Default is `float3(0,0,1)` — geometric normal, no perturbation.
-    pub normal:     MaterialExpr<[f32; 3]>,
-    pub occlusion:  MaterialExpr<f32>,
+    pub normal: MaterialExpr<[f32; 3]>,
+    pub occlusion: MaterialExpr<f32>,
     /// Linear-HDR emissive radiance. Values > 1.0 drive bloom.
-    pub emissive:   MaterialExpr<[f32; 3]>,
+    pub emissive: MaterialExpr<[f32; 3]>,
 
     /// Clear-coat intensity (only used when `shading_model == PbrClearcoat`).
-    pub clearcoat:           MaterialExpr<f32>,
+    pub clearcoat: MaterialExpr<f32>,
     pub clearcoat_roughness: MaterialExpr<f32>,
 }
 
@@ -611,8 +675,8 @@ impl UnifiedMaterial {
     /// A stable content hash of this material (hashes the generated shader source).
     /// Used by `DeferredPass` to cache compiled variants.
     pub fn content_hash(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
         self.generate_gbuffer_source().hash(&mut h);
         h.finish()
@@ -623,7 +687,7 @@ impl UnifiedMaterial {
     /// Called by `DeferredPass` when compiling a material variant. The result
     /// is passed as `ShaderSource::MemoryUtf8` to the shader compiler.
     pub fn generate_gbuffer_source(&self) -> String {
-        let mut tex2d:  HashSet<String> = HashSet::new();
+        let mut tex2d: HashSet<String> = HashSet::new();
         let mut array2d: HashSet<String> = HashSet::new();
 
         // Collect all texture binding names from every channel.
@@ -659,14 +723,15 @@ impl UnifiedMaterial {
         }
 
         let base_color_e = self.base_color.to_slang_expr();
-        let metallic_e   = self.metallic.to_slang_expr();
-        let roughness_e  = self.roughness.to_slang_expr();
-        let normal_e     = self.normal.to_slang_expr();
-        let emissive_e   = self.emissive.to_slang_expr();
+        let metallic_e = self.metallic.to_slang_expr();
+        let roughness_e = self.roughness.to_slang_expr();
+        let normal_e = self.normal.to_slang_expr();
+        let emissive_e = self.emissive.to_slang_expr();
 
         // The normal channel's expression returns float3 in tangent space.
         // We always apply TBN (even when normal is [0,0,1] → geometric normal).
-        format!(r#"
+        format!(
+            r#"
 // ── Material: {name} ──────────────────────────────────────────────────────────
 // Auto-generated by UnifiedMaterial::generate_gbuffer_source().
 // DO NOT EDIT — regenerated when the material is modified.
@@ -736,13 +801,13 @@ GBufferOut main(VSOut v) {{
     return o;
 }}
 "#,
-            name       = self.name,
-            decls      = decls,
+            name = self.name,
+            decls = decls,
             base_color_e = base_color_e,
-            metallic_e   = metallic_e,
-            roughness_e  = roughness_e,
-            normal_e     = normal_e,
-            emissive_e   = emissive_e,
+            metallic_e = metallic_e,
+            roughness_e = roughness_e,
+            normal_e = normal_e,
+            emissive_e = emissive_e,
         )
     }
 }
@@ -755,12 +820,12 @@ impl Default for UnifiedMaterial {
             shading_model: ShadingModel::PbrMetallicRoughness,
             render_state: RenderState::default(),
             base_color: MaterialExpr::Constant([1.0, 1.0, 1.0, 1.0]),
-            metallic:   MaterialExpr::Constant(0.0),
-            roughness:  MaterialExpr::Constant(0.5),
-            normal:     MaterialExpr::Constant([0.0, 0.0, 1.0]),
-            occlusion:  MaterialExpr::Constant(1.0),
-            emissive:   MaterialExpr::Constant([0.0, 0.0, 0.0]),
-            clearcoat:           MaterialExpr::Constant(0.0),
+            metallic: MaterialExpr::Constant(0.0),
+            roughness: MaterialExpr::Constant(0.5),
+            normal: MaterialExpr::Constant([0.0, 0.0, 1.0]),
+            occlusion: MaterialExpr::Constant(1.0),
+            emissive: MaterialExpr::Constant([0.0, 0.0, 0.0]),
+            clearcoat: MaterialExpr::Constant(0.0),
             clearcoat_roughness: MaterialExpr::Constant(0.0),
         }
     }
@@ -779,7 +844,12 @@ pub struct UnifiedMaterialBuilder {
 
 impl UnifiedMaterialBuilder {
     pub(crate) fn new(name: impl Into<String>) -> Self {
-        Self { inner: UnifiedMaterial { name: name.into(), ..Default::default() } }
+        Self {
+            inner: UnifiedMaterial {
+                name: name.into(),
+                ..Default::default()
+            },
+        }
     }
 
     pub fn domain(mut self, domain: MaterialDomain) -> Self {
@@ -817,11 +887,7 @@ impl UnifiedMaterialBuilder {
         self
     }
 
-    pub fn base_color_texture_factor(
-        mut self,
-        name: impl Into<String>,
-        factor: [f32; 4],
-    ) -> Self {
+    pub fn base_color_texture_factor(mut self, name: impl Into<String>, factor: [f32; 4]) -> Self {
         self.inner.base_color = MaterialExpr::texture_factor(name, factor);
         self
     }
@@ -858,8 +924,14 @@ impl UnifiedMaterialBuilder {
     /// Sample a GLTF-style metallic-roughness texture (B=metallic, G=roughness).
     pub fn metallic_roughness_texture(mut self, name: impl Into<String>) -> Self {
         let n = name.into();
-        self.inner.metallic  = MaterialExpr::Texture { name: format!("{n}__met"),  uv: UvSource::MeshUv0 };
-        self.inner.roughness = MaterialExpr::Texture { name: format!("{n}__rou"), uv: UvSource::MeshUv0 };
+        self.inner.metallic = MaterialExpr::Texture {
+            name: format!("{n}__met"),
+            uv: UvSource::MeshUv0,
+        };
+        self.inner.roughness = MaterialExpr::Texture {
+            name: format!("{n}__rou"),
+            uv: UvSource::MeshUv0,
+        };
         self
     }
 

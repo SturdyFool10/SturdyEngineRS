@@ -16,7 +16,7 @@ use crate::{Buffer, BufferDesc, BufferUsage, DrawIndexedIndirectCommand, Engine,
 pub(super) struct InstanceBatch {
     /// Index into `Scene::meshes`.
     pub mesh_idx: u32,
-    pub static_instances:  Vec<InstanceData>,
+    pub static_instances: Vec<InstanceData>,
     pub dynamic_instances: Vec<InstanceData>,
     pub gpu_buffer: Option<Buffer>,
     buffer_capacity: usize,
@@ -35,7 +35,6 @@ pub(super) struct InstanceBatch {
     indirect_capacity: usize,
 
     // ── GPU culling additions ─────────────────────────────────────────────────
-
     /// Pre-transformed world-space bounding spheres (float4: xyz=center, w=radius).
     /// One entry per instance in the same order as `gpu_buffer`.
     /// Filled during `Scene::prepare()` when GPU culling is enabled.
@@ -47,7 +46,7 @@ impl InstanceBatch {
     pub fn new(mesh_idx: u32) -> Self {
         Self {
             mesh_idx,
-            static_instances:  Vec::new(),
+            static_instances: Vec::new(),
             dynamic_instances: Vec::new(),
             gpu_buffer: None,
             buffer_capacity: 0,
@@ -67,7 +66,9 @@ impl InstanceBatch {
     /// Ensure the instance GPU buffer is large enough and upload dirty data.
     pub fn prepare(&mut self, engine: &Engine) -> Result<()> {
         let total = self.total_count() as usize;
-        if total == 0 { return Ok(()); }
+        if total == 0 {
+            return Ok(());
+        }
 
         let stride = std::mem::size_of::<InstanceData>();
 
@@ -100,7 +101,9 @@ impl InstanceBatch {
     /// Upload `indirect_commands` to the GPU (CPU culling path).
     pub fn prepare_indirect(&mut self, engine: &Engine) -> Result<()> {
         let count = self.indirect_commands.len();
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
         let stride = std::mem::size_of::<DrawIndexedIndirectCommand>();
         if count > self.indirect_capacity || self.indirect_gpu_buffer.is_none() {
             let new_cap = count.next_power_of_two().max(4);
@@ -122,7 +125,9 @@ impl InstanceBatch {
     /// (static instances first, then dynamic).
     pub fn prepare_bounds(&mut self, engine: &Engine, spheres: &[[f32; 4]]) -> Result<()> {
         let count = spheres.len();
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
         let stride = std::mem::size_of::<[f32; 4]>();
 
         if count > self.bounds_capacity || self.bounds_gpu_buffer.is_none() {
@@ -146,7 +151,9 @@ impl InstanceBatch {
     /// ones have instance_count = 0 and are skipped by the GPU).
     pub fn prepare_indirect_slots(&mut self, engine: &Engine, total: u32) -> Result<()> {
         let count = total as usize;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
         let stride = std::mem::size_of::<DrawIndexedIndirectCommand>();
         if count > self.indirect_capacity || self.indirect_gpu_buffer.is_none() {
             let new_cap = count.next_power_of_two().max(4);

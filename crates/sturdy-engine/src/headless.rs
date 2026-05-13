@@ -11,8 +11,10 @@
 //   render_to_rgba8()           — single frame → RGBA8 pixel buffer
 //   render_to_rgba8_with_engine — same, but reuse an existing Engine
 
-use crate::{Engine, Extent3d, Format, GraphImage, ImageDesc, ImageDimension, ImageUsage,
-             RenderFrame, Result, ScreenshotCapture, FrameSyncReason};
+use crate::{
+    Engine, Extent3d, Format, FrameSyncReason, GraphImage, ImageDesc, ImageDimension, ImageUsage,
+    RenderFrame, Result, ScreenshotCapture,
+};
 
 // ── HeadlessApp trait ─────────────────────────────────────────────────────────
 
@@ -79,6 +81,8 @@ pub fn run_headless<App: HeadlessApp>() -> std::result::Result<(), Box<dyn std::
     Engine::set_global(&engine);
     let mut app = App::init(&engine).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
     loop {
+        // Upload any textures that background workers finished decoding.
+        let _ = engine.drain_pending_uploads();
         let frame = engine.begin_render_frame()?;
         let keep_going = app
             .render(&frame, &engine)
@@ -130,7 +134,11 @@ pub fn render_to_rgba8_with_engine(
 ) -> Result<Vec<u8>> {
     let image = engine.create_image(ImageDesc {
         dimension: ImageDimension::D2,
-        extent: Extent3d { width, height, depth: 1 },
+        extent: Extent3d {
+            width,
+            height,
+            depth: 1,
+        },
         mip_levels: 1,
         layers: 1,
         samples: 1,
@@ -143,7 +151,7 @@ pub fn render_to_rgba8_with_engine(
 
     let capture = ScreenshotCapture::new(engine, width, height, Format::Rgba8Unorm)?;
 
-    let frame    = engine.begin_render_frame()?;
+    let frame = engine.begin_render_frame()?;
     let graph_img = frame.import_image("headless_output", &image)?;
     render_fn(&frame, &graph_img, engine)?;
     capture.record_render_frame_readback(&frame, &graph_img)?;

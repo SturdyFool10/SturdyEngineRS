@@ -13,10 +13,9 @@ use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 
 use crate::{
-    Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, ImageDesc,
-    ImageDimension, ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind,
-    RenderFrame, Result, ShaderDesc, ShaderSource, ShaderStage, push_constants,
-    scene::Scene,
+    Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, ImageDesc, ImageDimension,
+    ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind, RenderFrame, Result, ShaderDesc,
+    ShaderSource, ShaderStage, push_constants, scene::Scene,
 };
 use sturdy_engine_core::Extent3d;
 
@@ -32,12 +31,16 @@ pub const MAX_POINT_SHADOWS: usize = 4;
 
 /// Static names for each shadow map slot — avoids per-frame heap allocation.
 static FRONT_NAMES: [&str; MAX_POINT_SHADOWS] = [
-    "point_shadow_front_0", "point_shadow_front_1",
-    "point_shadow_front_2", "point_shadow_front_3",
+    "point_shadow_front_0",
+    "point_shadow_front_1",
+    "point_shadow_front_2",
+    "point_shadow_front_3",
 ];
 static BACK_NAMES: [&str; MAX_POINT_SHADOWS] = [
-    "point_shadow_back_0", "point_shadow_back_1",
-    "point_shadow_back_2", "point_shadow_back_3",
+    "point_shadow_back_0",
+    "point_shadow_back_1",
+    "point_shadow_back_2",
+    "point_shadow_back_3",
 ];
 
 // ── GPU data ──────────────────────────────────────────────────────────────────
@@ -72,7 +75,11 @@ pub struct PointShadowConfig {
 
 impl Default for PointShadowConfig {
     fn default() -> Self {
-        Self { resolution: 512, depth_bias: 0.005, near: 0.05 }
+        Self {
+            resolution: 512,
+            depth_bias: 0.005,
+            near: 0.05,
+        }
     }
 }
 
@@ -112,7 +119,8 @@ impl PointShadowPass {
                 fragment: ShaderDesc {
                     source: ShaderSource::Inline(
                         "struct V { float4 pos : SV_POSITION; float d : TEXCOORD0; };\
-                         float main(V v) : SV_DEPTH { return v.d; }".into(),
+                         float main(V v) : SV_DEPTH { return v.d; }"
+                            .into(),
                     ),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
@@ -133,7 +141,11 @@ impl PointShadowPass {
         };
         shadow_buf.write(0, bytemuck::bytes_of(&init))?;
 
-        Ok(Self { depth_program, shadow_buf, config })
+        Ok(Self {
+            depth_program,
+            shadow_buf,
+            config,
+        })
     }
 
     /// Render dual-paraboloid shadow maps for the highest-intensity point lights.
@@ -147,7 +159,10 @@ impl PointShadowPass {
         let res = self.config.resolution;
 
         // Pick up to MAX_POINT_SHADOWS highest-intensity point lights.
-        let mut ranked: Vec<(usize, f32)> = scene.point_lights.iter().enumerate()
+        let mut ranked: Vec<(usize, f32)> = scene
+            .point_lights
+            .iter()
+            .enumerate()
             .map(|(i, pl)| (i, pl.intensity))
             .collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -172,15 +187,31 @@ impl PointShadowPass {
             // Render front hemisphere (is_back = 0.0).
             let front_name = FRONT_NAMES[slot];
             let front_img = frame.image(front_name, dp_image_desc(res, front_name))?;
-            draw_dp_batches(scene, frame, &front_img, &self.depth_program,
-                            wtl, near, far, false)?;
+            draw_dp_batches(
+                scene,
+                frame,
+                &front_img,
+                &self.depth_program,
+                wtl,
+                near,
+                far,
+                false,
+            )?;
             front_img.register_as(front_name);
 
             // Render back hemisphere (is_back = 1.0).
             let back_name = BACK_NAMES[slot];
             let back_img = frame.image(back_name, dp_image_desc(res, back_name))?;
-            draw_dp_batches(scene, frame, &back_img, &self.depth_program,
-                            wtl, near, far, true)?;
+            draw_dp_batches(
+                scene,
+                frame,
+                &back_img,
+                &self.depth_program,
+                wtl,
+                near,
+                far,
+                true,
+            )?;
             back_img.register_as(back_name);
         }
 
@@ -202,11 +233,18 @@ impl PointShadowPass {
 fn dp_image_desc(resolution: u32, debug_name: &'static str) -> ImageDesc {
     ImageDesc {
         dimension: ImageDimension::D2,
-        extent: Extent3d { width: resolution, height: resolution, depth: 1 },
-        mip_levels: 1, layers: 1, samples: 1,
+        extent: Extent3d {
+            width: resolution,
+            height: resolution,
+            depth: 1,
+        },
+        mip_levels: 1,
+        layers: 1,
+        samples: 1,
         format: Format::Depth32Float,
         usage: ImageUsage::DEPTH_STENCIL | ImageUsage::SAMPLED,
-        transient: false, clear_value: None,
+        transient: false,
+        clear_value: None,
         debug_name: Some(debug_name),
     }
 }
@@ -224,18 +262,30 @@ fn draw_dp_batches(
     use crate::scene::material::MaterialDomain;
     let constants = DpDepthConstants {
         light_world_to_local: world_to_light.to_cols_array_2d(),
-        near, far,
+        near,
+        far,
         is_back: if is_back { 1.0 } else { 0.0 },
         _pad: 0.0,
     };
     for (mesh_idx, instance_buf_opt, instance_count) in scene.drawable_batches() {
-        let instance_buf = match instance_buf_opt { Some(b) => b, None => continue };
-        if instance_count == 0 { continue; }
-        if scene.domain_at(mesh_idx) == MaterialDomain::Translucent { continue; }
+        let instance_buf = match instance_buf_opt {
+            Some(b) => b,
+            None => continue,
+        };
+        if instance_count == 0 {
+            continue;
+        }
+        if scene.domain_at(mesh_idx) == MaterialDomain::Translucent {
+            continue;
+        }
         let mesh = scene.mesh_at(mesh_idx);
         frame.bind_buffer("instances", instance_buf);
         depth_img.draw_mesh_depth_only_with_push_constants(
-            mesh, program, instance_buf, instance_count, &constants,
+            mesh,
+            program,
+            instance_buf,
+            instance_count,
+            &constants,
         )?;
     }
     Ok(())

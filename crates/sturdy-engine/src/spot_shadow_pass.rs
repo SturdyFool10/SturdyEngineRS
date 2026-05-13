@@ -14,10 +14,8 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 
 use crate::{
-    Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, ImageDesc,
-    ImageDimension, ImageUsage, MeshProgram,
-    RenderFrame, Result, push_constants,
-    scene::Scene,
+    Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, ImageDesc, ImageDimension,
+    ImageUsage, MeshProgram, RenderFrame, Result, push_constants, scene::Scene,
 };
 use sturdy_engine_core::Extent3d;
 
@@ -61,7 +59,11 @@ pub struct SpotShadowConfig {
 
 impl Default for SpotShadowConfig {
     fn default() -> Self {
-        Self { resolution: 1024, depth_bias: 0.002, near: 0.05 }
+        Self {
+            resolution: 1024,
+            depth_bias: 0.002,
+            near: 0.05,
+        }
     }
 }
 
@@ -109,7 +111,12 @@ impl SpotShadowPass {
             ..empty
         };
         shadow_buf.write(0, bytemuck::bytes_of(&init))?;
-        Ok(Self { depth_program, masked_depth_program, shadow_buf, config })
+        Ok(Self {
+            depth_program,
+            masked_depth_program,
+            shadow_buf,
+            config,
+        })
     }
 
     /// Render shadow maps for up to `MAX_SPOT_SHADOWS` spot lights.
@@ -129,7 +136,10 @@ impl SpotShadowPass {
         let res = self.config.resolution;
 
         // Pick the highest-intensity spot lights (up to MAX_SPOT_SHADOWS).
-        let mut ranked: Vec<(usize, f32)> = scene.spot_lights.iter().enumerate()
+        let mut ranked: Vec<(usize, f32)> = scene
+            .spot_lights
+            .iter()
+            .enumerate()
             .map(|(i, sl)| (i, sl.intensity))
             .collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -154,8 +164,14 @@ impl SpotShadowPass {
             let map_name_static = Box::leak(map_name.clone().into_boxed_str());
             let desc = spot_shadow_image_desc(res, map_name_static);
             let img = frame.image(&map_name, desc)?;
-            draw_spot_shadow_batches(scene, frame, &img,
-                                     &self.depth_program, &self.masked_depth_program, lvp)?;
+            draw_spot_shadow_batches(
+                scene,
+                frame,
+                &img,
+                &self.depth_program,
+                &self.masked_depth_program,
+                lvp,
+            )?;
             img.register_as(&map_name);
         }
 
@@ -188,11 +204,18 @@ fn spot_light_proj(outer_angle: f32, near: f32, far: f32) -> Mat4 {
 fn spot_shadow_image_desc(resolution: u32, debug_name: &'static str) -> ImageDesc {
     ImageDesc {
         dimension: ImageDimension::D2,
-        extent: Extent3d { width: resolution, height: resolution, depth: 1 },
-        mip_levels: 1, layers: 1, samples: 1,
+        extent: Extent3d {
+            width: resolution,
+            height: resolution,
+            depth: 1,
+        },
+        mip_levels: 1,
+        layers: 1,
+        samples: 1,
         format: Format::Depth32Float,
         usage: ImageUsage::DEPTH_STENCIL | ImageUsage::SAMPLED,
-        transient: false, clear_value: None,
+        transient: false,
+        clear_value: None,
         debug_name: Some(debug_name),
     }
 }
@@ -211,11 +234,18 @@ fn draw_spot_shadow_batches(
         light_view_proj: light_view_proj.to_cols_array_2d(),
     };
     for (mesh_idx, instance_buf_opt, instance_count) in scene.drawable_batches() {
-        let instance_buf = match instance_buf_opt { Some(b) => b, None => continue };
-        if instance_count == 0 { continue; }
+        let instance_buf = match instance_buf_opt {
+            Some(b) => b,
+            None => continue,
+        };
+        if instance_count == 0 {
+            continue;
+        }
 
         let domain = scene.domain_at(mesh_idx);
-        if domain == MaterialDomain::Translucent { continue; }
+        if domain == MaterialDomain::Translucent {
+            continue;
+        }
 
         let mesh = scene.mesh_at(mesh_idx);
         frame.bind_buffer("instances", instance_buf);
@@ -230,7 +260,11 @@ fn draw_spot_shadow_batches(
         };
 
         shadow_image.draw_mesh_depth_only_with_push_constants(
-            mesh, prog, instance_buf, instance_count, &constants,
+            mesh,
+            prog,
+            instance_buf,
+            instance_count,
+            &constants,
         )?;
     }
     Ok(())

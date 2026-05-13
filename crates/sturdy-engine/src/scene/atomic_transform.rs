@@ -19,8 +19,8 @@
 // SceneLink-coupled objects by ensuring at most one system writes a given
 // entity's transform per wave.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use glam::Mat4;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ── AtomicMat4 ────────────────────────────────────────────────────────────────
 
@@ -51,7 +51,7 @@ impl AtomicMat4 {
         let mut cols = [0f32; 16];
         for i in 0..8 {
             let val = self.0[i].load(Ordering::Acquire);
-            cols[i * 2]     = f32::from_bits((val & 0xFFFF_FFFF) as u32);
+            cols[i * 2] = f32::from_bits((val & 0xFFFF_FFFF) as u32);
             cols[i * 2 + 1] = f32::from_bits((val >> 32) as u32);
         }
         Mat4::from_cols_array(&cols)

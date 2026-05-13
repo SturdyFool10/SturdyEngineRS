@@ -67,11 +67,15 @@ pub fn point_light_entries(
     lights: &[crate::scene::PointLight],
     light_array_offset: u32,
 ) -> Vec<(Vec3, Vec3, u32)> {
-    lights.iter().enumerate().map(|(i, l)| {
-        let r = Vec3::splat(l.range);
-        let c = l.position;
-        (c - r, c + r, light_array_offset + i as u32)
-    }).collect()
+    lights
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let r = Vec3::splat(l.range);
+            let c = l.position;
+            (c - r, c + r, light_array_offset + i as u32)
+        })
+        .collect()
 }
 
 /// Compute the AABB entries for a list of spot lights.
@@ -79,11 +83,15 @@ pub fn spot_light_entries(
     lights: &[crate::scene::SpotLight],
     light_array_offset: u32,
 ) -> Vec<(Vec3, Vec3, u32)> {
-    lights.iter().enumerate().map(|(i, l)| {
-        let r = Vec3::splat(l.range);
-        let c = l.position;
-        (c - r, c + r, light_array_offset + i as u32)
-    }).collect()
+    lights
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let r = Vec3::splat(l.range);
+            let c = l.position;
+            (c - r, c + r, light_array_offset + i as u32)
+        })
+        .collect()
 }
 
 /// Compute the AABB entries for a list of rect lights.
@@ -91,23 +99,30 @@ pub fn rect_light_entries(
     lights: &[crate::scene::RectLight],
     light_array_offset: u32,
 ) -> Vec<(Vec3, Vec3, u32)> {
-    lights.iter().enumerate().map(|(i, l)| {
-        // AABB encloses all 4 corners plus the influence sphere.
-        let hw = l.right.normalize() * l.half_extents[0];
-        let hh = l.up.normalize()    * l.half_extents[1];
-        let corners = [
-            l.position - hw - hh,
-            l.position + hw - hh,
-            l.position - hw + hh,
-            l.position + hw + hh,
-        ];
-        let mut mn = Vec3::splat(f32::INFINITY);
-        let mut mx = Vec3::splat(f32::NEG_INFINITY);
-        for c in &corners { mn = mn.min(*c); mx = mx.max(*c); }
-        // Extend by the range in all directions so indirect illumination is captured.
-        let r = Vec3::splat(l.range);
-        (mn - r, mx + r, light_array_offset + i as u32)
-    }).collect()
+    lights
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            // AABB encloses all 4 corners plus the influence sphere.
+            let hw = l.right.normalize() * l.half_extents[0];
+            let hh = l.up.normalize() * l.half_extents[1];
+            let corners = [
+                l.position - hw - hh,
+                l.position + hw - hh,
+                l.position - hw + hh,
+                l.position + hw + hh,
+            ];
+            let mut mn = Vec3::splat(f32::INFINITY);
+            let mut mx = Vec3::splat(f32::NEG_INFINITY);
+            for c in &corners {
+                mn = mn.min(*c);
+                mx = mx.max(*c);
+            }
+            // Extend by the range in all directions so indirect illumination is captured.
+            let r = Vec3::splat(l.range);
+            (mn - r, mx + r, light_array_offset + i as u32)
+        })
+        .collect()
 }
 
 /// Compute the AABB entries for a list of sphere area lights.
@@ -115,10 +130,18 @@ pub fn sphere_area_light_entries(
     lights: &[crate::scene::SphereLight],
     light_array_offset: u32,
 ) -> Vec<(Vec3, Vec3, u32)> {
-    lights.iter().enumerate().map(|(i, l)| {
-        let r = Vec3::splat(l.range);
-        (l.position - r, l.position + r, light_array_offset + i as u32)
-    }).collect()
+    lights
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let r = Vec3::splat(l.range);
+            (
+                l.position - r,
+                l.position + r,
+                light_array_offset + i as u32,
+            )
+        })
+        .collect()
 }
 
 /// Compute the AABB entries for a list of disk lights.
@@ -126,10 +149,18 @@ pub fn disk_light_entries(
     lights: &[crate::scene::DiskLight],
     light_array_offset: u32,
 ) -> Vec<(Vec3, Vec3, u32)> {
-    lights.iter().enumerate().map(|(i, l)| {
-        let r = Vec3::splat(l.range);
-        (l.position - r, l.position + r, light_array_offset + i as u32)
-    }).collect()
+    lights
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let r = Vec3::splat(l.range);
+            (
+                l.position - r,
+                l.position + r,
+                light_array_offset + i as u32,
+            )
+        })
+        .collect()
 }
 
 fn build_recursive(
@@ -163,9 +194,13 @@ fn build_recursive(
 
     // Split along the longest axis at the spatial median of centroids.
     let extent = combined_max - combined_min;
-    let axis = if extent.x >= extent.y && extent.x >= extent.z { 0 }
-               else if extent.y >= extent.z { 1 }
-               else { 2 };
+    let axis = if extent.x >= extent.y && extent.x >= extent.z {
+        0
+    } else if extent.y >= extent.z {
+        1
+    } else {
+        2
+    };
 
     entries[start..end].sort_unstable_by(|(a_min, a_max, _), (b_min, b_max, _)| {
         let a_c = (a_min[axis] + a_max[axis]) * 0.5;
@@ -174,7 +209,7 @@ fn build_recursive(
     });
 
     let mid = start + (end - start) / 2;
-    let left  = build_recursive(entries, start, mid, nodes);
+    let left = build_recursive(entries, start, mid, nodes);
     let right = build_recursive(entries, mid, end, nodes);
 
     nodes[node_idx as usize] = GpuBvhNode {
@@ -219,19 +254,19 @@ impl LightBvhBuilder {
     pub fn rebuild(
         &mut self,
         engine: &crate::Engine,
-        point_lights:  &[crate::scene::PointLight],
-        spot_lights:   &[crate::scene::SpotLight],
-        rect_lights:   &[crate::scene::RectLight],
+        point_lights: &[crate::scene::PointLight],
+        spot_lights: &[crate::scene::SpotLight],
+        rect_lights: &[crate::scene::RectLight],
         sphere_lights: &[crate::scene::SphereLight],
-        disk_lights:   &[crate::scene::DiskLight],
-        point_offset:  u32,
-        spot_offset:   u32,
-        rect_offset:   u32,
+        disk_lights: &[crate::scene::DiskLight],
+        point_offset: u32,
+        spot_offset: u32,
+        rect_offset: u32,
         sphere_offset: u32,
-        disk_offset:   u32,
+        disk_offset: u32,
     ) -> crate::Result<()> {
         self.point_light_offset = point_offset;
-        self.spot_light_offset  = spot_offset;
+        self.spot_light_offset = spot_offset;
 
         let mut entries = point_light_entries(point_lights, point_offset);
         entries.extend(spot_light_entries(spot_lights, spot_offset));
@@ -243,7 +278,8 @@ impl LightBvhBuilder {
 
         // Upload to GPU (create or resize buffer as needed).
         let byte_size = (self.nodes.len() * std::mem::size_of::<GpuBvhNode>()).max(32) as u64;
-        let needs_new_buf = self.gpu_buffer
+        let needs_new_buf = self
+            .gpu_buffer
             .as_ref()
             .map(|b| b.desc().size < byte_size)
             .unwrap_or(true);
@@ -256,6 +292,7 @@ impl LightBvhBuilder {
         }
 
         if !self.nodes.is_empty() {
+            //panic allowed, reason = "non-empty BVH upload path proves gpu_buffer exists immediately above"
             let buf = self.gpu_buffer.as_ref().unwrap();
             buf.write(0, bytemuck::cast_slice(&self.nodes))?;
         }

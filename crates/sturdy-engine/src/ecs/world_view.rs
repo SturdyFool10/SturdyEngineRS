@@ -144,6 +144,7 @@ impl<'w> WorldView<'w> {
             // SAFETY: Scheduler guarantees no concurrent writer for C in this wave.
             .and_then(|cell| downcast_storage::<C>(unsafe { &*cell.get() }.as_ref()))
             .unwrap_or_else(|| {
+                //panic allowed, reason = "world view read requires scheduler-proven component storage registration"
                 panic!(
                     "WorldView::read::<{}>() — no storage found. \
                      Spawn at least one entity with this component before building the schedule.",
@@ -166,21 +167,20 @@ impl<'w> WorldView<'w> {
     /// Same as `read` — panics if `C` has no storage.
     pub fn write<C: Component>(&self) -> ComponentWriteGuard<'_, C> {
         let world = unsafe { self.world.as_ref() };
-        let cell = world
-            .components
-            .get(&TypeId::of::<C>())
-            .unwrap_or_else(|| {
-                panic!(
-                    "WorldView::write::<{}>() — no storage found.",
-                    std::any::type_name::<C>()
-                )
-            });
+        let cell = world.components.get(&TypeId::of::<C>()).unwrap_or_else(|| {
+            //panic allowed, reason = "world view write requires scheduler-proven component storage registration"
+            panic!(
+                "WorldView::write::<{}>() — no storage found.",
+                std::any::type_name::<C>()
+            )
+        });
         // SAFETY: UnsafeCell::get() is the sanctioned way to get a *mut T from
         // a shared reference. The scheduler guarantees at most one active
         // ComponentWriteGuard<C> per wave (disjoint write sets), making the
         // exclusive borrow sound.
         let storage = unsafe {
             downcast_storage_mut::<C>((&mut *cell.get()).as_mut()).unwrap_or_else(|| {
+                //panic allowed, reason = "component storage TypeId key proves mutable storage type"
                 panic!(
                     "WorldView::write::<{}>() — storage type mismatch.",
                     std::any::type_name::<C>()
@@ -201,10 +201,20 @@ impl<'w> WorldView<'w> {
         let world = unsafe { self.world.as_ref() };
         let guard = self.read::<C>();
         let gens = &world.entities.generations;
-        guard.entity_of.par_iter().zip(guard.dense.par_iter()).for_each(|(&idx, val)| {
-            let generation = gens.get(idx as usize).copied().unwrap_or(0);
-            f(Entity { index: idx, generation }, val);
-        });
+        guard
+            .entity_of
+            .par_iter()
+            .zip(guard.dense.par_iter())
+            .for_each(|(&idx, val)| {
+                let generation = gens.get(idx as usize).copied().unwrap_or(0);
+                f(
+                    Entity {
+                        index: idx,
+                        generation,
+                    },
+                    val,
+                );
+            });
     }
 
     /// Iterate all entities with component `C` in parallel, with mutable access.
@@ -217,10 +227,19 @@ impl<'w> WorldView<'w> {
         let gens = &world.entities.generations;
         // Split the borrow: entity_of (read) and dense (write) are disjoint fields.
         let (entity_of, dense) = guard.entity_and_dense_mut();
-        entity_of.par_iter().zip(dense.par_iter_mut()).for_each(|(&idx, val)| {
-            let generation = gens.get(idx as usize).copied().unwrap_or(0);
-            f(Entity { index: idx, generation }, val);
-        });
+        entity_of
+            .par_iter()
+            .zip(dense.par_iter_mut())
+            .for_each(|(&idx, val)| {
+                let generation = gens.get(idx as usize).copied().unwrap_or(0);
+                f(
+                    Entity {
+                        index: idx,
+                        generation,
+                    },
+                    val,
+                );
+            });
     }
 
     // ── Resource access ───────────────────────────────────────────────────────

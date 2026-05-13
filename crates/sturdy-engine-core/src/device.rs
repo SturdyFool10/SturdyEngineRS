@@ -14,8 +14,7 @@ use crate::{
     GraphicsPipelineDesc, ImageDesc, ImageHandle, ImageStateKey, NativeHandleCapabilities,
     PipelineHandle, PipelineLayoutHandle, RenderGraph, ResourceBinding, Result, RgState,
     SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection, ShaderSource,
-    StageMask,
-    SubmissionHandle, SurfaceCapabilities, SurfaceEvent, SurfaceHandle, SurfaceHdrCaps,
+    StageMask, SubmissionHandle, SurfaceCapabilities, SurfaceEvent, SurfaceHandle, SurfaceHdrCaps,
     SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
 };
 
@@ -212,11 +211,74 @@ impl Device {
     /// Returns `None` on backends that don't expose allocator statistics.
     /// Call once per frame; the overhead is a single mutex read.
     pub fn memory_budget(&self) -> Option<crate::GpuMemoryBudget> {
+        //panic allowed, reason = "poisoned device mutex is unrecoverable"
         self.inner
             .lock()
             .expect("device mutex poisoned")
             .backend
             .memory_budget()
+    }
+
+    // ── Bindless descriptor heap (Track 8a) ───────────────────────────────────
+
+    /// Returns `true` when the GPU + driver support the bindless descriptor heap.
+    ///
+    /// Requires `VK_EXT_descriptor_indexing` with `runtime_descriptor_array`
+    /// and `descriptor_binding_partially_bound`. All discrete GPUs since 2016
+    /// and all current consoles support this.
+    pub fn bindless_supported(&self) -> bool {
+        //panic allowed, reason = "poisoned device mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .bindless_supported()
+    }
+
+    /// Register a sampled image in the global bindless heap and return its stable index.
+    ///
+    /// The returned `u32` is valid for the lifetime of the engine. Embed it in
+    /// push constants or a per-draw data buffer; sample in shaders via:
+    /// `g_bindless_textures[NonUniformResourceIndex(index)].Sample(...)`.
+    ///
+    /// Returns `None` if bindless is not supported or the heap is full.
+    pub fn register_bindless_sampled_image(&self, handle: ImageHandle) -> Option<u32> {
+        //panic allowed, reason = "poisoned device mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .register_bindless_sampled_image(handle)
+    }
+
+    /// Register a sampler in the bindless heap and return its stable index.
+    pub fn register_bindless_sampler(&self, handle: SamplerHandle) -> Option<u32> {
+        //panic allowed, reason = "poisoned device mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .register_bindless_sampler(handle)
+    }
+
+    /// Register a storage (read-write) image in the bindless heap.
+    pub fn register_bindless_storage_image(&self, handle: ImageHandle) -> Option<u32> {
+        //panic allowed, reason = "poisoned device mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .register_bindless_storage_image(handle)
+    }
+
+    /// Register a storage buffer in the bindless heap.
+    pub fn register_bindless_storage_buffer(&self, handle: BufferHandle) -> Option<u32> {
+        //panic allowed, reason = "poisoned device mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .register_bindless_storage_buffer(handle)
     }
 
     /// Per-pass GPU timings from the most recently completed frame.
@@ -480,7 +542,10 @@ impl Device {
                 //panic allowed, reason = "poisoned mutex is unrecoverable"
                 let mut inner = self.inner.lock().expect("device mutex poisoned");
                 // Use or_insert_with to avoid overwriting a concurrent insertion.
-                inner.shader_compile_cache.entry(key).or_insert_with(|| result.clone());
+                inner
+                    .shader_compile_cache
+                    .entry(key)
+                    .or_insert_with(|| result.clone());
             }
             result
         };

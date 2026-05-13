@@ -622,15 +622,12 @@ impl ActionMap {
         let mut changed = Vec::new();
         let actions: Vec<String> = self.bindings.keys().cloned().collect();
         for action in actions {
-            let matches = self
-                .bindings
-                .get(&action)
-                .is_some_and(|binds| {
-                    binds.iter().any(|b| match b {
-                        ActionBinding::Key(keybind) => keybind_matches(keybind, input),
-                        _ => false,
-                    })
-                });
+            let matches = self.bindings.get(&action).is_some_and(|binds| {
+                binds.iter().any(|b| match b {
+                    ActionBinding::Key(keybind) => keybind_matches(keybind, input),
+                    _ => false,
+                })
+            });
             if !matches {
                 continue;
             }

@@ -10,8 +10,8 @@ use sturdy_engine_core as core;
 
 use crate::{
     Access, BindGroup, BindGroupDesc, BindGroupEntry, BindingKind, Buffer, BufferDesc, BufferUsage,
-    BufferUse, ColorTargetDesc, CopyImageToBufferDesc, CullMode, DispatchDesc,
-    DrawDesc, DrawIndirectDesc, Engine, Error, Format, FrontFace, GraphicsPipelineDesc, ImageDesc,
+    BufferUse, ColorTargetDesc, CopyImageToBufferDesc, CullMode, DispatchDesc, DrawDesc,
+    DrawIndirectDesc, Engine, Error, Format, FrontFace, GraphicsPipelineDesc, ImageDesc,
     ImageHandle, ImageRef, ImageUse, IndexBufferBinding, PassDesc, PassWork, Pipeline,
     PipelineLayout, PrimitiveTopology, PushConstants, QueueType, RasterState, ResolveImageDesc,
     ResourceBinding, Result, RgState, Shader, ShaderDesc, ShaderReflection, ShaderSource,
@@ -676,11 +676,7 @@ impl RenderFrame {
 
     /// Configure this frame to call `device.present_surface(handle)` automatically
     /// when it is dropped, after flushing all queued passes.
-    pub(crate) fn configure_auto_present(
-        &self,
-        device: core::Device,
-        handle: core::SurfaceHandle,
-    ) {
+    pub(crate) fn configure_auto_present(&self, device: core::Device, handle: core::SurfaceHandle) {
         self.inner.borrow_mut().auto_present = Some((device, handle));
     }
 
@@ -961,10 +957,7 @@ impl RenderFrame {
         constants: &T,
         groups: [u32; 3],
     ) -> Result<()> {
-        let stages = reflected_push_constant_stages(
-            program.reflection(),
-            StageMask::COMPUTE,
-        );
+        let stages = reflected_push_constant_stages(program.reflection(), StageMask::COMPUTE);
         let push = Some(PushConstants {
             offset: 0,
             stages,
@@ -976,14 +969,18 @@ impl RenderFrame {
         inner.declaration_index = inner.declaration_index.saturating_add(1);
 
         // Snapshot eager buffer bindings from the current frame registry.
-        let buf_read_names  = reflected_buffer_read_names(program.reflection());
+        let buf_read_names = reflected_buffer_read_names(program.reflection());
         let buf_write_names = reflected_buffer_write_names(program.reflection());
 
-        let mut eager_buffers: HashMap<String, (core::BufferHandle, core::BufferDesc)> = HashMap::new();
+        let mut eager_buffers: HashMap<String, (core::BufferHandle, core::BufferDesc)> =
+            HashMap::new();
         for n in buf_read_names.iter().chain(buf_write_names.iter()) {
             if let Some(&(handle, desc)) = inner.buffers_by_name.get(n.as_str()) {
                 eager_buffers.insert(n.clone(), (handle, desc));
-                inner.frame.inner.graph_mut(|g| g.import_buffer(handle, desc))?;
+                inner
+                    .frame
+                    .inner
+                    .graph_mut(|g| g.import_buffer(handle, desc))?;
             }
         }
 
@@ -1003,24 +1000,34 @@ impl RenderFrame {
                 }),
                 reads: Vec::new(),
                 writes: Vec::new(),
-                buffer_reads: buf_read_names.iter().filter_map(|n| {
-                    eager_buffers.get(n).map(|&(handle, desc)| crate::BufferUse {
-                        buffer: handle,
-                        access: Access::Read,
-                        state: RgState::ShaderRead,
-                        offset: 0,
-                        size: desc.size,
+                buffer_reads: buf_read_names
+                    .iter()
+                    .filter_map(|n| {
+                        eager_buffers
+                            .get(n)
+                            .map(|&(handle, desc)| crate::BufferUse {
+                                buffer: handle,
+                                access: Access::Read,
+                                state: RgState::ShaderRead,
+                                offset: 0,
+                                size: desc.size,
+                            })
                     })
-                }).collect(),
-                buffer_writes: buf_write_names.iter().filter_map(|n| {
-                    eager_buffers.get(n).map(|&(handle, desc)| crate::BufferUse {
-                        buffer: handle,
-                        access: Access::Write,
-                        state: RgState::ShaderWrite,
-                        offset: 0,
-                        size: desc.size,
+                    .collect(),
+                buffer_writes: buf_write_names
+                    .iter()
+                    .filter_map(|n| {
+                        eager_buffers
+                            .get(n)
+                            .map(|&(handle, desc)| crate::BufferUse {
+                                buffer: handle,
+                                access: Access::Write,
+                                state: RgState::ShaderWrite,
+                                offset: 0,
+                                size: desc.size,
+                            })
                     })
-                }).collect(),
+                    .collect(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
             },
@@ -1381,7 +1388,9 @@ impl RenderFrame {
         for rec in &inner.pass_records {
             for use_ in rec.writes.iter().chain(rec.reads.iter()) {
                 if use_.subresource == SubresourceRange::WHOLE {
-                    let mip_count = inner.images_by_name.values()
+                    let mip_count = inner
+                        .images_by_name
+                        .values()
                         .find(|r| r.handle == use_.image)
                         .map(|r| r.desc.mip_levels)
                         .unwrap_or(1);
@@ -2136,10 +2145,7 @@ impl GraphImage {
         instance_count: u32,
         constants: &T,
     ) -> Result<()> {
-        let stage = reflected_push_constant_stages(
-            program.reflection(),
-            StageMask::VERTEX,
-        );
+        let stage = reflected_push_constant_stages(program.reflection(), StageMask::VERTEX);
         self.draw_mesh_depth_only_inner(
             mesh,
             program,
@@ -2168,9 +2174,16 @@ impl GraphImage {
     ) -> Result<()> {
         let stage = reflected_push_constant_stages(program.reflection(), StageMask::VERTEX);
         self.draw_mesh_depth_only_inner_with_viewport(
-            mesh, program,
-            Some(PushConstants { offset: 0, stages: stage, bytes: bytemuck::bytes_of(constants).to_vec() }),
-            instances, instance_count, Some(viewport),
+            mesh,
+            program,
+            Some(PushConstants {
+                offset: 0,
+                stages: stage,
+                bytes: bytemuck::bytes_of(constants).to_vec(),
+            }),
+            instances,
+            instance_count,
+            Some(viewport),
         )
     }
 
@@ -2183,7 +2196,12 @@ impl GraphImage {
         instance_count: u32,
     ) -> Result<()> {
         self.draw_mesh_depth_only_inner_with_viewport(
-            mesh, program, push_constants, instance_buf, instance_count, None,
+            mesh,
+            program,
+            push_constants,
+            instance_buf,
+            instance_count,
+            None,
         )
     }
 
@@ -2201,16 +2219,23 @@ impl GraphImage {
         inner.declaration_index = inner.declaration_index.saturating_add(1);
 
         // Import depth image, mesh buffers, and instance buffer.
-        inner.frame.inner.graph_mut(|g| g.import_image(self.handle, self.desc))?;
+        inner
+            .frame
+            .inner
+            .graph_mut(|g| g.import_image(self.handle, self.desc))?;
         inner.frame.inner.graph_mut(|g| {
             g.import_buffer(mesh.vertex_buffer.handle(), mesh.vertex_buffer.desc())
         })?;
         if let Some(ib) = &mesh.index_buffer {
-            inner.frame.inner.graph_mut(|g| g.import_buffer(ib.handle(), ib.desc()))?;
+            inner
+                .frame
+                .inner
+                .graph_mut(|g| g.import_buffer(ib.handle(), ib.desc()))?;
         }
-        inner.frame.inner.graph_mut(|g| {
-            g.import_buffer(instance_buf.handle(), instance_buf.desc())
-        })?;
+        inner
+            .frame
+            .inner
+            .graph_mut(|g| g.import_buffer(instance_buf.handle(), instance_buf.desc()))?;
         inner.buffers_by_name.insert(
             "instances".to_owned(),
             (instance_buf.handle(), instance_buf.desc()),
@@ -2229,7 +2254,11 @@ impl GraphImage {
             offset: 0,
             format: mesh.index_format,
         });
-        let draw_count = if mesh.is_indexed() { mesh.index_count } else { mesh.vertex_count };
+        let draw_count = if mesh.is_indexed() {
+            mesh.index_count
+        } else {
+            mesh.vertex_count
+        };
 
         let mut buffer_reads = vec![crate::BufferUse {
             buffer: mesh.vertex_buffer.handle(),
@@ -2360,25 +2389,38 @@ impl GraphImage {
         inner.declaration_index = inner.declaration_index.saturating_add(1);
 
         // Import all images and buffers.
-        inner.frame.inner.graph_mut(|g| g.import_image(self.handle, self.desc))?;
+        inner
+            .frame
+            .inner
+            .graph_mut(|g| g.import_image(self.handle, self.desc))?;
         for t in additional_targets {
-            inner.frame.inner.graph_mut(|g| g.import_image(t.handle, t.desc))?;
+            inner
+                .frame
+                .inner
+                .graph_mut(|g| g.import_image(t.handle, t.desc))?;
         }
         inner.frame.inner.graph_mut(|g| {
             g.import_buffer(mesh.vertex_buffer.handle(), mesh.vertex_buffer.desc())
         })?;
         if let Some(ib) = &mesh.index_buffer {
-            inner.frame.inner.graph_mut(|g| g.import_buffer(ib.handle(), ib.desc()))?;
+            inner
+                .frame
+                .inner
+                .graph_mut(|g| g.import_buffer(ib.handle(), ib.desc()))?;
         }
-        inner.frame.inner.graph_mut(|g| {
-            g.import_buffer(instance_buf.handle(), instance_buf.desc())
-        })?;
+        inner
+            .frame
+            .inner
+            .graph_mut(|g| g.import_buffer(instance_buf.handle(), instance_buf.desc()))?;
         inner.buffers_by_name.insert(
             "instances".to_owned(),
             (instance_buf.handle(), instance_buf.desc()),
         );
         if let Some(d) = depth {
-            inner.frame.inner.graph_mut(|g| g.import_image(d.handle, d.desc))?;
+            inner
+                .frame
+                .inner
+                .graph_mut(|g| g.import_image(d.handle, d.desc))?;
         }
 
         // Build the ordered list of color formats for the MRT pipeline.
@@ -2398,7 +2440,11 @@ impl GraphImage {
             offset: 0,
             format: mesh.index_format,
         });
-        let draw_count = if mesh.is_indexed() { mesh.index_count } else { mesh.vertex_count };
+        let draw_count = if mesh.is_indexed() {
+            mesh.index_count
+        } else {
+            mesh.vertex_count
+        };
 
         let mut buffer_reads = vec![crate::BufferUse {
             buffer: mesh.vertex_buffer.handle(),
@@ -2545,15 +2591,27 @@ impl GraphImage {
         let declaration_index = inner.declaration_index;
         inner.declaration_index = inner.declaration_index.saturating_add(1);
 
-        inner.frame.inner.graph_mut(|g| g.import_image(self.handle, self.desc))?;
+        inner
+            .frame
+            .inner
+            .graph_mut(|g| g.import_image(self.handle, self.desc))?;
         inner.frame.inner.graph_mut(|g| {
             g.import_buffer(mesh.vertex_buffer.handle(), mesh.vertex_buffer.desc())
         })?;
         if let Some(ib) = &mesh.index_buffer {
-            inner.frame.inner.graph_mut(|g| g.import_buffer(ib.handle(), ib.desc()))?;
+            inner
+                .frame
+                .inner
+                .graph_mut(|g| g.import_buffer(ib.handle(), ib.desc()))?;
         }
-        inner.frame.inner.graph_mut(|g| g.import_buffer(instance_buf.handle(), instance_buf.desc()))?;
-        inner.frame.inner.graph_mut(|g| g.import_buffer(indirect_buf.handle(), indirect_buf.desc()))?;
+        inner
+            .frame
+            .inner
+            .graph_mut(|g| g.import_buffer(instance_buf.handle(), instance_buf.desc()))?;
+        inner
+            .frame
+            .inner
+            .graph_mut(|g| g.import_buffer(indirect_buf.handle(), indirect_buf.desc()))?;
 
         let pipeline = program.pipeline_handle(self.desc.format, self.desc.samples)?;
 
@@ -2599,11 +2657,16 @@ impl GraphImage {
             size: indirect_buf.desc().size,
         });
 
-        inner.buffers_by_name
-            .insert("instances".to_owned(), (instance_buf.handle(), instance_buf.desc()));
+        inner.buffers_by_name.insert(
+            "instances".to_owned(),
+            (instance_buf.handle(), instance_buf.desc()),
+        );
 
         if let Some(d) = depth {
-            inner.frame.inner.graph_mut(|g| g.import_image(d.handle, d.desc))?;
+            inner
+                .frame
+                .inner
+                .graph_mut(|g| g.import_image(d.handle, d.desc))?;
         }
 
         let pass_name = format!("{declaration_index:04}-draw-indirect-{}", self.name);
@@ -3355,9 +3418,9 @@ impl GraphImageView {
             handle: self.handle,
             desc: self.desc,
             subresource: SubresourceRange {
-                base_mip:    mip as u16,
-                mip_count:   1,
-                base_layer:  0,
+                base_mip: mip as u16,
+                mip_count: 1,
+                base_layer: 0,
                 layer_count: self.desc.layers,
             },
         }
@@ -3976,6 +4039,7 @@ fn build_reflected_bind_group(
                         let (_, desc) = eager_buffers
                             .get(&binding.path)
                             .or_else(|| buffers_by_name.get(&binding.path))
+                            //panic allowed, reason = "same lookup was proven Some immediately above"
                             .expect("buffer desc present with buffer handle");
                         validate_reflected_buffer_usage(&binding.path, binding.kind, *desc)?;
                         entries.push(BindGroupEntry {
@@ -4012,7 +4076,11 @@ fn build_reflected_bind_group(
     Ok(vec![bind_group])
 }
 
-fn validate_pass_target_usage(name: &str, desc: ImageDesc, required: crate::ImageUsage) -> Result<()> {
+fn validate_pass_target_usage(
+    name: &str,
+    desc: ImageDesc,
+    required: crate::ImageUsage,
+) -> Result<()> {
     if desc.usage.contains(required) {
         return Ok(());
     }

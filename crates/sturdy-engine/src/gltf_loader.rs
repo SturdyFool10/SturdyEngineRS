@@ -1,17 +1,16 @@
 // GLTF 2.0 mesh and material loading.
 // Called by mesh_loader::load_mesh_from_path for .gltf / .glb files.
 
-use std::sync::Arc;
 use std::path::Path;
+use std::sync::Arc;
 
-use crate::{Engine, FrameSyncReason, Image, Mesh, Result, TextureUploadDesc, Vertex3d};
 use crate::mesh::compute_tangents;
 use crate::mesh_loader::{MeshAlphaMode, MeshMaterialParams, MeshPrimitive, MeshTextures};
+use crate::{Engine, FrameSyncReason, Image, Mesh, Result, TextureUploadDesc, Vertex3d};
 
 pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
-    let (doc, buffers, images) = gltf::import(path).map_err(|e| {
-        crate::Error::Unknown(format!("gltf import '{}': {e}", path.display()))
-    })?;
+    let (doc, buffers, images) = gltf::import(path)
+        .map_err(|e| crate::Error::Unknown(format!("gltf import '{}': {e}", path.display())))?;
 
     // Upload all images to GPU once; indexed by gltf source image index.
     let gpu_images = upload_images(engine, &images)?;
@@ -22,7 +21,11 @@ pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
         let mesh_name = mesh.name().unwrap_or("mesh").to_owned();
         let multi = mesh.primitives().len() > 1;
         for (slot, primitive) in mesh.primitives().enumerate() {
-            let name = if multi { format!("{mesh_name}.{slot}") } else { mesh_name.clone() };
+            let name = if multi {
+                format!("{mesh_name}.{slot}")
+            } else {
+                mesh_name.clone()
+            };
             match extract_primitive(engine, &primitive, &buffers, &gpu_images, &name) {
                 Ok(p) => out.push(p),
                 Err(e) => eprintln!("[gltf] skipping '{name}' in '{}': {e}", path.display()),
@@ -55,7 +58,11 @@ fn upload_images(engine: &Engine, images: &[gltf::image::Data]) -> Result<Vec<Op
     Ok(gpu_images)
 }
 
-fn upload_one_image(frame: &mut crate::Frame, img: &gltf::image::Data, idx: usize) -> Result<Image> {
+fn upload_one_image(
+    frame: &mut crate::Frame,
+    img: &gltf::image::Data,
+    idx: usize,
+) -> Result<Image> {
     use gltf::image::Format as GltfFmt;
 
     let w = img.width;
@@ -64,65 +71,83 @@ fn upload_one_image(frame: &mut crate::Frame, img: &gltf::image::Data, idx: usiz
     // Convert to RGBA8 — the only 8-bit format the engine uploads directly.
     let rgba: Vec<u8> = match img.format {
         GltfFmt::R8 => img.pixels.iter().flat_map(|&r| [r, r, r, 255]).collect(),
-        GltfFmt::R8G8 => img.pixels.chunks(2).flat_map(|c| [c[0], c[1], 0, 255]).collect(),
-        GltfFmt::R8G8B8 => img.pixels.chunks(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+        GltfFmt::R8G8 => img
+            .pixels
+            .chunks(2)
+            .flat_map(|c| [c[0], c[1], 0, 255])
+            .collect(),
+        GltfFmt::R8G8B8 => img
+            .pixels
+            .chunks(3)
+            .flat_map(|c| [c[0], c[1], c[2], 255])
+            .collect(),
         GltfFmt::R8G8B8A8 => img.pixels.clone(),
-        GltfFmt::R16 => {
-            img.pixels.chunks(2)
-                .flat_map(|c| { let v = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8; [v, v, v, 255] })
-                .collect()
-        }
-        GltfFmt::R16G16 => {
-            img.pixels.chunks(4)
-                .flat_map(|c| {
-                    let r = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8;
-                    let g = (u16::from_le_bytes([c[2], c[3]]) >> 8) as u8;
-                    [r, g, 0, 255]
-                })
-                .collect()
-        }
-        GltfFmt::R16G16B16 => {
-            img.pixels.chunks(6)
-                .flat_map(|c| {
-                    let r = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8;
-                    let g = (u16::from_le_bytes([c[2], c[3]]) >> 8) as u8;
-                    let b = (u16::from_le_bytes([c[4], c[5]]) >> 8) as u8;
-                    [r, g, b, 255]
-                })
-                .collect()
-        }
-        GltfFmt::R16G16B16A16 => {
-            img.pixels.chunks(8)
-                .flat_map(|c| {
-                    let r = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8;
-                    let g = (u16::from_le_bytes([c[2], c[3]]) >> 8) as u8;
-                    let b = (u16::from_le_bytes([c[4], c[5]]) >> 8) as u8;
-                    let a = (u16::from_le_bytes([c[6], c[7]]) >> 8) as u8;
-                    [r, g, b, a]
-                })
-                .collect()
-        }
-        GltfFmt::R32G32B32FLOAT => {
-            img.pixels.chunks(12)
-                .flat_map(|c| {
-                    let r = (f32::from_le_bytes([c[0],c[1],c[2],c[3]]).clamp(0.0,1.0) * 255.0) as u8;
-                    let g = (f32::from_le_bytes([c[4],c[5],c[6],c[7]]).clamp(0.0,1.0) * 255.0) as u8;
-                    let b = (f32::from_le_bytes([c[8],c[9],c[10],c[11]]).clamp(0.0,1.0) * 255.0) as u8;
-                    [r, g, b, 255]
-                })
-                .collect()
-        }
-        GltfFmt::R32G32B32A32FLOAT => {
-            img.pixels.chunks(16)
-                .flat_map(|c| {
-                    let r = (f32::from_le_bytes([c[0],c[1],c[2],c[3]]).clamp(0.0,1.0) * 255.0) as u8;
-                    let g = (f32::from_le_bytes([c[4],c[5],c[6],c[7]]).clamp(0.0,1.0) * 255.0) as u8;
-                    let b = (f32::from_le_bytes([c[8],c[9],c[10],c[11]]).clamp(0.0,1.0) * 255.0) as u8;
-                    let a = (f32::from_le_bytes([c[12],c[13],c[14],c[15]]).clamp(0.0,1.0) * 255.0) as u8;
-                    [r, g, b, a]
-                })
-                .collect()
-        }
+        GltfFmt::R16 => img
+            .pixels
+            .chunks(2)
+            .flat_map(|c| {
+                let v = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8;
+                [v, v, v, 255]
+            })
+            .collect(),
+        GltfFmt::R16G16 => img
+            .pixels
+            .chunks(4)
+            .flat_map(|c| {
+                let r = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8;
+                let g = (u16::from_le_bytes([c[2], c[3]]) >> 8) as u8;
+                [r, g, 0, 255]
+            })
+            .collect(),
+        GltfFmt::R16G16B16 => img
+            .pixels
+            .chunks(6)
+            .flat_map(|c| {
+                let r = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8;
+                let g = (u16::from_le_bytes([c[2], c[3]]) >> 8) as u8;
+                let b = (u16::from_le_bytes([c[4], c[5]]) >> 8) as u8;
+                [r, g, b, 255]
+            })
+            .collect(),
+        GltfFmt::R16G16B16A16 => img
+            .pixels
+            .chunks(8)
+            .flat_map(|c| {
+                let r = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8;
+                let g = (u16::from_le_bytes([c[2], c[3]]) >> 8) as u8;
+                let b = (u16::from_le_bytes([c[4], c[5]]) >> 8) as u8;
+                let a = (u16::from_le_bytes([c[6], c[7]]) >> 8) as u8;
+                [r, g, b, a]
+            })
+            .collect(),
+        GltfFmt::R32G32B32FLOAT => img
+            .pixels
+            .chunks(12)
+            .flat_map(|c| {
+                let r =
+                    (f32::from_le_bytes([c[0], c[1], c[2], c[3]]).clamp(0.0, 1.0) * 255.0) as u8;
+                let g =
+                    (f32::from_le_bytes([c[4], c[5], c[6], c[7]]).clamp(0.0, 1.0) * 255.0) as u8;
+                let b =
+                    (f32::from_le_bytes([c[8], c[9], c[10], c[11]]).clamp(0.0, 1.0) * 255.0) as u8;
+                [r, g, b, 255]
+            })
+            .collect(),
+        GltfFmt::R32G32B32A32FLOAT => img
+            .pixels
+            .chunks(16)
+            .flat_map(|c| {
+                let r =
+                    (f32::from_le_bytes([c[0], c[1], c[2], c[3]]).clamp(0.0, 1.0) * 255.0) as u8;
+                let g =
+                    (f32::from_le_bytes([c[4], c[5], c[6], c[7]]).clamp(0.0, 1.0) * 255.0) as u8;
+                let b =
+                    (f32::from_le_bytes([c[8], c[9], c[10], c[11]]).clamp(0.0, 1.0) * 255.0) as u8;
+                let a = (f32::from_le_bytes([c[12], c[13], c[14], c[15]]).clamp(0.0, 1.0) * 255.0)
+                    as u8;
+                [r, g, b, a]
+            })
+            .collect(),
     };
 
     frame.upload_texture_2d(
@@ -156,20 +181,19 @@ fn extract_primitive(
         .map(|u| u.into_f32().collect())
         .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
 
-    let gltf_tangents: Option<Vec<[f32; 4]>> = reader
-        .read_tangents()
-        .map(|t| t.collect());
+    let gltf_tangents: Option<Vec<[f32; 4]>> = reader.read_tangents().map(|t| t.collect());
 
     let n = positions.len();
     let mut vertices: Vec<Vertex3d> = (0..n)
         .map(|i| Vertex3d {
             position: positions[i],
-            normal:   normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
-            uv:       uvs.get(i).copied().unwrap_or([0.0, 0.0]),
-            tangent:  gltf_tangents.as_ref()
-                        .and_then(|t| t.get(i))
-                        .copied()
-                        .unwrap_or([1.0, 0.0, 0.0, 1.0]),
+            normal: normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]),
+            uv: uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+            tangent: gltf_tangents
+                .as_ref()
+                .and_then(|t| t.get(i))
+                .copied()
+                .unwrap_or([1.0, 0.0, 0.0, 1.0]),
         })
         .collect();
 
@@ -188,7 +212,12 @@ fn extract_primitive(
     let material_params = extract_material(material);
     let textures = extract_textures(material, gpu_images);
 
-    Ok(MeshPrimitive { mesh, name: name.to_owned(), material_params, textures })
+    Ok(MeshPrimitive {
+        mesh,
+        name: name.to_owned(),
+        material_params,
+        textures,
+    })
 }
 
 fn extract_material(material: &gltf::Material<'_>) -> MeshMaterialParams {
@@ -196,38 +225,42 @@ fn extract_material(material: &gltf::Material<'_>) -> MeshMaterialParams {
     let emissive = material.emissive_factor();
     let alpha_mode = match material.alpha_mode() {
         gltf::material::AlphaMode::Opaque => MeshAlphaMode::Opaque,
-        gltf::material::AlphaMode::Mask   => MeshAlphaMode::Mask,
-        gltf::material::AlphaMode::Blend  => MeshAlphaMode::Blend,
+        gltf::material::AlphaMode::Mask => MeshAlphaMode::Mask,
+        gltf::material::AlphaMode::Blend => MeshAlphaMode::Blend,
     };
 
     // KHR_materials_transmission
-    let transmission_factor =
-        material.transmission().map(|t| t.transmission_factor()).unwrap_or(0.0);
+    let transmission_factor = material
+        .transmission()
+        .map(|t| t.transmission_factor())
+        .unwrap_or(0.0);
 
     // KHR_materials_ior
     let ior = material.ior().unwrap_or(1.5);
 
     // KHR_materials_specular: treat specular_factor as an F0 scale when present
-    let _specular_factor = material.specular()
+    let _specular_factor = material
+        .specular()
         .map(|s| s.specular_factor())
         .unwrap_or(1.0);
 
     // KHR_materials_volume: attenuation / thick dielectric — captured in transmission
-    let _attenuation_color = material.volume()
+    let _attenuation_color = material
+        .volume()
         .map(|v| v.attenuation_color())
         .unwrap_or([1.0, 1.0, 1.0]);
 
     MeshMaterialParams {
         base_color_factor: pbr.base_color_factor(),
-        metallic_factor:   pbr.metallic_factor(),
-        roughness_factor:  pbr.roughness_factor(),
-        emissive_factor:   [emissive[0], emissive[1], emissive[2]],
+        metallic_factor: pbr.metallic_factor(),
+        roughness_factor: pbr.roughness_factor(),
+        emissive_factor: [emissive[0], emissive[1], emissive[2]],
         emissive_strength: material.emissive_strength().unwrap_or(1.0),
-        double_sided:      material.double_sided(),
+        double_sided: material.double_sided(),
         alpha_mode,
-        alpha_cutoff:      material.alpha_cutoff().unwrap_or(0.5),
-        unlit:             material.unlit(),
-        clearcoat_factor: 0.0,            // KHR_materials_clearcoat not in gltf 1.x
+        alpha_cutoff: material.alpha_cutoff().unwrap_or(0.5),
+        unlit: material.unlit(),
+        clearcoat_factor: 0.0, // KHR_materials_clearcoat not in gltf 1.x
         clearcoat_roughness_factor: 0.0,
         transmission_factor,
         ior,
@@ -236,7 +269,10 @@ fn extract_material(material: &gltf::Material<'_>) -> MeshMaterialParams {
     }
 }
 
-fn extract_textures(material: &gltf::Material<'_>, gpu_images: &[Option<Arc<Image>>]) -> MeshTextures {
+fn extract_textures(
+    material: &gltf::Material<'_>,
+    gpu_images: &[Option<Arc<Image>>],
+) -> MeshTextures {
     let pbr = material.pbr_metallic_roughness();
 
     let lookup = |tex: gltf::texture::Texture<'_>| -> Option<Arc<Image>> {
@@ -244,22 +280,29 @@ fn extract_textures(material: &gltf::Material<'_>, gpu_images: &[Option<Arc<Imag
     };
 
     // KHR_materials_transmission texture
-    let transmission = material.transmission()
+    let transmission = material
+        .transmission()
         .and_then(|t| t.transmission_texture())
         .and_then(|t| lookup(t.texture()));
 
     MeshTextures {
-        base_color:         pbr.base_color_texture().and_then(|t| lookup(t.texture())),
-        metallic_roughness: pbr.metallic_roughness_texture().and_then(|t| lookup(t.texture())),
-        normal:             material.normal_texture().and_then(|t| lookup(t.texture())),
-        occlusion:          material.occlusion_texture().and_then(|t| lookup(t.texture())),
-        emissive:           material.emissive_texture().and_then(|t| lookup(t.texture())),
+        base_color: pbr.base_color_texture().and_then(|t| lookup(t.texture())),
+        metallic_roughness: pbr
+            .metallic_roughness_texture()
+            .and_then(|t| lookup(t.texture())),
+        normal: material.normal_texture().and_then(|t| lookup(t.texture())),
+        occlusion: material
+            .occlusion_texture()
+            .and_then(|t| lookup(t.texture())),
+        emissive: material
+            .emissive_texture()
+            .and_then(|t| lookup(t.texture())),
         // KHR_materials_clearcoat / sheen not available in gltf 1.x — None for now
-        clearcoat:          None,
+        clearcoat: None,
         clearcoat_roughness: None,
-        clearcoat_normal:   None,
+        clearcoat_normal: None,
         transmission,
-        sheen_color:        None,
-        sheen_roughness:    None,
+        sheen_color: None,
+        sheen_roughness: None,
     }
 }

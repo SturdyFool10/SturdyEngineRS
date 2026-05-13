@@ -14,9 +14,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::{
-    Engine, Image, Mesh, Result,
-    MaterialDomain, ShadingModel, UnifiedMaterial, UnifiedMaterialBuilder,
-    scene::MaterialDescriptor,
+    Engine, Image, MaterialDomain, Mesh, Result, ShadingModel, UnifiedMaterial,
+    UnifiedMaterialBuilder, scene::MaterialDescriptor,
 };
 
 // ── Common types ──────────────────────────────────────────────────────────────
@@ -192,8 +191,8 @@ impl MeshMaterialParams {
         } else {
             match self.alpha_mode {
                 MeshAlphaMode::Opaque => MaterialDomain::Opaque,
-                MeshAlphaMode::Mask   => MaterialDomain::Masked,
-                MeshAlphaMode::Blend  => MaterialDomain::Translucent,
+                MeshAlphaMode::Mask => MaterialDomain::Masked,
+                MeshAlphaMode::Blend => MaterialDomain::Translucent,
             }
         };
 
@@ -255,8 +254,8 @@ pub(crate) fn load_mesh_from_path(engine: &Engine, path: &Path) -> Result<Vec<Me
 
     match ext.as_str() {
         "gltf" | "glb" => crate::gltf_loader::load(engine, path),
-        "obj"          => crate::obj_loader::load(engine, path),
-        "stl"          => crate::stl_loader::load(engine, path),
+        "obj" => crate::obj_loader::load(engine, path),
+        "stl" => crate::stl_loader::load(engine, path),
         other => Err(crate::Error::Unknown(format!(
             "load_mesh: unsupported file extension '.{other}' in '{}'. \
              Supported: .gltf, .glb, .obj, .stl",

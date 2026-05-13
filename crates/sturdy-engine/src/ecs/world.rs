@@ -90,7 +90,10 @@ impl World {
     /// and `.id()` to finish.
     pub fn spawn(&mut self) -> EntityBuilder<'_> {
         let entity = self.entities.alloc();
-        EntityBuilder { world: self, entity }
+        EntityBuilder {
+            world: self,
+            entity,
+        }
     }
 
     /// Spawn an entity with no components and return its handle immediately.
@@ -127,7 +130,10 @@ impl World {
     ///
     /// Panics if `entity` is not alive.
     pub fn insert<T: Component>(&mut self, entity: Entity, component: T) {
-        assert!(self.entities.is_alive(entity), "insert on dead entity {entity}");
+        assert!(
+            self.entities.is_alive(entity),
+            "insert on dead entity {entity}"
+        );
         self.storage_mut::<T>().insert(entity.index, component);
     }
 
@@ -171,7 +177,8 @@ impl World {
     ///
     /// Yields `(Entity, &T)` in dense-storage order (not spawn order).
     pub fn query<T: Component>(&self) -> Box<dyn Iterator<Item = (Entity, &T)> + '_> {
-        let Some(storage) = self.components
+        let Some(storage) = self
+            .components
             .get(&TypeId::of::<T>())
             // SAFETY: &self serial path — no concurrent write borrow.
             .and_then(|cell| downcast_storage::<T>(unsafe { &*cell.get() }.as_ref()))
@@ -185,13 +192,13 @@ impl World {
     /// Iterate all live entities with mutable access to their `T` component.
     pub fn query_mut<T: Component>(&mut self) -> Box<dyn Iterator<Item = (Entity, &mut T)> + '_> {
         let gens: *const Vec<u32> = &self.entities.generations;
-        let Some(storage) = self.components
+        let Some(storage) = self
+            .components
             .get(&TypeId::of::<T>())
             // SAFETY: &mut World — exclusive.
             .and_then(|cell| downcast_storage_mut::<T>(unsafe { &mut *cell.get() }.as_mut()))
         else {
-            return Box::new(std::iter::empty())
-                as Box<dyn Iterator<Item = (Entity, &mut T)>>;
+            return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = (Entity, &mut T)>>;
         };
         // SAFETY: `gens` points into `self.entities.generations` which is never
         // mutated during iteration (we only mutate `storage`).
@@ -222,30 +229,41 @@ impl World {
     /// Iterate entities that have **both** `A` and `B`, yielding immutable refs.
     ///
     /// Iterates the storage of `A` (the primary) and skips entities missing `B`.
-    pub fn query2<A: Component, B: Component>(
-        &self,
-    ) -> impl Iterator<Item = (Entity, &A, &B)> {
+    pub fn query2<A: Component, B: Component>(&self) -> impl Iterator<Item = (Entity, &A, &B)> {
         let tid_a = TypeId::of::<A>();
         let tid_b = TypeId::of::<B>();
 
         // SAFETY: &self serial path — no concurrent write borrows.
-        let sa = self.components.get(&tid_a)
+        let sa = self
+            .components
+            .get(&tid_a)
             .and_then(|cell| downcast_storage::<A>(unsafe { &*cell.get() }.as_ref()));
-        let sb = self.components.get(&tid_b)
+        let sb = self
+            .components
+            .get(&tid_b)
             .and_then(|cell| downcast_storage::<B>(unsafe { &*cell.get() }.as_ref()));
 
         let (Some(sa), Some(sb)) = (sa, sb) else {
-            return Box::new(std::iter::empty())
-                as Box<dyn Iterator<Item = (Entity, &A, &B)>>;
+            return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = (Entity, &A, &B)>>;
         };
 
         let gens = &self.entities.generations;
         Box::new(
-            sa.entity_of.iter().zip(sa.dense.iter()).filter_map(move |(&idx, a)| {
-                let b = sb.get(idx)?;
-                let generation = gens.get(idx as usize).copied().unwrap_or(0);
-                Some((Entity { index: idx, generation }, a, b))
-            }),
+            sa.entity_of
+                .iter()
+                .zip(sa.dense.iter())
+                .filter_map(move |(&idx, a)| {
+                    let b = sb.get(idx)?;
+                    let generation = gens.get(idx as usize).copied().unwrap_or(0);
+                    Some((
+                        Entity {
+                            index: idx,
+                            generation,
+                        },
+                        a,
+                        b,
+                    ))
+                }),
         )
     }
 
@@ -257,22 +275,26 @@ impl World {
     ) -> impl Iterator<Item = (Entity, &mut A, &B)> {
         let tid_a = TypeId::of::<A>();
         let tid_b = TypeId::of::<B>();
-        assert_ne!(tid_a, tid_b, "query2_mut: A and B must be distinct component types");
+        assert_ne!(
+            tid_a, tid_b,
+            "query2_mut: A and B must be distinct component types"
+        );
 
         // SAFETY: &mut World — exclusive. tid_a != tid_b guarantees the two
         // UnsafeCell values are distinct HashMap entries (no aliasing).
-        let sa_ptr: Option<*mut ComponentStorage<A>> = self.components
+        let sa_ptr: Option<*mut ComponentStorage<A>> = self
+            .components
             .get(&tid_a)
             .and_then(|cell| downcast_storage_mut::<A>(unsafe { &mut *cell.get() }.as_mut()))
             .map(|s| s as *mut _);
-        let sb_ptr: Option<*const ComponentStorage<B>> = self.components
+        let sb_ptr: Option<*const ComponentStorage<B>> = self
+            .components
             .get(&tid_b)
             .and_then(|cell| downcast_storage::<B>(unsafe { &*cell.get() }.as_ref()))
             .map(|s| s as *const _);
 
         let (Some(sa_ptr), Some(sb_ptr)) = (sa_ptr, sb_ptr) else {
-            return Box::new(std::iter::empty())
-                as Box<dyn Iterator<Item = (Entity, &mut A, &B)>>;
+            return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = (Entity, &mut A, &B)>>;
         };
 
         let gens: *const Vec<u32> = &self.entities.generations;
@@ -281,13 +303,23 @@ impl World {
             // SAFETY: sa_ptr and sb_ptr point to distinct storage entries.
             unsafe {
                 let sa: &mut ComponentStorage<A> = &mut *sa_ptr;
-                sa.entity_of.iter().zip(sa.dense.iter_mut()).filter_map(move |(&idx, a)| {
-                    let sb: &ComponentStorage<B> = &*sb_ptr;
-                    let b = sb.get(idx)?;
-                    let gens: &Vec<u32> = &*gens;
-                    let generation = gens.get(idx as usize).copied().unwrap_or(0);
-                    Some((Entity { index: idx, generation }, a, b))
-                })
+                sa.entity_of
+                    .iter()
+                    .zip(sa.dense.iter_mut())
+                    .filter_map(move |(&idx, a)| {
+                        let sb: &ComponentStorage<B> = &*sb_ptr;
+                        let b = sb.get(idx)?;
+                        let gens: &Vec<u32> = &*gens;
+                        let generation = gens.get(idx as usize).copied().unwrap_or(0);
+                        Some((
+                            Entity {
+                                index: idx,
+                                generation,
+                            },
+                            a,
+                            b,
+                        ))
+                    })
             },
         )
     }
@@ -301,23 +333,42 @@ impl World {
         let tid_c = TypeId::of::<C>();
 
         // SAFETY: &self serial path.
-        let sa = self.components.get(&tid_a).and_then(|cell| downcast_storage::<A>(unsafe { &*cell.get() }.as_ref()));
-        let sb = self.components.get(&tid_b).and_then(|cell| downcast_storage::<B>(unsafe { &*cell.get() }.as_ref()));
-        let sc = self.components.get(&tid_c).and_then(|cell| downcast_storage::<C>(unsafe { &*cell.get() }.as_ref()));
+        let sa = self
+            .components
+            .get(&tid_a)
+            .and_then(|cell| downcast_storage::<A>(unsafe { &*cell.get() }.as_ref()));
+        let sb = self
+            .components
+            .get(&tid_b)
+            .and_then(|cell| downcast_storage::<B>(unsafe { &*cell.get() }.as_ref()));
+        let sc = self
+            .components
+            .get(&tid_c)
+            .and_then(|cell| downcast_storage::<C>(unsafe { &*cell.get() }.as_ref()));
 
         let (Some(sa), Some(sb), Some(sc)) = (sa, sb, sc) else {
-            return Box::new(std::iter::empty())
-                as Box<dyn Iterator<Item = (Entity, &A, &B, &C)>>;
+            return Box::new(std::iter::empty()) as Box<dyn Iterator<Item = (Entity, &A, &B, &C)>>;
         };
 
         let gens = &self.entities.generations;
         Box::new(
-            sa.entity_of.iter().zip(sa.dense.iter()).filter_map(move |(&idx, a)| {
-                let b = sb.get(idx)?;
-                let c = sc.get(idx)?;
-                let generation = gens.get(idx as usize).copied().unwrap_or(0);
-                Some((Entity { index: idx, generation }, a, b, c))
-            }),
+            sa.entity_of
+                .iter()
+                .zip(sa.dense.iter())
+                .filter_map(move |(&idx, a)| {
+                    let b = sb.get(idx)?;
+                    let c = sc.get(idx)?;
+                    let generation = gens.get(idx as usize).copied().unwrap_or(0);
+                    Some((
+                        Entity {
+                            index: idx,
+                            generation,
+                        },
+                        a,
+                        b,
+                        c,
+                    ))
+                }),
         )
     }
 
@@ -325,13 +376,15 @@ impl World {
 
     /// Get or create the storage for component type `T`.
     pub(super) fn storage_mut<T: Component>(&mut self) -> &mut ComponentStorage<T> {
-        let cell = self.components
+        let cell = self
+            .components
             .entry(TypeId::of::<T>())
             .or_insert_with(|| UnsafeCell::new(Box::new(ComponentStorage::<T>::new())));
         // SAFETY: &mut World — exclusive.
         unsafe { &mut *cell.get() }
             .as_any_mut()
             .downcast_mut::<ComponentStorage<T>>()
+            //panic allowed, reason = "component storage TypeId key proves the inserted storage type"
             .expect("storage type mismatch — should never happen")
     }
 
@@ -386,6 +439,7 @@ impl World {
     /// The panic message includes the type name to make misconfigurations obvious.
     pub fn resource_unwrap<R: 'static>(&self) -> &R {
         self.resource::<R>().unwrap_or_else(|| {
+            //panic allowed, reason = "explicit unwrap API intentionally treats missing required resource as unrecoverable configuration error"
             panic!(
                 "World::resource_unwrap::<{}>() called but resource is not present. \
                  Insert it with world.insert_resource(...) before running this system.",
@@ -397,6 +451,7 @@ impl World {
     /// Mutably borrow a resource, panicking if it is not present.
     pub fn resource_unwrap_mut<R: 'static>(&mut self) -> &mut R {
         self.resource_mut::<R>().unwrap_or_else(|| {
+            //panic allowed, reason = "explicit unwrap API intentionally treats missing required resource as unrecoverable configuration error"
             panic!(
                 "World::resource_unwrap_mut::<{}>() called but resource is not present.",
                 std::any::type_name::<R>()
@@ -418,14 +473,18 @@ impl World {
     /// deferred.draw(&mut scene, view, proj, &output, &frame, &engine, time)?;
     /// ```
     pub fn sync_scene_transforms(&self, scene: &crate::Scene) {
-        for (_, transform, link) in self.query2::<super::components::Transform, super::components::SceneLink>() {
+        for (_, transform, link) in
+            self.query2::<super::components::Transform, super::components::SceneLink>()
+        {
             scene.set_transform(link.object_id, transform.to_mat4());
         }
     }
 }
 
 impl Default for World {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ── EntityBuilder ─────────────────────────────────────────────────────────────
@@ -447,7 +506,9 @@ pub struct EntityBuilder<'w> {
 impl<'w> EntityBuilder<'w> {
     /// Attach a component to the entity being built.
     pub fn with<T: Component>(self, component: T) -> Self {
-        self.world.storage_mut::<T>().insert(self.entity.index, component);
+        self.world
+            .storage_mut::<T>()
+            .insert(self.entity.index, component);
         self
     }
 
@@ -456,4 +517,3 @@ impl<'w> EntityBuilder<'w> {
         self.entity
     }
 }
-

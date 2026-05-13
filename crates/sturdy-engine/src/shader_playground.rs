@@ -28,9 +28,9 @@
 use std::path::Path;
 
 use crate::{
-    Engine, GraphImage, PcFieldKind, PushConstantField, RenderFrame, Result,
+    Engine, GraphImage, PcFieldKind, PushConstantField, RenderFrame, Result, RuntimeApplyPath,
     RuntimeController, RuntimeSettingDescriptor, RuntimeSettingId, RuntimeSettingValue,
-    ShaderProgram, StageMask, ShaderParameterKind, RuntimeApplyPath,
+    ShaderParameterKind, ShaderProgram, StageMask,
 };
 
 // ── PlaygroundValue ───────────────────────────────────────────────────────────
@@ -52,31 +52,31 @@ pub enum PlaygroundValue {
 impl PlaygroundValue {
     fn byte_size(&self) -> usize {
         match self {
-            Self::Float(_)   | Self::Int(_)   | Self::Uint(_) | Self::Bool(_) => 4,
-            Self::Float2(_)  => 8,
-            Self::Float3(_)  => 12,
-            Self::Float4(_)  => 16,
-            Self::Raw(v)     => v.len(),
+            Self::Float(_) | Self::Int(_) | Self::Uint(_) | Self::Bool(_) => 4,
+            Self::Float2(_) => 8,
+            Self::Float3(_) => 12,
+            Self::Float4(_) => 16,
+            Self::Raw(v) => v.len(),
         }
     }
 
     /// Write this value into `dst` at `offset`. `dst` must be large enough.
     fn write_into(&self, dst: &mut [u8], offset: usize) {
         match self {
-            Self::Float(v)   => dst[offset..offset + 4].copy_from_slice(&v.to_le_bytes()),
-            Self::Int(v)     => dst[offset..offset + 4].copy_from_slice(&v.to_le_bytes()),
-            Self::Uint(v)    => dst[offset..offset + 4].copy_from_slice(&v.to_le_bytes()),
-            Self::Bool(v)    => dst[offset..offset + 4].copy_from_slice(&(*v as u32).to_le_bytes()),
-            Self::Float2(v)  => {
+            Self::Float(v) => dst[offset..offset + 4].copy_from_slice(&v.to_le_bytes()),
+            Self::Int(v) => dst[offset..offset + 4].copy_from_slice(&v.to_le_bytes()),
+            Self::Uint(v) => dst[offset..offset + 4].copy_from_slice(&v.to_le_bytes()),
+            Self::Bool(v) => dst[offset..offset + 4].copy_from_slice(&(*v as u32).to_le_bytes()),
+            Self::Float2(v) => {
                 dst[offset..offset + 4].copy_from_slice(&v[0].to_le_bytes());
                 dst[offset + 4..offset + 8].copy_from_slice(&v[1].to_le_bytes());
             }
-            Self::Float3(v)  => {
+            Self::Float3(v) => {
                 dst[offset..offset + 4].copy_from_slice(&v[0].to_le_bytes());
                 dst[offset + 4..offset + 8].copy_from_slice(&v[1].to_le_bytes());
                 dst[offset + 8..offset + 12].copy_from_slice(&v[2].to_le_bytes());
             }
-            Self::Float4(v)  => {
+            Self::Float4(v) => {
                 dst[offset..offset + 4].copy_from_slice(&v[0].to_le_bytes());
                 dst[offset + 4..offset + 8].copy_from_slice(&v[1].to_le_bytes());
                 dst[offset + 8..offset + 12].copy_from_slice(&v[2].to_le_bytes());
@@ -91,14 +91,14 @@ impl PlaygroundValue {
 
     fn default_for(kind: &PcFieldKind) -> Self {
         match kind {
-            PcFieldKind::Float   => Self::Float(0.0),
-            PcFieldKind::Float2  => Self::Float2([0.0; 2]),
-            PcFieldKind::Float3  => Self::Float3([0.0; 3]),
-            PcFieldKind::Float4  => Self::Float4([0.0; 4]),
-            PcFieldKind::Int     => Self::Int(0),
-            PcFieldKind::Uint    => Self::Uint(0),
-            PcFieldKind::Bool    => Self::Bool(false),
-            PcFieldKind::Mat4    => Self::Raw(vec![0u8; 64]),
+            PcFieldKind::Float => Self::Float(0.0),
+            PcFieldKind::Float2 => Self::Float2([0.0; 2]),
+            PcFieldKind::Float3 => Self::Float3([0.0; 3]),
+            PcFieldKind::Float4 => Self::Float4([0.0; 4]),
+            PcFieldKind::Int => Self::Int(0),
+            PcFieldKind::Uint => Self::Uint(0),
+            PcFieldKind::Bool => Self::Bool(false),
+            PcFieldKind::Mat4 => Self::Raw(vec![0u8; 64]),
             PcFieldKind::Other { byte_size } => Self::Raw(vec![0u8; *byte_size as usize]),
         }
     }
@@ -110,9 +110,9 @@ impl PlaygroundValue {
             (PcFieldKind::Float2, RuntimeSettingValue::Text(s)) => parse_float2(&s),
             (PcFieldKind::Float3, RuntimeSettingValue::Text(s)) => parse_float3(&s),
             (PcFieldKind::Float4, RuntimeSettingValue::Text(s)) => parse_float4(&s),
-            (PcFieldKind::Int,    RuntimeSettingValue::Integer(v)) => Some(Self::Int(v as i32)),
-            (PcFieldKind::Uint,   RuntimeSettingValue::Integer(v)) => Some(Self::Uint(v as u32)),
-            (PcFieldKind::Bool,   RuntimeSettingValue::Bool(v)) => Some(Self::Bool(v)),
+            (PcFieldKind::Int, RuntimeSettingValue::Integer(v)) => Some(Self::Int(v as i32)),
+            (PcFieldKind::Uint, RuntimeSettingValue::Integer(v)) => Some(Self::Uint(v as u32)),
+            (PcFieldKind::Bool, RuntimeSettingValue::Bool(v)) => Some(Self::Bool(v)),
             _ => None,
         }
     }
@@ -120,14 +120,16 @@ impl PlaygroundValue {
     /// Convert to a `RuntimeSettingValue` for registration.
     fn to_runtime(&self) -> RuntimeSettingValue {
         match self {
-            Self::Float(v)   => RuntimeSettingValue::Float(*v as f64),
-            Self::Float2(v)  => RuntimeSettingValue::Text(format!("{} {}", v[0], v[1])),
-            Self::Float3(v)  => RuntimeSettingValue::Text(format!("{} {} {}", v[0], v[1], v[2])),
-            Self::Float4(v)  => RuntimeSettingValue::Text(format!("{} {} {} {}", v[0], v[1], v[2], v[3])),
-            Self::Int(v)     => RuntimeSettingValue::Integer(*v as i64),
-            Self::Uint(v)    => RuntimeSettingValue::Integer(*v as i64),
-            Self::Bool(v)    => RuntimeSettingValue::Bool(*v),
-            Self::Raw(_)     => RuntimeSettingValue::Text(String::new()),
+            Self::Float(v) => RuntimeSettingValue::Float(*v as f64),
+            Self::Float2(v) => RuntimeSettingValue::Text(format!("{} {}", v[0], v[1])),
+            Self::Float3(v) => RuntimeSettingValue::Text(format!("{} {} {}", v[0], v[1], v[2])),
+            Self::Float4(v) => {
+                RuntimeSettingValue::Text(format!("{} {} {} {}", v[0], v[1], v[2], v[3]))
+            }
+            Self::Int(v) => RuntimeSettingValue::Integer(*v as i64),
+            Self::Uint(v) => RuntimeSettingValue::Integer(*v as i64),
+            Self::Bool(v) => RuntimeSettingValue::Bool(*v),
+            Self::Raw(_) => RuntimeSettingValue::Text(String::new()),
         }
     }
 }
@@ -222,13 +224,20 @@ impl ShaderPlayground {
     /// Build from a pre-compiled [`ShaderProgram`].
     pub fn from_program(program: ShaderProgram) -> Self {
         let (params, total_bytes) = build_params(program.reflection());
-        Self { program, params, total_bytes, presets: Vec::new() }
+        Self {
+            program,
+            params,
+            total_bytes,
+            presets: Vec::new(),
+        }
     }
 
     // ── Parameter access ──────────────────────────────────────────────────────
 
     /// All reflected parameters in byte-offset order.
-    pub fn params(&self) -> &[PlaygroundParam] { &self.params }
+    pub fn params(&self) -> &[PlaygroundParam] {
+        &self.params
+    }
 
     /// Set a parameter by name. Returns `false` if not found or type mismatch.
     pub fn set(&mut self, name: &str, value: PlaygroundValue) -> bool {
@@ -243,7 +252,10 @@ impl ShaderPlayground {
 
     /// Get the current value of a parameter by name.
     pub fn get(&self, name: &str) -> Option<&PlaygroundValue> {
-        self.params.iter().find(|p| p.field.name == name).map(|p| &p.value)
+        self.params
+            .iter()
+            .find(|p| p.field.name == name)
+            .map(|p| &p.value)
     }
 
     /// Set label for display in the runtime settings panel.
@@ -262,10 +274,14 @@ impl ShaderPlayground {
     }
 
     /// Total size of the push constant block in bytes.
-    pub fn total_bytes(&self) -> u32 { self.total_bytes }
+    pub fn total_bytes(&self) -> u32 {
+        self.total_bytes
+    }
 
     /// The underlying compiled shader program.
-    pub fn program(&self) -> &ShaderProgram { &self.program }
+    pub fn program(&self) -> &ShaderProgram {
+        &self.program
+    }
 
     // ── Runtime settings integration ──────────────────────────────────────────
 
@@ -305,8 +321,12 @@ impl ShaderPlayground {
     /// Call once per frame after `register_with_runtime`.
     pub fn sync_from_runtime(&mut self, controller: &RuntimeController) {
         for param in &mut self.params {
-            let Some(id) = &param.setting_id else { continue };
-            let Some(rv) = controller.setting_value(id.clone()) else { continue };
+            let Some(id) = &param.setting_id else {
+                continue;
+            };
+            let Some(rv) = controller.setting_value(id.clone()) else {
+                continue;
+            };
             if let Some(v) = PlaygroundValue::from_runtime(rv, &param.field.kind) {
                 param.value = v;
             }
@@ -334,7 +354,9 @@ impl ShaderPlayground {
 
     /// Pack all parameter values into a `Vec<u8>` push constant buffer.
     pub fn pack_bytes(&self) -> Vec<u8> {
-        if self.total_bytes == 0 { return Vec::new(); }
+        if self.total_bytes == 0 {
+            return Vec::new();
+        }
         let mut buf = vec![0u8; self.total_bytes as usize];
         for param in &self.params {
             let off = param.field.byte_offset as usize;
@@ -372,7 +394,9 @@ impl ShaderPlayground {
     }
 
     /// All saved presets.
-    pub fn presets(&self) -> &[PlaygroundPreset] { &self.presets }
+    pub fn presets(&self) -> &[PlaygroundPreset] {
+        &self.presets
+    }
 
     // ── Screenshot export ─────────────────────────────────────────────────────
 

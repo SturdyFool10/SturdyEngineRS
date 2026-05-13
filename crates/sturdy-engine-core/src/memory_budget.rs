@@ -49,9 +49,13 @@ impl GpuMemoryBudget {
     /// One-line human-readable summary, e.g. `"VRAM 423 / 512 MiB (82 %) [over budget]"`.
     pub fn summary(&self) -> String {
         let used = self.device_local_used_mib();
-        let cap  = self.device_local_capacity_mib();
-        let pct  = (self.device_local_fraction() * 100.0) as u32;
-        let flag = if self.over_budget() { " [over budget]" } else { "" };
+        let cap = self.device_local_capacity_mib();
+        let pct = (self.device_local_fraction() * 100.0) as u32;
+        let flag = if self.over_budget() {
+            " [over budget]"
+        } else {
+            ""
+        };
         format!("VRAM {used:.0} / {cap:.0} MiB ({pct} %){flag}")
     }
 }

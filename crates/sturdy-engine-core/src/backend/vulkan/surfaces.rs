@@ -296,11 +296,8 @@ impl SurfaceRegistry {
             .wait_semaphores(&wait_semaphores)
             .swapchains(&swapchains)
             .image_indices(&image_indices);
-        let present_result = unsafe {
-            surface
-                .swapchain_loader
-                .queue_present(queue, &present_info)
-        };
+        let present_result =
+            unsafe { surface.swapchain_loader.queue_present(queue, &present_info) };
         surface.acquired_image_index = None;
 
         match present_result {

@@ -306,7 +306,10 @@ pub enum PassWork {
     /// from the previous one. The image must have `COPY_SRC | COPY_DST` usage
     /// and `mip_levels > 1`. The Vulkan backend uses `vkCmdBlitImage` with a
     /// linear filter; all mip levels end in `SHADER_READ_ONLY_OPTIMAL`.
-    GenerateMipmaps { image: ImageHandle, mip_count: u32 },
+    GenerateMipmaps {
+        image: ImageHandle,
+        mip_count: u32,
+    },
     /// Blit a single mip level to another mip level of the same image (linear filter).
     ///
     /// Used for explicit level-by-level downsample chains (e.g. HizPass) where
@@ -1062,6 +1065,23 @@ fn copy_byte_count(
     depth: u32,
     layer_count: u32,
 ) -> Result<u64> {
+    if desc.format.is_block_compressed() {
+        let blocks_x = (width as u64).div_ceil(4);
+        let blocks_y = (height as u64).div_ceil(4);
+        return [
+            blocks_x,
+            blocks_y,
+            depth as u64,
+            layer_count as u64,
+            desc.format.bc_block_bytes(),
+        ]
+        .into_iter()
+        .try_fold(1u64, |acc, value| {
+            acc.checked_mul(value)
+                .ok_or_else(|| Error::InvalidInput("copy byte count overflowed".into()))
+        });
+    }
+
     let texel_size = format_texel_size(desc)?;
     [
         width as u64,
@@ -1078,18 +1098,32 @@ fn copy_byte_count(
 }
 
 fn format_texel_size(desc: ImageDesc) -> Result<u64> {
+    use crate::Format;
+    if desc.format == Format::Unknown {
+        return Err(Error::InvalidInput(
+            "copy image format must be specified".into(),
+        ));
+    }
+    if desc.format.is_block_compressed() {
+        return Err(Error::InvalidInput(
+            "BC-compressed copy byte counts must be computed from 4x4 blocks".into(),
+        ));
+    }
     let size = match desc.format {
-        crate::Format::Unknown => {
-            return Err(Error::InvalidInput(
-                "copy image format must be specified".into(),
-            ));
-        }
-        crate::Format::Rgba8Unorm => 4,
-        crate::Format::Bgra8Unorm => 4,
-        crate::Format::Rgba16Float => 8,
-        crate::Format::Rgba32Float => 16,
-        crate::Format::Depth32Float => 4,
-        crate::Format::Depth24Stencil8 => 4,
+        Format::Rgba8Unorm | Format::Bgra8Unorm => 4,
+        Format::R8Unorm => 1,
+        Format::Rg8Unorm => 2,
+        Format::Rgba16Float => 8,
+        Format::Rgba32Float => 16,
+        Format::Depth32Float | Format::Depth24Stencil8 => 4,
+        Format::Unknown => unreachable!("checked above"),
+        Format::Bc3Unorm
+        | Format::Bc3UnormSrgb
+        | Format::Bc4Unorm
+        | Format::Bc5Unorm
+        | Format::Bc7Unorm
+        | Format::Bc7UnormSrgb
+        | Format::Bc6hUfloat => unreachable!("BC handled above"),
     };
     Ok(size)
 }
@@ -1116,6 +1150,16 @@ mod tests {
             clear_value: None,
             debug_name: None,
         }
+    }
+
+    #[test]
+    fn copy_byte_count_uses_bc_blocks() {
+        let mut desc = image_desc();
+        desc.format = Format::Bc4Unorm;
+
+        assert_eq!(copy_byte_count(desc, 4, 4, 1, 1).unwrap(), 8);
+        assert_eq!(copy_byte_count(desc, 5, 4, 1, 1).unwrap(), 16);
+        assert_eq!(copy_byte_count(desc, 7, 9, 1, 2).unwrap(), 96);
     }
 
     fn image_desc() -> ImageDesc {

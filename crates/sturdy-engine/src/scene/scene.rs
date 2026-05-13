@@ -216,11 +216,11 @@ impl Default for DiskLight {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct GpuLightData {
     color_intensity: [f32; 4],
-    position_range:  [f32; 4],
-    direction_kind:  [f32; 4],
-    misc:            [f32; 4],  // [cos_inner, cos_outer, area_radius, two_sided]
-    right_half_w:    [f32; 4],  // rect: right.xyz + half_width
-    up_half_h:       [f32; 4],  // rect: up.xyz + half_height
+    position_range: [f32; 4],
+    direction_kind: [f32; 4],
+    misc: [f32; 4],         // [cos_inner, cos_outer, area_radius, two_sided]
+    right_half_w: [f32; 4], // rect: right.xyz + half_width
+    up_half_h: [f32; 4],    // rect: up.xyz + half_height
 }
 
 impl GpuLightData {
@@ -228,24 +228,39 @@ impl GpuLightData {
         let toward = (-light.direction).normalize();
         let lum = light.intensity;
         Self {
-            color_intensity: [light.color.x * lum, light.color.y * lum, light.color.z * lum, 1.0],
-            position_range:  [toward.x, toward.y, toward.z, 0.0],
-            direction_kind:  [0.0, 0.0, 0.0, 0.0], // kind=0
-            misc:            [1.0, 1.0, 0.0, 0.0],
-            right_half_w:    [0.0; 4],
-            up_half_h:       [0.0; 4],
+            color_intensity: [
+                light.color.x * lum,
+                light.color.y * lum,
+                light.color.z * lum,
+                1.0,
+            ],
+            position_range: [toward.x, toward.y, toward.z, 0.0],
+            direction_kind: [0.0, 0.0, 0.0, 0.0], // kind=0
+            misc: [1.0, 1.0, 0.0, 0.0],
+            right_half_w: [0.0; 4],
+            up_half_h: [0.0; 4],
         }
     }
 
     pub(crate) fn from_point(light: &PointLight) -> Self {
         let lum = light.intensity;
         Self {
-            color_intensity: [light.color.x * lum, light.color.y * lum, light.color.z * lum, 1.0],
-            position_range:  [light.position.x, light.position.y, light.position.z, light.range],
-            direction_kind:  [0.0, 0.0, 0.0, 1.0], // kind=1
-            misc:            [1.0, 1.0, 0.0, 0.0],
-            right_half_w:    [0.0; 4],
-            up_half_h:       [0.0; 4],
+            color_intensity: [
+                light.color.x * lum,
+                light.color.y * lum,
+                light.color.z * lum,
+                1.0,
+            ],
+            position_range: [
+                light.position.x,
+                light.position.y,
+                light.position.z,
+                light.range,
+            ],
+            direction_kind: [0.0, 0.0, 0.0, 1.0], // kind=1
+            misc: [1.0, 1.0, 0.0, 0.0],
+            right_half_w: [0.0; 4],
+            up_half_h: [0.0; 4],
         }
     }
 
@@ -253,12 +268,22 @@ impl GpuLightData {
         let lum = light.intensity;
         let dir = light.direction.normalize();
         Self {
-            color_intensity: [light.color.x * lum, light.color.y * lum, light.color.z * lum, 1.0],
-            position_range:  [light.position.x, light.position.y, light.position.z, light.range],
-            direction_kind:  [dir.x, dir.y, dir.z, 2.0], // kind=2
-            misc:            [light.inner_angle.cos(), light.outer_angle.cos(), 0.0, 0.0],
-            right_half_w:    [0.0; 4],
-            up_half_h:       [0.0; 4],
+            color_intensity: [
+                light.color.x * lum,
+                light.color.y * lum,
+                light.color.z * lum,
+                1.0,
+            ],
+            position_range: [
+                light.position.x,
+                light.position.y,
+                light.position.z,
+                light.range,
+            ],
+            direction_kind: [dir.x, dir.y, dir.z, 2.0], // kind=2
+            misc: [light.inner_angle.cos(), light.outer_angle.cos(), 0.0, 0.0],
+            right_half_w: [0.0; 4],
+            up_half_h: [0.0; 4],
         }
     }
 
@@ -268,24 +293,44 @@ impl GpuLightData {
         let r = light.right.normalize();
         let u = light.up.normalize();
         Self {
-            color_intensity: [light.color.x * lum, light.color.y * lum, light.color.z * lum, 1.0],
-            position_range:  [light.position.x, light.position.y, light.position.z, light.range],
-            direction_kind:  [n.x, n.y, n.z, 3.0], // kind=3, normal = cross(right, up)
-            misc:            [0.0, 0.0, 0.0, if light.two_sided { 1.0 } else { 0.0 }],
-            right_half_w:    [r.x, r.y, r.z, light.half_extents[0]],
-            up_half_h:       [u.x, u.y, u.z, light.half_extents[1]],
+            color_intensity: [
+                light.color.x * lum,
+                light.color.y * lum,
+                light.color.z * lum,
+                1.0,
+            ],
+            position_range: [
+                light.position.x,
+                light.position.y,
+                light.position.z,
+                light.range,
+            ],
+            direction_kind: [n.x, n.y, n.z, 3.0], // kind=3, normal = cross(right, up)
+            misc: [0.0, 0.0, 0.0, if light.two_sided { 1.0 } else { 0.0 }],
+            right_half_w: [r.x, r.y, r.z, light.half_extents[0]],
+            up_half_h: [u.x, u.y, u.z, light.half_extents[1]],
         }
     }
 
     pub(crate) fn from_sphere_area(light: &SphereLight) -> Self {
         let lum = light.intensity;
         Self {
-            color_intensity: [light.color.x * lum, light.color.y * lum, light.color.z * lum, 1.0],
-            position_range:  [light.position.x, light.position.y, light.position.z, light.range],
-            direction_kind:  [0.0, 0.0, 0.0, 4.0], // kind=4
-            misc:            [1.0, 1.0, light.radius, 0.0],
-            right_half_w:    [0.0; 4],
-            up_half_h:       [0.0; 4],
+            color_intensity: [
+                light.color.x * lum,
+                light.color.y * lum,
+                light.color.z * lum,
+                1.0,
+            ],
+            position_range: [
+                light.position.x,
+                light.position.y,
+                light.position.z,
+                light.range,
+            ],
+            direction_kind: [0.0, 0.0, 0.0, 4.0], // kind=4
+            misc: [1.0, 1.0, light.radius, 0.0],
+            right_half_w: [0.0; 4],
+            up_half_h: [0.0; 4],
         }
     }
 
@@ -293,12 +338,27 @@ impl GpuLightData {
         let lum = light.intensity;
         let n = light.normal.normalize();
         Self {
-            color_intensity: [light.color.x * lum, light.color.y * lum, light.color.z * lum, 1.0],
-            position_range:  [light.position.x, light.position.y, light.position.z, light.range],
-            direction_kind:  [n.x, n.y, n.z, 5.0], // kind=5
-            misc:            [0.0, 0.0, light.radius, if light.two_sided { 1.0 } else { 0.0 }],
-            right_half_w:    [0.0; 4],
-            up_half_h:       [0.0; 4],
+            color_intensity: [
+                light.color.x * lum,
+                light.color.y * lum,
+                light.color.z * lum,
+                1.0,
+            ],
+            position_range: [
+                light.position.x,
+                light.position.y,
+                light.position.z,
+                light.range,
+            ],
+            direction_kind: [n.x, n.y, n.z, 5.0], // kind=5
+            misc: [
+                0.0,
+                0.0,
+                light.radius,
+                if light.two_sided { 1.0 } else { 0.0 },
+            ],
+            right_half_w: [0.0; 4],
+            up_half_h: [0.0; 4],
         }
     }
 }
@@ -307,9 +367,9 @@ impl GpuLightData {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct LightingUniforms {
-    dir_direction:    [f32; 4], // xyz = toward-light dir, w = intensity
-    dir_color:        [f32; 4], // xyz = colour, w = 0
-    ambient:          [f32; 4], // xyz = ambient colour, w = 0
+    dir_direction: [f32; 4],    // xyz = toward-light dir, w = intensity
+    dir_color: [f32; 4],        // xyz = colour, w = 0
+    ambient: [f32; 4],          // xyz = ambient colour, w = 0
     camera_world_pos: [f32; 4], // xyz = camera pos, w = 0
 }
 
@@ -317,10 +377,15 @@ impl LightingUniforms {
     fn from_light_and_camera(light: &DirectionalLight, camera_world_pos: Vec3) -> Self {
         let dir = (-light.direction).normalize();
         Self {
-            dir_direction:    [dir.x, dir.y, dir.z, light.intensity],
-            dir_color:        [light.color.x, light.color.y, light.color.z, 0.0],
-            ambient:          [light.ambient.x, light.ambient.y, light.ambient.z, 0.0],
-            camera_world_pos: [camera_world_pos.x, camera_world_pos.y, camera_world_pos.z, 0.0],
+            dir_direction: [dir.x, dir.y, dir.z, light.intensity],
+            dir_color: [light.color.x, light.color.y, light.color.z, 0.0],
+            ambient: [light.ambient.x, light.ambient.y, light.ambient.z, 0.0],
+            camera_world_pos: [
+                camera_world_pos.x,
+                camera_world_pos.y,
+                camera_world_pos.z,
+                0.0,
+            ],
         }
     }
 }
@@ -390,7 +455,12 @@ impl MaterialConstants {
                 desc.emissive.z,
                 desc.metallic,
             ],
-            roughness_flags: [desc.roughness, if desc.has_normal_map { 1.0 } else { 0.0 }, 0.0, 0.0],
+            roughness_flags: [
+                desc.roughness,
+                if desc.has_normal_map { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ],
         }
     }
 }
@@ -560,13 +630,17 @@ impl Scene {
     ///
     /// Used by `OitPass` to draw only transparent geometry in the collect pass.
     pub fn translucent_batches(&self) -> impl Iterator<Item = (usize, Option<&Buffer>, u32)> {
-        self.batches.values().filter(|b| {
-            let idx = b.mesh_idx as usize;
-            self.materials.get(idx)
-                .and_then(|m| m.unified.as_ref())
-                .map(|u| u.domain == super::material::MaterialDomain::Translucent)
-                .unwrap_or(false)
-        }).map(|b| (b.mesh_idx as usize, b.gpu_buffer.as_ref(), b.total_count()))
+        self.batches
+            .values()
+            .filter(|b| {
+                let idx = b.mesh_idx as usize;
+                self.materials
+                    .get(idx)
+                    .and_then(|m| m.unified.as_ref())
+                    .map(|u| u.domain == super::material::MaterialDomain::Translucent)
+                    .unwrap_or(false)
+            })
+            .map(|b| (b.mesh_idx as usize, b.gpu_buffer.as_ref(), b.total_count()))
     }
 
     /// Dispatch the GPU frustum culling compute shader for all batches.
@@ -604,6 +678,7 @@ impl Scene {
                 .join("cull_compute.slang");
             self.culling_program = Some(ComputeProgram::load(engine, path)?);
         }
+        //panic allowed, reason = "culling_program was initialized when absent immediately above"
         let program = self.culling_program.as_ref().unwrap();
 
         // Extract frustum planes from the VP matrix.
@@ -611,23 +686,38 @@ impl Scene {
         let planes: [[f32; 4]; 6] = {
             let raw = frustum.planes_raw();
             [
-                raw[0].to_array(), raw[1].to_array(),
-                raw[2].to_array(), raw[3].to_array(),
-                raw[4].to_array(), raw[5].to_array(),
+                raw[0].to_array(),
+                raw[1].to_array(),
+                raw[2].to_array(),
+                raw[3].to_array(),
+                raw[4].to_array(),
+                raw[5].to_array(),
             ]
         };
 
         for batch in self.batches.values() {
             let total = batch.total_count();
-            if total == 0 { continue; }
+            if total == 0 {
+                continue;
+            }
 
-            let bounds_buf   = match &batch.bounds_gpu_buffer   { Some(b) => b, None => continue };
-            let indirect_buf = match &batch.indirect_gpu_buffer { Some(b) => b, None => continue };
+            let bounds_buf = match &batch.bounds_gpu_buffer {
+                Some(b) => b,
+                None => continue,
+            };
+            let indirect_buf = match &batch.indirect_gpu_buffer {
+                Some(b) => b,
+                None => continue,
+            };
             let mesh_idx = batch.mesh_idx as usize;
             let mesh = &self.meshes[mesh_idx].0;
 
-            let index_count  = if mesh.is_indexed() { mesh.index_count } else { mesh.vertex_count };
-            let first_index  = 0u32;
+            let index_count = if mesh.is_indexed() {
+                mesh.index_count
+            } else {
+                mesh.vertex_count
+            };
+            let first_index = 0u32;
             let vertex_offset = 0i32;
 
             #[repr(C)]
@@ -635,9 +725,9 @@ impl Scene {
             struct CullConstants {
                 frustum_planes: [[f32; 4]; 6],
                 instance_count: u32,
-                index_count:    u32,
-                first_index:    u32,
-                vertex_offset:  i32,
+                index_count: u32,
+                first_index: u32,
+                vertex_offset: i32,
             }
             let constants = CullConstants {
                 frustum_planes: planes,
@@ -648,7 +738,7 @@ impl Scene {
             };
 
             // Bind source + dest buffers, then dispatch the culling compute.
-            frame.bind_buffer("instance_bounds",   bounds_buf);
+            frame.bind_buffer("instance_bounds", bounds_buf);
             frame.bind_buffer("indirect_commands", indirect_buf);
 
             let groups = [(total + 63) / 64, 1, 1];
@@ -670,9 +760,9 @@ impl Scene {
     /// geometry with a custom shader. The GPU instance buffer is `None` when
     /// the batch has not yet been prepared for this frame.
     pub fn drawable_batches(&self) -> impl Iterator<Item = (usize, Option<&Buffer>, u32)> {
-        self.batches.values().map(|b| {
-            (b.mesh_idx as usize, b.gpu_buffer.as_ref(), b.total_count())
-        })
+        self.batches
+            .values()
+            .map(|b| (b.mesh_idx as usize, b.gpu_buffer.as_ref(), b.total_count()))
     }
 
     /// Number of registered meshes.
@@ -725,11 +815,7 @@ impl Scene {
     ///     scene.set_normal_map(wall_id, Some(Arc::new(img)));
     /// }
     /// ```
-    pub fn set_normal_map(
-        &mut self,
-        id: MeshId,
-        texture: Option<std::sync::Arc<crate::Image>>,
-    ) {
+    pub fn set_normal_map(&mut self, id: MeshId, texture: Option<std::sync::Arc<crate::Image>>) {
         if let Some(mat) = self.materials.get_mut(id.0 as usize) {
             mat.descriptor.has_normal_map = texture.is_some();
             mat.normal_map = texture;
@@ -755,11 +841,7 @@ impl Scene {
     /// frame.bind_image("rock_albedo", &rock_tex);
     /// deferred.draw(&mut scene, view, proj, &output, &frame, &engine)?;
     /// ```
-    pub fn set_unified_material(
-        &mut self,
-        id: MeshId,
-        material: super::material::UnifiedMaterial,
-    ) {
+    pub fn set_unified_material(&mut self, id: MeshId, material: super::material::UnifiedMaterial) {
         if let Some(mat) = self.materials.get_mut(id.0 as usize) {
             mat.unified = Some(material);
         }
@@ -767,29 +849,41 @@ impl Scene {
 
     /// Return the expression-based material for a mesh, if one has been set.
     pub fn unified_material(&self, id: MeshId) -> Option<&super::material::UnifiedMaterial> {
-        self.materials.get(id.0 as usize).and_then(|m| m.unified.as_ref())
+        self.materials
+            .get(id.0 as usize)
+            .and_then(|m| m.unified.as_ref())
     }
 
     /// Return the expression-based material by mesh index (used internally by `DeferredPass`).
-    pub(crate) fn unified_material_at(&self, mesh_idx: usize) -> Option<&super::material::UnifiedMaterial> {
-        self.materials.get(mesh_idx).and_then(|m| m.unified.as_ref())
+    pub(crate) fn unified_material_at(
+        &self,
+        mesh_idx: usize,
+    ) -> Option<&super::material::UnifiedMaterial> {
+        self.materials
+            .get(mesh_idx)
+            .and_then(|m| m.unified.as_ref())
     }
 
     /// Return the per-mesh normal map override, if set (used by `DeferredPass`).
     pub(crate) fn normal_map_at(&self, mesh_idx: usize) -> Option<&std::sync::Arc<crate::Image>> {
-        self.materials.get(mesh_idx).and_then(|m| m.normal_map.as_ref())
+        self.materials
+            .get(mesh_idx)
+            .and_then(|m| m.normal_map.as_ref())
     }
 
     /// Return the material GPU buffer for a mesh (used by `DeferredPass`).
     pub(crate) fn material_gpu_buffer_at(&self, mesh_idx: usize) -> Option<&Buffer> {
-        self.materials.get(mesh_idx).and_then(|m| m.gpu_buffer.as_ref())
+        self.materials
+            .get(mesh_idx)
+            .and_then(|m| m.gpu_buffer.as_ref())
     }
 
     /// Return the `MaterialDomain` of the given mesh (used by the shadow pass).
     ///
     /// Returns `Opaque` for meshes without a `UnifiedMaterial`.
     pub(crate) fn domain_at(&self, mesh_idx: usize) -> super::material::MaterialDomain {
-        self.materials.get(mesh_idx)
+        self.materials
+            .get(mesh_idx)
             .and_then(|m| m.unified.as_ref())
             .map(|u| u.domain)
             .unwrap_or(super::material::MaterialDomain::Opaque)
@@ -813,7 +907,8 @@ impl Scene {
         kind: ObjectKind,
     ) -> ObjectId {
         let id = ObjectId(self.next_object_id.fetch_add(1, Ordering::Relaxed));
-        self.objects.push(SceneObject::new(mesh_id, transform, kind));
+        self.objects
+            .push(SceneObject::new(mesh_id, transform, kind));
         id
     }
 
@@ -886,7 +981,9 @@ impl Scene {
         // Drain structural mutations queued from worker threads.
         // `take_all` extracts the Vec without borrowing self, so we can then
         // pass `&mut self` to each command.
-        for cmd in self.commands.take_all() { cmd(self); }
+        for cmd in self.commands.take_all() {
+            cmd(self);
+        }
 
         self.gpu_cull_active = false;
 
@@ -897,9 +994,7 @@ impl Scene {
 
         // First pass: detect which static batches are dirty.
         for obj in &self.objects {
-            if matches!(obj.kind, ObjectKind::Static)
-                && obj.static_dirty.load(Ordering::Acquire)
-            {
+            if matches!(obj.kind, ObjectKind::Static) && obj.static_dirty.load(Ordering::Acquire) {
                 if let Some(batch) = self.batches.get_mut(&obj.mesh_id.0) {
                     batch.static_dirty = true;
                 }
@@ -926,18 +1021,24 @@ impl Scene {
             match obj.kind {
                 ObjectKind::Static => {
                     if batch.static_dirty || batch.static_instances.is_empty() {
-                        batch.static_instances.push(InstanceData::from_transform(transform));
+                        batch
+                            .static_instances
+                            .push(InstanceData::from_transform(transform));
                     }
                 }
                 ObjectKind::Dynamic => {
-                    batch.dynamic_instances.push(InstanceData::from_transform(transform));
+                    batch
+                        .dynamic_instances
+                        .push(InstanceData::from_transform(transform));
                 }
             }
         }
 
         // Pre-collect mesh bounding spheres so we can borrow them inside the
         // mutable batch loop without conflicting with &self.meshes.
-        let mesh_spheres: Vec<crate::BoundingSphere> = self.meshes.iter()
+        let mesh_spheres: Vec<crate::BoundingSphere> = self
+            .meshes
+            .iter()
             .map(|(mesh, _)| mesh.bounding_sphere)
             .collect();
         let gpu_cull = self.geometry_backend == GeometryBackend::ComputeIndirect;
@@ -948,7 +1049,9 @@ impl Scene {
 
             if gpu_cull {
                 if let Some(sphere) = mesh_spheres.get(batch.mesh_idx as usize) {
-                    let spheres: Vec<[f32; 4]> = batch.static_instances.iter()
+                    let spheres: Vec<[f32; 4]> = batch
+                        .static_instances
+                        .iter()
                         .chain(batch.dynamic_instances.iter())
                         .map(|inst| {
                             let ws = sphere.transform(Mat4::from_cols_array_2d(&inst.model));
@@ -1034,19 +1137,31 @@ impl Scene {
         // The BVH covers all non-directional lights via their array indices.
         let mut gpu_lights: Vec<GpuLightData> = Vec::new();
         gpu_lights.push(GpuLightData::from_directional(&self.directional_light));
-        for pl in &self.point_lights       { gpu_lights.push(GpuLightData::from_point(pl)); }
-        for sl in &self.spot_lights        { gpu_lights.push(GpuLightData::from_spot(sl)); }
-        for rl in &self.rect_lights        { gpu_lights.push(GpuLightData::from_rect(rl)); }
-        for sl in &self.sphere_area_lights { gpu_lights.push(GpuLightData::from_sphere_area(sl)); }
-        for dl in &self.disk_lights        { gpu_lights.push(GpuLightData::from_disk(dl)); }
+        for pl in &self.point_lights {
+            gpu_lights.push(GpuLightData::from_point(pl));
+        }
+        for sl in &self.spot_lights {
+            gpu_lights.push(GpuLightData::from_spot(sl));
+        }
+        for rl in &self.rect_lights {
+            gpu_lights.push(GpuLightData::from_rect(rl));
+        }
+        for sl in &self.sphere_area_lights {
+            gpu_lights.push(GpuLightData::from_sphere_area(sl));
+        }
+        for dl in &self.disk_lights {
+            gpu_lights.push(GpuLightData::from_disk(dl));
+        }
 
         let needed_bytes = (gpu_lights.len() * std::mem::size_of::<GpuLightData>()) as u64;
-        let needs_realloc = self.deferred_lights_buffer
+        let needs_realloc = self
+            .deferred_lights_buffer
             .as_ref()
             .map(|b| b.desc().size < needed_bytes)
             .unwrap_or(true);
         if needs_realloc {
-            let cap = (gpu_lights.len().next_power_of_two().max(16) * std::mem::size_of::<GpuLightData>()) as u64;
+            let cap = (gpu_lights.len().next_power_of_two().max(16)
+                * std::mem::size_of::<GpuLightData>()) as u64;
             self.deferred_lights_buffer = Some(engine.create_buffer(crate::BufferDesc {
                 size: cap,
                 usage: crate::BufferUsage::STORAGE,
@@ -1062,8 +1177,11 @@ impl Scene {
 
     /// Total number of entries in the deferred lights buffer.
     pub fn deferred_light_count(&self) -> u32 {
-        (1 + self.point_lights.len() + self.spot_lights.len()
-           + self.rect_lights.len() + self.sphere_area_lights.len() + self.disk_lights.len()) as u32
+        (1 + self.point_lights.len()
+            + self.spot_lights.len()
+            + self.rect_lights.len()
+            + self.sphere_area_lights.len()
+            + self.disk_lights.len()) as u32
     }
 
     /// Compute and upload the current lighting uniform from the directional light
@@ -1135,7 +1253,8 @@ impl Scene {
                     frame.bind_buffer("material_desc", mat_buf);
                 }
                 // Per-mesh normal map, falling back to the flat-normal default.
-                let nmap: &crate::Image = mat.normal_map
+                let nmap: &crate::Image = mat
+                    .normal_map
                     .as_ref()
                     .map(|arc| arc.as_ref())
                     .unwrap_or(default_normal_map);
@@ -1194,7 +1313,10 @@ impl Scene {
     ) -> Result<()> {
         let out_desc = output.desc();
 
-        if matches!(out_desc.format, Format::Depth32Float | Format::Depth24Stencil8) {
+        if matches!(
+            out_desc.format,
+            Format::Depth32Float | Format::Depth24Stencil8
+        ) {
             return Err(Error::InvalidInput(format!(
                 "Scene::draw output '{}' has depth format {:?}; use a colour-renderable format",
                 output.name(),
@@ -1296,7 +1418,11 @@ impl Scene {
             }
             let mesh_idx = batch.mesh_idx as usize;
             let mesh = &self.meshes[mesh_idx].0;
-            let index_count = if mesh.is_indexed() { mesh.index_count } else { mesh.vertex_count };
+            let index_count = if mesh.is_indexed() {
+                mesh.index_count
+            } else {
+                mesh.vertex_count
+            };
 
             let all_instances: Vec<_> = batch
                 .static_instances
@@ -1353,7 +1479,13 @@ impl Scene {
             }
             let effective_depth = if program.uses_depth { depth } else { None };
             output.draw_mesh_indirect_with_push_constants_and_depth(
-                mesh, program, instance_buf, indirect_buf, draw_count, constants, effective_depth,
+                mesh,
+                program,
+                instance_buf,
+                indirect_buf,
+                draw_count,
+                constants,
+                effective_depth,
             )?;
         }
         Ok(())
@@ -1389,7 +1521,12 @@ impl Scene {
             }
             let effective_depth = if program.uses_depth { depth } else { None };
             output.draw_mesh_instanced_with_push_constants_and_depth(
-                mesh, program, buf, total, constants, effective_depth,
+                mesh,
+                program,
+                buf,
+                total,
+                constants,
+                effective_depth,
             )?;
         }
         Ok(())

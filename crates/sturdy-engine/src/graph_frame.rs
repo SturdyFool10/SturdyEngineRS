@@ -409,16 +409,31 @@ impl<'f> FullscreenPassBuilder<'f> {
 }
 
 fn format_bytes_per_texel(format: Format) -> Result<u32> {
+    if format.is_block_compressed() {
+        return Err(Error::InvalidInput(
+            "BC-compressed images use block-aligned sizing; \
+             upload via Frame::upload_texture_2d instead of this copy path"
+                .into(),
+        ));
+    }
     Ok(match format {
         Format::Rgba8Unorm | Format::Bgra8Unorm => 4,
+        Format::R8Unorm => 1,
+        Format::Rg8Unorm => 2,
         Format::Rgba16Float => 8,
         Format::Rgba32Float => 16,
-        Format::Depth32Float => 4,
-        Format::Depth24Stencil8 => 4,
+        Format::Depth32Float | Format::Depth24Stencil8 => 4,
         Format::Unknown => {
             return Err(Error::InvalidInput(
                 "cannot copy image with unknown format".into(),
             ));
         }
+        Format::Bc3Unorm
+        | Format::Bc3UnormSrgb
+        | Format::Bc4Unorm
+        | Format::Bc5Unorm
+        | Format::Bc7Unorm
+        | Format::Bc7UnormSrgb
+        | Format::Bc6hUfloat => unreachable!("BC formats handled above"),
     })
 }

@@ -56,11 +56,17 @@ impl EntityAllocator {
     pub fn alloc(&mut self) -> Entity {
         self.live += 1;
         if let Some(index) = self.free.pop() {
-            Entity { index, generation: self.generations[index as usize] }
+            Entity {
+                index,
+                generation: self.generations[index as usize],
+            }
         } else {
             let index = self.generations.len() as u32;
             self.generations.push(0);
-            Entity { index, generation: 0 }
+            Entity {
+                index,
+                generation: 0,
+            }
         }
     }
 

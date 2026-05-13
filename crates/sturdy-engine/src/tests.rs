@@ -313,8 +313,7 @@ fn shader_pass_intent_validate_reports_reflected_resource_errors_before_flush() 
     let diagnostics = frame.validate();
     assert!(
         diagnostics.iter().any(|diagnostic| {
-            diagnostic.level == DiagnosticLevel::Error
-                && diagnostic.message.contains("source")
+            diagnostic.level == DiagnosticLevel::Error && diagnostic.message.contains("source")
         }),
         "validate should report sampled image usage errors, got {:?}",
         diagnostics
@@ -366,7 +365,10 @@ fn shader_pass_intent_validate_warns_when_push_constants_declared_but_not_provid
             d.level == DiagnosticLevel::Warning && d.message.contains("push-const-pass")
         }),
         "validate should warn about missing push constants, got {:?}",
-        diagnostics.iter().map(|d| d.message.as_str()).collect::<Vec<_>>()
+        diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -511,13 +513,14 @@ fn swapchain_image_rejects_image_without_present_usage() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     let surface = engine
         .create_surface(NativeSurfaceDesc::new(
-            raw_window_handle::RawDisplayHandle::Xlib(
-                raw_window_handle::XlibDisplayHandle::new(None, 0),
-            ),
-            raw_window_handle::RawWindowHandle::Xlib(
-                raw_window_handle::XlibWindowHandle::new(0),
-            ),
-            SurfaceSize { width: 64, height: 32 },
+            raw_window_handle::RawDisplayHandle::Xlib(raw_window_handle::XlibDisplayHandle::new(
+                None, 0,
+            )),
+            raw_window_handle::RawWindowHandle::Xlib(raw_window_handle::XlibWindowHandle::new(0)),
+            SurfaceSize {
+                width: 64,
+                height: 32,
+            },
         ))
         .unwrap();
     // Acquire a real surface image (has PRESENT usage) — must succeed.
@@ -577,7 +580,11 @@ fn graph_report_includes_queue_type_and_buffer_names() {
         .find(|p| p.name == "compute-pass")
         .expect("compute pass should appear in report");
 
-    assert_eq!(pass.queue, QueueType::Compute, "compute pass should be on Compute queue");
+    assert_eq!(
+        pass.queue,
+        QueueType::Compute,
+        "compute pass should be on Compute queue"
+    );
     assert!(
         pass.buffer_writes.iter().any(|b| b == "output_buffer"),
         "output_buffer should appear in buffer_writes, got {:?}",
@@ -602,7 +609,11 @@ fn graphics_shader_reflection_populates_vertex_inputs_for_vertex_shader() {
 
     // The merged graphics reflection must carry vertex input data from the vertex stage.
     // Locations must be sorted and formats must be float vectors.
-    let locs: Vec<u32> = reflection.vertex_inputs.iter().map(|i| i.location).collect();
+    let locs: Vec<u32> = reflection
+        .vertex_inputs
+        .iter()
+        .map(|i| i.location)
+        .collect();
     assert!(
         locs.windows(2).all(|w| w[0] < w[1]),
         "vertex inputs should be sorted by location, got {locs:?}"
@@ -625,12 +636,10 @@ fn begin_frame_for_surface_returns_frame_and_swapchain_image() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     let surface = engine
         .create_surface(NativeSurfaceDesc::new(
-            raw_window_handle::RawDisplayHandle::Xlib(
-                raw_window_handle::XlibDisplayHandle::new(None, 0),
-            ),
-            raw_window_handle::RawWindowHandle::Xlib(
-                raw_window_handle::XlibWindowHandle::new(0),
-            ),
+            raw_window_handle::RawDisplayHandle::Xlib(raw_window_handle::XlibDisplayHandle::new(
+                None, 0,
+            )),
+            raw_window_handle::RawWindowHandle::Xlib(raw_window_handle::XlibWindowHandle::new(0)),
             SurfaceSize {
                 width: 64,
                 height: 32,
@@ -685,12 +694,10 @@ fn app_runtime_frame_auto_presents_on_drop() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     let surface = engine
         .create_surface(NativeSurfaceDesc::new(
-            raw_window_handle::RawDisplayHandle::Xlib(
-                raw_window_handle::XlibDisplayHandle::new(None, 0),
-            ),
-            raw_window_handle::RawWindowHandle::Xlib(
-                raw_window_handle::XlibWindowHandle::new(0),
-            ),
+            raw_window_handle::RawDisplayHandle::Xlib(raw_window_handle::XlibDisplayHandle::new(
+                None, 0,
+            )),
+            raw_window_handle::RawWindowHandle::Xlib(raw_window_handle::XlibWindowHandle::new(0)),
             SurfaceSize {
                 width: 64,
                 height: 32,

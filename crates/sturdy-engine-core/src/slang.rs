@@ -418,8 +418,11 @@ fn reflect_pipeline_layout_inner(
             if let Some(code_ptr) = {
                 let mut code_size: usize = 0;
                 let ptr = sys::spGetEntryPointCode(request, 0, &mut code_size);
-                if ptr.is_null() || code_size < 4 { None }
-                else { Some((ptr, code_size)) }
+                if ptr.is_null() || code_size < 4 {
+                    None
+                } else {
+                    Some((ptr, code_size))
+                }
             } {
                 let code_bytes = std::slice::from_raw_parts(code_ptr.0, code_ptr.1);
                 let words = crate::spirv_words_from_bytes(code_bytes).unwrap_or_default();
@@ -757,7 +760,13 @@ pub fn compile_and_reflect(
         } else {
             Vec::new()
         };
-        return Ok((desc.clone(), ShaderReflection { vertex_inputs, ..Default::default() }));
+        return Ok((
+            desc.clone(),
+            ShaderReflection {
+                vertex_inputs,
+                ..Default::default()
+            },
+        ));
     }
     if matches!(desc.source, ShaderSource::Dxil(_) | ShaderSource::Msl(_)) {
         return Ok((desc.clone(), ShaderReflection::default()));
@@ -775,7 +784,13 @@ pub fn compile_and_reflect(
         };
         let mut compiled = desc.clone();
         compiled.source = ShaderSource::Spirv(words);
-        return Ok((compiled, ShaderReflection { vertex_inputs, ..Default::default() }));
+        return Ok((
+            compiled,
+            ShaderReflection {
+                vertex_inputs,
+                ..Default::default()
+            },
+        ));
     }
 
     let source_input = slang_source_input(&desc.source)?;
@@ -1461,7 +1476,11 @@ VSOutput vs_main(VSInput input) {
             );
         }
         // Locations must be in ascending order (parser sorts by location).
-        let locations: Vec<u32> = reflection.vertex_inputs.iter().map(|i| i.location).collect();
+        let locations: Vec<u32> = reflection
+            .vertex_inputs
+            .iter()
+            .map(|i| i.location)
+            .collect();
         assert!(
             locations.windows(2).all(|w| w[0] < w[1]),
             "vertex inputs should be sorted by location, got {locations:?}"

@@ -272,6 +272,8 @@ impl AppRuntime {
         self.debug_images.clear();
         self.controller.clear_overlay_lines();
         self.frame_start = Some(Instant::now());
+        // Upload any textures that background workers finished decoding.
+        let _ = self.engine.drain_pending_uploads();
         let frame_time = self.frame_clock.tick();
         let surface_image = self.surface.acquire_image()?;
         let render_frame = self.engine.begin_render_frame_for(&surface_image)?;

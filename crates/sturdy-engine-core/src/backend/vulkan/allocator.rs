@@ -284,9 +284,7 @@ impl TypePool {
 
     fn stats(&self) -> PoolStats {
         let capacity_bytes: u64 = self.blocks.iter().map(|b| b.capacity).sum();
-        let free_bytes: u64 = self.blocks.iter()
-            .flat_map(|b| b.free.values())
-            .sum();
+        let free_bytes: u64 = self.blocks.iter().flat_map(|b| b.free.values()).sum();
         PoolStats {
             capacity_bytes,
             used_bytes: capacity_bytes.saturating_sub(free_bytes),
@@ -375,10 +373,10 @@ impl GpuAllocator {
             let ps = pool.stats();
             if ps.host_visible {
                 stats.host_visible_capacity_bytes += ps.capacity_bytes;
-                stats.host_visible_used_bytes     += ps.used_bytes;
+                stats.host_visible_used_bytes += ps.used_bytes;
             } else {
                 stats.device_local_capacity_bytes += ps.capacity_bytes;
-                stats.device_local_used_bytes     += ps.used_bytes;
+                stats.device_local_used_bytes += ps.used_bytes;
             }
             stats.block_count += ps.block_count;
         }

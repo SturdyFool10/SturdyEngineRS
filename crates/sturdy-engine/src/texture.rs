@@ -39,19 +39,120 @@ pub struct TextureUploadDesc {
 
 impl TextureUploadDesc {
     pub const fn sampled_rgba8(width: u32, height: u32) -> Self {
-        Self { width, height, format: Format::Rgba8Unorm, usage: ImageUsage::SAMPLED }
+        Self {
+            width,
+            height,
+            format: Format::Rgba8Unorm,
+            usage: ImageUsage::SAMPLED,
+        }
     }
 
     /// 16-bit float RGBA — suitable for HDR/EXR textures, environment maps, and
     /// any image where values exceed [0, 1]. Uses half the memory of Rgba32Float.
     pub const fn sampled_rgba16f(width: u32, height: u32) -> Self {
-        Self { width, height, format: Format::Rgba16Float, usage: ImageUsage::SAMPLED }
+        Self {
+            width,
+            height,
+            format: Format::Rgba16Float,
+            usage: ImageUsage::SAMPLED,
+        }
     }
 
     /// 32-bit float RGBA — full precision HDR. Use when f16 precision is insufficient
     /// (e.g. very bright environment maps, scientific imagery).
     pub const fn sampled_rgba32f(width: u32, height: u32) -> Self {
-        Self { width, height, format: Format::Rgba32Float, usage: ImageUsage::SAMPLED }
+        Self {
+            width,
+            height,
+            format: Format::Rgba32Float,
+            usage: ImageUsage::SAMPLED,
+        }
+    }
+
+    /// BC4 — single-channel, 0.5 bytes/texel (roughness, AO, metallic, height).
+    ///
+    /// Width and height must be multiples of 4.
+    pub const fn sampled_bc4(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            format: Format::Bc4Unorm,
+            usage: ImageUsage::SAMPLED,
+        }
+    }
+
+    /// BC5 — two-channel XY normal map, 1 byte/texel.
+    ///
+    /// Reconstruct Z in the shader: `z = sqrt(1.0 - dot(n.xy, n.xy))`.
+    /// Width and height must be multiples of 4.
+    pub const fn sampled_bc5(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            format: Format::Bc5Unorm,
+            usage: ImageUsage::SAMPLED,
+        }
+    }
+
+    /// BC3 (DXT5) — RGBA, 1 byte/texel (colour + alpha). Use when BC7 is unavailable.
+    ///
+    /// Width and height must be multiples of 4.
+    pub const fn sampled_bc3(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            format: Format::Bc3Unorm,
+            usage: ImageUsage::SAMPLED,
+        }
+    }
+
+    /// BC3 sRGB (DXT5) — sRGB-encoded RGBA, 1 byte/texel. Default albedo format.
+    ///
+    /// Width and height must be multiples of 4.
+    pub const fn sampled_bc3_srgb(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            format: Format::Bc3UnormSrgb,
+            usage: ImageUsage::SAMPLED,
+        }
+    }
+
+    /// BC7 — four-channel RGBA, 1 byte/texel (linear-space albedo, emissive).
+    ///
+    /// Width and height must be multiples of 4.
+    pub const fn sampled_bc7(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            format: Format::Bc7Unorm,
+            usage: ImageUsage::SAMPLED,
+        }
+    }
+
+    /// BC7 sRGB — four-channel RGBA, 1 byte/texel (sRGB-encoded albedo textures).
+    ///
+    /// The GPU decodes RGB from sRGB to linear on sample. Use for most
+    /// game-art albedo/diffuse textures. Width and height must be multiples of 4.
+    pub const fn sampled_bc7_srgb(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            format: Format::Bc7UnormSrgb,
+            usage: ImageUsage::SAMPLED,
+        }
+    }
+
+    /// BC6H unsigned float — three-channel HDR, 1 byte/texel (emissive, env maps).
+    ///
+    /// Width and height must be multiples of 4.
+    pub const fn sampled_bc6h(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            format: Format::Bc6hUfloat,
+            usage: ImageUsage::SAMPLED,
+        }
     }
 }
 
@@ -395,17 +496,39 @@ impl Frame {
     }
 }
 
-fn texture_upload_byte_count(desc: TextureUploadDesc) -> Result<u64> {
-    let texel_size = match desc.format {
+pub(crate) fn texture_upload_byte_count(desc: TextureUploadDesc) -> Result<u64> {
+    if desc.format.is_block_compressed() {
+        // BC formats: tightly-packed 4×4 blocks. Width/height are padded to
+        // the next multiple of 4 for the block count calculation.
+        let block_bytes = desc.format.bc_block_bytes();
+        let blocks_x = (desc.width as u64).div_ceil(4);
+        let blocks_y = (desc.height as u64).div_ceil(4);
+        return blocks_x
+            .checked_mul(blocks_y)
+            .and_then(|b| b.checked_mul(block_bytes))
+            .ok_or_else(|| Error::InvalidInput("BC texture byte count overflowed".into()));
+    }
+
+    let texel_size: u64 = match desc.format {
         Format::Unknown => {
             return Err(Error::InvalidInput(
                 "texture upload format must be specified".into(),
             ));
         }
         Format::Rgba8Unorm | Format::Bgra8Unorm => 4,
+        Format::R8Unorm => 1,
+        Format::Rg8Unorm => 2,
         Format::Rgba16Float => 8,
         Format::Rgba32Float => 16,
         Format::Depth32Float | Format::Depth24Stencil8 => 4,
+        // BC formats handled above.
+        Format::Bc3Unorm
+        | Format::Bc3UnormSrgb
+        | Format::Bc4Unorm
+        | Format::Bc5Unorm
+        | Format::Bc7Unorm
+        | Format::Bc7UnormSrgb
+        | Format::Bc6hUfloat => unreachable!(),
     };
     [desc.width as u64, desc.height as u64, texel_size]
         .into_iter()

@@ -7,9 +7,9 @@
 
 use std::path::Path;
 
-use crate::{Engine, Mesh, Result, Vertex3d};
-use crate::mesh::{compute_tangents};
+use crate::mesh::compute_tangents;
 use crate::mesh_loader::{MeshAlphaMode, MeshMaterialParams, MeshPrimitive, MeshTextures};
+use crate::{Engine, Mesh, Result, Vertex3d};
 
 pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
     let load_opts = tobj::LoadOptions {
@@ -18,9 +18,8 @@ pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
         ..Default::default()
     };
 
-    let (models, materials_result) = tobj::load_obj(path, &load_opts).map_err(|e| {
-        crate::Error::Unknown(format!("obj load '{}': {e}", path.display()))
-    })?;
+    let (models, materials_result) = tobj::load_obj(path, &load_opts)
+        .map_err(|e| crate::Error::Unknown(format!("obj load '{}': {e}", path.display())))?;
 
     let materials = materials_result.unwrap_or_default();
 
@@ -31,8 +30,8 @@ pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
 
         // Build vertex list. With single_index, all attribute arrays are indexed
         // by mesh.indices. Normals and texcoords are optional in OBJ.
-        let has_normals  = !mesh_data.normals.is_empty();
-        let has_uvs      = !mesh_data.texcoords.is_empty();
+        let has_normals = !mesh_data.normals.is_empty();
+        let has_uvs = !mesh_data.texcoords.is_empty();
 
         // Vertex count from indices (triangulate ensures multiples of 3).
         let index_count = mesh_data.indices.len();
@@ -63,7 +62,12 @@ pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
             } else {
                 [0.0, 0.0]
             };
-            vertices.push(Vertex3d { position, normal, uv, tangent: [1.0, 0.0, 0.0, 1.0] });
+            vertices.push(Vertex3d {
+                position,
+                normal,
+                uv,
+                tangent: [1.0, 0.0, 0.0, 1.0],
+            });
         }
 
         // With single_index the mesh is already de-indexed into our vertex list;
@@ -89,7 +93,12 @@ pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
             .map(extract_material)
             .unwrap_or_default();
 
-        out.push(MeshPrimitive { mesh, name, material_params, textures: MeshTextures::default() });
+        out.push(MeshPrimitive {
+            mesh,
+            name,
+            material_params,
+            textures: MeshTextures::default(),
+        });
     }
 
     Ok(out)
@@ -101,11 +110,16 @@ fn extract_material(mat: &tobj::Material) -> MeshMaterialParams {
 
     // Opacity from `d` (dissolve). 1.0 = fully opaque.
     let opacity = mat.dissolve.unwrap_or(1.0);
-    let alpha_mode = if opacity < 1.0 { MeshAlphaMode::Blend } else { MeshAlphaMode::Opaque };
+    let alpha_mode = if opacity < 1.0 {
+        MeshAlphaMode::Blend
+    } else {
+        MeshAlphaMode::Opaque
+    };
 
     // Roughness approximated from Ns (shininess): higher shininess → lower roughness.
     // Ns range in OBJ is typically [0, 1000]; map to perceptual roughness [0, 1].
-    let roughness = mat.shininess
+    let roughness = mat
+        .shininess
         .map(|ns| 1.0 - (ns.min(1000.0) / 1000.0).sqrt())
         .unwrap_or(0.5);
 
@@ -118,14 +132,14 @@ fn extract_material(mat: &tobj::Material) -> MeshMaterialParams {
 
     MeshMaterialParams {
         base_color_factor: [kd[0], kd[1], kd[2], opacity],
-        metallic_factor:   metallic,
-        roughness_factor:  roughness,
-        emissive_factor:   ke,
+        metallic_factor: metallic,
+        roughness_factor: roughness,
+        emissive_factor: ke,
         emissive_strength: 1.0,
-        double_sided:      false,
+        double_sided: false,
         alpha_mode,
-        alpha_cutoff:      0.5,
-        unlit:             false,
+        alpha_cutoff: 0.5,
+        unlit: false,
         ..MeshMaterialParams::default()
     }
 }

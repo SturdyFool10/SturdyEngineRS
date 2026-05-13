@@ -1694,7 +1694,12 @@ where
                 // so any self.runtime access (e.g. surface recreation) must happen after
                 // the borrow ends. We return the error kind from the match so we can act
                 // on it once the frame is dropped.
-                enum FrameOutcome { Ok, RecreateSurface, FatalDeviceLost, FatalOther }
+                enum FrameOutcome {
+                    Ok,
+                    RecreateSurface,
+                    FatalDeviceLost,
+                    FatalOther,
+                }
                 let outcome = match self.runtime.acquire_frame() {
                     Err(ref e) if e.is_device_lost() => {
                         eprintln!("[FATAL] GPU device lost during frame acquire: {e}");
@@ -1741,9 +1746,11 @@ where
                     FrameOutcome::Ok => {}
                     FrameOutcome::RecreateSurface => {
                         // Swapchain became stale — recreate with current settings, skip frame.
-                        if let Err(re) = self.runtime.surface_mut().recreate(
-                            crate::SurfaceRecreateDesc::default()
-                        ) {
+                        if let Err(re) = self
+                            .runtime
+                            .surface_mut()
+                            .recreate(crate::SurfaceRecreateDesc::default())
+                        {
                             eprintln!("surface recreate failed: {re}");
                             std::process::exit(1);
                         }

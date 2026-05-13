@@ -15,9 +15,8 @@
 use std::path::PathBuf;
 
 use crate::{
-    Engine, GraphImage, Image, Mesh, MeshProgram, MeshProgramDesc, MeshVertexKind,
-    RenderFrame, Result, ShaderDesc, ShaderSource, ShaderStage, StageMask, push_constants,
-    mesh::Vertex2d,
+    Engine, GraphImage, Image, Mesh, MeshProgram, MeshProgramDesc, MeshVertexKind, RenderFrame,
+    Result, ShaderDesc, ShaderSource, ShaderStage, StageMask, mesh::Vertex2d, push_constants,
 };
 
 fn engine_shader(name: &str) -> PathBuf {
@@ -97,7 +96,9 @@ pub struct SpriteBatch {
 
 impl SpriteBatch {
     pub fn new() -> Self {
-        Self { sprites: Vec::new() }
+        Self {
+            sprites: Vec::new(),
+        }
     }
 
     /// Add a sprite to the batch.
@@ -113,7 +114,12 @@ impl SpriteBatch {
         size: [f32; 2],
         color: [f32; 4],
     ) -> &mut Self {
-        self.push(Sprite { position, size, color, ..Default::default() })
+        self.push(Sprite {
+            position,
+            size,
+            color,
+            ..Default::default()
+        })
     }
 
     /// Add a textured sprite with a UV sub-rectangle (for sprite sheets / atlas).
@@ -124,12 +130,24 @@ impl SpriteBatch {
         uv_rect: [f32; 4],
         color: [f32; 4],
     ) -> &mut Self {
-        self.push(Sprite { position, size, uv_rect, color, ..Default::default() })
+        self.push(Sprite {
+            position,
+            size,
+            uv_rect,
+            color,
+            ..Default::default()
+        })
     }
 
-    pub fn len(&self) -> usize { self.sprites.len() }
-    pub fn is_empty(&self) -> bool { self.sprites.is_empty() }
-    pub fn clear(&mut self) { self.sprites.clear(); }
+    pub fn len(&self) -> usize {
+        self.sprites.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.sprites.is_empty()
+    }
+    pub fn clear(&mut self) {
+        self.sprites.clear();
+    }
 
     /// Build a GPU mesh from the current sprites, sorted by `z_order`.
     ///
@@ -144,22 +162,22 @@ impl SpriteBatch {
         sorted.sort_by_key(|s| s.z_order);
 
         let mut vertices: Vec<Vertex2d> = Vec::with_capacity(sorted.len() * 4);
-        let mut indices:  Vec<u32>      = Vec::with_capacity(sorted.len() * 6);
+        let mut indices: Vec<u32> = Vec::with_capacity(sorted.len() * 6);
 
         for sprite in &sorted {
             let base = vertices.len() as u32;
             let [u0, v0, u1, v1] = sprite.uv_rect;
             let [ax, ay] = sprite.anchor;
-            let [w, h]   = sprite.size;
+            let [w, h] = sprite.size;
             let [px, py] = sprite.position;
-            let color    = sprite.color;
+            let color = sprite.color;
 
             // Compute the four corners relative to the anchor, pre-rotated.
             let corners = [
-                [-ax * w,        -ay * h       ],  // top-left
-                [(1.0 - ax) * w, -ay * h       ],  // top-right
+                [-ax * w, -ay * h],               // top-left
+                [(1.0 - ax) * w, -ay * h],        // top-right
                 [(1.0 - ax) * w, (1.0 - ay) * h], // bottom-right
-                [-ax * w,        (1.0 - ay) * h],  // bottom-left
+                [-ax * w, (1.0 - ay) * h],        // bottom-left
             ];
             let uvs = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
 
@@ -176,17 +194,18 @@ impl SpriteBatch {
                 });
             }
 
-            indices.extend_from_slice(&[
-                base, base + 1, base + 2,
-                base, base + 2, base + 3,
-            ]);
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
 
         Ok(Some(Mesh::indexed_2d(engine, &vertices, &indices)?))
     }
 }
 
-impl Default for SpriteBatch { fn default() -> Self { Self::new() } }
+impl Default for SpriteBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ── SpriteRenderer ────────────────────────────────────────────────────────────
 
@@ -211,7 +230,7 @@ impl Default for SpriteBatch { fn default() -> Self { Self::new() } }
 pub struct SpriteRenderer {
     program: MeshProgram,
     /// Viewport width and height in pixels. Update with `set_viewport` on resize.
-    pub viewport_width:  f32,
+    pub viewport_width: f32,
     pub viewport_height: f32,
     /// 1×1 white pixel texture used when no sprite_texture is bound.
     white_pixel: Image,
@@ -238,9 +257,8 @@ impl SpriteRenderer {
             },
         )?;
 
-        let white_pixel = engine.generate_texture_2d("sprite_white_pixel", 1, 1, |_, _| {
-            [255, 255, 255, 255]
-        })?;
+        let white_pixel =
+            engine.generate_texture_2d("sprite_white_pixel", 1, 1, |_, _| [255, 255, 255, 255])?;
 
         Ok(Self {
             program,
@@ -252,7 +270,7 @@ impl SpriteRenderer {
 
     /// Update the viewport size (call on window resize).
     pub fn set_viewport(&mut self, width: u32, height: u32) {
-        self.viewport_width  = width  as f32;
+        self.viewport_width = width as f32;
         self.viewport_height = height as f32;
     }
 
@@ -271,7 +289,7 @@ impl SpriteRenderer {
     ) -> Result<()> {
         let mesh = match batch.build(engine)? {
             Some(m) => m,
-            None => return Ok(()),  // empty batch — nothing to draw
+            None => return Ok(()), // empty batch — nothing to draw
         };
         self.draw_mesh(&mesh, output, frame)
     }
@@ -279,12 +297,7 @@ impl SpriteRenderer {
     /// Draw a pre-built `Mesh` (built via `SpriteBatch::build`).
     ///
     /// Bind `sprite_texture` on `frame` before calling. Falls back to white pixel.
-    pub fn draw_mesh(
-        &self,
-        mesh: &Mesh,
-        output: &GraphImage,
-        frame: &RenderFrame,
-    ) -> Result<()> {
+    pub fn draw_mesh(&self, mesh: &Mesh, output: &GraphImage, frame: &RenderFrame) -> Result<()> {
         // If the caller hasn't bound a texture, use the white pixel fallback.
         if frame.find_image_by_name("sprite_texture").is_none() {
             frame.bind_image("sprite_texture", &self.white_pixel);

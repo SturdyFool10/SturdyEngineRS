@@ -223,10 +223,12 @@ impl DescriptorRegistry {
         let push_ranges = if layout.push_constants_bytes == 0 {
             Vec::new()
         } else {
-            vec![vk::PushConstantRange::default()
-                .stage_flags(push_constant_stages)
-                .offset(0)
-                .size(layout.push_constants_bytes)]
+            vec![
+                vk::PushConstantRange::default()
+                    .stage_flags(push_constant_stages)
+                    .offset(0)
+                    .size(layout.push_constants_bytes),
+            ]
         };
         let info = vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&set_layouts)
@@ -264,6 +266,7 @@ impl DescriptorRegistry {
             },
         );
         // Pre-register the pool slab so it's ready on first bind-group creation.
+        //panic allowed, reason = "layout was inserted into layouts map immediately above"
         let layout = self.layouts.get(&handle).unwrap();
         self.pool_slabs.insert(
             handle,
@@ -549,8 +552,7 @@ fn write_descriptor(
                     "sampler resource can only be bound to sampler descriptors".into(),
                 ));
             }
-            let info =
-                [vk::DescriptorImageInfo::default().sampler(resources.sampler(sampler)?)];
+            let info = [vk::DescriptorImageInfo::default().sampler(resources.sampler(sampler)?)];
             let write = [vk::WriteDescriptorSet::default()
                 .dst_set(set)
                 .dst_binding(binding.binding_index)

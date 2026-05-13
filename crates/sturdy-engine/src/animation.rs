@@ -11,9 +11,9 @@
 //
 // Roadmap: Track 1 — game loop shell (skinned character support).
 
-use std::sync::Arc;
-use glam::{Mat4, Quat, Vec3};
 use crate::{Buffer, BufferDesc, BufferUsage, Engine, Result};
+use glam::{Mat4, Quat, Vec3};
+use std::sync::Arc;
 
 // ── Keyframe interpolation ────────────────────────────────────────────────────
 
@@ -36,11 +36,11 @@ pub enum AnimationProperty {
 
 /// One animation channel: time samples for a single property of a single joint.
 pub struct AnimationChannel {
-    pub joint_index:   usize,
-    pub property:      AnimationProperty,
+    pub joint_index: usize,
+    pub property: AnimationProperty,
     pub interpolation: Interpolation,
     /// Keyframe timestamps in seconds.
-    pub times:  Vec<f32>,
+    pub times: Vec<f32>,
     /// Flat packed values: 3 floats per sample for Translation/Scale, 4 for Rotation (xyzw).
     pub values: Vec<f32>,
 }
@@ -48,9 +48,8 @@ pub struct AnimationChannel {
 impl AnimationChannel {
     fn vps(&self) -> usize {
         match self.property {
-            AnimationProperty::Rotation    => 4,
-            AnimationProperty::Translation |
-            AnimationProperty::Scale       => 3,
+            AnimationProperty::Rotation => 4,
+            AnimationProperty::Translation | AnimationProperty::Scale => 3,
         }
     }
 
@@ -58,7 +57,9 @@ impl AnimationChannel {
     /// Returns 3 or 4 floats depending on `property`.
     fn sample(&self, t: f32) -> Vec<f32> {
         let n = self.times.len();
-        if n == 0 { return vec![0.0; self.vps()]; }
+        if n == 0 {
+            return vec![0.0; self.vps()];
+        }
         let vps = self.vps();
 
         if t <= self.times[0] {
@@ -83,7 +84,11 @@ impl AnimationChannel {
                 let q = q0.slerp(q1, alpha);
                 vec![q.x, q.y, q.z, q.w]
             }
-            _ => v0.iter().zip(v1.iter()).map(|(a, b)| a + (b - a) * alpha).collect(),
+            _ => v0
+                .iter()
+                .zip(v1.iter())
+                .map(|(a, b)| a + (b - a) * alpha)
+                .collect(),
         }
     }
 }
@@ -94,7 +99,7 @@ impl AnimationChannel {
 ///
 /// Share via `Arc<AnimationClip>` across multiple players.
 pub struct AnimationClip {
-    pub name:     String,
+    pub name: String,
     /// Total duration in seconds.
     pub duration: f32,
     pub channels: Vec<AnimationChannel>,
@@ -107,7 +112,7 @@ pub struct AnimationClip {
 /// Loaded alongside a skinned mesh. Pass an `Arc<GltfSkin>` to
 /// [`AnimationPlayer::new`].
 pub struct GltfSkin {
-    pub name:        String,
+    pub name: String,
     pub joint_count: usize,
     /// Per-joint: mesh-bind-pose → joint-local-space transform (inverse of the
     /// bind-pose global transform). One matrix per joint.
@@ -130,16 +135,30 @@ impl GltfSkin {
         let n = self.joint_count;
         let mut global = vec![Mat4::IDENTITY; n];
         for i in 0..n {
-            let lt = if i < t.len() { t[i] } else { self.bind_translation[i] };
-            let lr = if i < r.len() { r[i] } else { self.bind_rotation[i] };
-            let ls = if i < s.len() { s[i] } else { self.bind_scale[i] };
+            let lt = if i < t.len() {
+                t[i]
+            } else {
+                self.bind_translation[i]
+            };
+            let lr = if i < r.len() {
+                r[i]
+            } else {
+                self.bind_rotation[i]
+            };
+            let ls = if i < s.len() {
+                s[i]
+            } else {
+                self.bind_scale[i]
+            };
             let local = Mat4::from_scale_rotation_translation(ls, lr, lt);
             global[i] = match self.parent[i] {
                 Some(p) => global[p] * local,
-                None    => local,
+                None => local,
             };
         }
-        global.iter().zip(&self.inverse_bind_matrices)
+        global
+            .iter()
+            .zip(&self.inverse_bind_matrices)
             .map(|(g, ibm)| *g * *ibm)
             .collect()
     }
@@ -162,14 +181,14 @@ impl GltfSkin {
 /// // then draw the skinned mesh normally.
 /// ```
 pub struct AnimationPlayer {
-    skin:     Arc<GltfSkin>,
-    clip:     Option<Arc<AnimationClip>>,
+    skin: Arc<GltfSkin>,
+    clip: Option<Arc<AnimationClip>>,
     /// Current playback position in seconds.
-    pub time:     f32,
+    pub time: f32,
     /// Playback rate multiplier. Default 1.0.
-    pub speed:    f32,
+    pub speed: f32,
     /// Loop the clip when it reaches the end. Default true.
-    pub looping:  bool,
+    pub looping: bool,
     /// True when a non-looping clip has reached its end.
     pub finished: bool,
 
@@ -193,9 +212,16 @@ impl AnimationPlayer {
             usage: BufferUsage::STORAGE,
         })?;
         let p = Self {
-            skin, clip: None, time: 0.0, speed: 1.0,
-            looping: true, finished: false,
-            joint_t, joint_r, joint_s, bone_matrices,
+            skin,
+            clip: None,
+            time: 0.0,
+            speed: 1.0,
+            looping: true,
+            finished: false,
+            joint_t,
+            joint_r,
+            joint_s,
+            bone_matrices,
             gpu_buffer: Some(gpu_buffer),
         };
         p.flush_to_gpu();
@@ -204,32 +230,35 @@ impl AnimationPlayer {
 
     /// Start playing `clip` from time 0.
     pub fn play(&mut self, clip: Arc<AnimationClip>) {
-        self.clip     = Some(clip);
-        self.time     = 0.0;
+        self.clip = Some(clip);
+        self.time = 0.0;
         self.finished = false;
     }
 
     /// Stop playback and return joints to bind pose.
     pub fn stop(&mut self) {
-        self.clip     = None;
-        self.time     = 0.0;
+        self.clip = None;
+        self.time = 0.0;
         self.finished = false;
-        self.joint_t  = self.skin.bind_translation.clone();
-        self.joint_r  = self.skin.bind_rotation.clone();
-        self.joint_s  = self.skin.bind_scale.clone();
+        self.joint_t = self.skin.bind_translation.clone();
+        self.joint_r = self.skin.bind_rotation.clone();
+        self.joint_s = self.skin.bind_scale.clone();
     }
 
     /// Advance time by `dt` seconds and resample all joint transforms.
     ///
     /// Call once per frame before `upload()`.
     pub fn advance(&mut self, dt: f32) {
-        let clip = match self.clip.clone() { Some(c) => c, None => return };
+        let clip = match self.clip.clone() {
+            Some(c) => c,
+            None => return,
+        };
 
         self.time += dt * self.speed;
         if self.looping && clip.duration > 0.0 {
             self.time = self.time.rem_euclid(clip.duration);
         } else if self.time >= clip.duration {
-            self.time     = clip.duration;
+            self.time = clip.duration;
             self.finished = true;
         }
 
@@ -240,7 +269,9 @@ impl AnimationPlayer {
 
         for ch in &clip.channels {
             let ji = ch.joint_index;
-            if ji >= self.skin.joint_count { continue; }
+            if ji >= self.skin.joint_count {
+                continue;
+            }
             let v = ch.sample(self.time);
             match ch.property {
                 AnimationProperty::Translation => {
@@ -255,9 +286,9 @@ impl AnimationPlayer {
             }
         }
 
-        self.bone_matrices = self.skin.compute_bone_matrices(
-            &self.joint_t, &self.joint_r, &self.joint_s,
-        );
+        self.bone_matrices =
+            self.skin
+                .compute_bone_matrices(&self.joint_t, &self.joint_r, &self.joint_s);
     }
 
     /// Upload the current bone matrices to the GPU buffer.
@@ -266,11 +297,15 @@ impl AnimationPlayer {
     /// subsequent frames reuse it.
     pub fn upload(&mut self, engine: &Engine) -> Result<()> {
         let needed = (self.skin.joint_count * std::mem::size_of::<Mat4>()) as u64;
-        let too_small = self.gpu_buffer.as_ref()
-            .map(|b| b.desc().size < needed).unwrap_or(true);
+        let too_small = self
+            .gpu_buffer
+            .as_ref()
+            .map(|b| b.desc().size < needed)
+            .unwrap_or(true);
         if too_small {
             self.gpu_buffer = Some(engine.create_buffer(BufferDesc {
-                size: needed, usage: BufferUsage::STORAGE,
+                size: needed,
+                usage: BufferUsage::STORAGE,
             })?);
         }
         self.flush_to_gpu();

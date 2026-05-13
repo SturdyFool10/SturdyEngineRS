@@ -84,20 +84,38 @@ pub fn reflect_spirv_vertex_inputs(words: &[u32]) -> Vec<VertexInputReflection> 
                 let result_id = instr[1];
                 let component_type_id = instr[2];
                 let count = instr[3];
-                types.insert(result_id, SpirvType::Vector { component_type_id, count });
+                types.insert(
+                    result_id,
+                    SpirvType::Vector {
+                        component_type_id,
+                        count,
+                    },
+                );
             }
             OP_TYPE_POINTER if word_count >= 4 => {
                 let result_id = instr[1];
                 let storage_class = instr[2];
                 let pointee_id = instr[3];
-                types.insert(result_id, SpirvType::Pointer { storage_class, pointee_id });
+                types.insert(
+                    result_id,
+                    SpirvType::Pointer {
+                        storage_class,
+                        pointee_id,
+                    },
+                );
             }
             OP_VARIABLE if word_count >= 4 => {
                 let type_id = instr[1];
                 let result_id = instr[2];
                 let storage_class = instr[3];
                 if storage_class == STORAGE_CLASS_INPUT {
-                    input_vars.insert(result_id, InputVar { type_id, name: None });
+                    input_vars.insert(
+                        result_id,
+                        InputVar {
+                            type_id,
+                            name: None,
+                        },
+                    );
                 }
             }
             OP_DECORATE if word_count >= 3 => {
@@ -132,7 +150,10 @@ pub fn reflect_spirv_vertex_inputs(words: &[u32]) -> Vec<VertexInputReflection> 
             continue;
         };
         results.push(VertexInputReflection {
-            name: var.name.clone().unwrap_or_else(|| format!("_input_{location}")),
+            name: var
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("_input_{location}")),
             location,
             format,
         });
@@ -147,7 +168,10 @@ pub fn reflect_spirv_vertex_inputs(words: &[u32]) -> Vec<VertexInputReflection> 
 /// Returns `None` for types we can't map (matrices, integers wider than 32 bits, etc.).
 fn resolve_format(types: &HashMap<u32, SpirvType>, type_id: u32) -> Option<VertexFormat> {
     match types.get(&type_id)? {
-        SpirvType::Pointer { storage_class, pointee_id } => {
+        SpirvType::Pointer {
+            storage_class,
+            pointee_id,
+        } => {
             if *storage_class != STORAGE_CLASS_INPUT {
                 return None;
             }
@@ -155,7 +179,10 @@ fn resolve_format(types: &HashMap<u32, SpirvType>, type_id: u32) -> Option<Verte
         }
         SpirvType::Float { width: 32 } => None, // scalar float — no direct mapping, skip
         SpirvType::Int { .. } => None,
-        SpirvType::Vector { component_type_id, count } => {
+        SpirvType::Vector {
+            component_type_id,
+            count,
+        } => {
             let component = types.get(component_type_id)?;
             match (component, *count) {
                 (SpirvType::Float { width: 32 }, 2) => Some(VertexFormat::Float32x2),
@@ -169,10 +196,7 @@ fn resolve_format(types: &HashMap<u32, SpirvType>, type_id: u32) -> Option<Verte
 }
 
 fn decode_string(words: &[u32]) -> String {
-    let bytes: Vec<u8> = words
-        .iter()
-        .flat_map(|w| w.to_le_bytes())
-        .collect();
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     bytes
         .split(|&b| b == 0)
         .next()

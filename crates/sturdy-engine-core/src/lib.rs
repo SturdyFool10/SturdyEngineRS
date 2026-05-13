@@ -3,6 +3,8 @@
 //! This crate owns the renderer's backend-neutral model: devices, capabilities,
 //! opaque handles, images, shaders, frame graphs, and submission semantics. It
 //! intentionally has no C ABI concerns and no high-level ergonomic wrappers.
+#![allow(dead_code)]
+
 pub mod adapter_info;
 pub mod adapter_kind;
 pub mod adapter_selection;

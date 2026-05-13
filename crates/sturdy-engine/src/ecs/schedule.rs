@@ -17,8 +17,8 @@
 // ```
 
 use super::World;
-use super::parallel_system::{ErasedParallelSystem, ParallelSystem, ParallelSystemAdapter};
 use super::compiled_schedule::{CompiledSchedule, CompiledScheduleBuilder};
+use super::parallel_system::{ErasedParallelSystem, ParallelSystem, ParallelSystemAdapter};
 
 // ── SystemFn ──────────────────────────────────────────────────────────────────
 
@@ -40,7 +40,9 @@ pub trait System: Send + Sync + 'static {
 
 // Blanket impl for plain function pointers.
 impl<F: FnMut(&mut World) + Send + Sync + 'static> System for F {
-    fn run(&mut self, world: &mut World) { (self)(world); }
+    fn run(&mut self, world: &mut World) {
+        (self)(world);
+    }
 }
 
 // ── Schedule ──────────────────────────────────────────────────────────────────
@@ -77,7 +79,10 @@ enum ScheduleEntry {
 
 impl Schedule {
     pub fn new() -> Self {
-        Self { entries: Vec::new(), debug_timing: false }
+        Self {
+            entries: Vec::new(),
+            debug_timing: false,
+        }
     }
 
     /// Append a serial system (existing API — unchanged).
@@ -90,17 +95,15 @@ impl Schedule {
         name: impl Into<String>,
         system: impl FnMut(&mut World) + Send + Sync + 'static,
     ) -> &mut Self {
-        self.entries.push(ScheduleEntry::Serial(name.into(), Box::new(system)));
+        self.entries
+            .push(ScheduleEntry::Serial(name.into(), Box::new(system)));
         self
     }
 
     /// Append a stateful serial system.
-    pub fn add_system_obj(
-        &mut self,
-        name: impl Into<String>,
-        system: impl System,
-    ) -> &mut Self {
-        self.entries.push(ScheduleEntry::Serial(name.into(), Box::new(system)));
+    pub fn add_system_obj(&mut self, name: impl Into<String>, system: impl System) -> &mut Self {
+        self.entries
+            .push(ScheduleEntry::Serial(name.into(), Box::new(system)));
         self
     }
 
@@ -115,7 +118,8 @@ impl Schedule {
         system: impl ParallelSystem,
     ) -> &mut Self {
         let adapter = ParallelSystemAdapter::new(system);
-        self.entries.push(ScheduleEntry::Parallel(name.into(), Box::new(adapter)));
+        self.entries
+            .push(ScheduleEntry::Parallel(name.into(), Box::new(adapter)));
         self
     }
 
@@ -131,7 +135,10 @@ impl Schedule {
                 match entry {
                     ScheduleEntry::Serial(name, sys) => {
                         sys.run(world);
-                        eprintln!("[Schedule] {name}: {:.3}ms", t0.elapsed().as_secs_f64() * 1000.0);
+                        eprintln!(
+                            "[Schedule] {name}: {:.3}ms",
+                            t0.elapsed().as_secs_f64() * 1000.0
+                        );
                     }
                     ScheduleEntry::Parallel(name, sys) => {
                         // Downgrade: run parallel system serially via a temporary WorldView.
@@ -142,7 +149,10 @@ impl Schedule {
                             sys.run(&view, &mut cmds);
                         }
                         cmds.apply(world);
-                        eprintln!("[Schedule] {name} (parallel→serial): {:.3}ms", t0.elapsed().as_secs_f64() * 1000.0);
+                        eprintln!(
+                            "[Schedule] {name} (parallel→serial): {:.3}ms",
+                            t0.elapsed().as_secs_f64() * 1000.0
+                        );
                     }
                 }
             }
@@ -188,7 +198,9 @@ impl Schedule {
     }
 
     /// Number of registered systems (serial + parallel).
-    pub fn system_count(&self) -> usize { self.entries.len() }
+    pub fn system_count(&self) -> usize {
+        self.entries.len()
+    }
 
     /// Names of registered systems in insertion order.
     pub fn system_names(&self) -> impl Iterator<Item = &str> {
@@ -198,10 +210,16 @@ impl Schedule {
     }
 
     /// Remove all systems.
-    pub fn clear(&mut self) { self.entries.clear(); }
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
-impl Default for Schedule { fn default() -> Self { Self::new() } }
+impl Default for Schedule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ── Convenience: one-shot system execution ────────────────────────────────────
 

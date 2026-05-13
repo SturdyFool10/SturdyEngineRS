@@ -43,8 +43,8 @@
 // - Only one wave executes at a time (waves are sequentially ordered).
 
 use super::World;
-use super::schedule::System;
 use super::parallel_system::{ErasedParallelSystem, SystemAccess};
+use super::schedule::System;
 use super::world_commands::WorldCommands;
 use super::world_view::WorldView;
 
@@ -57,9 +57,7 @@ enum Wave {
         system: Box<dyn System>,
     },
     /// One or more parallel systems — all run concurrently per wave.
-    Parallel {
-        entries: Vec<ParallelEntry>,
-    },
+    Parallel { entries: Vec<ParallelEntry> },
 }
 
 struct ParallelEntry {
@@ -134,17 +132,28 @@ impl CompiledScheduleBuilder {
             self.close_parallel_wave();
         }
         // Merge access into the open wave's combined access.
-        self.open_wave_access.component_reads.extend(access.component_reads.iter().copied());
-        self.open_wave_access.component_writes.extend(access.component_writes.iter().copied());
-        self.open_wave_access.resource_reads.extend(access.resource_reads.iter().copied());
-        self.open_wave_access.resource_writes.extend(access.resource_writes.iter().copied());
+        self.open_wave_access
+            .component_reads
+            .extend(access.component_reads.iter().copied());
+        self.open_wave_access
+            .component_writes
+            .extend(access.component_writes.iter().copied());
+        self.open_wave_access
+            .resource_reads
+            .extend(access.resource_reads.iter().copied());
+        self.open_wave_access
+            .resource_writes
+            .extend(access.resource_writes.iter().copied());
         self.open_wave_entries.push(ParallelEntry { name, system });
     }
 
     /// Finalise: close any trailing parallel wave and return the schedule.
     pub fn finish(mut self) -> CompiledSchedule {
         self.close_parallel_wave();
-        CompiledSchedule { waves: self.waves, debug_timing: false }
+        CompiledSchedule {
+            waves: self.waves,
+            debug_timing: false,
+        }
     }
 }
 
@@ -154,11 +163,7 @@ impl CompiledScheduleBuilder {
 /// precision capture from extracting `*mut World` (which is `!Send`) when
 /// the closure is formed. The closure moves the whole `SendWorld` struct into
 /// this call, so the closure's captured type is `SendWorld`, not `*mut World`.
-fn run_parallel_entry(
-    raw: SendWorld,
-    entry: &mut ParallelEntry,
-    commands: &mut WorldCommands,
-) {
+fn run_parallel_entry(raw: SendWorld, entry: &mut ParallelEntry, commands: &mut WorldCommands) {
     // SAFETY: CompiledSchedule::run holds &mut World exclusively. The
     // scheduler verified disjoint write sets for all systems in this wave.
     let view = unsafe { WorldView::from_ptr(raw.0) };
@@ -258,17 +263,23 @@ impl CompiledSchedule {
 
     /// Total system count across all waves.
     pub fn system_count(&self) -> usize {
-        self.waves.iter().map(|w| match w {
-            Wave::Serial { .. } => 1,
-            Wave::Parallel { entries } => entries.len(),
-        }).sum()
+        self.waves
+            .iter()
+            .map(|w| match w {
+                Wave::Serial { .. } => 1,
+                Wave::Parallel { entries } => entries.len(),
+            })
+            .sum()
     }
 
     /// Names of all systems, wave by wave. Each inner Vec is one wave.
     pub fn wave_names(&self) -> Vec<Vec<&str>> {
-        self.waves.iter().map(|w| match w {
-            Wave::Serial { name, .. } => vec![name.as_str()],
-            Wave::Parallel { entries } => entries.iter().map(|e| e.name.as_str()).collect(),
-        }).collect()
+        self.waves
+            .iter()
+            .map(|w| match w {
+                Wave::Serial { name, .. } => vec![name.as_str()],
+                Wave::Parallel { entries } => entries.iter().map(|e| e.name.as_str()).collect(),
+            })
+            .collect()
     }
 }

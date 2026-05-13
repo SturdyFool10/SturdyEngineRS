@@ -23,8 +23,8 @@
 // }
 // ```
 
-use super::{Entity, EntityBuilder, World};
 use super::storage::Component;
+use super::{Entity, EntityBuilder, World};
 
 // ── Command type ──────────────────────────────────────────────────────────────
 
@@ -59,7 +59,9 @@ impl WorldCommands {
     ///
     /// If the entity is already dead when the command is applied, it is a no-op.
     pub fn despawn(&mut self, entity: Entity) {
-        self.push(move |world| { world.despawn(entity); });
+        self.push(move |world| {
+            world.despawn(entity);
+        });
     }
 
     /// Spawn a new entity. The closure receives an `EntityBuilder` — attach
@@ -70,17 +72,23 @@ impl WorldCommands {
     /// commands.spawn(|b| { b.with(Transform::default()).with(Velocity::default()); });
     /// ```
     pub fn spawn(&mut self, build: impl FnOnce(EntityBuilder<'_>) + Send + 'static) {
-        self.push(move |world| { build(world.spawn()); });
+        self.push(move |world| {
+            build(world.spawn());
+        });
     }
 
     /// Insert (or replace) a component on an existing entity.
     pub fn insert<C: Component>(&mut self, entity: Entity, component: C) {
-        self.push(move |world| { world.insert(entity, component); });
+        self.push(move |world| {
+            world.insert(entity, component);
+        });
     }
 
     /// Remove a component from an entity. No-op if the component is absent.
     pub fn remove<C: Component>(&mut self, entity: Entity) {
-        self.push(move |world| { world.remove::<C>(entity); });
+        self.push(move |world| {
+            world.remove::<C>(entity);
+        });
     }
 
     // ── Internal ──────────────────────────────────────────────────────────────
