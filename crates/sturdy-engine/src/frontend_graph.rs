@@ -632,6 +632,8 @@ impl RenderFrame {
                     .collect(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -1141,6 +1143,8 @@ impl RenderFrame {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             },
             deferred: None,
         });
@@ -1200,6 +1204,8 @@ impl RenderFrame {
                 }],
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             },
             deferred: None,
         });
@@ -2026,6 +2032,8 @@ impl GraphImage {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth,
+                push_descriptor_set: None,
+                predicate: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2226,6 +2234,8 @@ impl GraphImage {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth,
+                push_descriptor_set: None,
+                predicate: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2425,6 +2435,8 @@ impl GraphImage {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth,
+                push_descriptor_set: None,
+                predicate: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2598,6 +2610,8 @@ impl GraphImage {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth,
+                push_descriptor_set: None,
+                predicate: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2731,6 +2745,8 @@ impl GraphImage {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             },
             deferred: None,
         });
@@ -2919,6 +2935,8 @@ fn record_fullscreen_shader_pass(
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         },
         deferred: Some(DeferredPassResolve {
             layout_handle: shader.pipeline_layout.handle(),
@@ -3005,6 +3023,8 @@ fn record_compute_shader_pass(
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         },
         deferred: Some(DeferredPassResolve {
             layout_handle: program.pipeline_layout.handle(),
@@ -3410,6 +3430,8 @@ mod tests {
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         }
     }
 
@@ -3433,6 +3455,8 @@ mod tests {
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         }
     }
 

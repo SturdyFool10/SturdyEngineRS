@@ -1,7 +1,7 @@
 use std::collections::HashSet;
-use std::ffi::{CStr, CString, c_void};
+use std::ffi::{c_void, CStr, CString};
 
-use ash::{Device as AshDevice, Instance, vk};
+use ash::{vk, Device as AshDevice, Instance};
 
 use crate::{AdapterSelection, Error, Result};
 
@@ -23,7 +23,11 @@ pub struct LogicalDevice {
     pub synchronization2_enabled: bool,
     pub dynamic_rendering_enabled: bool,
     pub timeline_semaphores_enabled: bool,
+    pub buffer_device_address_enabled: bool,
     pub memory_priority_enabled: bool,
+    pub push_descriptors_enabled: bool,
+    pub conditional_rendering_enabled: bool,
+    pub global_queue_priority_enabled: bool,
 }
 
 impl DeviceSelection {
@@ -59,20 +63,26 @@ pub fn create_logical_device(
     ];
     unique_families.sort_unstable();
     unique_families.dedup();
-    let queue_info = unique_families
-        .iter()
-        .map(|family| {
-            vk::DeviceQueueCreateInfo::default()
-                .queue_family_index(*family)
-                .queue_priorities(&priority)
-        })
-        .collect::<Vec<_>>();
     let mut feature_request = FeatureRequest::resolve(instance, selection.physical_device, config)?;
     let mesh_shader_enabled = feature_request.mesh_shader.mesh_shader == vk::TRUE;
     let synchronization2_enabled = feature_request.synchronization2.synchronization2 == vk::TRUE;
     let dynamic_rendering_enabled = feature_request.dynamic_rendering.dynamic_rendering == vk::TRUE;
     let timeline_semaphores_enabled = feature_request.timeline.timeline_semaphore == vk::TRUE;
+    let buffer_device_address_enabled =
+        feature_request.buffer_device_address.buffer_device_address == vk::TRUE;
     let memory_priority_enabled = feature_request.memory_priority.memory_priority == vk::TRUE;
+    let conditional_rendering_enabled =
+        feature_request.conditional_rendering.conditional_rendering == vk::TRUE;
+    // push_descriptors and global_queue_priority are extension-only (no feature struct).
+    // They are enabled if the extension was added to required_extensions by resolve().
+    let push_descriptors_enabled = feature_request
+        .required_extensions
+        .iter()
+        .any(|e| *e == ash::khr::push_descriptor::NAME);
+    let global_queue_priority_enabled = feature_request
+        .required_extensions
+        .iter()
+        .any(|e| *e == ash::khr::global_priority::NAME);
     let extension_request = ExtensionRequest::resolve(
         instance,
         selection.physical_device,
@@ -84,6 +94,33 @@ pub fn create_logical_device(
         .iter()
         .map(|extension| extension.as_ptr())
         .collect::<Vec<_>>();
+
+    let global_priority_infos = unique_families
+        .iter()
+        .map(|family| {
+            let priority = if *family == selection.queue_families.graphics {
+                vk::QueueGlobalPriorityKHR::HIGH
+            } else if *family == selection.queue_families.compute {
+                vk::QueueGlobalPriorityKHR::MEDIUM
+            } else {
+                vk::QueueGlobalPriorityKHR::LOW
+            };
+            vk::DeviceQueueGlobalPriorityCreateInfoKHR::default().global_priority(priority)
+        })
+        .collect::<Vec<_>>();
+    let mut queue_info = Vec::with_capacity(unique_families.len());
+    for (index, family) in unique_families.iter().enumerate() {
+        let mut info = vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(*family)
+            .queue_priorities(&priority);
+        if global_queue_priority_enabled {
+            info.p_next = (&global_priority_infos[index]
+                as *const vk::DeviceQueueGlobalPriorityCreateInfoKHR)
+                .cast::<c_void>();
+        }
+        queue_info.push(info);
+    }
+
     let device_info_base = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_info)
         .enabled_extension_names(&device_extension_ptrs);
@@ -110,7 +147,11 @@ pub fn create_logical_device(
         synchronization2_enabled,
         dynamic_rendering_enabled,
         timeline_semaphores_enabled,
+        buffer_device_address_enabled,
         memory_priority_enabled,
+        push_descriptors_enabled,
+        conditional_rendering_enabled,
+        global_queue_priority_enabled,
     })
 }
 
@@ -210,11 +251,13 @@ struct FeatureRequest<'a> {
     timeline: vk::PhysicalDeviceTimelineSemaphoreFeatures<'a>,
     dynamic_rendering: vk::PhysicalDeviceDynamicRenderingFeatures<'a>,
     synchronization2: vk::PhysicalDeviceSynchronization2Features<'a>,
+    buffer_device_address: vk::PhysicalDeviceBufferDeviceAddressFeatures<'a>,
     mesh_shader: vk::PhysicalDeviceMeshShaderFeaturesEXT<'a>,
     acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'a>,
     ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR<'a>,
     fragment_shading_rate: vk::PhysicalDeviceFragmentShadingRateFeaturesKHR<'a>,
     memory_priority: vk::PhysicalDeviceMemoryPriorityFeaturesEXT<'a>,
+    conditional_rendering: vk::PhysicalDeviceConditionalRenderingFeaturesEXT<'a>,
     use_feature_chain: bool,
     required_extensions: Vec<&'static CStr>,
 }
@@ -245,11 +288,13 @@ impl FeatureRequest<'static> {
             timeline: vk::PhysicalDeviceTimelineSemaphoreFeatures::default(),
             dynamic_rendering: vk::PhysicalDeviceDynamicRenderingFeatures::default(),
             synchronization2: vk::PhysicalDeviceSynchronization2Features::default(),
+            buffer_device_address: vk::PhysicalDeviceBufferDeviceAddressFeatures::default(),
             mesh_shader: vk::PhysicalDeviceMeshShaderFeaturesEXT::default(),
             acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default(),
             ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default(),
             fragment_shading_rate: vk::PhysicalDeviceFragmentShadingRateFeaturesKHR::default(),
             memory_priority: vk::PhysicalDeviceMemoryPriorityFeaturesEXT::default(),
+            conditional_rendering: vk::PhysicalDeviceConditionalRenderingFeaturesEXT::default(),
             use_feature_chain: false,
             required_extensions: Vec::new(),
         };
@@ -387,6 +432,13 @@ impl FeatureRequest<'static> {
                 self.synchronization2.synchronization2 = vk::TRUE;
                 true
             }
+            "buffer_device_address" => {
+                if available.buffer_device_address.buffer_device_address != vk::TRUE {
+                    return false;
+                }
+                self.buffer_device_address.buffer_device_address = vk::TRUE;
+                true
+            }
             "mesh_shading" | "mesh_shader" => {
                 if available.mesh_shader.mesh_shader != vk::TRUE {
                     return false;
@@ -464,6 +516,19 @@ impl FeatureRequest<'static> {
                     return false;
                 }
                 self.memory_priority.memory_priority = vk::TRUE;
+                true
+            }
+            "conditional_rendering" => {
+                if available.conditional_rendering.conditional_rendering != vk::TRUE {
+                    return false;
+                }
+                self.conditional_rendering.conditional_rendering = vk::TRUE;
+                true
+            }
+            // push_descriptor and global_queue_priority are extension-only — no feature struct.
+            // They are handled purely via require_feature_extensions.
+            "push_descriptor" | "push_descriptors" | "global_queue_priority" => {
+                // Return true so require_feature_extensions is called.
                 true
             }
             _ => self.enable_descriptor_indexing_field(name, &available.descriptor_indexing),
@@ -569,6 +634,18 @@ impl FeatureRequest<'static> {
             "memory_priority" => {
                 self.require_extension(ash::ext::memory_priority::NAME, available_extensions)?
             }
+            "conditional_rendering" => {
+                self.require_extension(ash::ext::conditional_rendering::NAME, available_extensions)?
+            }
+            "push_descriptor" | "push_descriptors" => {
+                self.require_extension(ash::khr::push_descriptor::NAME, available_extensions)?
+            }
+            "global_queue_priority" => {
+                self.require_extension(ash::khr::global_priority::NAME, available_extensions)?
+            }
+            "buffer_device_address" if api_version < vk::API_VERSION_1_2 => {
+                self.require_extension(ash::khr::buffer_device_address::NAME, available_extensions)?
+            }
             _ if is_descriptor_indexing_field(name) && api_version < vk::API_VERSION_1_2 => {
                 self.require_extension(ash::ext::descriptor_indexing::NAME, available_extensions)?
             }
@@ -618,6 +695,10 @@ impl FeatureRequest<'static> {
             push_feature_chain(&mut self.features2, &mut self.synchronization2);
             self.use_feature_chain = true;
         }
+        if self.buffer_device_address.buffer_device_address == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.buffer_device_address);
+            self.use_feature_chain = true;
+        }
         if self.mesh_shader.mesh_shader == vk::TRUE || self.mesh_shader.task_shader == vk::TRUE {
             push_feature_chain(&mut self.features2, &mut self.mesh_shader);
             self.use_feature_chain = true;
@@ -639,6 +720,10 @@ impl FeatureRequest<'static> {
         }
         if self.memory_priority.memory_priority == vk::TRUE {
             push_feature_chain(&mut self.features2, &mut self.memory_priority);
+            self.use_feature_chain = true;
+        }
+        if self.conditional_rendering.conditional_rendering == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.conditional_rendering);
             self.use_feature_chain = true;
         }
     }
@@ -687,6 +772,7 @@ fn is_known_feature_name(name: &str) -> bool {
                 | "timeline_semaphores"
                 | "dynamic_rendering"
                 | "synchronization2"
+                | "buffer_device_address"
                 | "mesh_shading"
                 | "mesh_shader"
                 | "task_shader"
@@ -698,6 +784,10 @@ fn is_known_feature_name(name: &str) -> bool {
                 | "primitive_fragment_shading_rate"
                 | "attachment_fragment_shading_rate"
                 | "memory_priority"
+                | "conditional_rendering"
+                | "push_descriptor"
+                | "push_descriptors"
+                | "global_queue_priority"
         )
 }
 

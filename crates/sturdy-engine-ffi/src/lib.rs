@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::os::raw::c_char;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -713,6 +713,8 @@ pub extern "C" fn gfx_frame_add_pass(
                 buffer_writes,
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
         })
     })

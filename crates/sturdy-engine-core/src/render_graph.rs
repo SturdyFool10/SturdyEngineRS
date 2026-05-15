@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     BindGroupHandle, BufferDesc, BufferHandle, Error, ImageDesc, ImageHandle, PipelineHandle,
-    PushConstants, Result, ShaderHandle,
+    PushConstants, Result, SamplerHandle, ShaderHandle,
 };
 
 #[path = "render_graph/alias_plan.rs"]
@@ -357,6 +357,48 @@ pub enum PassWork {
     },
 }
 
+/// Inline descriptor binding pushed into the command stream without a descriptor pool.
+///
+/// Used with `PassDesc::push_descriptor_set` to update a single descriptor set
+/// inline during command recording.  Requires `BackendFeatures::push_descriptors`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PushDescriptorSetDesc {
+    /// Set index to push into.
+    pub set: u32,
+    pub bindings: Vec<PushDescriptorBinding>,
+}
+
+/// A single binding entry inside a `PushDescriptorSetDesc`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PushDescriptorBinding {
+    SampledImage {
+        binding: u32,
+        image_view: ImageHandle,
+        layout: RgState,
+    },
+    Sampler {
+        binding: u32,
+        sampler: SamplerHandle,
+    },
+    StorageBuffer {
+        binding: u32,
+        buffer: BufferHandle,
+        offset: u64,
+        range: u64,
+    },
+}
+
+/// GPU-driven predicate: skip all commands in this pass when the `u32` at
+/// `buffer[offset]` is zero (or non-zero when `inverted` is true).
+///
+/// Requires `BackendFeatures::conditional_rendering`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ConditionalRenderingDesc {
+    pub buffer: BufferHandle,
+    pub offset: u64,
+    pub inverted: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PassDesc {
     pub name: String,
@@ -382,6 +424,16 @@ pub struct PassDesc {
     pub clear_colors: Vec<(ImageHandle, [u32; 4])>,
     /// Clear depth (bits reinterpreted as f32) and stencil applied before this pass.
     pub clear_depth: Option<(ImageHandle, u32, u8)>,
+    /// Inline descriptor updates pushed directly into the command stream.
+    ///
+    /// Requires `BackendFeatures::push_descriptors`. Each entry maps a
+    /// binding slot to a descriptor (sampled image, sampler, or storage buffer).
+    pub push_descriptor_set: Option<PushDescriptorSetDesc>,
+    /// GPU-driven predicate: skip all commands in this pass when the u32 at
+    /// `buffer[offset]` is zero (or non-zero when `inverted` is true).
+    ///
+    /// Requires `BackendFeatures::conditional_rendering`.
+    pub predicate: Option<ConditionalRenderingDesc>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1367,6 +1419,8 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap();
 
@@ -1421,6 +1475,8 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap_err();
 
@@ -1477,6 +1533,8 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap();
 
@@ -1525,6 +1583,8 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -1561,6 +1621,8 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -1589,6 +1651,8 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -1613,6 +1677,8 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap_err();
 
@@ -1670,6 +1736,8 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -1709,6 +1777,8 @@ mod tests {
                 }],
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap();
 
@@ -1753,19 +1823,19 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap();
 
         let compiled = graph.compile().unwrap();
         assert_eq!(compiled.passes[0].name, "write-count");
         assert_eq!(compiled.passes[1].name, "consume-count");
-        assert!(
-            compiled.buffer_barriers_per_pass[1]
-                .iter()
-                .any(|barrier| barrier.buffer == count
-                    && barrier.before == RgState::ShaderWrite
-                    && barrier.after == RgState::IndirectRead)
-        );
+        assert!(compiled.buffer_barriers_per_pass[1]
+            .iter()
+            .any(|barrier| barrier.buffer == count
+                && barrier.before == RgState::ShaderWrite
+                && barrier.after == RgState::IndirectRead));
     }
 
     #[test]
@@ -1800,6 +1870,8 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap();
 
@@ -1884,6 +1956,8 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap();
 
@@ -1927,6 +2001,8 @@ mod tests {
                 }],
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap();
         graph
@@ -1956,6 +2032,8 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap();
 
@@ -2011,6 +2089,8 @@ mod tests {
                 }],
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap();
         graph
@@ -2040,6 +2120,8 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap();
         graph
@@ -2063,6 +2145,8 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap();
 
@@ -2171,6 +2255,8 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap();
 
@@ -2218,6 +2304,8 @@ mod tests {
                 }],
                 clear_colors: vec![(gbuffer, [0, 0, 0, f32::to_bits(1.0)])],
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap();
 
@@ -2257,6 +2345,8 @@ mod tests {
                 buffer_writes: Vec::new(),
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap();
 
@@ -2304,6 +2394,8 @@ mod tests {
                 }],
                 clear_colors: Vec::new(),
                 clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
             })
             .unwrap();
 

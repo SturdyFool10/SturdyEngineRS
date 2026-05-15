@@ -115,6 +115,8 @@ impl GraphFrame {
             buffer_writes: Vec::new(),
             clear_colors: vec![(image.handle(), color.map(f32::to_bits))],
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         })
     }
 
@@ -187,6 +189,8 @@ impl GraphFrame {
             }],
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         })?;
 
         self.frame.add_pass(PassDesc {
@@ -225,6 +229,8 @@ impl GraphFrame {
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         })?;
 
         self.owned_buffers.push(staging);
@@ -408,6 +414,8 @@ impl<'f> FullscreenPassBuilder<'f> {
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         })
     }
 }

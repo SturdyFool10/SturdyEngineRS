@@ -17,7 +17,7 @@ mod surfaces;
 
 use std::collections::HashMap;
 
-use ash::{Device as AshDevice, Entry, Instance, vk};
+use ash::{vk, Device as AshDevice, Entry, Instance};
 use std::sync::{Mutex, RwLock};
 use std::{fs, path::PathBuf};
 
@@ -33,7 +33,7 @@ use crate::{
 
 pub use bindless::BindlessVkInfo;
 pub use config::VulkanBackendConfig;
-use device::{DeviceSelection, create_logical_device};
+use device::{create_logical_device, DeviceSelection};
 use instance::{create_instance, load_entry};
 use queues::{QueueFamilyMap, VulkanQueues};
 
@@ -68,6 +68,12 @@ pub struct VulkanBackend {
     dynamic_rendering_khr: Option<ash::khr::dynamic_rendering::Device>,
     /// VK_EXT_device_fault commands. Present when device fault extension is available.
     device_fault_ext: Option<ash::ext::device_fault::Device>,
+    /// VK_KHR_push_descriptor commands. Present when push_descriptors is enabled.
+    push_descriptor_khr: Option<ash::khr::push_descriptor::Device>,
+    /// VK_EXT_conditional_rendering commands. Present when conditional_rendering is enabled.
+    conditional_rendering_ext: Option<ash::ext::conditional_rendering::Device>,
+    /// Whether VK_EXT_conservative_rasterization is available.
+    conservative_rasterization_enabled: bool,
 }
 
 impl VulkanBackend {
@@ -90,7 +96,11 @@ impl VulkanBackend {
         caps.features.synchronization2 = logical.synchronization2_enabled;
         caps.features.dynamic_rendering = logical.dynamic_rendering_enabled;
         caps.features.timeline_semaphores = logical.timeline_semaphores_enabled;
+        caps.features.buffer_device_address = logical.buffer_device_address_enabled;
         caps.features.memory_priority = logical.memory_priority_enabled;
+        caps.features.push_descriptors = logical.push_descriptors_enabled;
+        caps.features.conditional_rendering = logical.conditional_rendering_enabled;
+        caps.features.global_queue_priority = logical.global_queue_priority_enabled;
         let props = unsafe { instance.get_physical_device_properties(selection.physical_device) };
         let timestamp_period_ns = props.limits.timestamp_period;
         let memory_properties =
@@ -139,6 +149,24 @@ impl VulkanBackend {
         } else {
             None
         };
+        let push_descriptor_khr = if logical.push_descriptors_enabled {
+            Some(ash::khr::push_descriptor::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        let conditional_rendering_ext = if logical.conditional_rendering_enabled {
+            Some(ash::ext::conditional_rendering::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        let conservative_rasterization_enabled =
+            caps.features.conservative_rasterization_overestimate;
 
         // Create the bindless heap if the device supports descriptor_indexing.
         let bindless_heap = if caps.supports_bindless {
@@ -177,6 +205,9 @@ impl VulkanBackend {
             synchronization2_khr,
             dynamic_rendering_khr,
             device_fault_ext,
+            push_descriptor_khr,
+            conditional_rendering_ext,
+            conservative_rasterization_enabled,
         })
     }
 
@@ -922,8 +953,7 @@ fn gather_device_fault_info(
     let get_fault = fault_ext.fp().get_device_fault_info_ext;
     let mut fault_counts = ash::vk::DeviceFaultCountsEXT::default();
     // First call: get counts only (fault_info = null).
-    let count_result =
-        unsafe { get_fault(device_handle, &mut fault_counts, std::ptr::null_mut()) };
+    let count_result = unsafe { get_fault(device_handle, &mut fault_counts, std::ptr::null_mut()) };
     if count_result != ash::vk::Result::SUCCESS {
         return original_msg.to_string();
     }

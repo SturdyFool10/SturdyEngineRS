@@ -105,6 +105,8 @@ impl ScreenshotCapture {
             }],
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         })
     }
 

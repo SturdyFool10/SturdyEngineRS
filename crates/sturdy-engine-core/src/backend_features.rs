@@ -7,6 +7,9 @@ pub struct BackendFeatures {
     pub timeline_semaphores: bool,
     pub dynamic_rendering: bool,
     pub synchronization2: bool,
+    /// VK_KHR_buffer_device_address (or Vulkan 1.2 core) — expose GPU virtual
+    /// addresses for buffers created with SHADER_DEVICE_ADDRESS usage.
+    pub buffer_device_address: bool,
     pub hdr_output: bool,
     pub shader_fp16: bool,
     pub shader_fp64: bool,
@@ -38,6 +41,38 @@ pub struct BackendFeatures {
     /// VK_EXT_host_image_copy (or Vulkan 1.4 core) — CPU→GPU image uploads
     /// without a staging buffer or explicit transfer command.
     pub host_image_copy: bool,
+    /// VK_KHR_push_descriptor — inline descriptor updates pushed directly into
+    /// a command buffer without a descriptor pool.
+    pub push_descriptors: bool,
+    /// VK_EXT_conditional_rendering — GPU-side predicate that skips draw/dispatch
+    /// commands based on a buffer value.
+    pub conditional_rendering: bool,
+    /// VK_EXT_extended_dynamic_state3 — additional pipeline state settable dynamically.
+    pub extended_dynamic_state3: bool,
+    /// Polygon mode can be set dynamically (part of extended_dynamic_state3).
+    pub extended_dynamic_state3_polygon_mode: bool,
+    /// Color blend enable can be set dynamically (part of extended_dynamic_state3).
+    pub extended_dynamic_state3_color_blend: bool,
+    /// VK_EXT_vertex_input_dynamic_state — vertex input state settable dynamically.
+    pub vertex_input_dynamic_state: bool,
+    /// VK_EXT_conservative_rasterization overestimation mode.
+    pub conservative_rasterization_overestimate: bool,
+    /// VK_EXT_conservative_rasterization underestimation mode.
+    pub conservative_rasterization_underestimate: bool,
+    /// VK_KHR_global_priority — assign global GPU scheduler priority to queues.
+    pub global_queue_priority: bool,
+    /// VK_EXT_sampler_filter_minmax (core 1.2) — min/max reduction sampler filter.
+    pub sampler_filter_minmax: bool,
+    /// VK_EXT_custom_border_color — arbitrary border color for samplers.
+    pub custom_border_color: bool,
+    /// VK_EXT_filter_cubic — cubic filtering for sampled images.
+    pub filter_cubic: bool,
+    /// VK_EXT_image_view_min_lod — clamp minimum LOD in an image view.
+    pub image_view_min_lod: bool,
+    /// VK_EXT_image_compression_control — explicit lossy/lossless compression hints.
+    pub image_compression_control: bool,
+    /// VK_EXT_multisampled_render_to_single_sampled — render MSAA into single-sample storage.
+    pub msaa_render_to_single_sampled: bool,
 }
 
 #[cfg(test)]

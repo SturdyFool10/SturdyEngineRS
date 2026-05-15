@@ -1753,6 +1753,8 @@ impl<'f> DrawPassBuilder<'f> {
             buffer_writes: Vec::new(),
             clear_colors,
             clear_depth,
+            push_descriptor_set: None,
+            predicate: None,
         })
     }
 }
@@ -1915,6 +1917,8 @@ impl<'f> ComputePassBuilder<'f> {
             buffer_writes: buf_writes,
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         })
     }
 }
@@ -1987,6 +1991,8 @@ impl Frame {
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         })
     }
 
@@ -2006,6 +2012,8 @@ impl Frame {
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         })
     }
 
@@ -2075,6 +2083,8 @@ impl Frame {
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         })
     }
 

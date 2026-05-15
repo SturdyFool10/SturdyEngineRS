@@ -217,6 +217,8 @@ impl Frame {
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         })
     }
 
@@ -280,6 +282,8 @@ impl Frame {
             }],
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         })
     }
 
@@ -370,6 +374,8 @@ impl Frame {
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         })?;
         self.add_pass(PassDesc {
             name: format!("{name}-shader-read"),
@@ -396,6 +402,8 @@ impl Frame {
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         })?;
         Ok(image)
     }
@@ -472,6 +480,8 @@ impl Frame {
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         })?;
         self.add_pass(PassDesc {
             name: format!("{name}-shader-read"),
@@ -498,6 +508,8 @@ impl Frame {
             buffer_writes: Vec::new(),
             clear_colors: Vec::new(),
             clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
         })
     }
 }

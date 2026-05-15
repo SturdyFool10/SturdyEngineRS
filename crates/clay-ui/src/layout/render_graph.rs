@@ -70,6 +70,8 @@ impl UiGraphPassBuilder {
                     buffer_writes: Vec::new(),
                     clear_colors: Vec::new(),
                     clear_depth: None,
+                    push_descriptor_set: None,
+                    predicate: None,
                 })
             })
             .collect()

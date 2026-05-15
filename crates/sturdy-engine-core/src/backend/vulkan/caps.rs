@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 
-use ash::{Instance, vk};
+use ash::{vk, Instance};
 
 use crate::{BackendFeatures, Caps, Format, FormatCapabilities, Limits};
 
@@ -36,14 +36,24 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     let variable_rate_shading = has(b"VK_KHR_fragment_shading_rate\0");
     let draw_indirect_count =
         properties.api_version >= vk::API_VERSION_1_2 || has(b"VK_KHR_draw_indirect_count\0");
+    let buffer_device_address =
+        properties.api_version >= vk::API_VERSION_1_2 || has(b"VK_KHR_buffer_device_address\0");
     let memory_budget = has(b"VK_EXT_memory_budget\0");
     let memory_priority = has(b"VK_EXT_memory_priority\0");
     let pageable_device_local_memory = has(b"VK_EXT_pageable_device_local_memory\0");
     let device_fault = has(b"VK_EXT_device_fault\0");
     // VK_EXT_host_image_copy is core in Vulkan 1.4 (version 0x00401000).
     let vk_1_4 = vk::make_api_version(0, 1, 4, 0);
-    let host_image_copy =
-        has(b"VK_EXT_host_image_copy\0") || properties.api_version >= vk_1_4;
+    let host_image_copy = has(b"VK_EXT_host_image_copy\0") || properties.api_version >= vk_1_4;
+    // GFX-1f: VK_KHR_push_descriptor — no feature struct, purely extension presence.
+    let push_descriptors = has(b"VK_KHR_push_descriptor\0");
+    // GFX-2g: VK_KHR_global_priority — no feature struct, purely extension presence.
+    let global_queue_priority = has(b"VK_KHR_global_priority\0");
+    // GFX-2f: VK_EXT_conservative_rasterization — no feature struct, extension presence only.
+    let conservative_rasterization_ext = has(b"VK_EXT_conservative_rasterization\0");
+    // GFX-2k: VK_EXT_filter_cubic — no feature struct.
+    let filter_cubic = has(b"VK_EXT_filter_cubic\0");
+
     let core_features = unsafe { instance.get_physical_device_features(physical_device) };
     let feature_chain = available_feature_chain(instance, physical_device);
     let mesh_shading =
@@ -74,6 +84,61 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     );
     let max_color_sample_count = max_sample_count(lim.framebuffer_color_sample_counts);
 
+    // GFX-2b: VK_EXT_conditional_rendering
+    let conditional_rendering = has(b"VK_EXT_conditional_rendering\0")
+        && feature_chain.conditional_rendering.conditional_rendering == vk::TRUE;
+
+    // GFX-2d: VK_EXT_extended_dynamic_state3
+    let extended_dynamic_state3 = has(b"VK_EXT_extended_dynamic_state3\0")
+        && (feature_chain
+            .extended_dynamic_state3
+            .extended_dynamic_state3_polygon_mode
+            == vk::TRUE
+            || feature_chain
+                .extended_dynamic_state3
+                .extended_dynamic_state3_rasterization_samples
+                == vk::TRUE
+            || feature_chain
+                .extended_dynamic_state3
+                .extended_dynamic_state3_color_blend_enable
+                == vk::TRUE);
+    let extended_dynamic_state3_polygon_mode = has(b"VK_EXT_extended_dynamic_state3\0")
+        && feature_chain
+            .extended_dynamic_state3
+            .extended_dynamic_state3_polygon_mode
+            == vk::TRUE;
+    let extended_dynamic_state3_color_blend = has(b"VK_EXT_extended_dynamic_state3\0")
+        && feature_chain
+            .extended_dynamic_state3
+            .extended_dynamic_state3_color_blend_enable
+            == vk::TRUE;
+
+    // GFX-2e: VK_EXT_vertex_input_dynamic_state
+    let vertex_input_dynamic_state = has(b"VK_EXT_vertex_input_dynamic_state\0")
+        && feature_chain
+            .vertex_input_dynamic_state
+            .vertex_input_dynamic_state
+            == vk::TRUE;
+
+    // GFX-2k: sampler/image quality extensions
+    let vk_1_2 = vk::make_api_version(0, 1, 2, 0);
+    let sampler_filter_minmax =
+        properties.api_version >= vk_1_2 || has(b"VK_EXT_sampler_filter_minmax\0");
+    let custom_border_color = has(b"VK_EXT_custom_border_color\0")
+        && feature_chain.custom_border_color.custom_border_colors == vk::TRUE;
+    let image_view_min_lod =
+        has(b"VK_EXT_image_view_min_lod\0") && feature_chain.image_view_min_lod.min_lod == vk::TRUE;
+    let image_compression_control = has(b"VK_EXT_image_compression_control\0")
+        && feature_chain
+            .image_compression_control
+            .image_compression_control
+            == vk::TRUE;
+    let msaa_render_to_single_sampled = has(b"VK_EXT_multisampled_render_to_single_sampled\0")
+        && feature_chain
+            .msaa_render_to_single_sampled
+            .multisampled_render_to_single_sampled
+            == vk::TRUE;
+
     let features = BackendFeatures {
         ray_tracing,
         mesh_shading,
@@ -82,6 +147,7 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         timeline_semaphores,
         dynamic_rendering,
         synchronization2,
+        buffer_device_address,
         hdr_output,
         shader_fp16,
         shader_fp64,
@@ -100,6 +166,21 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         pageable_device_local_memory,
         device_fault,
         host_image_copy,
+        push_descriptors,
+        conditional_rendering,
+        extended_dynamic_state3,
+        extended_dynamic_state3_polygon_mode,
+        extended_dynamic_state3_color_blend,
+        vertex_input_dynamic_state,
+        conservative_rasterization_overestimate: conservative_rasterization_ext,
+        conservative_rasterization_underestimate: conservative_rasterization_ext,
+        global_queue_priority,
+        sampler_filter_minmax,
+        custom_border_color,
+        filter_cubic,
+        image_view_min_lod,
+        image_compression_control,
+        msaa_render_to_single_sampled,
     };
 
     let limits = Limits {
@@ -304,6 +385,10 @@ pub fn available_feature_names(
 ) -> Vec<String> {
     let mut names = available_core_feature_names(instance, physical_device);
     let chain = available_feature_chain(instance, physical_device);
+    let extensions = available_device_extension_names(instance, physical_device)
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let has_ext = |name: &str| extensions.contains(name);
 
     if chain.timeline.timeline_semaphore == vk::TRUE {
         names.push("timeline_semaphore".into());
@@ -314,6 +399,9 @@ pub fn available_feature_names(
     }
     if chain.synchronization2.synchronization2 == vk::TRUE {
         names.push("synchronization2".into());
+    }
+    if chain.buffer_device_address.buffer_device_address == vk::TRUE {
+        names.push("buffer_device_address".into());
     }
     if chain.mesh_shader.mesh_shader == vk::TRUE {
         names.push("mesh_shader".into());
@@ -343,6 +431,58 @@ pub fn available_feature_names(
     if chain.fragment_shading_rate.attachment_fragment_shading_rate == vk::TRUE {
         names.push("attachment_fragment_shading_rate".into());
     }
+    if chain.memory_priority.memory_priority == vk::TRUE {
+        names.push("memory_priority".into());
+    }
+    if chain.conditional_rendering.conditional_rendering == vk::TRUE {
+        names.push("conditional_rendering".into());
+    }
+    if chain
+        .extended_dynamic_state3
+        .extended_dynamic_state3_polygon_mode
+        == vk::TRUE
+        || chain
+            .extended_dynamic_state3
+            .extended_dynamic_state3_color_blend_enable
+            == vk::TRUE
+    {
+        names.push("extended_dynamic_state3".into());
+    }
+    if chain.vertex_input_dynamic_state.vertex_input_dynamic_state == vk::TRUE {
+        names.push("vertex_input_dynamic_state".into());
+    }
+    if chain.custom_border_color.custom_border_colors == vk::TRUE {
+        names.push("custom_border_color".into());
+    }
+    if chain.image_view_min_lod.min_lod == vk::TRUE {
+        names.push("image_view_min_lod".into());
+    }
+    if chain.image_compression_control.image_compression_control == vk::TRUE {
+        names.push("image_compression_control".into());
+    }
+    if chain
+        .msaa_render_to_single_sampled
+        .multisampled_render_to_single_sampled
+        == vk::TRUE
+    {
+        names.push("msaa_render_to_single_sampled".into());
+    }
+    if has_ext("VK_KHR_push_descriptor") {
+        names.push("push_descriptor".into());
+        names.push("push_descriptors".into());
+    }
+    if has_ext("VK_KHR_global_priority") {
+        names.push("global_queue_priority".into());
+    }
+    if has_ext("VK_EXT_conservative_rasterization") {
+        names.push("conservative_rasterization".into());
+    }
+    if has_ext("VK_EXT_sampler_filter_minmax") {
+        names.push("sampler_filter_minmax".into());
+    }
+    if has_ext("VK_EXT_filter_cubic") {
+        names.push("filter_cubic".into());
+    }
 
     push_descriptor_indexing_feature_names(&mut names, &chain.descriptor_indexing);
     names.sort();
@@ -356,12 +496,21 @@ pub struct AvailableFeatureChain<'a> {
     pub timeline: vk::PhysicalDeviceTimelineSemaphoreFeatures<'a>,
     pub dynamic_rendering: vk::PhysicalDeviceDynamicRenderingFeatures<'a>,
     pub synchronization2: vk::PhysicalDeviceSynchronization2Features<'a>,
+    pub buffer_device_address: vk::PhysicalDeviceBufferDeviceAddressFeatures<'a>,
     pub shader_float16_int8: vk::PhysicalDeviceShaderFloat16Int8Features<'a>,
     pub mesh_shader: vk::PhysicalDeviceMeshShaderFeaturesEXT<'a>,
     pub acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'a>,
     pub ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR<'a>,
     pub fragment_shading_rate: vk::PhysicalDeviceFragmentShadingRateFeaturesKHR<'a>,
     pub memory_priority: vk::PhysicalDeviceMemoryPriorityFeaturesEXT<'a>,
+    pub conditional_rendering: vk::PhysicalDeviceConditionalRenderingFeaturesEXT<'a>,
+    pub extended_dynamic_state3: vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT<'a>,
+    pub vertex_input_dynamic_state: vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT<'a>,
+    pub custom_border_color: vk::PhysicalDeviceCustomBorderColorFeaturesEXT<'a>,
+    pub image_view_min_lod: vk::PhysicalDeviceImageViewMinLodFeaturesEXT<'a>,
+    pub image_compression_control: vk::PhysicalDeviceImageCompressionControlFeaturesEXT<'a>,
+    pub msaa_render_to_single_sampled:
+        vk::PhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT<'a>,
 }
 
 pub fn available_feature_chain(
@@ -373,24 +522,41 @@ pub fn available_feature_chain(
         timeline: vk::PhysicalDeviceTimelineSemaphoreFeatures::default(),
         dynamic_rendering: vk::PhysicalDeviceDynamicRenderingFeatures::default(),
         synchronization2: vk::PhysicalDeviceSynchronization2Features::default(),
+        buffer_device_address: vk::PhysicalDeviceBufferDeviceAddressFeatures::default(),
         shader_float16_int8: vk::PhysicalDeviceShaderFloat16Int8Features::default(),
         mesh_shader: vk::PhysicalDeviceMeshShaderFeaturesEXT::default(),
         acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default(),
         ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default(),
         fragment_shading_rate: vk::PhysicalDeviceFragmentShadingRateFeaturesKHR::default(),
         memory_priority: vk::PhysicalDeviceMemoryPriorityFeaturesEXT::default(),
+        conditional_rendering: vk::PhysicalDeviceConditionalRenderingFeaturesEXT::default(),
+        extended_dynamic_state3: vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT::default(),
+        vertex_input_dynamic_state: vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT::default(),
+        custom_border_color: vk::PhysicalDeviceCustomBorderColorFeaturesEXT::default(),
+        image_view_min_lod: vk::PhysicalDeviceImageViewMinLodFeaturesEXT::default(),
+        image_compression_control: vk::PhysicalDeviceImageCompressionControlFeaturesEXT::default(),
+        msaa_render_to_single_sampled:
+            vk::PhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT::default(),
     };
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut chain.descriptor_indexing)
         .push_next(&mut chain.timeline)
         .push_next(&mut chain.dynamic_rendering)
         .push_next(&mut chain.synchronization2)
+        .push_next(&mut chain.buffer_device_address)
         .push_next(&mut chain.shader_float16_int8)
         .push_next(&mut chain.mesh_shader)
         .push_next(&mut chain.acceleration_structure)
         .push_next(&mut chain.ray_tracing)
         .push_next(&mut chain.fragment_shading_rate)
-        .push_next(&mut chain.memory_priority);
+        .push_next(&mut chain.memory_priority)
+        .push_next(&mut chain.conditional_rendering)
+        .push_next(&mut chain.extended_dynamic_state3)
+        .push_next(&mut chain.vertex_input_dynamic_state)
+        .push_next(&mut chain.custom_border_color)
+        .push_next(&mut chain.image_view_min_lod)
+        .push_next(&mut chain.image_compression_control)
+        .push_next(&mut chain.msaa_render_to_single_sampled);
     unsafe { instance.get_physical_device_features2(physical_device, &mut features2) };
     chain
 }
