@@ -1,691 +1,215 @@
-# Cross‑API Rust Graphics Engine Design with Slang Reflection
+# Modern Real-Time Graphics That Look Great and Perform Well
 
 ## Executive summary
 
-This design doc proposes a **Rust-based, cross‑API graphics engine** targeting Vulkan, DirectX 12, and Metal, with **Slang-driven shader reflection** as the canonical source of truth for binding layouts and pipeline compatibility. Vulkan is standardized by entity["organization","Khronos Group","graphics standards consortium"], DirectX 12 is from entity["company","Microsoft","redmond, wa, us"], and Metal is from entity["company","Apple","cupertino, ca, us"]. The engine architecture is explicitly shaped around modern explicit APIs: **record work**, **derive dependencies from declared resource usage**, and **submit in large batches without implicit flushes**, using explicit fences/events/timeline primitives. Vulkan’s explicit sync model and “external synchronization” rules (notably queue submission and command pool usage) directly motivate a “single submission point per queue” and per-thread recording contexts. citeturn3search0turn3search5turn0search0
+Target platforms were unspecified, so the most defensible cross-platform target is a renderer architecture that treats **Vulkan, Direct3D 12, and Metal as first-class backends**, while treating **OpenGL or OpenGL ES as a compatibility fallback** rather than the primary design center. That is where the modern feature set lives: explicit resource state management, descriptor-based or bindless-style resource access, multithreaded command generation, indirect and device-generated work, async compute, standardized ray tracing, variable-rate shading or rasterization-rate control, mesh shading, sparse or virtualized resources, and persistent pipeline compilation artifacts. Vulkan is explicitly positioned as a cross-platform explicit API and now has current registry specification updates through Vulkan 1.4.351; Direct3D 12 exposes the same class of explicit control on Windows; and Metal exposes parallel low-overhead graphics/compute with argument buffers, indirect command buffers, sparse textures, binary archives, and ray tracing on supported Apple GPUs. OpenGL can still do useful compatibility work with persistent mapped buffers, multi-draw indirect, compute, sparse textures, and bindless textures, but it is not the best primary abstraction for a new high-end engine. citeturn17search9turn23search2turn14search13turn5search7turn24search2turn24search0turn24search11turn24search14turn39search21
 
-The central consumer requirements map naturally onto a render-graph–first design:
+The main analytical conclusion is that **visual quality and performance are no longer separable problems**. The best-looking modern engines are structured around a retained-mode render graph or frame graph, aggressive GPU visibility work, robust resource streaming and residency systems, carefully managed shader and pipeline compilation, and a temporal reconstruction stack that includes TAA, denoising, temporal upscaling, tone mapping, and HDR-aware compositing. In practice, an engine usually wins not by any single “killer feature,” but by making every stage cheap enough and stable enough that temporal methods can accumulate information across frames without visible instability. Frostbite’s frame-graph work is still representative of the architectural direction: build rendering as explicit passes and resources, compile the graph, alias transient resources, and automate synchronization and lifetime decisions. citeturn19search0turn20search0turn25search17turn14search10turn39search9turn34search18turn34search11
 
-- Consumers should not care which API/GPU they are on **except for ray tracing availability**. This becomes a `supports_raytracing` capability query with an optional “advanced feature” surface for mesh shading and bindless tiers. citeturn9search3turn9search2turn0search2turn9search0
-- A single `Image` type represents either a **GPU resource** or a **render target**; “screen” is just an imported `Image` representing a swapchain drawable. citeturn4search29turn7search13turn3search3
-- Shaders can be built at runtime from inline or file sources, and can run with arbitrary input/output sets; the engine derives ordering from **who reads/writes which Images/Buffers** (render graph) and only submits when the consumer explicitly asks to flush/present. This aligns with render-graph systems described in Unreal RDG, Frostbite FrameGraph, AMD RPS, and EA SEED Halcyon. citeturn1search1turn1search10turn1search4turn1search6
-- The API must be C-FFI-safe for consumers writing game logic in any language; use opaque handles and `#[repr(C)]` structs, and forbid panics crossing FFI. (Rust engineering choice; API facts cited where applicable.)
+The second conclusion is that **low latency is a whole-stack problem**. Operating systems and compositors decide a great deal of present behavior; graphics APIs expose present modes, frame-latency controls, and queue synchronization primitives; and the engine decides when input is sampled, how many frames are queued, how long compute jobs run before yielding to graphics, and whether tracking or camera state is refreshed late. Windows flip-model swap chains and waitable objects, Vulkan present mode selection, Metal display-link pacing and drawable count control, and OpenXR’s predicted display time all show that low visual latency is not just “render faster”; it is “render with the right cadence and the smallest safe amount of buffering.” citeturn8search1turn8search0turn9search0turn12search0turn12search8turn8search2turn10search13
 
-A practical implementation uses three layers:
+The third conclusion is that **recent research is pushing production engines in three directions at once**: more GPU-generated geometry and visibility work, more temporal or neural reconstruction, and more out-of-core, foveated, or streamed representations to keep memory and latency under control. The latest papers that are most relevant to shipping engines are not uniform “drop-ins”; they are signals about where implementations are headed. The most useful recent work, as of May 2026, clusters around neural denoising, neural or wavelet super-resolution, mesh-shader-generated detail, GPU-side procedural geometry, out-of-core rendering, and latency-aware foveated or streamed representations. citeturn37search1turn37search2turn37search3turn13search11turn37search7turn38search0turn38search1
 
-1. **Thin backend**: minimal wrappers over native concepts (queues, command buffers/lists, fences/semaphores/events, descriptor sets/tables/argument buffers, pipelines/PSOs).  
-2. **Middle utilities**: per-frame contexts, deferred destruction, transient allocators, descriptor allocators/rings, pipeline caches/libraries/binary archives.  
-3. **High-level render graph**: compile pass/resource declarations into barriers + lifetimes + aliasing plan + multithreaded recording batches, then submit without implicit flushes. citeturn1search4turn1search1turn1search12turn7search5
+## Core graphics API capabilities
 
-## Architecture model and backend mapping
+A modern high-end engine needs the API to expose a **small set of non-negotiable explicit controls**: resource lifetime and memory placement, explicit synchronization and queueing, programmable shader stages with subgroup or wave-style operations, scalable resource binding, reusable pipeline objects, and enough GPU-side dispatch and indirect drawing support to keep scene traversal off the CPU. The precise spelling differs by API, but the capability classes are now very clear and broadly convergent. citeturn27search16turn26search1turn39search1turn14search9turn14search1
 
-### Unified mental model across Vulkan, DirectX 12, and Metal
+| Capability | Vulkan | Direct3D 12 | Metal | OpenGL fallback | Why it matters |
+|---|---|---|---|---|---|
+| Explicit resource binding | Descriptor sets and layouts; descriptor indexing is a modern portability target; descriptor buffers are an advanced path. citeturn27search16turn23search4turn27search2 | Descriptor heaps, descriptor tables, and root signatures; SM 6.6 dynamic resources allow direct heap indexing. citeturn26search1turn4search2turn26search2turn26search5 | Argument buffers group resources and support bindless-style access patterns. citeturn39search1turn39search0turn5search13 | Bindless textures, ARB_gl_spirv, and older binding models coexist. citeturn24search14turn24search7 | Lets the engine move from per-draw rebinding to large descriptor tables or scene-wide resource tables. |
+| Memory placement and residency | Explicit memory model; portability depends on queried features and limits. citeturn17search9turn23search4 | Resources, heaps, placed resources, tiled resources, and sampler feedback. citeturn25search9turn32search0turn32search18 | Heaps, sparse textures, fast resource loading, and residency tracking for argument buffers. citeturn5search2turn32search2turn39search11 | ARB_sparse_texture, ARB_sparse_buffer, persistent mapping. citeturn6search1turn6search7turn24search2 | Makes virtual texturing, mesh streaming, and transient allocation practical. |
+| Explicit synchronization | Synchronization2, barriers, queue ownership, timeline semaphores. citeturn23search4turn27search11 | Resource barriers, fences, multi-engine sync. citeturn25search17turn33search16 | Barriers, fences, events, and shared events. citeturn39search9turn39search14turn39search4 | Sync objects plus mostly driver-managed hazards. citeturn24search18turn6search3 | Required for correctness and for overlapping copy, compute, and graphics work. |
+| Multithreaded command generation | Per-thread command pools; secondary command buffers. citeturn14search15turn14search0turn14search6 | Command lists and bundles can be recorded and submitted from multiple threads. citeturn14search14turn14search13turn14search7 | Parallel render command encoders and indirect command buffers. citeturn14search2turn15search7 | Limited explicit multithreading relative to newer APIs. citeturn24search0turn24search2 | Prevents the CPU submission path from becoming the frame bottleneck. |
+| GPU-driven rendering | Multi-draw indirect, indirect count, and device-generated commands. citeturn33search17turn33search5turn33search9turn31search10 | ExecuteIndirect and indirect drawing. citeturn33search8turn33search0turn33search4 | Indirect command buffers on CPU or GPU. citeturn15search7turn39search12 | Multi-draw indirect and indirect parameters. citeturn24search0turn24search3 | Moves culling, LOD, and draw compaction to the GPU. |
+| Async compute and multi-queue work | Multiple queues; explicit queue synchronization. citeturn14search3turn14search10 | Independent direct, compute, and copy queues with explicit synchronization. citeturn33search16turn14search10 | Compute and graphics share a unified API; events synchronize across queues. citeturn14search8turn39search9 | Limited and driver-mediated compared with explicit APIs. citeturn24search11turn24search18 | Needed for concurrent culling, post, denoising, and copy workloads. |
+| Ray tracing | KHR acceleration structures, ray tracing pipeline, and ray query. citeturn28search14turn28search13turn28search16turn28search4 | DXR state objects, shader tables, local/global root signatures. citeturn3search6turn4search5turn26search8 | Acceleration structures and ray tracing support on supported Apple GPUs. citeturn5search5turn5search15 | No standardized cross-vendor modern RT path. citeturn24search9turn39search21 | Enables hybrid shadows, reflections, GI probes, and path-traced modes. |
+| Variable shading rate | KHR fragment shading rate. citeturn29search15turn29search3 | Tiered VRS, base shading rate, and shading-rate images. citeturn30search0turn30search5turn30search12turn30search13 | Rasterization-rate maps and variable rasterization rate. citeturn15search6turn15search9turn29search11 | No standardized equivalent at this level. citeturn24search9 | Trades perceptual quality for fill/shading performance. |
+| Mesh shading | VK_EXT_mesh_shader. citeturn31search0turn31search1 | Mesh and amplification shaders; meshlets are the practical content unit. citeturn4search0turn31search2turn31search20 | Object and mesh shaders, with samples showing meshlet LOD. citeturn15search1turn15search5turn39search12 | No modern core cross-vendor equivalent. citeturn24search9 | Best used with meshletized assets, GPU culling, LOD, and procedural detail. |
+| Pipeline reuse and caching | Pipeline cache and pipeline libraries are part of the modern Vulkan toolbox. Ray tracing also integrates with pipeline libraries. citeturn28search0turn23search4 | Cached PSO blobs and pipeline libraries. citeturn25search0turn25search4turn25search7 | Binary archives, dynamic libraries, and compiler/archive workflows. citeturn16search0turn16search4turn16search6turn16search10 | Historically weaker and more driver-managed. citeturn24search9 | Avoids runtime hitches from shader or PSO compilation. |
+| Multi-GPU and portability | Device groups, portability subset, portability enumeration, and Vulkan Profiles. citeturn23search0turn23search5turn17search1turn17search2turn23search8 | Multi-adapter node model. citeturn22search1 | Multiple GPU devices and shared events across devices. citeturn22search14turn22search16turn39search4 | Compatibility-only path; not a strategic target for high-end new work. citeturn39search21 | Feature-query-driven fallback design matters more than theoretical feature parity. |
 
-All three APIs converge on the same underlying structure:
+Two clarifications matter. First, **meshlets are not an API feature**; they are an engine asset and culling unit that becomes especially valuable when paired with mesh shaders or GPU-driven classic draws. Microsoft’s mesh shader samples explicitly frame the projects as an introduction to meshlets and mesh shaders, and Apple’s mesh-shader sample likewise uses meshlets as the object/mesh-shader work unit. citeturn31search2turn39search12
 
-- **Record** work into command containers (Vulkan command buffers, D3D12 command lists, Metal command buffers/encoders). citeturn3search5turn2search10turn4search29
-- **Synchronize** explicitly (Vulkan fences/semaphores/timeline semaphores; D3D12 fences + resource barriers; Metal shared events/fences/hazard tracking). citeturn0search0turn2search3turn4search2turn4search30
-- **Bind resources** explicitly (Vulkan descriptor sets / descriptor buffers; D3D12 root signatures + descriptor heaps; Metal argument buffers). citeturn8search19turn8search15turn2search1turn2search0turn4search14turn0search6
-- **Use immutable pipeline objects** (Vulkan pipelines; D3D12 PSOs; Metal pipeline states). D3D12 explicitly states the only way to change pipeline state contained in the PSO is to bind a different PSO. citeturn8search0turn7search8turn4search13
+Second, **bindless is not one thing**. In Vulkan it usually means descriptor indexing or a descriptor-buffer path over large descriptor address spaces; in Direct3D 12 it means large descriptor heaps plus root-signature policy and often SM 6.6 dynamic resources; in Metal it means argument buffers and indexed access to resource tables. An engine abstraction should therefore target the concept of **scene-wide resource indexing**, not one backend’s binding object. citeturn27search2turn26search2turn39search1
 
-The engine abstraction should therefore expose a small number of explicit primitives that can map 1:1 to each backend without hidden side effects.
+## Engine subsystems and how they map onto API features
 
-### Shader IR targets and toolchain integration
+The renderer architecture that now dominates high-end engines is a **frame graph or render graph**. Frostbite’s public frame-graph talk described exactly the responsibilities engines still need today: represent passes and resources explicitly, compile the dependence graph each frame, infer transitions and lifetimes, alias transient resources where legal, and keep feature code modular without losing performance. This model is a natural fit for Vulkan barriers and Vulkan/Direct3D/Metal transient allocation strategies because it turns synchronization into a graph problem instead of an ad hoc pile of barriers inside every pass. citeturn19search0turn20search0turn25search17turn39search9
 
-For runtime compilation and reflection-driven layout:
+| Engine subsystem | API features it leans on | Why it exists |
+|---|---|---|
+| Render graph / frame graph | Explicit barriers, queue ownership, render-pass or dynamic-rendering metadata, transient allocations, pipeline compatibility. citeturn19search0turn25search17turn23search4turn39search9 | Centralizes pass ordering, resource lifetime, aliasing, and async scheduling decisions. |
+| Memory allocator and residency manager | Heaps/placed resources, sparse or tiled resources, fast loading, residency feedback where available. citeturn25search9turn32search0turn32search2turn32search20 | Prevents fragmentation, controls working set, and keeps visible content resident. |
+| Shader compilation and pipeline manager | Shader libraries, binary archives, pipeline libraries, cached PSO blobs, offline variants. citeturn16search4turn16search6turn25search4turn25search7 | Prevents stutter and controls variant explosion. |
+| Visibility, culling, and LOD | Indirect draws, ExecuteIndirect, indirect count, ICBs, mesh shaders, visibility buffers or occlusion results. citeturn33search17turn33search4turn33search2turn15search7turn15search5 | Keeps the CPU out of per-object decision-making and scales scene complexity. |
+| Batching, instancing, and material binding | Descriptor indexing, dynamic resources, argument buffers, root signatures, bindless texture tables. citeturn26search2turn39search1turn24search14 | Reduces submission overhead and state churn. |
+| Lighting and shadowing | Deferred or forward+/clustered light lists, async compute, ray query or RT pipelines, VRS where perceptually safe. citeturn34search0turn34search1turn28search4turn28search13turn30search0 | Makes many-light scenes and hybrid shadows tractable. |
+| Post, TAA, denoising, and upscaling | Motion vectors, history buffers, compute kernels, temporal filters, HDR-aware output. citeturn34search18turn34search11turn37search1turn37search7turn36search3 | Reconstructs stability and detail from limited per-frame work. |
+| HDR, color management, compositing, XR | Correct swapchain or layer color spaces, tone mapping, compositor integration, predicted display time. citeturn35search0turn36search0turn36search3turn8search2turn10search13 | Prevents the final mile from undoing the rest of the renderer. |
 
-- Vulkan consumes **SPIR-V** shader modules, and SPIR-V is specified as the intermediate language. citeturn3search5turn0search4turn0search0turn7search1
-- D3D12 consumes **DXIL** (as compiled output of modern HLSL toolchains); DXIL is specified as a mapping of HLSL into LLVM IR suitable for GPU drivers. citeturn7search0turn7search3
-- Metal uses **MSL** (Metal Shading Language), specified by Apple’s MSL specification. citeturn7search1turn7search13
+For opaque-heavy scenes with many local lights, **deferred shading** still excels because it decouples geometry processing from lighting cost, and current APIs make multiple render targets and compute/post pipelines straightforward. But **Forward+ or clustered forward** remains superior where transparency, MSAA, and material flexibility matter, and clustered methods outperform purely tiled methods because they partition in 3D rather than only screen space. The canonical references are still Harada et al.’s *Forward+* and Olsson et al.’s *Clustered Deferred and Forward Shading*. citeturn34search0turn34search1turn34search17
 
-Slang sits “above” these backends: it can provide reflection metadata and can target D3D12/DXIL, Vulkan/SPIR-V, and Metal/MSL workflows when configured appropriately, and its reflection API is explicitly designed to support binding-group mechanisms used by these targets. citeturn0search3turn0search31turn0search19
+The modern quality stack is also strongly **temporal**. TAA became mainstream because a stable history buffer often fixes more visible aliasing than more raw shading alone; modern denoisers do the same for ray-traced effects. Playdead’s *Temporal Reprojection Anti-Aliasing in INSIDE* is still one of the clearest production explanations of why history reprojection, jitter, and clamping matter, and SVGF remains foundational for temporally stable ray-tracing reconstruction. More recent work is extending that pattern with neural denoisers and real-time super-resolution. citeturn34search18turn34search14turn34search11turn37search1turn37search7
 
-### Driver/validation layers and debugging contracts
+A material system that wants both scale and quality should therefore be built around **stable identifiers, per-material parameter blocks, and scene-wide resource tables**, not around repeated API binding calls. On Vulkan that usually means descriptor-indexed material tables; on Direct3D 12, large descriptor heaps and root-signature policy; on Metal, argument buffers that group textures, buffers, samplers, and constants. This is the practical substrate that enables batched shading, virtual texturing, ray tracing, and GPU-driven visibility without per-draw CPU churn. citeturn27search2turn26search1turn26search2turn39search1turn39search12
 
-The abstraction must treat validation and capture tooling as part of the design:
+## Low-latency input, rendering, and presentation
 
-- Vulkan: minimal error checking in drivers is by design; `VK_LAYER_KHRONOS_validation` exists to catch incorrect usage. citeturn6search2turn6search9turn6search6  
-- D3D12: the debug layer and GPU-based validation enable detection of issues only visible on the GPU timeline. citeturn5search0turn5search16  
-- Metal: Xcode’s Metal API validation checks for incorrect resource creation/encoding/usage; Xcode supports capturing Metal workloads for analysis. citeturn6search0turn6search1turn6search5  
-- Cross-API capture: RenderDoc is a frame-capture debugger available for Vulkan and D3D12 (among others). citeturn5search2  
+Low visual latency has to be split into **OS-level**, **API-level**, and **engine-level** responsibilities. The OS and compositor determine whether an application gets an independent fast path or has to pass through desktop composition; the API determines how many images may queue, which present modes exist, and what synchronization is exposed; and the engine decides when to sample input, how many frames to pipeline, and whether to keep long compute passes from delaying graphics. That division is visible in Windows DXGI flip-model guidance, Vulkan WSI present modes, Metal display-link pacing, and OpenXR frame pacing. citeturn8search1turn8search6turn9search0turn12search0turn8search2
 
-The engine’s “debug personality” should enable these checks by default in dev builds and systematically label passes/resources so captures are readable (names are also important for render graph visualization tools). citeturn1search4turn5search1turn6search21
+On Windows, the best-documented non-proprietary path is still **flip-model presentation with explicit frame-latency control**. Microsoft’s guidance says games should prefer DXGI flip model, and notes that with a frame-latency waitable object and independent flip mode, latency can be reduced to roughly one frame on supported systems; DXGI 1.3 also exposes APIs specifically intended to wake the app when rendering the next frame is productive. citeturn8search1turn8search0turn8search6
 
-### Comparison table across APIs
+In Vulkan, the key latency control is **present-mode choice plus swapchain image count**. The spec distinguishes IMMEDIATE, MAILBOX, FIFO, and FIFO_RELAXED semantics; FIFO is the only universally required mode, MAILBOX avoids tearing while replacing queued presents, and IMMEDIATE can tear but removes vblank waiting. The Vulkan samples also emphasize that the number of swapchain images is critical and that FIFO is often the lower-load choice unless the application truly benefits from MAILBOX. citeturn9search0turn9search3turn9search7
 
-| Attribute | Vulkan | DirectX 12 | Metal |
-|---|---|---|---|
-| Work submission | Command buffers submitted on queues; submission has explicit host synchronization requirements citeturn3search0turn3search5 | Command lists/bundles recorded then executed by command queues citeturn2search10turn2search18 | Command buffers represent chunks of GPU work; work encoded via encoders citeturn4search29turn4search17 |
-| Sync primitives | Fences + semaphores (binary/timeline) + barriers; explicit memory/exec dependencies citeturn0search0turn0search20turn0search32 | Fences + resource barriers (transition/UAV/aliasing); barriers express before/after states citeturn2search3turn2search2turn2search11 | Shared events sync CPU/GPU; hazard tracking can be relied on or disabled for manual sync citeturn4search2turn4search5turn4search30 |
-| Binding model | Descriptor sets/layouts; descriptor buffers as alternative; descriptor indexing for “bindless” citeturn8search19turn8search15turn8search7 | Root signatures + descriptors in descriptor heaps; heaps back descriptor tables citeturn2search1turn2search0turn2search12 | Argument buffers gather many resources into one shader argument; tiered support and explicit residency tracking citeturn4search14turn0search6turn0search22 |
-| Multithread recording | Command pools are externally synchronized; per-thread pools are standard citeturn3search5turn3search9 | Command lists can be recorded on multiple threads; allocator reuse constraints drive per-thread-per-frame allocators citeturn2search18turn2search6 | Parallel render command encoding supported; indirect command buffers support multi-thread encoding/reuse citeturn4search0turn4search1 |
-| Ray tracing | VK_KHR ray tracing extensions (sample: `ray_tracing_basic`) citeturn9search0turn9search8 | DXR is first-class peer to graphics/compute; raytracing tier query via CheckFeatureSupport citeturn0search5turn9search3turn9search15 | Device property `supportsRaytracing`; feature-set caveats in Apple tables citeturn9search2turn0search2turn9search10 |
-| Mesh shading | VK_EXT_mesh_shader provides programmable mesh shading pipeline citeturn9search1turn9search21 | D3D12 mesh shader spec (next-gen VS/GS replacement) citeturn8search2turn8search6 | Mesh shading availability is GPU-family dependent (Metal feature set tables) citeturn0search2turn7search10 |
-| Pipeline creation cost + caching | Pipeline creation can be costly; pipeline caches reduce stutter; pipeline binaries emerging citeturn7search5turn7search2turn7search23 | PSO is immutable; pipeline libraries reduce redundant/duplicated cached data overhead citeturn8search0turn8search1 | Pipeline creation expensive; Metal binary archives provide explicit caching control citeturn4search12turn4search26turn4search13 |
-| Validation/capture tools | Unified validation layer; loader/layer mechanism; validation overview citeturn6search2turn6search9 | Debug layer + GPU-based validation; PIX is primary D3D12 profiling/capture tool citeturn5search0turn5search1 | Xcode Metal API validation and workload capture; Metal debugger citeturn6search0turn6search1turn6search5 |
+For Metal, Apple’s display-link guidance explicitly frames pacing as a way to achieve **smooth frame rates with minimal input latency**, while `CAMetalLayer.maximumDrawableCount` gives the engine a direct way to influence how much buffering the present path may accumulate. In practice that means a low-latency engine on Apple platforms should keep drawable count conservative, align frame pacing to display-link callbacks, and avoid accumulating more command buffers than the display cadence can use. citeturn12search0turn12search3turn12search8
 
-## Multithreaded rendering and synchronization strategy
+For XR, OpenXR makes the timing model unusually explicit. `xrWaitFrame` returns a **predicted display time** for the next composited frame, and `xrLocateViews` is typically called for that time; importantly, the spec states that calling `xrLocateViews` repeatedly for the same target time does not necessarily return the same result because the prediction becomes more accurate as the call is made closer to the target time. The practical engine inference is that **late latching** should be treated as “refresh the smallest possible pose-dependent constants as late as practical,” while **asynchronous reprojection or timewarp equivalents** should be treated as a runtime/compositor capability that the application can support by submitting on time with accurate tracking, good motion data, and minimal queuing. citeturn8search2turn8search13turn10search6turn10search13
 
-### Backend-specific constraints that drive the engine design
+Variable refresh and low-latency strategy should be chosen conservatively. As a rule, use **FIFO/vsync paths when stability dominates**, **MAILBOX-like paths when tearing is unacceptable but queue replacement helps latency**, and **IMMEDIATE/tearing paths only where visible tearing is acceptable or VRR behavior makes it worthwhile**. On Windows, present-path behavior also depends on whether the app reaches independent flip or stays composed, so the engine cannot assume one latency model from API flags alone. citeturn9search0turn8search1turn8search4
 
-**Vulkan** has two critical host-threading constraints that must shape the abstraction:
-
-- `vkQueueSubmit` requires external synchronization on the queue unless created with an internal synchronization bit; this motivates a **single submission thread per queue** or a per-queue mutex. citeturn3search0turn3search4  
-- Command pools are externally synchronized: you must not record from command buffers allocated from the same pool concurrently across threads. This motivates **one command pool per worker thread per frame-in-flight**. citeturn3search5turn3search9  
-
-**DirectX 12** multithreading is structured around command list recording and allocator reuse:
-
-- Command lists and bundles are recorded for later execution; recording can be parallelized, but the runtime’s model forces you to manage synchronization and allocator lifetimes carefully. citeturn2search18turn2search10  
-- The “before/after resource states at each barrier” model means your render graph’s barrier generator must produce accurate transitions and batch them. citeturn2search2turn2search11  
-
-**Metal** enables parallel command encoding explicitly:
-
-- `MTLParallelRenderCommandEncoder` supports encoding render commands in parallel across threads; the doc explicitly states you are responsible for thread synchronization. citeturn4search0turn4search9  
-- `MTLIndirectCommandBuffer` supports “encode once, reuse” and multi-thread encoding (CPU/GPU), enabling GPU-driven workflows. citeturn4search1turn4search4  
-- Shared events synchronize CPU and GPU, and can synchronize across devices/processes. citeturn4search2turn4search5  
-
-### Engine recording model: per-thread contexts, centralized submit, allocator recycling
-
-The engine should implement **thread-local recording contexts** and a **centralized submission point**:
-
-- A `ThreadCtx` owns per-frame command allocators/pools and transient allocators.
-- A `SubmitCtx` owns per-queue submission mutexes (Vulkan), queue objects, and fence/timeline management.
-- A `FrameCtx` owns a completion signal (fence/timeline/shared event value) used to recycle per-frame-per-thread allocators safely.
-
-This aligns with vendor guidance that encourages parallelizing command buffer recording and task-graph architectures that respect dependencies. citeturn5search3turn0search20
-
-### Submission timeline diagram
-
-```mermaid
-sequenceDiagram
-  participant App as Consumer (FFI)
-  participant RG as RenderGraph Compiler
-  participant W as Worker Threads
-  participant S as Submitter (per-queue)
-  participant GPU as GPU Queues
-
-  App->>RG: Declare passes + Images (read/write)
-  RG->>RG: Compile DAG + lifetimes + barriers + batches
-  par Record batches
-    RG->>W: Record batch 0 (thread-local allocators/pools)
-    RG->>W: Record batch 1
-  end
-  W-->>S: Recorded cmd streams
-  S->>GPU: Submit (no implicit flushes)
-  GPU-->>S: Signal fence/timeline/event
-  S-->>RG: Recycle allocators after completion (N frames in flight)
-```
-
-## Render graph, resource chaining, and deferred submission semantics
-
-### Why the render graph is non-negotiable for the stated requirements
-
-The requirement “dependency logic derived from consumer use of images and reasoning which shaders must finish before others, without flushes” is exactly what a render graph does: it turns declared reads/writes into a DAG, then derives barriers, lifetimes, scheduling, and batching. Unreal’s `FRDGBuilder` explicitly states that “resource barriers and lifetimes are derived from RDG parameters” and the graph is compiled and executed. citeturn1search1turn1search3
-
-This approach matches documented industry systems:
-
-- Frostbite FrameGraph (GDC talk and slides) models passes and resources as a graph to maintain efficiency and modularity. citeturn1search2turn1search10  
-- AMD RPS describes a render graph toolkit that handles barrier generation and transient memory aliasing with a compiler-like scheduler for explicit APIs. citeturn1search4turn1search12turn1search20  
-- EA SEED Halcyon notes show a render graph inspired by Frostbite’s frame graph and emphasize automatic transitions and parallelized evaluation. citeturn1search6turn1search8  
-
-### Resource and pass model
-
-The core consumer-facing concept is:
-
-- **`Image`**: a typed handle representing a texture-like GPU resource, potentially used as render target, sampled texture, storage image, or presentation surface. (Swapchain drawables are imported as Images.) Metal’s command buffer model includes the idea that a command buffer stores the commands you encode, plus resources those commands need. citeturn4search29turn4search17  
-- **`Pass`**: a shader invocation (graphics, compute, mesh, RT) that declares which Images/Buffers it reads and writes.
-
-Render-target chaining is just graph edges: A pass writes an Image; subsequent passes read it.
+The following latency path is the most useful mental model for engine work. It is a synthesis of DXGI frame pacing, Vulkan present semantics, Metal display-link pacing, and OpenXR predicted-display timing. citeturn8search0turn9search0turn12search0turn8search2turn10search13
 
 ```mermaid
 flowchart LR
-  G[Pass: GBuffer] -->|writes| GB[(Image: GBuffer)]
-  G -->|writes| D[(Image: Depth)]
-  L[Pass: Lighting] -->|writes| HDR[(Image: HDR)]
-  GB -->|reads| L
-  D -->|reads| L
-  HDR -->|reads| PP[Pass: Post]
-  PP -->|writes| LDR[(Image: LDR)]
-  LDR -->|writes| P[(Image: Present)]
+    A[Input sampled] --> B[Simulation / game logic]
+    B --> C[Late camera or pose update]
+    C --> D[CPU command recording]
+    D --> E[Queue submit]
+    E --> F[GPU visibility, draw, post]
+    F --> G[Present request]
+    G --> H[OS compositor or direct flip]
+    H --> I[Scanout / display refresh]
+    I --> J[Photons to user]
+
+    K[XR runtime predictedDisplayTime] -. informs .-> C
+    K -. informs .-> H
 ```
 
-### Complete sample render-graph design in Rust-style pseudocode
+## Performance and quality tradeoffs
 
-#### Data structures
+A renderer that “looks good and runs fast” is best evaluated using **time-domain metrics**, not only average FPS. PresentMon’s official documentation says it captures CPU, GPU, and display frame durations and latencies across DirectX, Vulkan, and OpenGL on Windows, while PIX timing captures combine CPU and GPU profiling and can show queueing delays, submission-to-execution latency, file I/O, and allocations. Those are exactly the observables a modern engine needs. citeturn21search0turn21search6turn21search5turn21search12
 
-```rust
-// --- FFI-friendly handles are u64 IDs; internal Rust wraps them in newtypes.
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
-pub struct ImageHandle(u64);
+| Metric | What to look for | Why it matters |
+|---|---|---|
+| CPU frame duration | Main-thread time, worker saturation, time spent recording commands. citeturn21search5turn14search14 | Reveals submission bottlenecks and poor threading. |
+| GPU frame duration | Longest queue, queue overlap, end-of-pipe duration, async contention. citeturn21search1turn21search5turn33search16 | Determines whether graphics, compute, or copy is the limiting factor. |
+| Display frame duration | Present-to-display cadence, missed refreshes, pacing irregularity. citeturn21search0turn8search0 | Tells you whether “60 FPS average” is actually arriving uniformly. |
+| Latency breakdown | Input sample → simulation → CPU build → queue wait → GPU render → present → display. citeturn21search5turn8search0turn8search2 | Lets you optimize the right stage instead of blindly reducing GPU cost. |
+| Jitter | Variation in frame intervals over time. PresentMon supports charts and histograms that make this visible. citeturn21search2turn21search8 | Jitter is often more visible than a slightly lower mean FPS. |
+| Tail latency | Worst-case or high-percentile spikes in frame or present times. citeturn21search0turn21search5 | Spikes are what users feel as hitching or input inconsistency. |
+| Residency misses and streaming stalls | Page-in cost, copy-queue backlogs, visible texture or geometry pop-in. citeturn32search0turn32search2turn39search11 | Memory pressure increasingly limits visual scale before raw shading does. |
 
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
-pub struct BufferHandle(u64);
+Several tradeoffs are structural rather than incidental. **Bindless-style binding** cuts CPU overhead and simplifies materials, but it increases residency pressure, indirection depth, and debugging complexity. **Deferred shading** reduces per-light cost for opaque materials, but it raises memory bandwidth and complicates transparency and MSAA. **Async compute** improves utilization only when it avoids contending for the same bottleneck that graphics needs; otherwise it simply delays the critical graphics queue. **Mesh shading** is most valuable when paired with meshlets, culling, and LOD selection, not when treated only as a syntactic replacement for legacy geometry stages. **Ray tracing** improves visibility and lighting accuracy, but acceleration structure build and update cost, divergence, and denoising requirements must be budgeted explicitly. **VRS** or rasterization-rate control is often a perceptually cheap win in sky, motion-heavy, or peripheral regions, but it can visibly damage text, high-frequency specular detail, or UI if applied broadly. citeturn26search2turn39search1turn34search0turn34search1turn33search16turn15search1turn15search5turn28search13turn28search4turn30search0turn15search6
 
-#[derive(Copy, Clone, Eq, PartialEq, Hash)]
-pub struct PassHandle(u32);
+Resource streaming is its own tradeoff class. D3D12 sampler feedback exists specifically for streaming and texture-space shading, while Metal’s sparse textures and fast resource-loading samples show the same general pattern: smaller memory footprints and larger scenes are possible, but only if the engine maintains a robust page table, prefetch strategy, and copy scheduling plan. Poor streaming architecture can turn memory savings into frame stutter. citeturn32search0turn32search15turn32search2turn32search20turn32search11
 
-#[derive(Copy, Clone)]
-pub enum QueueType { Graphics, Compute, Transfer }
+## Implementation patterns, data structures, and threading models
 
-#[derive(Copy, Clone)]
-pub enum Access { Read, Write, ReadWrite }
+The most robust implementation pattern today is a **retained-mode frame graph feeding a multiqueue submission system**, with visibility and draw compaction happening on the GPU whenever scene scale justifies it. Frostbite’s frame-graph design and the official D3D12/Vulkan/Metal GPU-driven samples all point to the same pattern: build a graph of passes and resources, compile it into synchronization and transient allocations, record work in parallel, let compute generate visibility or indirect worklists, and then consume those worklists on the graphics queue. citeturn19search0turn33search4turn33search17turn15search7
 
-#[derive(Copy, Clone)]
-pub enum RgState {
-    ShaderRead,
-    ShaderWrite,
-    RenderTarget,
-    DepthRead,
-    DepthWrite,
-    CopySrc,
-    CopyDst,
-    Present,
-}
+A useful engine-internal data model looks like this:
 
-#[derive(Copy, Clone)]
-pub struct SubresourceRange {
-    pub base_mip: u16, pub mip_count: u16,
-    pub base_layer: u16, pub layer_count: u16,
-}
+| Data structure | Purpose |
+|---|---|
+| `ResourceHandle { type, format, size, lifetime, aliasClass, residencyState }` | Lets the frame graph infer transitions, aliasing, and transient allocation. citeturn19search0turn25search17turn39search9 |
+| `PassNode { reads[], writes[], queue, pipelineKey, asyncEligible }` | Encodes execution order and cross-queue dependencies. citeturn19search0turn33search16turn14search10 |
+| `DescriptorArena` or `ArgumentTable` | Implements scene-wide resource indexing. citeturn27search2turn26search2turn39search1 |
+| `DrawPacket { meshletOrMeshID, materialID, transformID, sortKey }` | CPU-side compact draw description before GPU culling or batching. citeturn31search2turn39search12 |
+| `IndirectArgsBuffer + CountBuffer` | GPU-written visible draw stream. citeturn33search5turn33search4turn15search7 |
+| `TimelineValue` or fence/event values | Cross-queue lifetime and readiness tracking. citeturn23search4turn33search16turn39search14 |
+| `StreamingPageTable` | Maps virtual assets to resident pages or tiles. citeturn32search0turn32search20turn39search11 |
 
-pub struct Use {
-    pub image: ImageHandle,
-    pub access: Access,
-    pub required: RgState,
-    pub sub: SubresourceRange,
-}
+A good threading model separates **frame planning**, **parallel recording**, and **submission**. Vulkan’s guide explicitly recommends a separate command pool per host thread and treats submission as lighter-weight than command recording. Direct3D 12 likewise expects command lists to be recorded and submitted from multiple threads, and Metal offers both parallel render encoders and indirect command buffers. The CPU-side model that tends to survive contact with real engines is: one thread builds the frame graph, worker threads record pass-local command chunks, a resource system thread resolves streaming/residency work, and a submission thread linearizes queue submissions and fence values. citeturn14search15turn14search0turn14search14turn14search13turn14search2turn15search7
 
-pub struct PassDesc {
-    pub name: String,
-    pub queue: QueueType,
-    pub reads: Vec<Use>,
-    pub writes: Vec<Use>,
-    pub record: fn(&mut CommandCtx, &PassResources),
-}
+The synchronization model should be explicit and boring. Use **barriers for intra-queue hazards**, **timeline semaphores or fences/events for inter-queue readiness**, and **small, restartable compute dispatches** instead of monolithic kernels if low latency matters. On Metal, Apple’s own guidance differentiates fences, events, and shared events by scope; on D3D12, multi-engine sync and barriers make the same distinction; on Vulkan, Synchronization2 and timeline semantics simplify queue orchestration. citeturn39search14turn39search9turn33search16turn25search17turn23search4
 
-// Internal representation
-pub struct VirtualImage {
-    pub first: u32,
-    pub last: u32,
-    pub desc: ImageDesc,
-    pub imported: bool,
-}
-
-pub struct Barrier {
-    pub image: ImageHandle,
-    pub sub: SubresourceRange,
-    pub before: RgState,
-    pub after: RgState,
-    pub queue: QueueType,
-}
-
-pub struct RecordBatch {
-    pub queue: QueueType,
-    pub pass_indices: Vec<u32>,     // topologically sorted indices
-}
-
-pub struct CompiledGraph {
-    pub passes: Vec<PassDesc>,
-    pub images: Vec<VirtualImage>,
-    pub barriers_per_pass: Vec<Vec<Barrier>>,
-    pub batches: Vec<RecordBatch>,
-    pub alias_plan: AliasPlan,      // transient allocations + aliasing
-}
-```
-
-#### Compile algorithm: lifetime, aliasing, barrier generation, batching
-
-Key goals:
-
-1. **Derive dependencies** from read-after-write / write-after-read hazards on the same Image/subresource.  
-2. Compute **lifetime ranges** `[first_use, last_use]` for transient Images.  
-3. Compute an **aliasing plan** (transient heap reuse) when lifetimes do not overlap. D3D12 explicitly supports aliasing barriers for overlapping heap mappings, making aliasing a first-class target for render-graph scheduling. citeturn2search3turn2search11  
-4. Generate **barrier batches** per pass (Vulkan/D3D12 style) or synchronization boundaries/events (Metal mapping). Vulkan’s synchronization chapter defines explicit execution and memory dependencies; D3D12 requires before/after states at each barrier. citeturn0search0turn2search2  
-5. Partition into **record batches** that can be encoded in parallel given backend constraints (Vulkan command pools external sync; D3D12 allocator constraints; Metal parallel render encoders). citeturn3search5turn2search18turn4search0
-
-```rust
-impl RenderGraph {
-    pub fn compile(&self, device: &Device) -> CompiledGraph {
-        // 1) Build dependency edges from declared reads/writes.
-        // 2) Topologically sort passes.
-        let order: Vec<u32> = topo_sort(&self.passes);
-
-        // 3) Lifetime analysis for each virtual image.
-        let mut images = self.images.clone();
-        for img in &mut images { img.first = u32::MAX; img.last = 0; }
-        for (i, &pidx) in order.iter().enumerate() {
-            let pass = &self.passes[pidx as usize];
-            for u in pass.reads.iter().chain(pass.writes.iter()) {
-                let v = &mut images[image_index(u.image)];
-                v.first = v.first.min(i as u32);
-                v.last  = v.last.max(i as u32);
-            }
-        }
-
-        // 4) Transient aliasing plan (simple greedy).
-        let alias_plan = AliasPlan::build(&images, device);
-
-        // 5) Barrier generation using a per-image state tracker.
-        let mut tracker = StateTracker::new();
-        let mut barriers_per_pass = vec![Vec::new(); order.len()];
-        for (i, &pidx) in order.iter().enumerate() {
-            let pass = &self.passes[pidx as usize];
-            barriers_per_pass[i] = tracker.compute_barriers(pass);
-            tracker.apply(pass);
-        }
-
-        // 6) Partition into record batches for parallel encoding.
-        // Must respect: per-thread command pools/allocators/Metal encoder rules.
-        let batches = partition_for_parallel_recording(&order, &self.passes);
-
-        CompiledGraph {
-            passes: order.iter().map(|&i| self.passes[i as usize].clone()).collect(),
-            images,
-            barriers_per_pass,
-            batches,
-            alias_plan,
-        }
-    }
-}
-```
-
-#### Execution model: multithreaded recording + deferred submission + explicit flush
-
-The consumer requirement “no flush unless explicitly asked” implies:
-
-- Engine collects passes into a `FrameBuilder`.
-- Engine does not submit GPU work until `frame.flush()` or `frame.present()`.
-- `frame.present()` implies a flush and returns quickly; CPU waits only if consumer calls `device.wait_frame()` or a blocking `present_and_wait()` convenience.
-
-This maps naturally to D3D12’s explicit submission and to Vulkan/Metal’s explicit command buffer submission model. citeturn2search10turn3search0turn4search29
-
-```rust
-impl FrameBuilder {
-    pub fn flush(&mut self) -> GpuSignal {
-        let compiled = self.graph.compile(&self.device);
-
-        // 1) Parallel record.
-        parallel_for(&compiled.batches, |batch, worker_idx| {
-            let mut ctx = self.device.acquire_thread_ctx(worker_idx, batch.queue, self.in_flight_index);
-            ctx.begin();
-
-            for &pass_i in &batch.pass_indices {
-                ctx.apply_barriers(&compiled.barriers_per_pass[pass_i as usize]);
-                let pass = &compiled.passes[pass_i as usize];
-
-                // Resolve pass resources (descriptor tables/sets/arg buffers)
-                // from Slang reflection + bound resources.
-                let resources = self.resolve_pass_resources(pass);
-
-                (pass.record)(&mut ctx, &resources);
-            }
-
-            ctx.end();
-            self.device.store_recorded(worker_idx, batch.queue, ctx.finish());
-        });
-
-        // 2) Submit (serialized per queue).
-        // Vulkan requires external sync on VkQueue submission. D3D12/Metal still benefit from central submit. citeturn3search0turn2search10turn4search29
-        let signal = self.device.submit_recorded(&compiled);
-
-        // 3) Retire transient resources only after completion signal.
-        self.device.defer_recycle(compiled.alias_plan, signal);
-
-        self.submitted = true;
-        signal
-    }
-
-    pub fn present(&mut self) -> PresentToken {
-        if !self.submitted {
-            self.flush();
-        }
-        self.device.present_swapchain_image()
-    }
-}
-```
-
-### Resource relationship diagram
+The following synthesized flow is representative of a practical high-end frame. citeturn19search0turn33search4turn33search17turn15search7turn34search18turn34search11
 
 ```mermaid
-erDiagram
-  PASS ||--o{ USE : declares
-  IMAGE ||--o{ USE : referenced_by
-  PASS {
-    string name
-    string queue
-  }
-  IMAGE {
-    int id
-    bool imported
-    int first_use
-    int last_use
-  }
-  USE {
-    string access
-    string required_state
-    string subresource
-  }
+flowchart TD
+    A[Asset streaming / residency update] --> B[Build frame graph]
+    B --> C[CPU visibility seeds and pass setup]
+    C --> D[Async compute culling / LOD / compaction]
+    D --> E[Indirect arg buffers or meshlet lists]
+    B --> F[Parallel command recording]
+    E --> G[Graphics queue: depth or visibility prepass]
+    F --> G
+    G --> H[Main shading: deferred or forward+]
+    H --> I[Shadows / ray query / RT passes]
+    I --> J[TAA / denoise / upscale]
+    J --> K[Tone map / HDR composite / UI]
+    K --> L[Present]
 ```
 
-## Slang shader system and reflection-driven pipelines
+A concise cross-API pseudocode sketch looks like this:
 
-### Canonical binding layouts via Slang parameter blocks
+```cpp
+FrameContext& f = begin_frame();
 
-Slang’s documentation and reflection guide explicitly describe that modern API targets (D3D12/DXIL, Vulkan/SPIR-V) require shader parameters to be bound via grouping mechanisms (descriptor tables, descriptor sets), and Slang may wrap global parameters into a default `ParameterBlock<>` if no explicit space is specified. citeturn0search31turn0search3
+sample_input_late(f.input);
+update_camera_and_prediction(f);
 
-**Design choice:** treat Slang `ParameterBlock<>` as the engine’s canonical “bind group.” Slang’s parameter blocks map naturally to:
+RenderGraph rg;
+build_visibility_inputs(scene, rg);
+build_geometry_passes(scene, rg);
+build_lighting_passes(scene, rg);
+build_post_pipeline(scene, rg); // TAA, denoise, upscale, tone map
 
-- Vulkan descriptor sets  
-- D3D12 descriptor tables (root signature descriptor tables)  
-- Metal argument buffers citeturn0search3turn0search31turn4search14
+rg.add_async_compute("CullAndCompact", [&] {
+    dispatch_gpu_culling(meshlets, lods, visibilityBuffer, indirectArgs, drawCount);
+});
 
-This lets the engine synthesize backend binding layouts deterministically from reflection.
+rg.add_graphics("MainRender", waits_on("CullAndCompact"), [&] {
+    consume_indirect(drawCount, indirectArgs);
+    render_deferred_or_forward_plus();
+});
 
-### Reflection-driven pipeline layout generator
+rg.add_compute("Post", [&] {
+    taa_reproject(history, motionVectors);
+    denoise_if_needed();
+    upscale_if_enabled();
+    tone_map_and_composite();
+});
 
-Key constraints from the backends:
-
-- Vulkan: descriptor sets/layouts define what descriptors can be stored; descriptor buffers provide an alternative where descriptors are stored in GPU-readable buffers. citeturn8search19turn8search15turn8search7  
-- D3D12: root signature is “like an API function signature” describing what shaders expect; descriptors live in descriptor heaps and are referenced via descriptor tables. citeturn2search1turn2search0turn2search12  
-- Metal: argument buffers gather multiple resources into a single shader argument; tier 2 increases capability and residency tracking must be handled explicitly for argument-buffer referenced resources. citeturn4search14turn0search6turn0search22  
-
-Pseudocode:
-
-```rust
-/// Canonical binding model independent of backend.
-pub struct CanonicalGroupLayout {
-    pub name: String,                // parameter block name
-    pub bindings: Vec<CanonicalBinding>,
-}
-
-pub struct CanonicalBinding {
-    pub path: String,                // stable full path from reflection
-    pub kind: BindingKind,            // texture/buffer/sampler/as
-    pub count: u32,                  // arrays/bindless
-    pub stage_mask: StageMask,
-    pub update_rate: UpdateRate,     // Frame/Pass/Material/Draw
-}
-
-pub struct CanonicalPipelineLayout {
-    pub groups: Vec<CanonicalGroupLayout>,
-    pub push_constants_bytes: u32,
-}
-
-/// Build CanonicalPipelineLayout from Slang reflection.
-pub fn build_layout_from_slang(refl: &SlangProgramLayout) -> CanonicalPipelineLayout {
-    // Walk parameter blocks, extract bindings, normalize ordering,
-    // compute stable "path" identifiers.
-    todo!()
-}
-
-/// Backend translation.
-pub fn create_backend_layout(api: Api, c: &CanonicalPipelineLayout) -> BackendPipelineLayout {
-    match api {
-        Api::Vulkan => create_vk_pipeline_layout(c),
-        Api::D3D12  => create_d3d12_root_signature(c),
-        Api::Metal  => create_metal_argument_buffer_layouts(c),
-    }
-}
+compile_graph(rg);      // infer lifetimes, aliases, barriers, queue waits
+record_in_parallel(rg); // one command allocator/pool per worker thread
+submit_queues(rg);
+present_low_latency(f);
 ```
 
-A subtle but important Slang reflection detail: Slang’s internal “set indices” may not equal Vulkan descriptor set indices in some cases; Slang discussions and issues highlight the need to apply descriptor set space offsets when extracting Vulkan binding indices. citeturn0search23turn0search31
+That pseudocode is not tied to one API object model. The portable idea is a graph compiler plus queue scheduler plus a tiny set of canonical engine buffers: view constants, resource tables, visibility lists, indirect args, history buffers, and residency maps. citeturn19search0turn14search15turn33search16turn39search1turn33search5
 
-### Runtime shader construction and hot reload
+## Cross-platform portability and fallbacks
 
-Requirements:
+The practical answer to portability is **feature queries plus explicit fallback ladders**, not a lowest-common-denominator renderer. Vulkan Profiles exist precisely to give developers a guaranteed feature and limit target, while Vulkan’s portability subset and portability enumeration exist to make layered or non-conformant implementations queryable rather than surprising. Direct3D 12 exposes tiered feature queries for resource binding, mesh shaders, sampler feedback, and VRS. Metal’s feature-set tables and per-device capability queries serve the same purpose on Apple platforms. citeturn23search8turn17search1turn17search2turn30search8turn31search20turn5search2
 
-- Compile shaders from **inline sources** and **files** at runtime.
-- Shaders can be used to draw to swapchain (screen) or any `Image`.
-- Hot reload should invalidate dependent pipelines and recompile.
+| Desired feature | Preferred path | Portable fallback |
+|---|---|---|
+| Scene-wide resource indexing | Vulkan descriptor indexing or descriptor buffer; D3D12 Tier-3 heaps + dynamic resources; Metal argument buffers. citeturn27search2turn26search2turn39search1 | Per-material descriptor sets or root tables; larger batching granularity. |
+| GPU-driven visibility and draw compaction | Vulkan indirect count or device-generated commands; D3D12 ExecuteIndirect; Metal ICBs on GPU. citeturn33search5turn33search9turn33search4turn15search7 | CPU-generated indirect buffers or CPU-side visibility lists. |
+| Mesh shaders | VK_EXT_mesh_shader, D3D12 mesh shaders, Metal object/mesh shaders. citeturn31search0turn4search0turn15search1 | Compute-based meshlet culling plus classic indexed draws. |
+| Ray tracing | Vulkan KHR ray query/pipeline, DXR, Metal acceleration structures. citeturn28search4turn28search13turn3search6turn5search5 | Screen-space techniques, shadow maps, probe or voxel GI, signed-distance or software BVH effects where viable. |
+| VRS / rate control | Vulkan fragment shading rate; D3D12 VRS; Metal rasterization-rate maps. citeturn29search15turn30search0turn29search11 | Dynamic resolution scaling, checkerboard-like reconstruction, or content-adaptive post scaling. |
+| Sparse or virtual resources | D3D12 tiled resources + sampler feedback; Metal sparse textures; OpenGL sparse texture/buffer. citeturn32search0turn32search2turn32search20turn6search1turn6search7 | Chunked mip streaming, clipmaps, coarse residency granules, conservative prefetching. |
+| Multi-GPU | Vulkan device groups; D3D12 multi-adapter; Metal multi-GPU on supported Macs. citeturn23search0turn22search1turn22search14 | Single-GPU renderer with copy/streaming overlap; treat multi-GPU as optional. |
+| XR compositor integration | OpenXR frame loop and predicted display time. citeturn8search2turn10search13 | If XR is absent, keep the renderer’s late-update and low-buffering path for flat display latency anyway. |
 
-Implementation strategy:
+OpenGL should be treated candidly: it can still support useful compatibility renderers via bindless textures, sparse textures, compute, sync objects, multi-draw indirect, and persistent mapped buffers, but on Apple platforms it is deprecated, and across platforms it does not offer the same clean, explicit, cross-vendor modern path for mesh shaders, pipeline compilation workflows, or standardized ray tracing as Vulkan, Direct3D 12, and Metal. The right use of OpenGL in a 2026 cross-platform engine is therefore as a **fallback backend with narrower ambitions**, not as the architectural reference model. citeturn24search14turn6search1turn24search11turn24search18turn24search0turn24search2turn39search21
 
-1. A `ShaderModule` stores `(source_hash, entry_points, slang_profile, target_api)` and compiled artifacts:
-   - SPIR-V for Vulkan citeturn0search4turn3search5  
-   - DXIL for D3D12 citeturn7search0turn7search3  
-   - MSL / Metal library/pipeline functions for Metal citeturn7search1turn7search13  
-2. A `PipelineKey` includes:
-   - Canonical reflection layout hash (sorted bindings, update-rates),
-   - render target formats / depth format / sample count,
-   - shader specialization/permutation constants,
-   - fixed-function state.
-3. Rebuild pipeline objects on cache miss; do not compile pipelines during draw submission.
+## Recent papers and what they imply
 
-Pipeline caching primitives differ per backend:
+The most useful recent papers for this topic are the ones that clearly connect to engine systems rather than only to isolated visual effects. As of **May 13, 2026**, the most relevant recent papers are the following. Peer-reviewed conference or journal papers deserve the most weight for near-term engine adoption; 2026 preprints are important signals, but they should still be treated as directional rather than production-proven. citeturn37search1turn37search2turn37search3turn13search11turn37search7turn38search0turn38search1
 
-- Vulkan: pipeline cache reduces stutter and pipeline creation is “somewhat costly” due to shader compilation; pipeline cache can be saved between runs. citeturn7search5turn7search2  
-- D3D12: pipeline libraries reduce overhead by grouping PSOs expected to share data before serialization. citeturn8search1turn8search13  
-- Metal: Metal binary archives provide explicit caching control; WWDC notes emphasize collecting compiled PSOs and distributing to compatible devices. citeturn4search12turn4search26  
+| Year | Paper | Status | Why it matters |
+|---|---|---|---|
+| 2024 | **Online Neural Denoising with Cross-Regression for Interactive Rendering**. citeturn37search1turn37search8turn37search11 | SIGGRAPH Asia 2024 / ACM TOG | Strong evidence that real-time denoising continues moving toward online, temporally aware neural reconstruction rather than only hand-built filters. |
+| 2025 | **Real-time Procedural Resurfacing Using GPU Mesh Shader**. citeturn37search2turn37search6turn37search9 | Eurographics / CGF 2025 | Shows mesh shaders being used not just as “new vertex processing,” but as a GPU-side detail-generation mechanism tightly tied to content structure. |
+| 2025 | **Real-Time GPU Tree Generation**. citeturn37search3turn37search19 | HPG 2025 | Important for open-world engines: procedural geometry generation can dramatically reduce memory footprint if the GPU can generate and feed geometry directly into rendering. |
+| 2025 | **Efficient Structure and Management of GPU Out-of-core Rendering for Large 3D Gaussian Models**. citeturn13search11 | 2025 publication | Relevant because out-of-core data structures are increasingly central to scene scale, especially for hybrid raster/RT or neural scene representations. |
+| 2025 | **Wavelet-Space Super-Resolution for Real-Time Rendering**. citeturn37search0turn37search7 | arXiv preprint | Signals continuing work on non-proprietary real-time super-resolution that better preserves high-frequency structure than straightforward image-space reconstruction. |
+| 2026 | **Streaming Real-Time Rendered Scenes as 3D Gaussians**. citeturn38search0turn38search3 | arXiv preprint, April 2026 | Highly relevant to low-latency cloud rendering and XR because it replaces viewpoint-locked 2D video with a streamable 3D representation that supports better view correction. |
+| 2026 | **Hybrid Foveated Path Tracing with Peripheral Gaussians for Immersive Anatomy**. citeturn38search1turn38search19 | arXiv preprint, January 2026 | Important as a systems idea: combine high-fidelity foveal rendering, approximate peripheral representation, and depth-guided reprojection to balance latency, quality, and cost. |
 
-## Rust API surface and C FFI
+These recent papers point in a consistent direction. Geometry is becoming **more GPU-generated and more procedural**, reconstruction is becoming **more temporal and more learned**, and large-scene rendering is becoming **more virtualized, streamed, or foveated**. None of that changes the engine fundamentals described earlier; it strengthens them. The papers become practical only if the engine already has explicit synchronization, temporal history management, residency control, and a renderer architecture that can schedule cross-queue work predictably. citeturn37search2turn37search3turn13search11turn37search1turn38search0turn38search1
 
-### Handle model and safe/unsafe boundaries
-
-To be FFI-friendly and language-agnostic, expose opaque handles (u64) and `#[repr(C)]` structs:
-
-- **Opaque handles**: `u64` generational IDs (index + generation counter).  
-- **No panics across FFI**: all public `extern "C"` functions must catch unwinding and return error codes; never propagate Rust panics into C.  
-- **Ownership**: C API uses explicit `create/destroy` for resources; Rust internal uses RAII, but FFI boundary must not rely on drop timing.
-
-### Core consumer-visible types
-
-Key requirement: “There is an image type which represents either a GPU resource or a render target.” That suggests a single `Image` handle with:
-
-- `usage` flags: sampled, storage, render target, depth/stencil, present  
-- `format`, `extent`, `mips`, `layers`, `samples`  
-- optionally: externally-owned imported images (swapchain, user-provided native texture)
-
-Metal’s command organization explicitly includes a blit encoder that can do mipmap generation, which justifies treating “mips” as a first-class capability in the `Image` API. citeturn4search17turn0search2
-
-Rust-style pseudocode:
-
-```rust
-bitflags::bitflags! {
-  pub struct ImageUsage: u32 {
-    const SAMPLED      = 1 << 0;
-    const STORAGE      = 1 << 1;
-    const RENDER_TARGET= 1 << 2;
-    const DEPTH_STENCIL= 1 << 3;
-    const PRESENT      = 1 << 4; // only for imported swapchain images
-  }
-}
-
-#[repr(C)]
-pub struct ImageDesc {
-  pub width: u32,
-  pub height: u32,
-  pub mip_levels: u16,
-  pub layers: u16,
-  pub format: Format,
-  pub usage: ImageUsage,
-}
-
-pub struct Image {
-  handle: ImageHandle,
-  desc: ImageDesc,
-}
-```
-
-### C header sketch for consumers
-
-```c
-// --- Opaque handles
-typedef struct gfx_device_t { uint64_t h; } gfx_device_t;
-typedef struct gfx_image_t  { uint64_t h; } gfx_image_t;
-typedef struct gfx_shader_t { uint64_t h; } gfx_shader_t;
-typedef struct gfx_frame_t  { uint64_t h; } gfx_frame_t;
-
-typedef enum gfx_result_t {
-  GFX_OK = 0,
-  GFX_ERR_INVALID_HANDLE = 1,
-  GFX_ERR_UNSUPPORTED = 2,
-  GFX_ERR_COMPILE_FAILED = 3,
-  GFX_ERR_OUT_OF_MEMORY = 4,
-  GFX_ERR_UNKNOWN = 0x7fffffff
-} gfx_result_t;
-
-typedef struct gfx_caps_t {
-  uint32_t supports_raytracing;   // the one most users care about
-  uint32_t supports_mesh_shading;
-  uint32_t supports_bindless;
-  uint32_t max_mip_levels;
-  uint32_t max_frames_in_flight;
-} gfx_caps_t;
-
-// Device
-gfx_result_t gfx_create_device(gfx_device_t* out);
-gfx_result_t gfx_destroy_device(gfx_device_t dev);
-gfx_result_t gfx_get_caps(gfx_device_t dev, gfx_caps_t* out_caps);
-
-// Images
-typedef struct gfx_image_desc_t {
-  uint32_t width, height;
-  uint16_t mip_levels, layers;
-  uint32_t format;
-  uint32_t usage_flags;
-} gfx_image_desc_t;
-
-gfx_result_t gfx_create_image(gfx_device_t dev, const gfx_image_desc_t* desc, gfx_image_t* out);
-gfx_result_t gfx_destroy_image(gfx_device_t dev, gfx_image_t img);
-
-// Shaders (inline or file)
-typedef struct gfx_shader_desc_t {
-  const char* source_utf8;   // optional if file path provided
-  const char* file_path_utf8;
-  const char* entry_point_utf8;
-  const char* stage_utf8;    // "compute", "vertex", "fragment", "mesh", "raygen", etc.
-} gfx_shader_desc_t;
-
-gfx_result_t gfx_create_shader(gfx_device_t dev, const gfx_shader_desc_t* desc, gfx_shader_t* out);
-
-// Frame graph-like API
-gfx_result_t gfx_begin_frame(gfx_device_t dev, gfx_frame_t* out_frame);
-gfx_result_t gfx_frame_add_pass(gfx_frame_t frame, /* reads/writes arrays */, /* shader */, /* params */);
-
-// Deferred submission
-gfx_result_t gfx_frame_flush(gfx_frame_t frame);     // submit without wait
-gfx_result_t gfx_frame_present(gfx_frame_t frame);   // flush + present
-gfx_result_t gfx_frame_wait(gfx_frame_t frame);      // CPU wait (explicit)
-```
-
-### Flush semantics and “fire it off all at once”
-
-Vulkan and D3D12 are explicit submission models; Metal command buffers are explicit recording/commit units. The engine’s deferred submission semantics should ensure:
-
-- API calls that declare work (create passes, bind resources) do **not** implicitly submit to GPU queues.
-- Only `flush/present` produce actual queue submissions.
-- CPU waits only occur if consumers call `wait` or use a blocking present.
-
-This is consistent with D3D12’s model where apps record GPU commands and submit via command queues, and with Vulkan’s explicit queue submission requiring host synchronization. citeturn2search10turn3search0turn4search29
-
-## Capability system and advanced features
-
-### Consumer-facing rule: only ray tracing requires hardware awareness
-
-Expose one “simple” query:
-
-- `supports_raytracing`: required for ray tracing usage.
-
-Backend support detection:
-
-- D3D12: `ID3D12Device::CheckFeatureSupport` with `D3D12_FEATURE_DATA_D3D12_OPTIONS5` and `RaytracingTier`. citeturn9search3turn9search15  
-- Metal: `MTLDevice.supportsRaytracing`. citeturn9search2  
-- Vulkan: require the ray tracing extension set (e.g., `VK_KHR_ray_tracing_pipeline`, `VK_KHR_acceleration_structure`) as demonstrated by Khronos samples. citeturn9search0turn9search8  
-
-### Advanced capability surface
-
-To satisfy “mesh shading, bindless tiers, instancing, mips,” expose a richer `Caps`:
-
-- `supports_mesh_shading`:
-  - D3D12: mesh shader spec exists and support is device/driver dependent; sample set exists. citeturn8search2turn8search10  
-  - Vulkan: `VK_EXT_mesh_shader`. citeturn9search1turn9search5  
-  - Metal: per-GPU-family support in feature set tables. citeturn0search2turn7search10  
-- `supports_bindless`:
-  - Vulkan: descriptor indexing is explicitly feature-gated; descriptor buffers are a distinct design option. citeturn8search7turn8search15turn8search3  
-  - D3D12: descriptor heaps are backing memory for descriptors; heap binding constraints matter for bindless strategies. citeturn2search0turn2search12  
-  - Metal: argument buffer tier 2 availability via `MTLArgumentBuffersTier.tier2`. citeturn0search6turn0search18  
-- `max_mip_levels` and “mip generation support”: Metal’s blit encoder supports mipmap generation; Vulkan/D3D12 can implement mip generation via compute/blit pipelines, but that is an engine technique. citeturn4search17turn0search2  
-
-### Portability: macOS Vulkan and MoltenVK
-
-On macOS, Vulkan support is commonly provided via MoltenVK as a portability/translation layer; LunarG’s macOS Vulkan SDK documentation states the SDK provides **partial** Vulkan support through MoltenVK mapping most of Vulkan to Metal. citeturn6search10
-
-The Vulkan portability initiative introduces `VK_KHR_portability_enumeration` so apps can opt into enumerating portability (non-conformant) implementations, and the Vulkan spec exposes the `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR` behavior. citeturn6search24turn6search27turn6search13
-
-**Design implication:** your capability system must treat “Vulkan on macOS” as a portability-subset device with potentially different feature/extension availability than native Vulkan on Windows/Linux.
-
-## Performance, pitfalls, and tooling
-
-### Pipeline creation and shader compilation stalls
-
-Pipeline creation cost is a cross-API pitfall:
-
-- Vulkan: pipeline creation can be costly; pipeline caches eliminate some expensive portions by reusing cached data between runs, and the Vulkan samples demonstrate noticeable slowdowns when caches are disabled or pipelines are recreated. citeturn7search5turn7search2  
-- D3D12: PSOs are immutable; pipeline libraries help reduce overhead and redundant data when serializing caches. citeturn8search0turn8search1  
-- Metal: pipeline state creation is expensive; Apple’s WWDC “Build GPU binaries with Metal” describes Metal binary archives as explicit control over pipeline state caching and distribution to compatible devices. citeturn4search12turn4search13  
-
-Mitigation strategy: compile pipelines asynchronously (load-time or background), and keep robust persistent caches keyed by reflection-derived layout + fixed-function state.
-
-### Descriptor/binding overhead and stalls
-
-Binding overhead and stalls are commonly caused by mismatched binding models:
-
-- Vulkan: descriptors are organized in descriptor sets with layouts defining arrangement; descriptor buffers change the model by placing descriptor data into application-managed buffers. citeturn8search19turn8search15turn8search7  
-- D3D12: descriptor heaps provide backing memory; rapid switching requires heap space to define descriptor tables “on the fly,” motivating stable heap strategies for a frame or more. citeturn2search0turn2search12  
-- Metal: argument buffers allow assigning once and reusing many times, reducing CPU overhead; residency tracking is required because the driver can’t automatically track residency of argument buffer resources. citeturn4search14turn0search22  
-
-### Synchronization mistakes and over-synchronization
-
-Over-synchronization leads to GPU bubbles; under-synchronization leads to hazards.
-
-- Vulkan: synchronization defines explicit execution/memory dependencies; queue submit is thread-sensitive; the Vulkan Guide explicitly discusses swapchain semaphore reuse correctness and validation layer behavior changes (SDK 1.4.313). citeturn0search0turn3search0turn3search3  
-- D3D12: barriers require before/after states and are typically managed within command lists; transitions should be batched for performance. citeturn2search2turn2search11  
-- Metal: shared events synchronize CPU/GPU work; hazard tracking offers safety but may impose overhead; advanced engines may choose manual synchronization. citeturn4search2turn4search22  
-
-### Validation and debugging workflow
-
-The engine should bake in “debug hooks”:
-
-- Vulkan: enable `VK_LAYER_KHRONOS_validation` in dev builds; Vulkan validation overview notes unified validation layer. citeturn6search2turn6search9  
-- D3D12: use debug layer + GPU-based validation; use PIX for GPU captures and timing captures. citeturn5search0turn5search1turn5search13  
-- Metal: use Xcode Metal API validation and capture Metal workloads in Xcode; Metal developer tools highlight validation and profiling toolchain. citeturn6search0turn6search1turn6search21  
-- Use RenderDoc for Vulkan/D3D12 frame capture where applicable. citeturn5search2  
-
-## Sources
-
-- Vulkan `vkQueueSubmit` host synchronization rule (queue externally synchronized). citeturn3search0  
-- Vulkan command pools are externally synchronized (no concurrent use across threads). citeturn3search5turn3search9  
-- Vulkan synchronization chapter (execution and memory dependencies). citeturn0search0turn0search4  
-- Vulkan memory allocation guidance (sub-allocation; `maxMemoryAllocationCount`). citeturn3search2  
-- Vulkan swapchain semaphore reuse guidance and validation behavior notes. citeturn3search3  
-- Vulkan descriptor sets and descriptors overview. citeturn8search19  
-- Vulkan descriptor buffers guide/spec/sample. citeturn8search7turn8search15turn8search3  
-- Vulkan pipeline cache guide and sample. citeturn7search5turn7search2  
-- Vulkan mesh shading extension proposal and blog. citeturn9search1turn9search21  
-- Vulkan ray tracing sample and Khronos blog. citeturn9search0turn9search8  
-- D3D12 descriptor heaps overview. citeturn2search0  
-- D3D12 root signatures overview and creating a root signature. citeturn2search1turn2search9  
-- D3D12 command queues/lists and command list recording. citeturn2search10turn2search18  
-- D3D12 resource barriers and barrier batching guidance. citeturn2search3turn2search11  
-- D3D12 PSO immutability (`ID3D12PipelineState`) and pipeline libraries. citeturn8search0turn8search1  
-- DXR functional spec and `CheckFeatureSupport` ray tracing tier querying. citeturn0search5turn9search3turn9search15  
-- D3D12 mesh shader spec. citeturn8search2turn8search6  
-- DXIL specification (DXC). citeturn7search0turn7search3  
-- Metal command buffer model and command organization (including mipmap generation in blit encoder). citeturn4search29turn4search17  
-- Metal parallel render command encoder and indirect command buffers. citeturn4search0turn4search1turn4search4  
-- Metal shared events and CPU↔GPU synchronization docs. citeturn4search2turn4search5turn4search22  
-- Metal argument buffers overview and tier 2 support; residency tracking for argument buffers. citeturn4search14turn0search6turn0search22  
-- Metal ray tracing support property (`supportsRaytracing`) and Metal feature set tables (Feb 2026). citeturn9search2turn0search2  
-- Metal pipeline caching: WWDC “Build GPU binaries with Metal” (binary archives). citeturn4search12turn4search26  
-- Metal validation and capture in Xcode. citeturn6search0turn6search1turn6search5  
-- Vulkan validation layer docs and validation overview. citeturn6search2turn6search9turn6search6  
-- D3D12 GPU-based validation and PIX overview / GPU captures. citeturn5search0turn5search1turn5search13  
-- RenderDoc repository (cross-API frame capture availability). citeturn5search2  
-- NVIDIA Vulkan Do’s and Don’ts (parallelization/task-graph guidance). citeturn5search3  
-- Unreal RDG `FRDGBuilder` doc statement about derived barriers/lifetimes. citeturn1search1turn1search3  
-- Frostbite FrameGraph slides/talk listing. citeturn1search10turn1search2  
-- AMD RPS SDK overview and introduction (barriers + transient aliasing scheduler for explicit APIs). citeturn1search4turn1search12turn1search20  
-- EA SEED Halcyon architecture notes (render graph inspiration and goals). citeturn1search6turn1search8  
-- Slang parameter blocks and reflection API guide (binding-group mechanisms). citeturn0search3turn0search31turn0search11  
-- Slang reflection/Vulkan binding extraction caveat (descriptor set space offsets). citeturn0search23  
-- Vulkan portability enumeration extension and macOS Vulkan SDK notes about MoltenVK partial support. citeturn6search24turn6search27turn6search10turn6search13
+**Open questions and limitations.** Target platforms were unspecified, so this report did not optimize for any single shipping matrix such as Windows-only, Apple-only, Linux+Wayland, Android-only, or XR-only. Support details remain hardware-, OS-, and driver-dependent even inside the same API family, which is why Vulkan Profiles, D3D12 feature tiers, Metal device queries, and the Vulkan portability subset matter so much. Also, some of the most recent 2026 items above are preprints instead of long-production-validated techniques, so they should influence roadmap and experimentation more than immediate hard dependency decisions. citeturn23search8turn30search8turn31search20turn5search2turn17search1turn38search0turn38search1

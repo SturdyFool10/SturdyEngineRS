@@ -6,522 +6,20 @@ use super::{
     batch::InstanceBatch,
     camera::{CameraId, CameraOutput, SceneCamera},
     commands::{SceneCommands, SceneView},
+    gpu_constants::{CameraConstants, LightingUniforms},
+    gpu_instance::GpuInstanceData,
+    lights::{
+        DirectionalLight, DiskLight, GpuLightData, PointLight, RectLight, SphereLight, SpotLight,
+    },
+    material_state::{MaterialConstants, MaterialDescriptor, MeshMaterial},
     object::{InstanceData, MeshId, ObjectId, ObjectKind, SceneObject},
 };
 use crate::{
     Buffer, BufferDesc, BufferUsage, ComputeProgram, DrawIndexedIndirectCommand, Engine, Error,
     Format, Frustum, GeometryBackend, GraphImage, ImageDesc, ImageDimension, ImageUsage, Mesh,
-    MeshProgram, RenderFrame, Result, push_constants,
+    MeshProgram, RenderFrame, Result,
 };
 use sturdy_engine_core::Extent3d;
-
-/// A directional light illuminating the entire scene.
-///
-/// Set via [`Scene::directional_light`] before calling [`Scene::draw`].
-/// The default is a warm sunlight from above-right with a dark-grey ambient.
-#[derive(Clone, Debug)]
-pub struct DirectionalLight {
-    /// World-space direction the light shines **toward** (normalized before upload).
-    pub direction: Vec3,
-    /// Diffuse + specular colour of the light.
-    pub color: Vec3,
-    /// Multiplier applied to both diffuse and specular contributions.
-    pub intensity: f32,
-    /// Constant ambient term added to every fragment regardless of normal.
-    pub ambient: Vec3,
-}
-
-impl Default for DirectionalLight {
-    fn default() -> Self {
-        Self {
-            direction: Vec3::new(0.45, -0.75, -0.55).normalize(),
-            color: Vec3::new(1.0, 0.95, 0.88),
-            intensity: 1.0,
-            ambient: Vec3::new(0.08, 0.08, 0.10),
-        }
-    }
-}
-
-/// An omnidirectional point light with physically correct inverse-square falloff.
-///
-/// Add to a scene via `scene.point_lights.push(PointLight { ... })`.
-/// Changes take effect from the next `DeferredPass::draw()` call.
-#[derive(Clone, Debug)]
-pub struct PointLight {
-    /// World-space position.
-    pub position: Vec3,
-    /// Linear RGB colour (linear, not sRGB).
-    pub color: Vec3,
-    /// Luminous intensity in candela (or a relative scale when `intensity` < 1000).
-    pub intensity: f32,
-    /// Maximum influence radius in world units. The light is clamped to zero at this distance.
-    pub range: f32,
-}
-
-impl Default for PointLight {
-    fn default() -> Self {
-        Self {
-            position: Vec3::ZERO,
-            color: Vec3::ONE,
-            intensity: 100.0,
-            range: 10.0,
-        }
-    }
-}
-
-/// A cone-shaped spot light with inner (full intensity) and outer (zero intensity) angles.
-///
-/// Add to a scene via `scene.spot_lights.push(SpotLight { ... })`.
-#[derive(Clone, Debug)]
-pub struct SpotLight {
-    /// World-space position of the light source.
-    pub position: Vec3,
-    /// World-space direction the spot **shines toward** (normalized before upload).
-    pub direction: Vec3,
-    /// Linear RGB colour.
-    pub color: Vec3,
-    /// Luminous intensity in candela (or a relative scale).
-    pub intensity: f32,
-    /// Maximum influence radius in world units.
-    pub range: f32,
-    /// Inner cone half-angle in radians — full intensity inside this cone.
-    pub inner_angle: f32,
-    /// Outer cone half-angle in radians — zero intensity outside this cone.
-    pub outer_angle: f32,
-}
-
-impl Default for SpotLight {
-    fn default() -> Self {
-        Self {
-            position: Vec3::ZERO,
-            direction: Vec3::new(0.0, -1.0, 0.0),
-            color: Vec3::ONE,
-            intensity: 500.0,
-            range: 20.0,
-            inner_angle: 0.35, // ~20°
-            outer_angle: 0.52, // ~30°
-        }
-    }
-}
-
-// ── Area lights ───────────────────────────────────────────────────────────────
-
-/// A rectangular area light. Illuminates via polygon solid-angle diffuse +
-/// representative-point specular (same BVH as point/spot lights).
-///
-/// `right` and `up` define the local axes; the light surface spans
-/// `[-half_extents.x, +half_extents.x] × [-half_extents.y, +half_extents.y]`.
-#[derive(Clone, Debug)]
-pub struct RectLight {
-    /// World-space center.
-    pub position: Vec3,
-    /// Local X axis (right direction), unit vector.
-    pub right: Vec3,
-    /// Local Y axis (up direction), unit vector.
-    pub up: Vec3,
-    /// \[half_width, half_height\] — half-dimensions along `right` and `up`.
-    pub half_extents: [f32; 2],
-    /// Emitted radiance (linear RGB).
-    pub color: Vec3,
-    /// Intensity multiplier. Default 1.0.
-    pub intensity: f32,
-    /// Maximum influence distance in world units.
-    pub range: f32,
-    /// If true, illuminates from both sides of the rectangle.
-    pub two_sided: bool,
-}
-
-impl Default for RectLight {
-    fn default() -> Self {
-        Self {
-            position: Vec3::ZERO,
-            right: Vec3::X,
-            up: Vec3::Y,
-            half_extents: [0.5, 0.5],
-            color: Vec3::ONE,
-            intensity: 1.0,
-            range: 10.0,
-            two_sided: false,
-        }
-    }
-}
-
-/// A spherical area light (emissive sphere, e.g. bare bulb, sun disc).
-///
-/// `radius` is the source radius (controls apparent size and specular highlight
-/// softness). `range` is the maximum influence distance.
-#[derive(Clone, Debug)]
-pub struct SphereLight {
-    pub position: Vec3,
-    /// Emissive radius of the source (not the influence radius). Default 0.1.
-    pub radius: f32,
-    pub color: Vec3,
-    pub intensity: f32,
-    /// Maximum influence distance.
-    pub range: f32,
-}
-
-impl Default for SphereLight {
-    fn default() -> Self {
-        Self {
-            position: Vec3::ZERO,
-            radius: 0.1,
-            color: Vec3::ONE,
-            intensity: 100.0,
-            range: 10.0,
-        }
-    }
-}
-
-/// A disc (circular) area light — e.g. a recessed ceiling downlight.
-#[derive(Clone, Debug)]
-pub struct DiskLight {
-    pub position: Vec3,
-    /// Outward normal of the disc surface.
-    pub normal: Vec3,
-    /// Disc radius.
-    pub radius: f32,
-    pub color: Vec3,
-    pub intensity: f32,
-    pub range: f32,
-    pub two_sided: bool,
-}
-
-impl Default for DiskLight {
-    fn default() -> Self {
-        Self {
-            position: Vec3::ZERO,
-            normal: Vec3::NEG_Y,
-            radius: 0.3,
-            color: Vec3::ONE,
-            intensity: 500.0,
-            range: 10.0,
-            two_sided: false,
-        }
-    }
-}
-
-// ── GPU-packed light data ─────────────────────────────────────────────────────
-// Matches GpuLightData in deferred_lighting.slang exactly (96 bytes = 6 × float4).
-//
-// Layout (backward-compatible: bytes 0-63 unchanged from the old 64-byte struct):
-//   0-15:  color_intensity   rgb × intensity
-//   16-31: position_range    world pos + influence range
-//   32-47: direction_kind    dir/normal xyz + kind (float: 0=dir,1=pt,2=spot,3=rect,4=sphere,5=disk)
-//   48-63: misc              [cos_inner, cos_outer, area_radius, two_sided 0/1]
-//   64-79: right_half_w      rect: right.xyz + half_width;  others: zero
-//   80-95: up_half_h         rect: up.xyz + half_height;    others: zero
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct GpuLightData {
-    color_intensity: [f32; 4],
-    position_range: [f32; 4],
-    direction_kind: [f32; 4],
-    misc: [f32; 4],         // [cos_inner, cos_outer, area_radius, two_sided]
-    right_half_w: [f32; 4], // rect: right.xyz + half_width
-    up_half_h: [f32; 4],    // rect: up.xyz + half_height
-}
-
-impl GpuLightData {
-    pub(crate) fn from_directional(light: &DirectionalLight) -> Self {
-        let toward = (-light.direction).normalize();
-        let lum = light.intensity;
-        Self {
-            color_intensity: [
-                light.color.x * lum,
-                light.color.y * lum,
-                light.color.z * lum,
-                1.0,
-            ],
-            position_range: [toward.x, toward.y, toward.z, 0.0],
-            direction_kind: [0.0, 0.0, 0.0, 0.0], // kind=0
-            misc: [1.0, 1.0, 0.0, 0.0],
-            right_half_w: [0.0; 4],
-            up_half_h: [0.0; 4],
-        }
-    }
-
-    pub(crate) fn from_point(light: &PointLight) -> Self {
-        let lum = light.intensity;
-        Self {
-            color_intensity: [
-                light.color.x * lum,
-                light.color.y * lum,
-                light.color.z * lum,
-                1.0,
-            ],
-            position_range: [
-                light.position.x,
-                light.position.y,
-                light.position.z,
-                light.range,
-            ],
-            direction_kind: [0.0, 0.0, 0.0, 1.0], // kind=1
-            misc: [1.0, 1.0, 0.0, 0.0],
-            right_half_w: [0.0; 4],
-            up_half_h: [0.0; 4],
-        }
-    }
-
-    pub(crate) fn from_spot(light: &SpotLight) -> Self {
-        let lum = light.intensity;
-        let dir = light.direction.normalize();
-        Self {
-            color_intensity: [
-                light.color.x * lum,
-                light.color.y * lum,
-                light.color.z * lum,
-                1.0,
-            ],
-            position_range: [
-                light.position.x,
-                light.position.y,
-                light.position.z,
-                light.range,
-            ],
-            direction_kind: [dir.x, dir.y, dir.z, 2.0], // kind=2
-            misc: [light.inner_angle.cos(), light.outer_angle.cos(), 0.0, 0.0],
-            right_half_w: [0.0; 4],
-            up_half_h: [0.0; 4],
-        }
-    }
-
-    pub(crate) fn from_rect(light: &RectLight) -> Self {
-        let lum = light.intensity;
-        let n = light.right.cross(light.up).normalize();
-        let r = light.right.normalize();
-        let u = light.up.normalize();
-        Self {
-            color_intensity: [
-                light.color.x * lum,
-                light.color.y * lum,
-                light.color.z * lum,
-                1.0,
-            ],
-            position_range: [
-                light.position.x,
-                light.position.y,
-                light.position.z,
-                light.range,
-            ],
-            direction_kind: [n.x, n.y, n.z, 3.0], // kind=3, normal = cross(right, up)
-            misc: [0.0, 0.0, 0.0, if light.two_sided { 1.0 } else { 0.0 }],
-            right_half_w: [r.x, r.y, r.z, light.half_extents[0]],
-            up_half_h: [u.x, u.y, u.z, light.half_extents[1]],
-        }
-    }
-
-    pub(crate) fn from_sphere_area(light: &SphereLight) -> Self {
-        let lum = light.intensity;
-        Self {
-            color_intensity: [
-                light.color.x * lum,
-                light.color.y * lum,
-                light.color.z * lum,
-                1.0,
-            ],
-            position_range: [
-                light.position.x,
-                light.position.y,
-                light.position.z,
-                light.range,
-            ],
-            direction_kind: [0.0, 0.0, 0.0, 4.0], // kind=4
-            misc: [1.0, 1.0, light.radius, 0.0],
-            right_half_w: [0.0; 4],
-            up_half_h: [0.0; 4],
-        }
-    }
-
-    pub(crate) fn from_disk(light: &DiskLight) -> Self {
-        let lum = light.intensity;
-        let n = light.normal.normalize();
-        Self {
-            color_intensity: [
-                light.color.x * lum,
-                light.color.y * lum,
-                light.color.z * lum,
-                1.0,
-            ],
-            position_range: [
-                light.position.x,
-                light.position.y,
-                light.position.z,
-                light.range,
-            ],
-            direction_kind: [n.x, n.y, n.z, 5.0], // kind=5
-            misc: [
-                0.0,
-                0.0,
-                light.radius,
-                if light.two_sided { 1.0 } else { 0.0 },
-            ],
-            right_half_w: [0.0; 4],
-            up_half_h: [0.0; 4],
-        }
-    }
-}
-
-/// GPU-layout mirror of the data read by `lit_fragment.slang` (forward path only).
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct LightingUniforms {
-    dir_direction: [f32; 4],    // xyz = toward-light dir, w = intensity
-    dir_color: [f32; 4],        // xyz = colour, w = 0
-    ambient: [f32; 4],          // xyz = ambient colour, w = 0
-    camera_world_pos: [f32; 4], // xyz = camera pos, w = 0
-}
-
-impl LightingUniforms {
-    fn from_light_and_camera(light: &DirectionalLight, camera_world_pos: Vec3) -> Self {
-        let dir = (-light.direction).normalize();
-        Self {
-            dir_direction: [dir.x, dir.y, dir.z, light.intensity],
-            dir_color: [light.color.x, light.color.y, light.color.z, 0.0],
-            ambient: [light.ambient.x, light.ambient.y, light.ambient.z, 0.0],
-            camera_world_pos: [
-                camera_world_pos.x,
-                camera_world_pos.y,
-                camera_world_pos.z,
-                0.0,
-            ],
-        }
-    }
-}
-
-/// Per-mesh material parameters for the built-in lit shader.
-///
-/// Set via [`Scene::set_material`] after calling [`Scene::add_mesh`]. The default
-/// is a white, fully opaque, mid-roughness dielectric (no metallic, no emission).
-///
-/// # In the shader
-///
-/// `lit_fragment.slang` reads a `StructuredBuffer<MaterialConstants> material_desc`
-/// buffer that [`Scene::draw`] binds automatically. Custom fragment shaders can
-/// declare the same binding to receive these values.
-#[derive(Clone, Debug)]
-pub struct MaterialDescriptor {
-    /// Base colour (linear RGB). Multiplied with the lighting result.
-    pub albedo: Vec3,
-    /// Opacity in \[0, 1\]. Values below 1.0 require an alpha-blend program.
-    pub opacity: f32,
-    /// Self-emission added after lighting (HDR values are valid).
-    pub emissive: Vec3,
-    /// Metallic factor in \[0, 1\]. 0 = dielectric, 1 = conductor.
-    pub metallic: f32,
-    /// Surface roughness in \[0, 1\]. 0 = mirror, 1 = fully diffuse.
-    pub roughness: f32,
-    /// Whether a tangent-space normal map is bound for this mesh.
-    ///
-    /// Set automatically by [`Scene::set_normal_map`]. When `true`,
-    /// `gbuffer_fragment.slang` applies a TBN transform using the bound
-    /// `"normal_map"` texture; when `false`, the geometric normal is used.
-    pub has_normal_map: bool,
-}
-
-impl Default for MaterialDescriptor {
-    fn default() -> Self {
-        Self {
-            albedo: Vec3::ONE,
-            opacity: 1.0,
-            emissive: Vec3::ZERO,
-            metallic: 0.0,
-            roughness: 0.5,
-            has_normal_map: false,
-        }
-    }
-}
-
-/// GPU-layout mirror of `MaterialConstants` in the lit and G-Buffer shaders.
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct MaterialConstants {
-    /// xyz = albedo, w = opacity
-    albedo: [f32; 4],
-    /// xyz = emissive, w = metallic
-    emissive_metallic: [f32; 4],
-    /// x = roughness, y = has_normal_map (1.0 = yes), zw = unused
-    roughness_flags: [f32; 4],
-}
-
-impl MaterialConstants {
-    fn from_descriptor(desc: &MaterialDescriptor) -> Self {
-        Self {
-            albedo: [desc.albedo.x, desc.albedo.y, desc.albedo.z, desc.opacity],
-            emissive_metallic: [
-                desc.emissive.x,
-                desc.emissive.y,
-                desc.emissive.z,
-                desc.metallic,
-            ],
-            roughness_flags: [
-                desc.roughness,
-                if desc.has_normal_map { 1.0 } else { 0.0 },
-                0.0,
-                0.0,
-            ],
-        }
-    }
-}
-
-/// Per-mesh material state owned by the scene.
-struct MeshMaterial {
-    descriptor: MaterialDescriptor,
-    gpu_buffer: Option<Buffer>,
-    dirty: bool,
-    /// Optional tangent-space normal map for the G-Buffer fill pass.
-    ///
-    /// Set via [`Scene::set_normal_map`]. When present, it is bound as
-    /// `"normal_map"` before each G-Buffer draw call for this mesh.
-    normal_map: Option<std::sync::Arc<crate::Image>>,
-    /// Full expression-based material for the deferred G-Buffer path.
-    ///
-    /// When set, `DeferredPass` compiles a unique G-Buffer fragment shader
-    /// variant from this material's expression tree and uses it instead of the
-    /// default G-Buffer program. The `descriptor` above is still used by the
-    /// forward lit path and for `set_material` compatibility.
-    unified: Option<super::material::UnifiedMaterial>,
-}
-
-/// Push constants sent to the vertex and fragment shaders for each camera draw call.
-///
-/// Shaders must declare `uniform CameraConstants cam` to receive these values.
-/// `time` is the elapsed time in seconds since application start — available
-/// in fragment shaders for procedural animation and UV scrolling.
-#[push_constants]
-pub struct CameraConstants {
-    pub view_proj: [[f32; 4]; 4],
-    pub previous_view_proj: [[f32; 4]; 4],
-    /// Elapsed time in seconds (application start = 0). Use in material expressions.
-    pub time: f32,
-    pub _pad: [f32; 3],
-}
-
-impl CameraConstants {
-    pub fn identity() -> Self {
-        Self {
-            view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-            previous_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-            time: 0.0,
-            _pad: [0.0; 3],
-        }
-    }
-
-    pub fn from_camera(camera: &SceneCamera) -> Self {
-        Self {
-            view_proj: camera.view_proj().to_cols_array_2d(),
-            previous_view_proj: camera.previous_view_proj.to_cols_array_2d(),
-            time: 0.0,
-            _pad: [0.0; 3],
-        }
-    }
-
-    pub fn with_time(mut self, time: f32) -> Self {
-        self.time = time;
-        self
-    }
-}
 
 /// A managed collection of meshes, object instances, and cameras.
 ///
@@ -549,10 +47,10 @@ impl CameraConstants {
 pub struct Scene {
     pub(super) meshes: Vec<(Mesh, MeshProgram)>,
     /// Parallel to `meshes` — one material entry per registered mesh.
-    materials: Vec<MeshMaterial>,
+    pub(super) materials: Vec<MeshMaterial>,
     pub(super) objects: Vec<SceneObject>,
     pub(super) cameras: Vec<SceneCamera>,
-    batches: HashMap<u32, InstanceBatch>,
+    pub(super) batches: HashMap<u32, InstanceBatch>,
     /// Atomic ID counter so `reserve_object_id()` works from any thread.
     next_object_id: AtomicU32,
     /// Atomic ID counter so `reserve_mesh_id()` works from any thread.
@@ -575,12 +73,25 @@ pub struct Scene {
     light_buffer: Option<Buffer>,
     /// GPU-resident array of [`GpuLightData`] for the deferred lighting pass.
     pub(crate) deferred_lights_buffer: Option<Buffer>,
-    geometry_backend: GeometryBackend,
+    pub(super) geometry_backend: GeometryBackend,
     /// Lazily created GPU frustum culling compute program.
-    culling_program: Option<ComputeProgram>,
+    pub(super) culling_program: Option<ComputeProgram>,
     /// Set by `cull_gpu()` each frame; tells the draw path to use `total_count`
     /// rather than `indirect_commands.len()` as the indirect draw count.
-    gpu_cull_active: bool,
+    pub(super) gpu_cull_active: bool,
+
+    // ── Track 8b: flat GPU scene buffer ───────────────────────────────────────
+    /// One `GpuInstanceData` per scene object, uploaded to the GPU.
+    ///
+    /// Objects are ordered by mesh_id (same grouping as batches) so each batch
+    /// has a contiguous slice. `batch.scene_base_idx` and `batch.scene_count`
+    /// identify each batch's slice within this buffer.
+    ///
+    /// Populated every frame during `prepare()`. Only objects whose transforms
+    /// changed (dynamic objects always; static objects only when dirty) are
+    /// re-uploaded — the rest retain their previous GPU values.
+    pub(super) gpu_scene_buffer: Option<Buffer>,
+    gpu_scene_capacity: usize,
 }
 
 impl Scene {
@@ -605,6 +116,8 @@ impl Scene {
             geometry_backend: GeometryBackend::ClassicVertex,
             culling_program: None,
             gpu_cull_active: false,
+            gpu_scene_buffer: None,
+            gpu_scene_capacity: 0,
         }
     }
 
@@ -624,155 +137,6 @@ impl Scene {
     /// Returns the currently active geometry backend.
     pub fn geometry_backend(&self) -> GeometryBackend {
         self.geometry_backend
-    }
-
-    /// Iterate batches whose `UnifiedMaterial` has `MaterialDomain::Translucent`.
-    ///
-    /// Used by `OitPass` to draw only transparent geometry in the collect pass.
-    pub fn translucent_batches(&self) -> impl Iterator<Item = (usize, Option<&Buffer>, u32)> {
-        self.batches
-            .values()
-            .filter(|b| {
-                let idx = b.mesh_idx as usize;
-                self.materials
-                    .get(idx)
-                    .and_then(|m| m.unified.as_ref())
-                    .map(|u| u.domain == super::material::MaterialDomain::Translucent)
-                    .unwrap_or(false)
-            })
-            .map(|b| (b.mesh_idx as usize, b.gpu_buffer.as_ref(), b.total_count()))
-    }
-
-    /// Dispatch the GPU frustum culling compute shader for all batches.
-    ///
-    /// Call this once per frame **after** `scene.prepare()` and **before** the
-    /// draw pass. Only active when `geometry_backend == ComputeIndirect`.
-    ///
-    /// The compute shader writes one `DrawIndexedIndirectCommand` per instance
-    /// slot: visible instances get `instance_count = 1`, invisible ones get
-    /// `instance_count = 0` (silently skipped by the GPU). The CPU draws all N
-    /// slots via `DrawIndexedIndirect` — no readback or atomic counter needed.
-    ///
-    /// # Example
-    /// ```ignore
-    /// scene.set_geometry_backend(GeometryBackend::ComputeIndirect);
-    /// // Each frame:
-    /// scene.prepare(&engine)?;
-    /// scene.cull_gpu(view_proj, &frame, &engine)?;
-    /// deferred.draw(&mut scene, view, proj, &output, &frame, &engine, time)?;
-    /// ```
-    pub fn cull_gpu(
-        &mut self,
-        view_proj: Mat4,
-        frame: &RenderFrame,
-        engine: &Engine,
-    ) -> Result<()> {
-        if self.geometry_backend != GeometryBackend::ComputeIndirect {
-            return Ok(());
-        }
-
-        // Lazily compile the culling compute program.
-        if self.culling_program.is_none() {
-            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("shaders")
-                .join("cull_compute.slang");
-            self.culling_program = Some(ComputeProgram::load(engine, path)?);
-        }
-        //panic allowed, reason = "culling_program was initialized when absent immediately above"
-        let program = self.culling_program.as_ref().unwrap();
-
-        // Extract frustum planes from the VP matrix.
-        let frustum = Frustum::from_view_proj(view_proj);
-        let planes: [[f32; 4]; 6] = {
-            let raw = frustum.planes_raw();
-            [
-                raw[0].to_array(),
-                raw[1].to_array(),
-                raw[2].to_array(),
-                raw[3].to_array(),
-                raw[4].to_array(),
-                raw[5].to_array(),
-            ]
-        };
-
-        for batch in self.batches.values() {
-            let total = batch.total_count();
-            if total == 0 {
-                continue;
-            }
-
-            let bounds_buf = match &batch.bounds_gpu_buffer {
-                Some(b) => b,
-                None => continue,
-            };
-            let indirect_buf = match &batch.indirect_gpu_buffer {
-                Some(b) => b,
-                None => continue,
-            };
-            let mesh_idx = batch.mesh_idx as usize;
-            let mesh = &self.meshes[mesh_idx].0;
-
-            let index_count = if mesh.is_indexed() {
-                mesh.index_count
-            } else {
-                mesh.vertex_count
-            };
-            let first_index = 0u32;
-            let vertex_offset = 0i32;
-
-            #[repr(C)]
-            #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-            struct CullConstants {
-                frustum_planes: [[f32; 4]; 6],
-                instance_count: u32,
-                index_count: u32,
-                first_index: u32,
-                vertex_offset: i32,
-            }
-            let constants = CullConstants {
-                frustum_planes: planes,
-                instance_count: total,
-                index_count,
-                first_index,
-                vertex_offset,
-            };
-
-            // Bind source + dest buffers, then dispatch the culling compute.
-            frame.bind_buffer("instance_bounds", bounds_buf);
-            frame.bind_buffer("indirect_commands", indirect_buf);
-
-            let groups = [(total + 63) / 64, 1, 1];
-            frame.dispatch_compute_auto(
-                format!("cull-batch-{mesh_idx}"),
-                program,
-                &constants,
-                groups,
-            )?;
-        }
-
-        self.gpu_cull_active = true;
-        Ok(())
-    }
-
-    /// Iterate over all drawable batches as `(mesh_index, instance_gpu_buffer, instance_count)`.
-    ///
-    /// Used by external passes (e.g. `ShadowPass`) that need to draw scene
-    /// geometry with a custom shader. The GPU instance buffer is `None` when
-    /// the batch has not yet been prepared for this frame.
-    pub fn drawable_batches(&self) -> impl Iterator<Item = (usize, Option<&Buffer>, u32)> {
-        self.batches
-            .values()
-            .map(|b| (b.mesh_idx as usize, b.gpu_buffer.as_ref(), b.total_count()))
-    }
-
-    /// Number of registered meshes.
-    pub fn mesh_count(&self) -> usize {
-        self.meshes.len()
-    }
-
-    /// Return the `Mesh` at the given index (as registered by `add_mesh`).
-    pub fn mesh_at(&self, index: usize) -> &Mesh {
-        &self.meshes[index].0
     }
 
     /// Register a mesh+program pair. Returns a `MeshId` used to spawn objects.
@@ -1043,12 +407,103 @@ impl Scene {
             .collect();
         let gpu_cull = self.geometry_backend == GeometryBackend::ComputeIndirect;
 
+        // Count total instances across all batches to size the GPU scene buffer.
+        let total_gpu_instances: usize = self
+            .batches
+            .values()
+            .map(|b| b.total_count() as usize)
+            .sum();
+
+        // Grow the flat GPU scene buffer if needed.
+        let gpu_stride = std::mem::size_of::<GpuInstanceData>();
+        if total_gpu_instances > self.gpu_scene_capacity || self.gpu_scene_buffer.is_none() {
+            let new_cap = total_gpu_instances.next_power_of_two().max(4);
+            self.gpu_scene_buffer = Some(engine.create_buffer(BufferDesc {
+                size: (new_cap * gpu_stride) as u64,
+                usage: BufferUsage::STORAGE,
+            })?);
+            self.gpu_scene_capacity = new_cap;
+        }
+
+        // Build GpuInstanceData for every batch and upload into the flat buffer.
+        // Batches are assigned contiguous ranges; scene_base_idx / scene_count
+        // are updated so cull_gpu() can dispatch per-batch slices.
+        let mut scene_offset: u32 = 0;
         for batch in self.batches.values_mut() {
             batch.prepare(engine)?;
             batch.indirect_commands.clear();
 
-            if gpu_cull {
-                if let Some(sphere) = mesh_spheres.get(batch.mesh_idx as usize) {
+            let mesh_idx = batch.mesh_idx as usize;
+            let local_sphere =
+                mesh_spheres
+                    .get(mesh_idx)
+                    .copied()
+                    .unwrap_or(crate::BoundingSphere {
+                        center: glam::Vec3::ZERO,
+                        radius: 0.0,
+                    });
+            let total = batch.total_count();
+
+            if total > 0 {
+                // Build GpuInstanceData for this batch's instances.
+                let mut gpu_data: Vec<GpuInstanceData> = Vec::with_capacity(total as usize);
+
+                for inst in batch
+                    .static_instances
+                    .iter()
+                    .chain(batch.dynamic_instances.iter())
+                {
+                    let model_mat = Mat4::from_cols_array_2d(&inst.model);
+                    let ws = local_sphere.transform(model_mat);
+                    let is_static = {
+                        let static_len = batch.static_instances.len();
+                        let dynamic_len = batch.dynamic_instances.len();
+                        let built_so_far = gpu_data.len();
+                        built_so_far < static_len && dynamic_len > 0 || {
+                            // Simpler: the first static_len entries are static.
+                            gpu_data.len() < static_len
+                        }
+                    };
+                    let flags = if is_static {
+                        GpuInstanceData::FLAG_STATIC
+                            | GpuInstanceData::FLAG_CAST_SHADOW
+                            | GpuInstanceData::FLAG_RECEIVE_SHADOW
+                    } else {
+                        GpuInstanceData::FLAG_DYNAMIC
+                            | GpuInstanceData::FLAG_CAST_SHADOW
+                            | GpuInstanceData::FLAG_RECEIVE_SHADOW
+                    };
+                    gpu_data.push(GpuInstanceData {
+                        model: inst.model,
+                        bounds: [ws.center.x, ws.center.y, ws.center.z, ws.radius],
+                        mesh_id: batch.mesh_idx,
+                        material_id: batch.mesh_idx, // same until bindless material system
+                        lod_bias: 0.0,
+                        flags,
+                    });
+                }
+
+                // Record this batch's slice in the flat scene buffer.
+                batch.scene_base_idx = scene_offset;
+                batch.scene_count = total;
+
+                // Upload to gpu_scene_buffer.
+                if let Some(buf) = &self.gpu_scene_buffer {
+                    buf.write(
+                        (scene_offset as usize * gpu_stride) as u64,
+                        bytemuck::cast_slice(&gpu_data),
+                    )?;
+                }
+
+                scene_offset += total;
+            } else {
+                batch.scene_base_idx = scene_offset;
+                batch.scene_count = 0;
+            }
+
+            // Per-batch culling buffers (existing path, kept for compatibility).
+            if gpu_cull && total > 0 {
+                if let Some(sphere) = mesh_spheres.get(mesh_idx) {
                     let spheres: Vec<[f32; 4]> = batch
                         .static_instances
                         .iter()
@@ -1059,7 +514,7 @@ impl Scene {
                         })
                         .collect();
                     batch.prepare_bounds(engine, &spheres)?;
-                    batch.prepare_indirect_slots(engine, batch.total_count())?;
+                    batch.prepare_indirect_slots(engine, total)?;
                 }
             }
         }

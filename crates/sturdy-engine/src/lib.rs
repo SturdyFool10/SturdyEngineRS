@@ -35,6 +35,7 @@ mod gltf_animation;
 mod gltf_loader;
 mod gpu_procedural_texture;
 mod graph_frame;
+pub mod graph_report;
 mod hdr_pipeline;
 mod headless;
 mod input;
@@ -57,6 +58,7 @@ mod sampler_catalog;
 mod scene;
 mod screenshot;
 mod shader_playground;
+pub mod shader_program;
 mod shader_watcher;
 mod shadow_pass;
 mod spot_shadow_pass;
@@ -70,6 +72,7 @@ mod text_overlay;
 mod text_tiling;
 mod texture;
 mod texture_compression;
+mod ui_renderer;
 mod upload_arena;
 mod window_registry;
 
@@ -179,20 +182,20 @@ pub use procedural_texture::{
 pub use quad_batch::QuadBatch;
 pub use runtime::{
     AppLayer, AppRuntime, AppRuntimeFrame, AssetDiagnostic, AssetState, DebugImageRegistry,
-    DefaultSceneTargetConfig, RuntimeApplyNotification, RuntimeApplyPath, RuntimeApplyReport,
-    RuntimeChangeResult, RuntimeController, RuntimeDiagnostics, RuntimeGraphDiagnostics,
-    RuntimePassTiming, RuntimeSettingChange, RuntimeSettingDescriptor, RuntimeSettingEntry,
-    RuntimeSettingId, RuntimeSettingKey, RuntimeSettingOption, RuntimeSettingSource,
-    RuntimeSettingSupport, RuntimeSettingValue, RuntimeSettingsSnapshot,
+    DefaultSceneTargetConfig, FrameTimingReport, RuntimeApplyNotification, RuntimeApplyPath,
+    RuntimeApplyReport, RuntimeChangeResult, RuntimeController, RuntimeDiagnostics,
+    RuntimeGraphDiagnostics, RuntimePassTiming, RuntimeSettingChange, RuntimeSettingDescriptor,
+    RuntimeSettingEntry, RuntimeSettingId, RuntimeSettingKey, RuntimeSettingOption,
+    RuntimeSettingSource, RuntimeSettingSupport, RuntimeSettingValue, RuntimeSettingsSnapshot,
     RuntimeSettingsTransaction, RuntimeTimingSummary, RuntimeUserDiagnostic,
     RuntimeWindowDiagnostics, SceneRenderContext, ShaderCompileError, UiContext, WindowMode,
 };
 pub use sampler_catalog::SamplerPreset;
 pub use scene::{
-    CameraConstants, CameraId, CameraOutput, DirectionalLight, DiskLight, InstanceData,
-    MaterialDescriptor, MaterialDomain, MaterialExpr, MaterialInput, MeshId, ObjectId, ObjectKind,
-    OrbitCamera, PointLight, RectLight, RenderState, RenderTarget, Scene, SceneCamera,
-    SceneCommands, SceneView, ShadingModel, SphereLight, SpotLight, UnifiedMaterial,
+    CameraConstants, CameraId, CameraOutput, DirectionalLight, DiskLight, GpuInstanceData,
+    InstanceData, MaterialDescriptor, MaterialDomain, MaterialExpr, MaterialInput, MeshId,
+    ObjectId, ObjectKind, OrbitCamera, PointLight, RectLight, RenderState, RenderTarget, Scene,
+    SceneCamera, SceneCommands, SceneView, ShadingModel, SphereLight, SpotLight, UnifiedMaterial,
     UnifiedMaterialBuilder, UvSource, gbuffer,
 };
 pub use screenshot::{ScreenshotCapture, ScreenshotExportReport};
@@ -217,16 +220,18 @@ pub use text_tiling::{TiledTextAtlasPage, TiledTextEngineFrame};
 pub use bind_group::BindGroupBuilder;
 pub use bindless::BindlessHandle;
 pub use frontend_graph::{
-    DiagnosticLevel, GraphDiagnostic, GraphImage, GraphImageCacheKey, GraphImageInfo,
-    GraphImageView, GraphPassInfo, GraphReport, PassKind, RenderFrame, ShaderName,
-    ShaderPassIntent, ShaderProgram, ShaderProgramDesc, SlangEntryPoints,
+    GraphImage, GraphImageCacheKey, GraphImageView, RenderFrame, ShaderPassIntent,
 };
 pub use glam::{Vec2, Vec3};
+pub use graph_report::{
+    DiagnosticLevel, GraphDiagnostic, GraphImageInfo, GraphPassInfo, GraphReport, PassKind,
+};
 pub use pipeline_layout::PipelineLayoutBuilder;
 pub use post_process::{
     AutoExposureConfig, CaConfig, CaPass, GrainConfig, GrainPass, LensConfig, PostProcessConfig,
     PostProcessPasses, VignetteConfig, VignettePass,
 };
+pub use shader_program::{ShaderName, ShaderProgram, ShaderProgramDesc, SlangEntryPoints};
 #[cfg(not(target_arch = "wasm32"))]
 pub use sturdy_engine_core::NativeSurfaceDesc;
 pub use sturdy_engine_core::ShaderReflection;
@@ -269,6 +274,7 @@ pub use sturdy_engine_platform::{
     current_window_appearance_caps, native_window_appearance_protocol, requested_backdrop_name,
 };
 pub use texture::{ImageCopyRegion, TextureUploadDesc};
+pub use ui_renderer::UiRenderer;
 pub use texture_compression::{CompressedTexture, TextureKind, compress_texture};
 pub use window_registry::{WindowHandle, WindowId, WindowRegistry};
 
@@ -280,6 +286,22 @@ use upload_arena::UploadArena;
 // Process-wide engine singleton, set once at shell startup.
 // All fields of Engine are Arc-backed, so clone is O(1) reference-count bumps.
 static GLOBAL_ENGINE: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
+
+// Latest frame-timing report, updated each frame by the runtime shell.
+// Stored as a Mutex<Option<...>> so Engine::frame_timing() can read it from any thread.
+static FRAME_TIMING: std::sync::OnceLock<std::sync::Mutex<Option<crate::FrameTimingReport>>> =
+    std::sync::OnceLock::new();
+
+fn frame_timing_cell() -> &'static std::sync::Mutex<Option<crate::FrameTimingReport>> {
+    FRAME_TIMING.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Called by the runtime shell at the end of each frame to publish timing data.
+pub(crate) fn set_global_frame_timing(report: crate::FrameTimingReport) {
+    *frame_timing_cell()
+        .lock()
+        .expect("frame timing mutex poisoned") = Some(report);
+}
 
 // Compile-time proof that Engine is safe to share across threads.
 // If this fails, a field was added that is not Send + Sync.
@@ -324,6 +346,7 @@ impl Engine {
         // "bindless_resources" is an alias for "descriptor_indexing" in the device builder.
         desc.optional_features
             .push("bindless_resources".to_string());
+        desc.optional_features.push("mesh_shading".to_string());
         Self::with_desc(desc)
     }
 
@@ -966,6 +989,30 @@ impl Engine {
     /// in a rendered scene, making missing asset bugs obvious at a glance.
     pub fn checkerboard_texture(&self, size: u32, tile_size: u32) -> Result<Image> {
         asset_loader::make_checkerboard(self, size, tile_size)
+    }
+
+    // ── Frame-time diagnostics (Track LL) ────────────────────────────────────
+
+    /// Return the most recent frame timing snapshot, or `None` before the first frame.
+    ///
+    /// Updated once per frame by the runtime shell. Contains CPU frame time,
+    /// GPU frame time, and rolling P95/P99 jitter metrics over 128 frames.
+    ///
+    /// **Callable from any thread at any time** — reads a Mutex without blocking
+    /// (uncontended in normal use: the runtime only writes once per frame).
+    ///
+    /// ```ignore
+    /// if let Some(t) = Engine::global().frame_timing() {
+    ///     if t.is_jittery() {
+    ///         eprintln!("jitter! p99={:.1}ms mean={:.1}ms", t.p99_cpu_ms, t.mean_cpu_ms);
+    ///     }
+    /// }
+    /// ```
+    pub fn frame_timing(&self) -> Option<crate::FrameTimingReport> {
+        frame_timing_cell()
+            .lock()
+            .expect("frame timing mutex poisoned")
+            .clone()
     }
 
     // ── Bindless descriptor heap (Track 8a) ───────────────────────────────────

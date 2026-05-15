@@ -113,6 +113,11 @@ Engine + ECS thread safety (foundational — do alongside GPU-driven work)
   └─ Parallel PSO compilation — no more render-thread stutter on first material use
   └─ Parallel ECS schedule — wave-based, rayon, WorldView + WorldCommands
 
+Code organisation (continuous guardrail)
+  └─ Keep large systems split by ownership, not by arbitrary line count
+  └─ Keep public facades thin and compatibility re-exports stable while moving code
+  └─ Separate runtime code, test fixtures, shader fixtures, generated code, and demos
+
 Physics, UI, Platform (parallel, after foundation)
 ```
 
@@ -332,6 +337,7 @@ Current: CSM (4 cascades, PCF or PCSS) ✓, spot PCF ✓, point dual-paraboloid 
 
 - [ ] **Virtual Shadow Maps (VSM)**: page-based virtual atlas (`R32Float`, 16K×16K logical, 128×128 resident pages). Only render pages visible to the camera and dirty pages. Supports 16+ simultaneous shadow sources without atlas defragmentation stalls. Gate behind `ShadowTechnique::Virtual`; fall back to CSM.
 - [ ] **RT shadows**: hardware RT shadow rays replacing PCF for the primary directional light. `ShadowConfig::rt_shadows: RtShadowMode` (Off / DirectionalOnly / All); graceful fallback to CSM.
+- [ ] **Denoising slot**: RT shadow output routes through a replaceable denoiser pass (`ShadowDenoiser::Svgf` initially; `ShadowDenoiser::Neural` when Track LL — Research Horizons matures).
 - [ ] **Point light shadow atlas**: consolidate the 8 dual-paraboloid maps (4 lights × front/back) into a single atlas to reduce texture binding count.
 
 ---
@@ -814,6 +820,221 @@ The text system, input callbacks, and Clay UI bindings exist. There is no layout
 
 ---
 
+## Low-Latency Presentation (Track LL)
+
+*Source: deep-research-report.md, §Low-latency input, rendering, and presentation.*
+
+Visual latency is a whole-stack problem. Operating systems and compositors decide present cadence; graphics APIs expose present modes and queue controls; the engine decides when to sample input, how many frames to pipeline, and when to commit the final camera state. A high-quality engine must control all three layers.
+
+### Present mode selection
+
+- [ ] Query available present modes at surface creation; expose `SurfacePresentStrategy { Fifo, Mailbox, Immediate }` alongside `SurfacePresentMode`. Default to `Fifo` (universally available, stable cadence); offer `Mailbox` for low-latency windowed mode; document `Immediate` as tearing-risk.
+- [ ] On Windows: request DXGI flip-model swap chain with a frame-latency waitable object (`DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT`). Block on the waitable at the top of the frame loop to pace at exactly one frame of buffering when desired.
+- [ ] Expose `SurfaceConfig::max_frames_in_flight: u32` (default 2). Clamped to swapchain image count. Lower values reduce latency; higher values reduce GPU stalls on slow frames.
+- [ ] `Surface::present_latency_hint() -> Duration` — best-effort estimate of display latency from queue submission to photons, derived from `VkPastPresentationTimingGOOGLE` or `DXGI_FRAME_STATISTICS`.
+
+### Late input sampling
+
+- [ ] **Sample input as late as possible** before GPU submission, not at the top of the frame. A late sample can save 4–8 ms of input latency versus sampling at game-logic time.
+- [ ] Add `InputHub::sample_late()` — a second, render-thread snapshot taken immediately before `frame.flush()`. Camera jitter, view matrix, and motion vectors should use this snapshot, not the physics snapshot.
+- [ ] `FixedUpdateContext` keeps the physics snapshot; `GameContext::render_input` is the late-sampled snapshot.
+
+### Frame-time diagnostics
+
+Research (PresentMon, PIX, Vulkan timestamp queries) consistently shows that mean FPS is a poor metric. What matters is per-frame time stability and latency breakdown.
+
+- [ ] `FrameTimingReport` per frame: `cpu_ms`, `gpu_ms`, `present_to_display_ms`, `total_latency_ms`. Surfaced via `RuntimeGraphDiagnostics`.
+- [ ] Track P95 and P99 frame times over a rolling 128-frame window alongside the mean. Expose via `RuntimeTimingSummary`.
+- [ ] Log a warning when P99 exceeds 2× P50 (jitter spike) or when GPU occupancy drops below 70% (CPU-bound frame).
+- [ ] `Engine::frame_timing() -> Option<FrameTimingReport>` — callable from any thread, updated each frame.
+
+---
+
+## Research Horizons (2026 and beyond)
+
+*These items derive from peer-reviewed and preprint research as of May 2026. They are directional signals, not committed roadmap items. Designs should not hard-depend on them; they become concrete when the technique is production-proven and implementation cost is understood.*
+
+### Neural denoising (SIGGRAPH Asia 2024)
+
+**Online Neural Denoising with Cross-Regression for Interactive Rendering** (ACM TOG, SIGGRAPH Asia 2024) shows that real-time denoising is moving from hand-built bilateral/SVGF filters toward online, temporally aware neural reconstruction that accumulates information across frames with learned kernels.
+
+- [ ] **Short-term** (no change): ship SVGF for RT shadow and GI denoising as planned (Track Shadow, Track GI).
+- [ ] **Medium-term**: design the SVGF denoiser pass with a replaceable kernel slot. When a neural denoiser is available (compiled ONNX or custom Slang kernel), it slots in without changing the pass interface.
+- [ ] Neural denoiser output should feed the same temporal accumulation path as SVGF so motion-vector reprojection still works.
+
+### GPU procedural geometry (Eurographics 2025)
+
+**Real-time Procedural Resurfacing Using GPU Mesh Shader** (CGF 2025) and **Real-Time GPU Tree Generation** (HPG 2025) demonstrate that mesh shaders are most valuable not as a vertex-stage replacement, but as a **GPU-side detail-generation mechanism** that can produce geometry on the fly from compact procedural descriptions.
+
+- [ ] Add `ProceduralMeshProvider` trait: given a cluster or seed, emit mesh-shader-compatible meshlet data. Connects to Track 7 (VirtualMesh) hardware rasterization path.
+- [ ] Evaluate tree/foliage generation as a candidate for GPU procedural instancing: store a procedural descriptor per instance rather than full geometry.
+
+### Wavelet-space super-resolution (arXiv 2025)
+
+**Wavelet-Space Super-Resolution for Real-Time Rendering** proposes a non-proprietary upscaler that better preserves high-frequency structure than image-space methods.
+
+- [ ] When FSR 3.1 (Track 10) is implemented, expose `UpscalerConfig::algorithm: UpscalerAlgorithm` with `Fsr31`, `Xess2`, and `Wavelet` variants. Wavelet becomes available when the technique matures.
+- [ ] The unified upscaler interface (Track 10c) already accounts for this via `UpscalerConfig::auto()`.
+
+### 3D Gaussian Splatting and streaming representations
+
+**Streaming Real-Time Rendered Scenes as 3D Gaussians** (arXiv 2026) replaces viewpoint-locked 2D video with a streamable 3D representation that supports view correction — directly relevant to cloud rendering and XR.
+
+- [ ] Track as a **Scene representation** option alongside raster and RT: `SceneRepresentation::GaussianSplat`.
+- [ ] Gaussian splat rendering requires sorted alpha compositing (OIT is an approximation); a dedicated splat rasterizer (compute-based) would be correct.
+- [ ] Not a near-term deliverable; keep the architecture open by not hard-wiring assumptions that only raster geometry will be used.
+
+### Hybrid foveated path tracing (arXiv 2026)
+
+**Hybrid Foveated Path Tracing with Peripheral Gaussians** combines high-fidelity foveal rendering with approximate peripheral Gaussian representation and depth-guided reprojection — a systems idea for XR.
+
+- [ ] Foveated rendering requires eye-tracking input (`InputHub::gaze_direction() -> Option<Vec2>`). Wire it when hardware is present; no-op otherwise.
+- [ ] `RenderConfig::foveal_region: Option<FovealDesc>` — describes the high-detail region. Passes that support VRS (Track 8c) use this to reduce peripheral shading rate.
+
+---
+
+## Code Organisation
+
+This is a continuous engineering track, not a polish pass. Capability work should leave
+the engine easier to navigate than it found it. Files must stay digestible: target ≤ 800
+lines for any `.rs` source file, split files over ~1 200 lines unless there is a written
+reason they are intentionally cohesive, and keep module boundaries aligned with ownership
+and invariants rather than arbitrary line count.
+
+Public API compatibility matters during this work. Move implementation into focused
+modules, then keep existing public paths alive with `pub use` re-exports until an explicit
+breaking-change window.
+
+### Project-wide organisation rules
+
+- [ ] Add a lightweight file-size report script or CI check that lists `.rs` files over 800 lines and fails only when a file crosses 1 200 lines without an allow-list note.
+- [ ] Keep facade files (`lib.rs`, `mod.rs`, backend entry points) mostly declarations and re-exports. Implementation-heavy impl blocks move into owned modules.
+- [ ] Split types together with their inherent impls, trait impls, `Default` impls, and small type-local helper functions. Do not leave orphan impl blocks behind in facade files.
+- [ ] Split pure functional code by job: parsing, validation, scheduling, rasterization, upload, diagnostics, and platform translation each get their own module when they grow independently.
+- [ ] Keep test-only code in `#[cfg(test)] mod tests` blocks or `tests/` modules beside the subsystem they validate. Shared shader fixtures live under `shaders/tests/`.
+- [ ] Keep generated shader templates, runtime shaders, and test shaders in separate folders so language accounting and shader-error searches stay accurate.
+- [ ] When a split touches public types, add compatibility re-exports in the old module and update `docs/architecture.md` with the new ownership boundary.
+- [ ] Prefer one module per lifecycle owner: creation/bootstrap, runtime mutation, cache/registry, diagnostics/reporting, and tests should not share one large file.
+
+### Current files over 1 000 lines
+
+Snapshot from `find crates -name '*.rs' -print0 | xargs -0 wc -l | awk '$2 != "total" && $1 > 1000' | sort -nr` on 2026-05-13:
+
+| File | Lines | Organisation need |
+|---|---:|---|
+| `crates/clay-ui/src/layout/widgets/mod.rs` | 4 556 | Continue splitting widget builders by family and shared behavior. |
+| `crates/sturdy-engine/src/frontend_graph.rs` | 3 425 | Finish graph image and render-frame extraction. |
+| `crates/sturdy-engine/src/runtime.rs` | 2 817 | Split config, diagnostics, controller, and runtime shell. |
+| `crates/sturdy-engine/src/application.rs` | 2 588 | Split window setup, shell frame, event loop runner, and app traits. |
+| `crates/sturdy-engine/src/lib.rs` | 2 111 | Move `Engine` impls into `engine/*` modules; keep facade exports. |
+| `crates/sturdy-engine-core/src/render_graph.rs` | 2 111 | Split graph model, compiler, barriers, scheduler, aliasing, and validation. |
+| `crates/textui/src/atlas.rs` | 1 957 | Split atlas allocation, glyph upload, cache policy, and diagnostics. |
+| `crates/sturdy-engine/src/tests.rs` | 1 664 | Group integration tests into domain modules. |
+| `crates/sturdy-engine-core/src/backend/vulkan/commands.rs` | 1 568 | Split command contexts, frame acquisition, submission, barriers, and debug labels. |
+| `crates/sturdy-engine-testbed/src/main.rs` | 1 564 | Split app state, tonemapping controls, runtime settings, resources, and entry point. |
+| `crates/sturdy-engine-core/src/slang.rs` | 1 523 | Split sessions, modules, diagnostics, reflection, and panic-policy tests. |
+| `crates/sturdy-engine-core/src/device.rs` | 1 494 | Split backend-agnostic device traits, handles, features, and errors. |
+| `crates/textui/src/text_ui_input_widget.rs` | 1 450 | Split text editing model, layout, event handling, and rendering bridge. |
+| `crates/textui/src/lib.rs` | 1 384 | Move implementation into modules; keep crate facade lean. |
+| `crates/clay-ui/src/layout/input/tests.rs` | 1 261 | Split behavior tests by focus, scroll, slider, callbacks, and overlay scopes. |
+| `crates/clay-ui/src/layout/input/simulator.rs` | 1 158 | Continue splitting pointer routing, keyboard routing, focus, scroll, and slider handling. |
+| `crates/textui/src/editor.rs` | 1 058 | Split editor state, cursor/selection movement, edits, undo/redo, and scroll metrics. |
+
+### Per-file split plans
+
+| File | Target organisation |
+|---|---|
+| `crates/clay-ui/src/layout/widgets/mod.rs` | Initial split done: `layout/widgets/mod.rs` is now the facade; `widgets/palette.rs` owns `ToggleAnimConfig`, `WidgetPalette`, and `WidgetRenderContext`; `widgets/types.rs` owns widget style/config/spec types; `widgets/selection.rs` owns button/radio/checkbox/toggle/segmented controls; `widgets/slider.rs` owns `DragBarAxis`, `SliderStyle`, drag bars, sliders, and progress bars; `widgets/scroll.rs` owns `ScrollbarMetrics`, scrollbars, and scroll containers; `widgets/overlays.rs` owns portal hosts, modal layers, and tooltip layers/surfaces. Next splits: context-menu overlays, `widgets/inputs.rs` for text, number, search, select; `widgets/virtualized.rs` for virtual list/dropdown/log/grid/table/tree/mosaic; `widgets/navigation.rs` for tabs, breadcrumbs, accordion; `widgets/data.rs` for list item, table header, property row, chip; `widgets/feedback.rs` for badges, notifications, status bar; `widgets/primitives.rs` for local layout/style helpers. |
+| `crates/clay-ui/src/layout/input.rs` | Initial split done: `layout/input.rs` is now a facade with `input/types.rs`, `input/simulator.rs`, `input/helpers.rs`, and `input/tests.rs`. Remaining split: `input/context.rs` for `PendingRegistrations`, `Cx`, `EventContext`, `UiEventResult`; `input/events.rs` for event enums and payload structs; `input/behavior.rs` for `WidgetKind`, `WidgetBehavior`, `WidgetConfig`, `WidgetState`; `input/scroll.rs`; `input/focus.rs`; `input/dispatch.rs`; `input/slider.rs`; split tests by behavior family. |
+| `crates/sturdy-engine/src/frontend_graph.rs` | `frontend_graph/mod.rs` facade; finish `graph_image.rs` with `GraphImage*` types and impls; `render_frame.rs` for `RenderFrame` and `RenderFrameInner`; `pass_intent.rs` for `ShaderPassIntent`; `recording.rs` for fullscreen/compute recording helpers; `resources.rs` for explicit resource import and subresource validation; `submit.rs` for pending-pass submission; keep `scheduler.rs` and `reflection.rs`; move tests into `frontend_graph/tests.rs`. |
+| `crates/sturdy-engine/src/runtime.rs` | `runtime/mod.rs` facade; `runtime/app.rs` for `AppRuntime`; `runtime/frame.rs` for `AppRuntimeFrame`; `runtime/controller.rs` for `RuntimeController` and change reports; `runtime/settings.rs` or `runtime/settings/*` for setting ids, values, descriptors, entries, support, sources, transactions, and defaults; `runtime/diagnostics.rs` for diagnostics structs; `runtime/timing.rs` for `FrameTimingReport`, `RuntimeTimingSummary`, history; `runtime/debug_images.rs`; `runtime/context.rs` for scene/UI context structs. |
+| `crates/sturdy-engine/src/application.rs` | `application/mod.rs` facade; `application/config.rs` for `WindowConfig`, `WindowDesc`, shell commands; `application/app.rs` for `EngineApp`; `application/shell_frame.rs` for `ShellFrame`, motion vectors, post-process output; `application/runner.rs` for `run`/`try_run`; `application/shell_app.rs` for `ShellApp` lifecycle; `application/gamepad.rs`; `application/window.rs` for window state/create/apply helpers; `application/window_settings.rs` for runtime setting translation; platform-specific helpers under `application/platform/`. |
+| `crates/sturdy-engine/src/lib.rs` | Keep as crate facade; `engine/mod.rs` owns `Engine`; `engine/core.rs` for construction/global/wait/surface basics; `engine/resources.rs` for images, buffers, samplers, shaders; `engine/pipelines.rs`; `engine/assets.rs`; `engine/bindless.rs`; `engine/frame.rs`; `engine/sync.rs` for `FrameSync*`; `handles.rs` for `Image`, `Buffer`, `Sampler`, `Shader`, `BindGroup`, `PipelineLayout`, `Pipeline`, `Surface`, `SurfaceImage`; `passes.rs` for `DrawPassBuilder` and `ComputePassBuilder`; `frame.rs` for `Frame`. |
+| `crates/sturdy-engine-core/src/render_graph.rs` | `render_graph/mod.rs` facade; `render_graph/model.rs` for queue/access/state/use/key structs; `render_graph/work.rs` for draw/dispatch/copy/pass work descriptions; `render_graph/resources.rs` for virtual image/buffer/resource state; `render_graph/graph.rs` for `RenderGraph` type and type-local impls; `render_graph/compiler.rs` for compile logic; `render_graph/scheduler.rs` for record batches; `render_graph/barriers.rs`; `render_graph/copy_validation.rs`; keep `alias_plan.rs`; move tests into `render_graph/tests.rs`. |
+| `crates/textui/src/atlas.rs` | Keep `atlas.rs` as facade; `atlas/key.rs` for raster keys; `atlas/glyph_atlas.rs` for `GlyphAtlas` and its impl; `atlas/worker.rs` for worker loop/messages; `atlas/cursor.rs` for cursor-stop and glyph-cluster math; `atlas/raster_alpha.rs`; `atlas/raster_field.rs`; `atlas/outline.rs` for flattening and winding; `atlas/field_encoding.rs`; `atlas/image_ops.rs` for color-image sampling/subimages; `atlas/upload.rs` for texture upload/write paths. |
+| `crates/sturdy-engine/src/input.rs` | Initial split done: parent is now ~977 lines with `input/keybind.rs`, `keyboard.rs`, `gamepad.rs`, `capture.rs`, `actions.rs`, `display.rs`, and `winit_bridge.rs`. Remaining optional splits: `input/hub.rs`, `input/clay_bridge.rs`, and tests beside owning modules. |
+| `crates/sturdy-engine/src/tests.rs` | Replace with `tests/mod.rs`; split into `tests/bind_groups.rs`, `tests/shader_reflection.rs`, `tests/render_frame.rs`, `tests/runtime.rs`, `tests/graph_report.rs`, `tests/input.rs`, `tests/upload.rs`, `tests/sync.rs`, `tests/deferred_destroy.rs`, and `tests/backend_null.rs`. Keep shader fixtures in `shaders/tests/`. |
+| `crates/sturdy-engine/src/scene/scene.rs` | Initial split done: parent is now ~995 lines with `scene/lights.rs`, `gpu_constants.rs`, `gpu_culling.rs`, `material_state.rs`, `queries.rs`, existing `gpu_instance.rs`, and `batch.rs`. Remaining optional splits: `scene/prepare.rs`, `scene/draw.rs`, and camera/output orchestration if the parent grows again. |
+| `crates/sturdy-engine-core/src/backend/vulkan/commands.rs` | `commands/mod.rs` facade; `commands/context.rs` for `CommandContext`; `commands/render.rs` for render pass/draw recording; `commands/compute.rs`; `commands/copy.rs`; `commands/barriers.rs` for access/stage/layout/aspect helpers; `commands/push_constants.rs`; `commands/subresources.rs`; `commands/framed.rs` for `FramedCommands`; keep `batch_pool.rs`. |
+| `crates/sturdy-engine-testbed/src/main.rs` | `main.rs` only starts the app; `testbed/app.rs` for `Testbed` and `EngineApp` impl; `testbed/tonemap.rs` for settings/dials/operator parsing; `testbed/aa.rs`; `testbed/resources.rs` for shader/texture setup; `testbed/ui.rs` for debug/runtime UI; `testbed/runtime_settings.rs`; `testbed/helpers.rs` for labels/sanitization/path helpers. |
+| `crates/sturdy-engine-core/src/slang.rs` | `slang/mod.rs` facade; `slang/ffi.rs` for raw `sys`; `slang/session.rs` for session/request guards; `slang/source.rs` for source-input handling and SPIR-V byte parsing; `slang/reflection.rs`; `slang/layout_merge.rs`; `slang/compile.rs` for CLI/compiler artifact paths; `slang/targets.rs`; `slang/diagnostics.rs`; keep `spirv_push_constants.rs` and `spirv_vertex_inputs.rs`; move tests into `slang/tests.rs`. |
+| `crates/sturdy-engine-core/src/device.rs` | `device/mod.rs` facade; `device/desc.rs` for `DeviceDesc`; `device/adapter.rs`; `device/inner.rs` for `DeviceInner`; `device/resources.rs`; `device/pipelines.rs`; `device/bind_groups.rs`; `device/surfaces.rs`; `device/frame.rs` for `Frame`; `device/deferred_destroy.rs`; `device/validation.rs`; `device/reflection.rs` for shader layout merge/cache helpers. |
+| `crates/textui/src/text_ui_input_widget.rs` | `input_widget/mod.rs` facade; `input_widget/singleline.rs`; `input_widget/multiline.rs`; `input_widget/rich_viewer.rs`; `input_widget/events.rs` for keyboard/pointer/gamepad handling; `input_widget/paint.rs`; `input_widget/scrollbars.rs`; `input_widget/state.rs` for state sync and cleanup; pure cursor/edit helpers stay in `editor/*`. |
+| `crates/textui/src/lib.rs` | Keep as crate facade and public types; `config.rs` for text fundamentals/options/color/raster config; `gpu_scene.rs` for `TextGpuQuad`, `TextGpuScene`, page data; `text_ui.rs` for `TextUi` lifecycle; `layout.rs` for buffer/layout measurement; `raster/mod.rs`, `raster/alpha.rs`, `raster/field.rs`, `raster/outline.rs`, `raster/distance.rs`; `cache_key.rs`; tests by module. |
+| `crates/textui/src/editor.rs` | `editor/mod.rs` facade; `editor/state.rs` for `InputState`, undo entries, scroll metrics; `editor/cursor.rs`; `editor/selection.rs`; `editor/navigation.rs`; `editor/edits.rs` for insert/delete/paste/cut; `editor/undo.rs`; `editor/scroll.rs`; `editor/layout.rs` for visual cursor and preferred-x helpers. |
+| `crates/sturdy-engine/src/deferred_pass.rs` | Initial split done: parent is now ~758 lines with `deferred_pass/config.rs`, `constants.rs`, `helpers.rs`, `hot_reload.rs`, `oit.rs`, and `shadows.rs`. Remaining optional splits: `deferred_pass/pass.rs` for constructors, `gbuffer.rs`, `lighting.rs`, and `environment.rs` if the parent grows again. |
+
+### Cross-crate follow-up tracks
+
+- [ ] **Clay UI split**: Clay source now lives under `crates/clay-ui/src/layout/` with public module paths preserved from `lib.rs`. `layout/widgets/` exists with palette/context in `widgets/palette.rs`, widget specs in `widgets/types.rs`, selection controls in `widgets/selection.rs`, slider/progress controls in `widgets/slider.rs`, scroll primitives in `widgets/scroll.rs`, and portal/modal/tooltip overlays in `widgets/overlays.rs`; next, split context menus, text/input, virtualized, navigation, data, feedback, and shared primitive helpers.
+- [ ] **Clay UI input split**: first pass done with `layout/input.rs` as a facade over `input/types.rs`, `input/simulator.rs`, `input/helpers.rs`, and `input/tests.rs`. Continue separating raw events, pointer capture, keyboard focus, navigation, gesture recognition, and test helpers.
+- [ ] **Text UI split**: move atlas allocation, glyph cache policy, upload staging, editor state, input widget behavior, and scene building into separate modules. Keep `textui::lib` as a small public facade.
+- [ ] **Engine-core render graph split**: extract `render_graph/model.rs`, `compiler.rs`, `barriers.rs`, `scheduler.rs`, `aliasing.rs`, `validation.rs`, and `diagnostics.rs`. This pairs with async compute, transient memory, and future backend support.
+- [ ] **Vulkan backend split**: keep `backend/vulkan/mod.rs` as the backend facade. Move command recording/submission, descriptor allocation, resource creation, synchronization, feature queries, and pipeline cache handling into independent ownership modules.
+- [ ] **Slang service split**: isolate compiler session setup, module loading, reflection, diagnostic formatting, shader cache keys, and test fixtures. This keeps shader-input expansion work from growing a single compiler file.
+- [ ] **Test suite split**: replace large crate-level `tests.rs` files with domain modules (`tests/render_graph.rs`, `tests/materials.rs`, `tests/runtime.rs`, `tests/scene.rs`, `tests/shaders.rs`) or integration tests where they exercise public APIs.
+
+### `crates/sturdy-engine/src/frontend_graph.rs` (≈ 3 425 lines)
+
+The first two extractions are done. The remaining file still holds graph-image ownership
+and frame-building logic that should become separate modules:
+
+| Target file | Contents | Est. lines |
+|---|---|---|
+| `graph_report.rs` | `PassKind`, `GraphPassInfo`, `GraphImageInfo`, `GraphReport`, `DiagnosticLevel`, `GraphDiagnostic` | ~120 |
+| `shader_program.rs` | `ShaderProgramDesc`, `ShaderName`, `SlangEntryPoints`, `ShaderProgram` | ~360 |
+| `graph_image.rs` | `GraphImage`, `GraphImageView`, `GraphImageCacheKey`, `GraphImageDescKey`, `ImageRef for GraphImage` | ~1 600 |
+| `render_frame.rs` | `RenderFrame`, `ShaderPassIntent`, frame builders | ~1 700 |
+
+- [x] Extract `graph_report.rs`
+- [x] Extract `shader_program.rs`
+- [ ] Extract `graph_image.rs`
+- [ ] Extract `render_frame.rs`
+
+### `crates/sturdy-engine/src/runtime.rs` (≈ 2 817 lines)
+
+| Target file | Contents | Est. lines |
+|---|---|---|
+| `runtime/config.rs` | `RuntimeSettingDescriptor`, `RuntimeSettingEntry`, `RuntimeSettingId`, `RuntimeSettingKey`, `RuntimeSettingOption`, `RuntimeSettingValue`, `RuntimeSettingSource`, `RuntimeSettingSupport`, `RuntimeSettingChange`, `WindowMode`, `RuntimeSettingsSnapshot`, `RuntimeSettingsTransaction` | ~500 |
+| `runtime/diagnostics.rs` | `AssetDiagnostic`, `AssetState`, `RuntimeDiagnostics`, `RuntimeGraphDiagnostics`, `RuntimePassTiming`, `RuntimeTimingSummary`, `RuntimeUserDiagnostic`, `RuntimeWindowDiagnostics`, `DebugImageRegistry` | ~400 |
+| `runtime/controller.rs` | `RuntimeController`, `RuntimeApplyNotification`, `RuntimeApplyPath`, `RuntimeApplyReport`, `RuntimeChangeResult` | ~400 |
+| `runtime/mod.rs` | `AppRuntime`, `AppRuntimeFrame`, `SceneRenderContext`, `UiContext`, re-exports | ~1 379 |
+
+- [ ] Extract `runtime/config.rs`
+- [ ] Extract `runtime/diagnostics.rs`
+- [ ] Extract `runtime/controller.rs`
+
+### `crates/sturdy-engine/src/application.rs` (≈ 2 588 lines)
+
+| Target file | Contents | Est. lines |
+|---|---|---|
+| `application/window.rs` | `WindowConfig`, `WindowDesc`, `WindowMode`, per-window state | ~400 |
+| `application/shell_frame.rs` | `ShellFrame`, post-process helpers, `RuntimePostProcessDesc`, `RuntimePostProcessOutput` | ~600 |
+| `application/app_runner.rs` | `run`, `try_run`, event loop wiring | ~800 |
+| `application/mod.rs` | `EngineApp` trait, `MotionVector*`, re-exports | ~788 |
+
+- [ ] Extract `application/window.rs`
+- [ ] Extract `application/shell_frame.rs`
+- [ ] Extract `application/app_runner.rs`
+
+### `crates/sturdy-engine/src/lib.rs` (≈ 2 071 lines)
+
+`lib.rs` is mostly the `Engine` struct and its impls. The clean split is:
+
+| Target file | Contents | Est. lines |
+|---|---|---|
+| `engine/core.rs` | `Engine` struct, `new`, `with_backend`, global accessor, `wait_idle`, surface methods | ~400 |
+| `engine/resources.rs` | `create_image`, `create_buffer`, `create_sampler`, `create_shader`, `write_buffer`, etc. | ~400 |
+| `engine/assets.rs` | `load_texture_2d`, `load_hdr_texture*`, `load_mesh`, `drain_pending_uploads`, `checkerboard_texture`, `generate_texture_2d` | ~350 |
+| `engine/bindless.rs` (separate from `bindless.rs`) | `register_bindless_*`, `bindless_supported` | ~80 |
+| `engine/frame.rs` | `begin_frame`, `begin_render_frame`, `begin_frame_for_surface`, `render_image` | ~80 |
+| `lib.rs` | RAII wrappers (`Image`, `Buffer`, `Sampler`, `Shader`, `Pipeline`, `Surface`, `Frame`, `SurfaceImage`), all `pub use` re-exports | ~760 |
+
+- [ ] Extract `engine/core.rs`
+- [ ] Extract `engine/assets.rs`
+
+---
+
 ## Ongoing Architectural Constraints
 
 ### Threading (Law 2 compliance)
@@ -834,3 +1055,6 @@ The text system, input callbacks, and Clay UI bindings exist. There is no layout
 - [ ] Standardise colour handling: linear scene colour internally, explicit sRGB decode/encode at I/O boundaries.
 - [ ] Standardise resource debug labels for all surfaces, images, buffers, passes, pipelines, and generated resources.
 - [ ] Standardise capability queries before feature enablement.
+- [ ] **Track time-domain frame metrics, not just FPS.** Mean FPS masks jitter and tail latency. `FrameTimingReport` must include CPU duration, GPU duration, present-to-display duration, P95, and P99 over a 128-frame rolling window. See Track LL.
+- [ ] **Late input sampling.** Camera matrix and motion vectors used in the render path must be derived from the latest possible input snapshot, not the game-logic snapshot. See Track LL.
+- [ ] **Minimize frame queuing.** Default to 2 frames in flight. Never allow unbounded command buffer queuing; always pace against the waitable object or fence. See Track LL.

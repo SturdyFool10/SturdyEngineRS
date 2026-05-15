@@ -1,3 +1,4 @@
+use ash::ext::mesh_shader;
 use ash::{Device, vk};
 
 #[path = "commands/batch_pool.rs"]
@@ -93,6 +94,7 @@ impl CommandContext {
         pipelines: &mut PipelineRegistry,
         debug: &DebugUtils,
         bindless: Option<BindlessVkInfo>,
+        mesh_shader_ext: Option<&mesh_shader::Device>,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
     ) -> Result<SubmissionHandle> {
@@ -249,6 +251,7 @@ impl CommandContext {
                             descriptors,
                             pipelines,
                             bindless,
+                            mesh_shader_ext,
                         )?;
                         if !pass.name.is_empty() {
                             debug.end_region(cmd);
@@ -408,6 +411,7 @@ impl CommandContext {
         descriptors: &DescriptorRegistry,
         pipelines: &mut PipelineRegistry,
         bindless: Option<BindlessVkInfo>,
+        mesh_shader_ext: Option<&mesh_shader::Device>,
     ) -> Result<()> {
         let mut bound_pipeline = None;
         if let Some(pipeline) = pass.pipeline {
@@ -692,9 +696,84 @@ impl CommandContext {
                     },
                 )?;
             }
-            // Mesh-shader work variants: recorded when VK_EXT_mesh_shader is enabled (Track 7d).
-            PassWork::DrawMeshShader(_) | PassWork::DrawMeshShaderIndirect(_) => {
-                // TODO(Track 7d): emit vkCmdDrawMeshTasksEXT / vkCmdDrawMeshTasksIndirectEXT
+            PassWork::DrawMeshShader(desc) => {
+                let pipeline = bound_pipeline.ok_or_else(|| {
+                    Error::InvalidInput("mesh shader draw pass requires a graphics pipeline".into())
+                })?;
+                if pipeline.bind_point != vk::PipelineBindPoint::GRAPHICS {
+                    return Err(Error::InvalidInput(
+                        "mesh shader draw pass pipeline must bind to the graphics pipeline bind point"
+                            .into(),
+                    ));
+                }
+                let mesh_shader_ext = mesh_shader_ext.ok_or_else(|| {
+                    Error::Unsupported(
+                        "mesh shader draw pass requires VK_EXT_mesh_shader to be enabled".into(),
+                    )
+                })?;
+                self.record_draw_pass(
+                    device,
+                    command_buffer,
+                    pass,
+                    pipeline.render_pass,
+                    resources,
+                    pipelines,
+                    None,
+                    || unsafe {
+                        mesh_shader_ext.cmd_draw_mesh_tasks(
+                            command_buffer,
+                            desc.group_count_x,
+                            desc.group_count_y,
+                            desc.group_count_z,
+                        );
+                    },
+                )?;
+            }
+            PassWork::DrawMeshShaderIndirect(desc) => {
+                let pipeline = bound_pipeline.ok_or_else(|| {
+                    Error::InvalidInput(
+                        "indirect mesh shader draw pass requires a graphics pipeline".into(),
+                    )
+                })?;
+                if pipeline.bind_point != vk::PipelineBindPoint::GRAPHICS {
+                    return Err(Error::InvalidInput(
+                        "indirect mesh shader draw pass pipeline must bind to the graphics pipeline bind point"
+                            .into(),
+                    ));
+                }
+                if desc.stride < std::mem::size_of::<vk::DrawMeshTasksIndirectCommandEXT>() as u32
+                    || desc.stride % 4 != 0
+                {
+                    return Err(Error::InvalidInput(
+                        "indirect mesh shader draw stride must be a multiple of 4 and at least the size of VkDrawMeshTasksIndirectCommandEXT"
+                            .into(),
+                    ));
+                }
+                let mesh_shader_ext = mesh_shader_ext.ok_or_else(|| {
+                    Error::Unsupported(
+                        "indirect mesh shader draw pass requires VK_EXT_mesh_shader to be enabled"
+                            .into(),
+                    )
+                })?;
+                let indirect_buf = resources.buffer(desc.indirect_buffer)?;
+                self.record_draw_pass(
+                    device,
+                    command_buffer,
+                    pass,
+                    pipeline.render_pass,
+                    resources,
+                    pipelines,
+                    None,
+                    || unsafe {
+                        mesh_shader_ext.cmd_draw_mesh_tasks_indirect(
+                            command_buffer,
+                            indirect_buf,
+                            desc.offset,
+                            desc.draw_count,
+                            desc.stride,
+                        );
+                    },
+                )?;
             }
             PassWork::GenerateMipmaps {
                 image: img_handle,
@@ -1387,6 +1466,7 @@ impl FramedCommands {
         pipelines: &mut PipelineRegistry,
         debug: &DebugUtils,
         bindless: Option<BindlessVkInfo>,
+        mesh_shader_ext: Option<&mesh_shader::Device>,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
     ) -> Result<SubmissionHandle> {
@@ -1402,6 +1482,7 @@ impl FramedCommands {
             pipelines,
             debug,
             bindless,
+            mesh_shader_ext,
             wait_semaphore,
             signal_semaphore,
         )?;

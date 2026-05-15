@@ -19,6 +19,11 @@ Texture2D<float4> gbuffer_emissive;
 Texture2D<float>  gbuffer_depth;    // hardware depth [0,1] — used for world pos reconstruction
 SamplerState      gbuffer_sampler;
 
+// ── Ambient occlusion (Track AO) ──────────────────────────────────────────────
+// Bound as R32Float by AoPass when ambient occlusion is enabled.
+// When not bound, falls back to `gtao_result_fallback` (1×1 white = no occlusion).
+Texture2D<float>  gtao_result;           // AO value [0,1]; 1 = no occlusion
+
 // ── Shadow atlas ──────────────────────────────────────────────────────────────
 // All CSM cascades are packed into a single Depth32Float atlas (2×2 tile grid).
 // The legacy per-cascade names (shadow_map_0..3) are also registered as aliases
@@ -766,6 +771,10 @@ float4 main(VSOut v) : SV_TARGET {
     } else {
         ambient = push.ambient * albedo;
     }
+
+    // Sample AO and apply to the ambient term only (direct lighting is unaffected).
+    float ao = gtao_result.Sample(gbuffer_sampler, v.uv).r;
+    ambient *= ao;
 
     return float4(ambient + Lo + emissive, 1.0);
 }

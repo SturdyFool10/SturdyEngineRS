@@ -18,10 +18,20 @@
 //   scene.prepare(&engine)?;
 //   deferred.draw(&mut scene, view, proj, &hdr_output, &frame, &engine, time)?;
 
+mod config;
+mod constants;
+mod helpers;
+mod hot_reload;
+mod oit;
+mod shadows;
+
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use glam::{Mat4, Vec4};
+
+pub use config::{RenderPath, SkyConfig};
+use constants::{DeferredLightingConstants, ForwardLightingUniforms};
+use helpers::{engine_shader, extract_near_far};
 
 use crate::scene::CameraConstants;
 use crate::{
@@ -30,65 +40,11 @@ use crate::{
     ShaderProgram, ShaderSource, ShaderStage,
     environment_map::{EnvironmentMap, SPECULAR_LAYER_COUNT, compute_brdf_lut, compute_e_avg_lut},
     light_bvh::LightBvhBuilder,
-    oit_pass::{OitConfig, OitPass},
-    push_constants,
+    oit_pass::OitPass,
     scene::Scene,
     shadow_pass::{CsmConfig, CsmPass},
 };
 use sturdy_engine_core::Extent3d;
-
-fn engine_shader(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("shaders")
-        .join(name)
-}
-
-/// Push constants for `deferred_lighting.slang` (128 bytes = Vulkan guaranteed minimum).
-#[push_constants]
-struct DeferredLightingConstants {
-    camera_world_pos: [f32; 4],   // 16
-    ambient: [f32; 3],            // 12
-    dir_light_count: u32,         //  4  → 32
-    ibl_strength: f32,            //  4
-    ibl_max_layer: f32,           //  4
-    bvh_root: u32,                //  4
-    sky_enabled: u32,             //  4  → 48
-    inv_view_proj: [[f32; 4]; 4], // 64  → 112
-    sky_turbidity: f32,           //  4
-    sky_exposure: f32,            //  4
-    sky_sun_size: f32,            //  4
-    _pad: f32,                    //  4  → 128
-}
-
-/// Uniform buffer (48 bytes) bound as `"forward_lighting"` for the OIT forward lit pass.
-/// Pre-bound by `DeferredPass::draw()` before the OIT collect phase runs.
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct ForwardLightingUniforms {
-    camera_world_pos: [f32; 4], // 16
-    ambient: [f32; 3],          // 12
-    dir_light_count: u32,       //  4  → 32
-    ibl_strength: f32,          //  4
-    ibl_max_layer: f32,         //  4
-    bvh_root: u32,              //  4
-    _pad: f32,                  //  4  → 48
-}
-
-/// Selects how opaque geometry is rendered.
-///
-/// - `DeferredThenForward` (default): opaque objects via G-Buffer deferred; translucent
-///   objects via `OitPass` if enabled. Best quality and scalability.
-/// - `ForwardOnly`: all opaque objects rendered with the forward-lit shader in one pass;
-///   no G-Buffer, no deferred lighting. Useful as a compatibility fallback on hardware
-///   that does not support multiple render targets.
-///
-/// Set via `DeferredPass::render_path`.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum RenderPath {
-    #[default]
-    DeferredThenForward,
-    ForwardOnly,
-}
 
 /// Deferred rendering component with GGX PBR, per-material shader variants,
 /// and a directional shadow map.
@@ -115,38 +71,6 @@ pub enum RenderPath {
 /// frame.bind_image("rock_normal",    &rock_normal_tex);
 /// deferred.draw(&mut scene, view, proj, &hdr_output, &frame, &engine, time_secs)?;
 /// ```
-/// Procedural sky configuration.
-///
-/// The sky is rendered as part of the deferred lighting pass — background pixels
-/// (those with no geometry, i.e. depth = 1.0) receive a physically-inspired sky
-/// colour derived from the scene's directional light direction. No extra pass needed.
-///
-/// `SkyConfig::default()` gives a clear midday sky. Set on `DeferredPass` via
-/// `deferred.sky = SkyConfig { turbidity: 4.0, ..Default::default() }`.
-#[derive(Clone, Debug)]
-pub struct SkyConfig {
-    /// Atmospheric turbidity \[1, 10\]. 1 = crystal clear, 10 = heavy haze.
-    /// Default 2.5.
-    pub turbidity: f32,
-    /// Overall sky exposure multiplier. Default 1.0.
-    pub exposure: f32,
-    /// Sun disc angular radius in degrees. Default 0.53 (physically correct).
-    pub sun_size_deg: f32,
-    /// Enable sky rendering for background pixels. Default true.
-    pub enabled: bool,
-}
-
-impl Default for SkyConfig {
-    fn default() -> Self {
-        Self {
-            turbidity: 2.5,
-            exposure: 1.0,
-            sun_size_deg: 0.53,
-            enabled: true,
-        }
-    }
-}
-
 pub struct DeferredPass {
     default_gbuffer_program: MeshProgram,
     /// Forward-lit opaque program used when `render_path == ForwardOnly`.
@@ -368,51 +292,6 @@ impl DeferredPass {
         })
     }
 
-    /// Expose the CSM configuration for live tuning.
-    pub fn csm_config_mut(&mut self) -> &mut CsmConfig {
-        &mut self.csm.config
-    }
-
-    /// Enable spot light shadow maps.
-    ///
-    /// ```ignore
-    /// let spot_shadows = SpotShadowPass::new(&engine)?;
-    /// deferred.set_spot_shadows(spot_shadows);
-    /// ```
-    pub fn set_spot_shadows(&mut self, pass: crate::SpotShadowPass) {
-        self.spot_shadows = Some(pass);
-    }
-
-    /// Remove the spot light shadow pass.
-    pub fn clear_spot_shadows(&mut self) {
-        self.spot_shadows = None;
-    }
-
-    /// Expose spot shadow config for tuning.
-    pub fn spot_shadow_config_mut(&mut self) -> Option<&mut crate::SpotShadowConfig> {
-        self.spot_shadows.as_mut().map(|s| &mut s.config)
-    }
-
-    /// Enable dual-paraboloid point light shadow maps for up to 4 lights.
-    ///
-    /// ```ignore
-    /// let point_shadows = PointShadowPass::new(&engine)?;
-    /// deferred.set_point_shadows(point_shadows);
-    /// ```
-    pub fn set_point_shadows(&mut self, pass: crate::PointShadowPass) {
-        self.point_shadows = Some(pass);
-    }
-
-    /// Remove the point light shadow pass.
-    pub fn clear_point_shadows(&mut self) {
-        self.point_shadows = None;
-    }
-
-    /// Expose point shadow config for tuning.
-    pub fn point_shadow_config_mut(&mut self) -> Option<&mut crate::PointShadowConfig> {
-        self.point_shadows.as_mut().map(|p| &mut p.config)
-    }
-
     /// Attach an environment map for image-based lighting.
     ///
     /// Enables split-sum specular reflections and SH9 diffuse irradiance.
@@ -459,134 +338,6 @@ impl DeferredPass {
     /// Returns the current blend alpha [0, 1] (0 = source, 1 = target).
     pub fn blend_alpha(&self) -> f32 {
         self.blend_alpha
-    }
-
-    /// Returns all material variant compile failures since init.
-    ///
-    /// Each entry is `(content_hash, error_message)`. The failed material falls
-    /// back to the default G-Buffer program and is not retried until the hash changes
-    /// (i.e. the `UnifiedMaterial` expression is modified).
-    pub fn variant_compile_failures(&self) -> impl Iterator<Item = (u64, &str)> {
-        self.failed_variants.iter().map(|(k, v)| (*k, v.as_str()))
-    }
-
-    /// Clear all recorded variant compile failures, allowing retry on next frame.
-    pub fn clear_variant_failures(&mut self) {
-        self.failed_variants.clear();
-    }
-
-    /// Poll for changes to the engine shader files and hot-reload as needed.
-    ///
-    /// Call once per frame. Returns one diagnostic per changed file.
-    ///
-    /// **Cache invalidation**: changes to `brdf.slang`, `material_surface.slang`, or
-    /// `gbuffer_fragment.slang` automatically clear the `UnifiedMaterial` variant
-    /// cache so all variants recompile against the new code on the next draw.
-    ///
-    /// # Example
-    /// ```ignore
-    /// for d in deferred.tick_hot_reload() {
-    ///     if !d.success { eprintln!("{}", d.summary()); }
-    /// }
-    /// ```
-    pub fn tick_hot_reload(&mut self) -> Vec<crate::ShaderReloadDiagnostic> {
-        use crate::ShaderReloadDiagnostic;
-
-        let changed = self.shader_watcher.poll_changed();
-        if changed.is_empty() {
-            return Vec::new();
-        }
-
-        let lighting_path = engine_shader("deferred_lighting.slang");
-        let gbuffer_path = engine_shader("gbuffer_fragment.slang");
-        let forward_path = engine_shader("forward_opaque.slang");
-        let brdf_path = engine_shader("brdf.slang");
-        let mat_surface_path = engine_shader("material_surface.slang");
-
-        let mut diags = Vec::new();
-        let mut invalidate_cache = false;
-
-        for path in changed {
-            let mut success = true;
-            let mut error: Option<String> = None;
-
-            let is_shared = path == brdf_path || path == mat_surface_path;
-
-            if is_shared {
-                // A shared import changed — reload every program that imports it
-                // and clear the variant cache so all UnifiedMaterial variants recompile.
-                invalidate_cache = true;
-                for result in [
-                    self.lighting_program.reload(),
-                    self.default_gbuffer_program.reload_fragment(),
-                    self.forward_opaque_program.reload_fragment(),
-                ] {
-                    if let Err(e) = result {
-                        if error.is_none() {
-                            error = Some(e.to_string());
-                        }
-                        success = false;
-                    }
-                }
-            } else if path == lighting_path {
-                match self.lighting_program.reload() {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error = Some(e.to_string());
-                        success = false;
-                    }
-                }
-            } else if path == gbuffer_path {
-                // The default G-Buffer program changed — also invalidate variants
-                // since user-authored variants are derived from the same base.
-                invalidate_cache = true;
-                if let Err(e) = self.default_gbuffer_program.reload_fragment() {
-                    error = Some(e.to_string());
-                    success = false;
-                }
-            } else if path == forward_path {
-                match self.forward_opaque_program.reload_fragment() {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error = Some(e.to_string());
-                        success = false;
-                    }
-                }
-            }
-
-            diags.push(ShaderReloadDiagnostic {
-                path,
-                success,
-                error,
-            });
-        }
-
-        if invalidate_cache {
-            self.variant_cache.clear();
-            self.failed_variants.clear();
-        }
-
-        diags
-    }
-
-    /// Enable order-independent transparency for `Translucent`-domain materials.
-    ///
-    /// Without this, translucent objects are silently skipped.
-    /// ```ignore
-    /// deferred.set_oit(OitPass::new(&engine)?);
-    /// ```
-    pub fn set_oit(&mut self, oit: OitPass) {
-        self.oit = Some(oit);
-    }
-
-    /// Remove the OIT pass (translucent objects will no longer be rendered).
-    pub fn clear_oit(&mut self) {
-        self.oit = None;
-    }
-
-    /// Expose OIT configuration for live tuning.
-    pub fn oit_config_mut(&mut self) -> Option<&mut OitConfig> {
-        self.oit.as_mut().map(|o| &mut o.config)
     }
 
     /// Execute the full deferred frame into `output`.
@@ -1004,20 +755,4 @@ impl DeferredPass {
 
         Ok(())
     }
-}
-
-/// Extract camera near and far clip planes from a RH perspective projection matrix.
-fn extract_near_far(proj: Mat4) -> (f32, f32) {
-    // For glam perspective_rh:  col3.z = near*far/(near-far),  col2.z = far/(near-far)
-    let a = proj.z_axis.z; // far/(near-far)
-    let b = proj.w_axis.z; // near*far/(near-far)
-    // a = far/(near-far) → near-far = far/a → near = far/a + far
-    // b = near*far/(near-far) = near * a_inv_... easier:
-    // b/a = near → near = b/a  (note: both negative for RH looking down -Z)
-    if a.abs() < 1e-7 {
-        return (0.1, 1000.0);
-    } // orthographic fallback
-    let near = b / a;
-    let far = near * a / (a - 1.0 + 1e-7);
-    (near.abs().max(0.01), far.abs().max(near.abs() + 1.0))
 }

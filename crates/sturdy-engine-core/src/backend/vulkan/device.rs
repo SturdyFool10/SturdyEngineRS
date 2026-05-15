@@ -19,6 +19,7 @@ pub struct LogicalDevice {
     pub device: AshDevice,
     pub queue_families: QueueFamilyMap,
     pub queues: VulkanQueues,
+    pub mesh_shader_enabled: bool,
 }
 
 impl DeviceSelection {
@@ -63,6 +64,7 @@ pub fn create_logical_device(
         })
         .collect::<Vec<_>>();
     let mut feature_request = FeatureRequest::resolve(instance, selection.physical_device, config)?;
+    let mesh_shader_enabled = feature_request.mesh_shader.mesh_shader == vk::TRUE;
     let extension_request = ExtensionRequest::resolve(
         instance,
         selection.physical_device,
@@ -96,6 +98,7 @@ pub fn create_logical_device(
         device,
         queue_families: selection.queue_families,
         queues,
+        mesh_shader_enabled,
     })
 }
 

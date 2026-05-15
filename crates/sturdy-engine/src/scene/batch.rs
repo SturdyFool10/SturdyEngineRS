@@ -40,6 +40,15 @@ pub(super) struct InstanceBatch {
     /// Filled during `Scene::prepare()` when GPU culling is enabled.
     pub bounds_gpu_buffer: Option<Buffer>,
     bounds_capacity: usize,
+
+    // ── Track 8b: flat GPU scene buffer integration ───────────────────────────
+    /// First index into `Scene::gpu_scene_buffer` that belongs to this batch.
+    ///
+    /// Set during `prepare()` after the scene buffer is (re)built.
+    /// Used as the `batch_base_idx` push constant in the culling dispatch.
+    pub scene_base_idx: u32,
+    /// Number of instances from `gpu_scene_buffer` that belong to this batch.
+    pub scene_count: u32,
 }
 
 impl InstanceBatch {
@@ -56,6 +65,8 @@ impl InstanceBatch {
             indirect_capacity: 0,
             bounds_gpu_buffer: None,
             bounds_capacity: 0,
+            scene_base_idx: 0,
+            scene_count: 0,
         }
     }
 

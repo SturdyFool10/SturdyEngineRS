@@ -26,7 +26,6 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
 
     let ray_tracing =
         has(b"VK_KHR_ray_tracing_pipeline\0") && has(b"VK_KHR_acceleration_structure\0");
-    let mesh_shading = has(b"VK_EXT_mesh_shader\0");
     let descriptor_indexing = has(b"VK_EXT_descriptor_indexing\0");
     let dynamic_rendering = has(b"VK_KHR_dynamic_rendering\0");
     let synchronization2 = has(b"VK_KHR_synchronization2\0");
@@ -37,6 +36,8 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     let variable_rate_shading = has(b"VK_KHR_fragment_shading_rate\0");
     let core_features = unsafe { instance.get_physical_device_features(physical_device) };
     let feature_chain = available_feature_chain(instance, physical_device);
+    let mesh_shading =
+        has(b"VK_EXT_mesh_shader\0") && feature_chain.mesh_shader.mesh_shader == vk::TRUE;
     let bindless = descriptor_indexing
         && feature_chain.descriptor_indexing.runtime_descriptor_array == vk::TRUE
         && feature_chain

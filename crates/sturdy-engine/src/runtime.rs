@@ -42,6 +42,12 @@ pub struct AppRuntime {
     motion_debug_pass: MotionVectorDebugPass,
     frame_clock: FrameClock,
     frame_start: Option<Instant>,
+    /// Rolling 128-frame CPU-time history for P95/P99 computation.
+    cpu_time_history: FrameTimeHistory,
+    /// Clay UI layout context. Access via [`AppRuntime::clay_ui`].
+    clay_ui: clay_ui::UiContext,
+    /// Renderer for clay GpuWorkQueue commands — lazy-initialised.
+    ui_renderer: Option<crate::ui_renderer::UiRenderer>,
 }
 
 impl AppRuntime {
@@ -56,6 +62,9 @@ impl AppRuntime {
             motion_debug_pass,
             frame_clock: FrameClock::new(),
             frame_start: None,
+            cpu_time_history: FrameTimeHistory::new(128),
+            clay_ui: clay_ui::UiContext::new(),
+            ui_renderer: None,
             controller: RuntimeController::new(RuntimeSettingsSnapshot {
                 backend: engine.backend_kind(),
                 adapter_name: engine.adapter_name(),
@@ -116,6 +125,18 @@ impl AppRuntime {
     }
 
     /// Return the runtime-owned frame clock.
+    pub fn clay_ui(&mut self) -> &mut clay_ui::UiContext {
+        &mut self.clay_ui
+    }
+
+    fn ui_renderer(&mut self) -> Result<&crate::ui_renderer::UiRenderer> {
+        if self.ui_renderer.is_none() {
+            self.ui_renderer = Some(crate::ui_renderer::UiRenderer::new(&self.engine)?);
+        }
+        //panic allowed, reason = "just initialised above"
+        Ok(self.ui_renderer.as_ref().unwrap())
+    }
+
     pub fn frame_clock(&self) -> &FrameClock {
         &self.frame_clock
     }
@@ -448,6 +469,35 @@ impl<'a> AppRuntimeFrame<'a> {
     /// the start of the *next* frame's submission, enabling CPU/GPU overlap.
     ///
     /// Records CPU-measured frame time into `RuntimeDiagnostics.timings`.
+    pub fn ui_context(&mut self) -> UiContext<'_> {
+        let surface_info = self.runtime.surface.info();
+        let viewport = clay_ui::Size {
+            width: surface_info.size.width as f32,
+            height: surface_info.size.height as f32,
+        };
+        let frame_number = self.runtime.frame_clock.time().frame;
+        UiContext::new(self.runtime, viewport, frame_number)
+    }
+
+    pub fn route_input_to_ui(&mut self, hub: &mut crate::InputHub) {
+        hub.route_to_clay(&mut self.runtime.clay_ui);
+    }
+
+    pub fn draw_ui(&mut self, output: &clay_ui::UiFrameOutput, target: &GraphImage) -> Result<()> {
+        let surface = self.runtime.surface.info();
+        let (w, h) = (surface.size.width, surface.size.height);
+        let renderer = self.runtime.ui_renderer()?;
+        for (_, tree) in &output.trees {
+            renderer.draw_queue(&self.render_frame, target, &tree.queue, w, h)?;
+        }
+        if !output.text_scenes.is_empty() {
+            crate::ui_renderer::draw_ui_text(
+                &self.render_frame, &self.runtime.engine, output, target, w, h,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn finish_and_present(&mut self) -> Result<()> {
         self.finished = true;
         let flush_report = self
@@ -462,10 +512,29 @@ impl<'a> AppRuntimeFrame<'a> {
             ));
         });
         if let Some(start) = self.runtime.frame_start.take() {
-            let elapsed_ms = start.elapsed().as_secs_f32() * 1000.0;
+            let cpu_ms = start.elapsed().as_secs_f32() * 1000.0;
+            self.runtime.cpu_time_history.push(cpu_ms);
+            let percentiles = self.runtime.cpu_time_history.percentiles();
+            let pass_timings_raw = self.runtime.engine.device.pass_timings();
+            let gpu_total: f32 = pass_timings_raw.iter().map(|(_, ms)| ms).sum();
+            let pass_timings: Vec<RuntimePassTiming> = pass_timings_raw
+                .into_iter()
+                .map(|(name, ms)| RuntimePassTiming { name, gpu_time_ms: Some(ms) })
+                .collect();
+            let gpu_ms = if pass_timings.is_empty() { None } else { Some(gpu_total) };
             self.runtime.controller.update_diagnostics(|d| {
                 d.timings.available = true;
-                d.timings.cpu_frame_time_ms = Some(elapsed_ms);
+                d.timings.cpu_frame_time_ms = Some(cpu_ms);
+                d.timings.gpu_frame_time_ms = gpu_ms;
+                d.timings.pass_timings = pass_timings;
+                if let Some((mean, p95, p99)) = percentiles {
+                    d.timings.cpu_mean_ms = Some(mean);
+                    d.timings.cpu_p95_ms = Some(p95);
+                    d.timings.cpu_p99_ms = Some(p99);
+                }
+                if let Some(report) = FrameTimingReport::from_summary(&d.timings) {
+                    crate::set_global_frame_timing(report);
+                }
             });
         }
         Ok(())
@@ -1127,18 +1196,80 @@ pub struct RuntimeGraphDiagnostics {
     pub error_count: usize,
 }
 
-/// Frame timing summary surfaced through runtime diagnostics.
+/// A point-in-time snapshot of frame timing from the most recently completed frame.
 ///
-/// `cpu_frame_time_ms` is populated automatically by `AppRuntimeFrame::finish_and_present`.
-/// `gpu_frame_time_ms` and `pass_timings` require backend timer-query support (future work).
+/// Obtained via [`Engine::frame_timing()`] from any thread at any time.
+#[derive(Clone, Debug)]
+pub struct FrameTimingReport {
+    pub cpu_ms: f32,
+    pub gpu_ms: Option<f32>,
+    pub mean_cpu_ms: f32,
+    pub p95_cpu_ms: f32,
+    pub p99_cpu_ms: f32,
+    pub fps: f32,
+}
+
+impl FrameTimingReport {
+    pub(crate) fn from_summary(s: &RuntimeTimingSummary) -> Option<Self> {
+        let cpu_ms = s.cpu_frame_time_ms?;
+        let mean = s.cpu_mean_ms?;
+        let p95 = s.cpu_p95_ms?;
+        let p99 = s.cpu_p99_ms?;
+        Some(Self {
+            cpu_ms,
+            gpu_ms: s.gpu_frame_time_ms,
+            mean_cpu_ms: mean,
+            p95_cpu_ms: p95,
+            p99_cpu_ms: p99,
+            fps: if mean > 0.0 { 1000.0 / mean } else { 0.0 },
+        })
+    }
+
+    pub fn is_jittery(&self) -> bool {
+        self.p99_cpu_ms > self.mean_cpu_ms * 2.0
+    }
+}
+
+/// Rolling fixed-size frame-time sample buffer for P95/P99 computation.
+pub(crate) struct FrameTimeHistory {
+    samples: Vec<f32>,
+    head: usize,
+    count: usize,
+    capacity: usize,
+}
+
+impl FrameTimeHistory {
+    pub fn new(capacity: usize) -> Self {
+        Self { samples: vec![0.0; capacity], head: 0, count: 0, capacity }
+    }
+
+    pub fn push(&mut self, ms: f32) {
+        self.samples[self.head] = ms;
+        self.head = (self.head + 1) % self.capacity;
+        self.count = (self.count + 1).min(self.capacity);
+    }
+
+    pub fn percentiles(&self) -> Option<(f32, f32, f32)> {
+        if self.count < 4 { return None; }
+        let mut sorted: Vec<f32> = self.samples[..self.count].to_vec();
+        sorted.sort_by(f32::total_cmp);
+        let mean = sorted.iter().sum::<f32>() / sorted.len() as f32;
+        let p95 = sorted[(sorted.len() as f32 * 0.95) as usize];
+        let p99 = sorted[((sorted.len() - 1) as f32 * 0.99) as usize];
+        Some((mean, p95, p99))
+    }
+}
+
+/// Frame timing summary surfaced through runtime diagnostics.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RuntimeTimingSummary {
     pub available: bool,
-    /// CPU-measured time from `acquire_frame` to `finish_and_present` in milliseconds.
     pub cpu_frame_time_ms: Option<f32>,
-    /// GPU-measured whole-frame time (requires timer query backend support).
     pub gpu_frame_time_ms: Option<f32>,
     pub pass_timings: Vec<RuntimePassTiming>,
+    pub cpu_mean_ms: Option<f32>,
+    pub cpu_p95_ms: Option<f32>,
+    pub cpu_p99_ms: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2602,15 +2733,23 @@ impl<'a> SceneRenderContext<'a> {
 /// UI-building context handed to [`AppLayer::build_ui`].
 pub struct UiContext<'a> {
     runtime: &'a mut AppRuntime,
+    viewport: clay_ui::Size,
+    frame_number: u64,
 }
 
 impl<'a> UiContext<'a> {
-    pub fn new(runtime: &'a mut AppRuntime) -> Self {
-        Self { runtime }
+    pub fn new(runtime: &'a mut AppRuntime, viewport: clay_ui::Size, frame_number: u64) -> Self {
+        Self { runtime, viewport, frame_number }
     }
 
-    pub fn runtime(&mut self) -> &mut AppRuntime {
-        self.runtime
+    pub fn runtime(&mut self) -> &mut AppRuntime { self.runtime }
+    pub fn clay(&mut self) -> &mut clay_ui::UiContext { &mut self.runtime.clay_ui }
+    pub fn viewport(&self) -> clay_ui::Size { self.viewport }
+    pub fn frame_number(&self) -> u64 { self.frame_number }
+
+    pub fn build_frame(&mut self) -> clay_ui::UiFrameOutput {
+        let limits = self.runtime.engine.caps().limits;
+        self.runtime.clay_ui.build_frame_with_limits(self.viewport, self.frame_number, &limits, 1.0)
     }
 }
 

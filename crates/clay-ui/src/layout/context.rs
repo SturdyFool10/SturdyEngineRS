@@ -146,6 +146,11 @@ impl UiContext {
             .insert(name.clone(), UiTreeInstance::new(name, tree, target))
     }
 
+    /// Iterate all registered trees as `(name, &UiTreeInstance)` pairs.
+    pub fn trees(&self) -> impl Iterator<Item = (&str, &UiTreeInstance)> {
+        self.trees.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
     pub fn remove_tree(&mut self, name: &str) -> Option<UiTreeInstance> {
         self.trees.remove(name)
     }

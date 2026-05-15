@@ -60,6 +60,8 @@ pub struct VulkanBackend {
     active_surface: Mutex<Option<SurfaceHandle>>,
     /// Global bindless descriptor heap. `None` when `Caps::supports_bindless` is false.
     bindless_heap: Option<bindless::BindlessHeap>,
+    /// VK_EXT_mesh_shader commands. Present only when the mesh shader feature was enabled.
+    mesh_shader_ext: Option<ash::ext::mesh_shader::Device>,
 }
 
 impl VulkanBackend {
@@ -93,6 +95,14 @@ impl VulkanBackend {
             pipelines::PipelineRegistry::create(&logical.device, cache_data.as_deref())?;
 
         let debug_utils = debug::DebugUtils::new(&instance, &logical.device);
+        let mesh_shader_ext = if logical.mesh_shader_enabled {
+            Some(ash::ext::mesh_shader::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
 
         // Create the bindless heap if the device supports descriptor_indexing.
         let bindless_heap = if caps.supports_bindless {
@@ -127,6 +137,7 @@ impl VulkanBackend {
             alias_heaps: Mutex::new(alias_heaps::AliasHeapRegistry::default()),
             active_surface: Mutex::new(None),
             bindless_heap,
+            mesh_shader_ext,
         })
     }
 
@@ -707,6 +718,7 @@ impl Backend for VulkanBackend {
             &mut pipelines,
             &self.debug,
             self.bindless_vk_info(),
+            self.mesh_shader_ext.as_ref(),
             wait_sem,
             signal_sem,
         )?;

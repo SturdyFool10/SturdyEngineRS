@@ -5,27 +5,49 @@
 //! without recording API-specific commands.
 #![allow(dead_code)]
 
+#[path = "layout/batch.rs"]
 pub mod batch;
+#[path = "layout/color.rs"]
 pub mod color;
+#[path = "layout/context.rs"]
 pub mod context;
+#[path = "layout/coords.rs"]
 pub mod coords;
+#[path = "layout/element.rs"]
 pub mod element;
+#[path = "layout/floating.rs"]
 pub mod floating;
+#[path = "layout/font_discovery.rs"]
 pub mod font_discovery;
+#[path = "layout/geometry.rs"]
 pub mod geometry;
+#[path = "layout/gradient.rs"]
 pub mod gradient;
+#[path = "layout/id.rs"]
 pub mod id;
+#[path = "layout/image_tiling.rs"]
 pub mod image_tiling;
+#[path = "layout/input.rs"]
 pub mod input;
+#[path = "layout/core.rs"]
 pub mod layout;
+#[path = "layout/media.rs"]
 pub mod media;
+#[path = "layout/mosaic.rs"]
 pub mod mosaic;
+#[path = "layout/render_command.rs"]
 pub mod render_command;
+#[path = "layout/render_graph.rs"]
 pub mod render_graph;
+#[path = "layout/shader.rs"]
 pub mod shader;
+#[path = "layout/text.rs"]
 pub mod text;
+#[path = "layout/tree.rs"]
 pub mod tree;
+#[path = "layout/virtualization.rs"]
 pub mod virtualization;
+#[path = "layout/widgets/mod.rs"]
 pub mod widgets;
 
 pub use batch::{GpuBatch, GpuBatchKind, GpuWorkQueue, OffscreenTarget};
