@@ -34,7 +34,6 @@ use clay_ui::{GpuWorkQueue, RenderCommandKind, RenderData};
 use crate::{
     Engine, GraphImage, Image, Mesh, MeshProgram, MeshProgramDesc, MeshVertexKind, QuadBatch,
     RenderFrame, Result, ShaderDesc, ShaderSource, ShaderStage, TextureUploadDesc,
-    FrameSyncReason,
 };
 
 const UI_SHAPE_FRAGMENT: &str = include_str!("../shaders/debug_overlay_ui_shape_fragment.slang");
@@ -226,10 +225,10 @@ struct TextGlyphConstants {
 /// The atlas image cache is caller-managed. Pass a `HashMap<u64, Image>` that
 /// persists across frames to avoid redundant GPU uploads.
 pub fn draw_ui_text(
-    frame: &RenderFrame,
+    _frame: &RenderFrame,
     engine: &Engine,
     output: &clay_ui::UiFrameOutput,
-    target: &GraphImage,
+    _target: &GraphImage,
     _width: u32,
     _height: u32,
 ) -> Result<()> {
@@ -259,17 +258,13 @@ pub fn draw_ui_text(
         *TEXT_PROGRAM.lock().expect("text program mutex poisoned") = Some(prog);
     }
     let program_guard = TEXT_PROGRAM.lock().expect("text program mutex poisoned");
-    let program = match program_guard.as_ref() {
+    let _program = match program_guard.as_ref() {
         Some(p) => p,
         None => return Ok(()),
     };
 
     // Collect all text scenes from all trees.
-    let all_scenes: Vec<Arc<textui::TextGpuScene>> = output
-        .text_scenes
-        .values()
-        .cloned()
-        .collect();
+    let all_scenes: Vec<Arc<textui::TextGpuScene>> = output.text_scenes.values().cloned().collect();
 
     // Atlas page cache: content_hash → GPU Image.
     // We use thread-local here so it persists across frames without external state.
