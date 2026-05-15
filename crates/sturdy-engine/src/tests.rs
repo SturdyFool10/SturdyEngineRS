@@ -5,6 +5,10 @@ mod shader_fixtures {
         include_str!("../shaders/tests/push_constants_fragment.slang");
     pub const CONSTANT_RED_FRAGMENT: &str =
         include_str!("../shaders/tests/constant_red_fragment.slang");
+    pub const STORAGE_IMAGE_COMPUTE_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/shaders/tests/storage_image_compute.slang"
+    );
 }
 
 fn sampled_image_sampler_layout() -> CanonicalPipelineLayout {
@@ -144,6 +148,92 @@ fn shader_pass_intent_records_reflected_fullscreen_resources() {
         .expect("intent pass should be recorded");
     assert_eq!(pass.reads, vec!["intent_source".to_string()]);
     assert_eq!(pass.writes, vec!["intent_target".to_string()]);
+}
+
+#[test]
+fn shader_pass_intent_records_compute_sampled_reads_and_named_storage_output() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let program =
+        ComputeProgram::load(&engine, shader_fixtures::STORAGE_IMAGE_COMPUTE_PATH).unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let source = frame
+        .image(
+            "compute_source",
+            ImageDesc {
+                usage: ImageUsage::SAMPLED,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+    let target = frame
+        .image(
+            "logical_compute_target",
+            ImageDesc {
+                usage: ImageUsage::SAMPLED | ImageUsage::STORAGE,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+
+    frame
+        .shader_pass("compute-copy")
+        .target_as("dst", &target)
+        .image("src", &source)
+        .compute(&program, [1, 1, 1])
+        .unwrap();
+
+    let report = frame.describe();
+    let pass = report
+        .passes
+        .iter()
+        .find(|pass| pass.name == "compute-copy")
+        .expect("compute pass should be recorded");
+    assert_eq!(pass.reads, vec!["compute_source".to_string()]);
+    assert_eq!(pass.writes, vec!["logical_compute_target".to_string()]);
+}
+
+#[test]
+fn graph_image_history_ping_pongs_and_resets_on_descriptor_change() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let mut history = GraphImageHistory::new();
+    let desc = ImageDesc {
+        usage: ImageUsage::SAMPLED | ImageUsage::STORAGE,
+        ..small_image_desc()
+    };
+
+    let first = frame
+        .history_images(&mut history, "temporal_history", desc)
+        .unwrap();
+    assert!(!first.has_history);
+    assert_eq!(first.frame_index, 0);
+    assert_eq!(first.read.name(), "temporal_history_0");
+    assert_eq!(first.write.name(), "temporal_history_1");
+
+    let second = frame
+        .history_images(&mut history, "temporal_history", desc)
+        .unwrap();
+    assert!(second.has_history);
+    assert_eq!(second.frame_index, 1);
+    assert_eq!(second.read.name(), "temporal_history_1");
+    assert_eq!(second.write.name(), "temporal_history_0");
+
+    let resized = frame
+        .history_images(
+            &mut history,
+            "temporal_history",
+            ImageDesc {
+                extent: Extent3d {
+                    width: 8,
+                    height: 8,
+                    depth: 1,
+                },
+                ..desc
+            },
+        )
+        .unwrap();
+    assert!(!resized.has_history);
+    assert_eq!(resized.frame_index, 0);
 }
 
 #[test]
@@ -732,6 +822,12 @@ fn app_runtime_frame_auto_presents_on_drop() {
 fn anti_aliasing_pass_constructs_builtin_shader() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     AntiAliasingPass::new(&engine).unwrap();
+}
+
+#[test]
+fn ao_pass_constructs_builtin_shaders() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    AoPass::new(&engine).unwrap();
 }
 
 #[test]

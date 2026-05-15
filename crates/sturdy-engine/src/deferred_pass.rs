@@ -38,6 +38,7 @@ use crate::{
     Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, ImageDesc, ImageDimension,
     ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind, RenderFrame, Result, ShaderDesc,
     ShaderProgram, ShaderSource, ShaderStage,
+    ao_pass::AoPass,
     environment_map::{EnvironmentMap, SPECULAR_LAYER_COUNT, compute_brdf_lut, compute_e_avg_lut},
     light_bvh::LightBvhBuilder,
     oit_pass::OitPass,
@@ -109,6 +110,10 @@ pub struct DeferredPass {
     black_spot_depth: crate::Image,
     /// Optional point light shadow pass (dual-paraboloid). Attach via `set_point_shadows`.
     point_shadows: Option<crate::PointShadowPass>,
+    /// Optional screen-space/ray-traced ambient occlusion pass.
+    ao: Option<AoPass>,
+    /// 1x1 white AO fallback bound as `gtao_result` when AO is disabled.
+    white_ao: crate::Image,
     /// Zero-filled point shadow data buffer bound when no point shadows are active.
     empty_point_shadow_buf: Buffer,
     /// Watches the engine shader files and drives hot-reload + cache invalidation.
@@ -164,6 +169,7 @@ impl DeferredPass {
             engine.generate_texture_2d("flat_normal_map", 1, 1, |_, _| [128, 128, 255, 255])?;
 
         let brdf_lut = compute_brdf_lut(engine)?;
+        let white_ao = engine.generate_texture_2d("white_ao", 1, 1, |_, _| [255, 255, 255, 255])?;
 
         let black_env = engine.create_image(crate::ImageDesc {
             dimension: crate::ImageDimension::D2,
@@ -288,8 +294,26 @@ impl DeferredPass {
             empty_spot_shadow_buf,
             black_spot_depth,
             point_shadows: None,
+            ao: None,
+            white_ao,
             empty_point_shadow_buf,
         })
+    }
+
+    /// Attach an ambient occlusion pass. The deferred lighting shader samples
+    /// the resulting texture as `gtao_result`.
+    pub fn set_ao(&mut self, ao: AoPass) {
+        self.ao = Some(ao);
+    }
+
+    /// Detach ambient occlusion and return to the white no-occlusion fallback.
+    pub fn clear_ao(&mut self) {
+        self.ao = None;
+    }
+
+    /// Mutable access to the attached AO pass, if any, for runtime tuning.
+    pub fn ao_mut(&mut self) -> Option<&mut AoPass> {
+        self.ao.as_mut()
     }
 
     /// Attach an environment map for image-based lighting.
@@ -556,6 +580,17 @@ impl DeferredPass {
             g1.register_as("gbuffer_normal_rough");
             g2.register_as("gbuffer_emissive");
             depth.register_as("gbuffer_depth");
+
+            if let Some(ao) = &mut self.ao {
+                let inv_proj = proj.inverse();
+                let inv_view = view.inverse();
+                ao.execute(
+                    engine, frame, &depth, &g1, None, inv_proj, inv_view, view, ext.width,
+                    ext.height,
+                )?;
+            } else {
+                frame.bind_image("gtao_result", &self.white_ao);
+            }
         } else {
             // ForwardOnly: draw all opaque meshes directly into the HDR output.
             // Depth testing uses `depth` to give correct z-order.
@@ -589,6 +624,7 @@ impl DeferredPass {
                 )?;
             }
             depth.register_as("gbuffer_depth");
+            frame.bind_image("gtao_result", &self.white_ao);
         }
 
         // shadow_map_0..3 already registered inside CsmPass::draw()

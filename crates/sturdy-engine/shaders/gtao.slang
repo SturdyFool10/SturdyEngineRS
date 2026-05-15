@@ -33,6 +33,7 @@
 
 Texture2D<float>  gbuffer_depth;
 Texture2D<float4> gbuffer_normal_rough;
+SamplerState      gtao_sampler;
 RWTexture2D<float> gtao_out;
 
 struct GtaoConstants {
@@ -131,8 +132,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
             if (all(uv_pos >= 0.0) && all(uv_pos <= 1.0)) {
                 float2 px_pos = uv_pos / inv_res;
                 float d_pos   = gbuffer_depth.SampleLevel(
-                    SamplerState::create(FilterMode::Linear, AddressMode::Clamp),
-                    uv_pos, 0).r;
+                    gtao_sampler, uv_pos, 0).r;
                 float3 S_pos  = reconstruct_view_pos(uv_pos, d_pos);
                 float3 H_pos  = S_pos - P_vs;
                 float  dist   = length(H_pos);
@@ -146,8 +146,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
             float2 uv_neg = uv - dir_ss * step * inv_res;
             if (all(uv_neg >= 0.0) && all(uv_neg <= 1.0)) {
                 float d_neg  = gbuffer_depth.SampleLevel(
-                    SamplerState::create(FilterMode::Linear, AddressMode::Clamp),
-                    uv_neg, 0).r;
+                    gtao_sampler, uv_neg, 0).r;
                 float3 S_neg = reconstruct_view_pos(uv_neg, d_neg);
                 float3 H_neg = S_neg - P_vs;
                 float  dist  = length(H_neg);

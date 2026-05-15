@@ -1,0 +1,17 @@
+[package]
+name = "colorlab"
+version = "0.1.0"
+edition.workspace = true
+description = "A color manipulation library with support for various color spaces"
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["color", "conversion", "colorspace"]
+categories = ["graphics", "visualization"]
+
+[lib]
+name = "colorlab"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true

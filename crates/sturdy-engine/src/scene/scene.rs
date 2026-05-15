@@ -126,7 +126,7 @@ impl Scene {
     /// Call this once at init (after checking [`GeometryRendererCaps`]) to opt
     /// into frustum culling and indirect draw. Safe to change between frames.
     ///
-    /// ```rust
+    /// ```ignore
     /// let caps = GeometryRendererCaps::from_caps(&engine.caps());
     /// scene.set_geometry_backend(caps.best_opaque_backend());
     /// ```

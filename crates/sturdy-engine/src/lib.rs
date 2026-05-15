@@ -13,6 +13,7 @@ use std::{
 pub mod animation;
 mod anti_aliasing_pass;
 mod antialiasing;
+mod ao_pass;
 mod application;
 mod asset_loader;
 mod asset_watcher;
@@ -83,6 +84,7 @@ pub use anti_aliasing_pass::{AntiAliasingPass, taa_jitter_uv, taa_jittered_proje
 pub use antialiasing::{
     AntiAliasingConfig, AntiAliasingDial, AntiAliasingMode, FxaaSettings, MsaaSettings, TaaSettings,
 };
+pub use ao_pass::{AoConfig, AoMode, AoPass};
 #[cfg(not(target_arch = "wasm32"))]
 pub use application::{
     EngineApp, MotionVectorLayer, MotionVectorSpace, RuntimeMotionVectorDesc,
@@ -220,7 +222,8 @@ pub use text_tiling::{TiledTextAtlasPage, TiledTextEngineFrame};
 pub use bind_group::BindGroupBuilder;
 pub use bindless::BindlessHandle;
 pub use frontend_graph::{
-    GraphImage, GraphImageCacheKey, GraphImageView, RenderFrame, ShaderPassIntent,
+    GraphImage, GraphImageCacheKey, GraphImageHistory, GraphImageHistoryFrame, GraphImageView,
+    RenderFrame, ShaderPassIntent,
 };
 pub use glam::{Vec2, Vec3};
 pub use graph_report::{

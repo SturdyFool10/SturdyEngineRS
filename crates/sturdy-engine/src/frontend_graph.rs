@@ -246,6 +246,10 @@ impl RenderFrame {
         self.inner.borrow().engine.clone()
     }
 
+    pub(crate) fn swapchain_slot(&self) -> u64 {
+        self.inner.borrow().swapchain_slot
+    }
+
     /// Configure this frame to call `device.present_surface(handle)` automatically
     /// when it is dropped, after flushing all queued passes.
     pub(crate) fn configure_auto_present(&self, device: core::Device, handle: core::SurfaceHandle) {
@@ -1301,6 +1305,49 @@ impl RenderFrame {
             desc,
         })
     }
+
+    /// Allocate or retrieve a pair of ping-ponged history images for a temporal
+    /// pass and return this frame's read/write images.
+    ///
+    /// History is tracked independently for each swapchain slot and is reset
+    /// automatically when the descriptor changes. When `has_history` is false,
+    /// callers should ignore `read` and use current-frame data instead.
+    pub fn history_images(
+        &self,
+        state: &mut GraphImageHistory,
+        base_name: impl Into<String>,
+        desc: ImageDesc,
+    ) -> Result<GraphImageHistoryFrame> {
+        let base_name = base_name.into();
+        let key = GraphImageHistoryKey {
+            desc: GraphImageDescKey::from(desc),
+        };
+        let slot = self.swapchain_slot();
+        let slot_state = state.slots.entry(slot).or_insert(GraphImageHistorySlot {
+            key,
+            frame_index: 0,
+        });
+        if slot_state.key != key {
+            *slot_state = GraphImageHistorySlot {
+                key,
+                frame_index: 0,
+            };
+        }
+
+        let frame_index = slot_state.frame_index;
+        let read_index = frame_index % 2;
+        let write_index = (frame_index + 1) % 2;
+        slot_state.frame_index = slot_state.frame_index.saturating_add(1);
+
+        let read = self.image(format!("{base_name}_{read_index}"), desc)?;
+        let write = self.image(format!("{base_name}_{write_index}"), desc)?;
+        Ok(GraphImageHistoryFrame {
+            read,
+            write,
+            has_history: frame_index > 0,
+            frame_index,
+        })
+    }
 }
 
 impl Drop for RenderFrame {
@@ -1328,6 +1375,7 @@ pub struct ShaderPassIntent<'a> {
     frame: &'a RenderFrame,
     name: String,
     target: Option<GraphImage>,
+    target_binding_name: Option<String>,
     resources: ExplicitPassResources,
     push_constants: Option<PushConstants>,
 }
@@ -1338,6 +1386,7 @@ impl<'a> ShaderPassIntent<'a> {
             frame,
             name,
             target: None,
+            target_binding_name: None,
             resources: ExplicitPassResources::default(),
             push_constants: None,
         }
@@ -1345,6 +1394,18 @@ impl<'a> ShaderPassIntent<'a> {
 
     pub fn target(mut self, image: &GraphImage) -> Self {
         self.target = Some(image.clone());
+        self
+    }
+
+    /// Set the pass output target and the reflected storage-image binding name
+    /// that should receive it.
+    ///
+    /// This is useful for compute passes where the graph image has a stable
+    /// cache name while the shader uses a different domain-specific binding
+    /// name.
+    pub fn target_as(mut self, binding_name: impl Into<String>, image: &GraphImage) -> Self {
+        self.target = Some(image.clone());
+        self.target_binding_name = Some(binding_name.into());
         self
     }
 
@@ -1442,6 +1503,7 @@ impl<'a> ShaderPassIntent<'a> {
             program,
             push_constants,
             groups,
+            self.target_binding_name.as_deref(),
             self.resources,
         )
     }
@@ -1453,6 +1515,40 @@ impl<'a> ShaderPassIntent<'a> {
             bytes: bytemuck::bytes_of(constants).to_vec(),
         });
         self
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GraphImageHistory {
+    slots: HashMap<u64, GraphImageHistorySlot>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct GraphImageHistorySlot {
+    key: GraphImageHistoryKey,
+    frame_index: u64,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct GraphImageHistoryKey {
+    desc: GraphImageDescKey,
+}
+
+#[derive(Clone)]
+pub struct GraphImageHistoryFrame {
+    pub read: GraphImage,
+    pub write: GraphImage,
+    pub has_history: bool,
+    pub frame_index: u64,
+}
+
+impl GraphImageHistory {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn reset(&mut self) {
+        self.slots.clear();
     }
 }
 
@@ -1474,6 +1570,15 @@ pub struct GraphImageView {
 }
 
 impl GraphImage {
+    pub(crate) fn renamed(&self, name: impl Into<String>) -> Self {
+        Self {
+            frame: self.frame.clone(),
+            name: name.into(),
+            handle: self.handle,
+            desc: self.desc,
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -2686,6 +2791,7 @@ impl GraphImage {
             program,
             push_constants,
             groups,
+            None,
             ExplicitPassResources::default(),
         )
     }
@@ -2801,6 +2907,7 @@ fn record_compute_shader_pass(
     program: &ComputeProgram,
     push_constants: Option<PushConstants>,
     groups: [u32; 3],
+    target_binding_name: Option<&str>,
     explicit: ExplicitPassResources,
 ) -> Result<()> {
     validate_pass_target_usage(&target.name, target.desc, crate::ImageUsage::STORAGE)?;
@@ -2814,10 +2921,12 @@ fn record_compute_shader_pass(
         .graph_mut(|graph| graph.import_image(target.handle, target.desc))?;
     import_explicit_resources(&mut inner, &explicit)?;
 
-    let read_names = reflected_storage_image_reads(program.reflection());
+    let output_binding_name = target_binding_name.unwrap_or(&target.name);
+    let mut read_names = reflected_image_reads(program.reflection());
+    read_names.extend(reflected_storage_image_reads(program.reflection()));
     let (eager_bindings, unresolved_read_names, eager_uses) = split_read_names_with_explicit(
         &read_names,
-        &target.name,
+        output_binding_name,
         &inner.images_by_name,
         &explicit.images,
     );
@@ -2839,7 +2948,7 @@ fn record_compute_shader_pass(
         buffer_read_names: reflected_buffer_read_names(program.reflection()),
         buffer_write_names: reflected_buffer_write_names(program.reflection()),
         deferred_read_names: unresolved_read_names.clone(),
-        skip_read_name: target.name.clone(),
+        skip_read_name: output_binding_name.to_owned(),
     });
 
     inner.pending_passes.push(PendingPass {
@@ -2869,8 +2978,8 @@ fn record_compute_shader_pass(
             eager_samplers: explicit.samplers,
             eager_buffers: explicit.buffers,
             unresolved_read_names,
-            skip_name: target.name.clone(),
-            storage_output: Some((target.name.clone(), target.handle)),
+            skip_name: output_binding_name.to_owned(),
+            storage_output: Some((output_binding_name.to_owned(), target.handle)),
         }),
     });
     Ok(())

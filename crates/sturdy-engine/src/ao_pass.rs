@@ -28,8 +28,8 @@
 use glam::Mat4;
 
 use crate::{
-    ComputeProgram, Engine, Format, FrameSyncReason, GraphImage, Image, ImageDesc, ImageDimension,
-    ImageUsage, RenderFrame, Result, ShaderSource,
+    ComputeProgram, Engine, Format, GraphImage, GraphImageHistory, ImageDesc, ImageDimension,
+    ImageUsage, RenderFrame, Result, SamplerPreset,
 };
 
 // ── AoConfig ─────────────────────────────────────────────────────────────────
@@ -131,26 +131,26 @@ pub enum AoMode {
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct GtaoPush {
-    inv_proj:       [[f32; 4]; 4],  // 64 bytes
-    inv_view:       [[f32; 4]; 4],  // 64 bytes
-    view:           [[f32; 4]; 4],  // 64 bytes
-    viewport:       [f32; 4],       // 16 bytes   xy=inv_res  zw=res
-    radius_world:   f32,
-    falloff_start:  f32,
-    falloff_end:    f32,
-    intensity:      f32,
-    slice_count:    u32,
+    inv_proj: [[f32; 4]; 4], // 64 bytes
+    inv_view: [[f32; 4]; 4], // 64 bytes
+    view: [[f32; 4]; 4],     // 64 bytes
+    viewport: [f32; 4],      // 16 bytes   xy=inv_res  zw=res
+    radius_world: f32,
+    falloff_start: f32,
+    falloff_end: f32,
+    intensity: f32,
+    slice_count: u32,
     steps_per_slice: u32,
-    _pad0:          f32,
-    _pad1:          f32,
+    _pad0: f32,
+    _pad1: f32,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct BilateralPush {
     inv_resolution: [f32; 2],
-    sigma_depth:    f32,
-    normal_power:   f32,
+    sigma_depth: f32,
+    normal_power: f32,
 }
 
 #[repr(C)]
@@ -158,7 +158,7 @@ struct BilateralPush {
 struct TemporalPush {
     inv_resolution: [f32; 2],
     temporal_blend: f32,
-    _pad:           f32,
+    _pad: f32,
 }
 
 // ── AoPass ───────────────────────────────────────────────────────────────────
@@ -168,20 +168,13 @@ struct TemporalPush {
 /// Obtained via `AoPass::new` and attached to `DeferredPass::set_ao`.
 pub struct AoPass {
     pub config: AoConfig,
-    pub mode:   AoMode,
+    pub mode: AoMode,
 
-    gtao_program:     ComputeProgram,
+    gtao_program: ComputeProgram,
     bilateral_program: ComputeProgram,
-    temporal_program:  ComputeProgram,
+    temporal_program: ComputeProgram,
 
-    /// Raw GTAO output (R32Float, updated each frame).
-    ao_raw:       Option<Image>,
-    /// Spatially filtered AO (R32Float, updated each frame).
-    ao_filtered:  Option<Image>,
-    /// Temporally accumulated AO from the **previous** frame.
-    ao_history:   Option<Image>,
-
-    cached_dims: (u32, u32),
+    history: GraphImageHistory,
 }
 
 fn engine_shader(name: &str) -> std::path::PathBuf {
@@ -195,23 +188,24 @@ impl AoPass {
     pub fn new(engine: &Engine) -> Result<Self> {
         let gtao_program = ComputeProgram::load(engine, engine_shader("gtao.slang"))?;
         let bilateral_program = ComputeProgram::load(engine, engine_shader("ao_bilateral.slang"))?;
-        let temporal_program  = ComputeProgram::load(engine, engine_shader("ao_temporal.slang"))?;
+        let temporal_program = ComputeProgram::load(engine, engine_shader("ao_temporal.slang"))?;
 
         Ok(Self {
             config: AoConfig::default(),
-            mode:   AoMode::Auto,
+            mode: AoMode::Auto,
             gtao_program,
             bilateral_program,
             temporal_program,
-            ao_raw:      None,
-            ao_filtered: None,
-            ao_history:  None,
-            cached_dims: (0, 0),
+            history: GraphImageHistory::new(),
         })
     }
 
-    pub fn config(&self) -> &AoConfig { &self.config }
-    pub fn config_mut(&mut self) -> &mut AoConfig { &mut self.config }
+    pub fn config(&self) -> &AoConfig {
+        &self.config
+    }
+    pub fn config_mut(&mut self) -> &mut AoConfig {
+        &mut self.config
+    }
 
     /// Run the full AO pipeline and return the final accumulated AO image.
     ///
@@ -229,114 +223,117 @@ impl AoPass {
     /// in the deferred lighting pass.
     pub fn execute(
         &mut self,
-        engine:     &Engine,
-        frame:      &RenderFrame,
-        depth:      &GraphImage,
+        _engine: &Engine,
+        frame: &RenderFrame,
+        depth: &GraphImage,
         normal_rough: &GraphImage,
         motion_vecs: Option<&GraphImage>,
-        inv_proj:   Mat4,
-        inv_view:   Mat4,
-        view:       Mat4,
-        width:      u32,
-        height:     u32,
+        inv_proj: Mat4,
+        inv_view: Mat4,
+        view: Mat4,
+        width: u32,
+        height: u32,
     ) -> Result<GraphImage> {
-        // Reallocate intermediate images when resolution changes.
-        if self.cached_dims != (width, height) {
-            self.cached_dims = (width, height);
-            let ao_desc = ImageDesc {
-                dimension: ImageDimension::D2,
-                extent: crate::Extent3d { width, height, depth: 1 },
-                format: Format::Rgba32Float,  // R32Float for AO value
-                mip_levels: 1,
-                layers: 1,
-                samples: 1,
-                usage: ImageUsage::SAMPLED | ImageUsage::STORAGE,
-                transient: false,
-                clear_value: None,
-                debug_name: Some("ao_raw"),
-            };
-            let mut ao_desc_filtered = ao_desc.clone();
-            ao_desc_filtered.debug_name = Some("ao_filtered");
-            let mut ao_desc_history = ao_desc.clone();
-            ao_desc_history.debug_name = Some("ao_history");
+        let ao_desc = |name: &'static str| ImageDesc {
+            dimension: ImageDimension::D2,
+            extent: crate::Extent3d {
+                width,
+                height,
+                depth: 1,
+            },
+            // The public Format set does not currently expose R32Float. Store
+            // the scalar AO value in the red channel and leave the other
+            // channels unused.
+            format: Format::Rgba32Float,
+            mip_levels: 1,
+            layers: 1,
+            samples: 1,
+            usage: ImageUsage::SAMPLED | ImageUsage::STORAGE,
+            transient: false,
+            clear_value: None,
+            debug_name: Some(name),
+        };
 
-            self.ao_raw      = Some(engine.create_image(ao_desc)?);
-            self.ao_filtered = Some(engine.create_image(ao_desc_filtered)?);
-            self.ao_history  = Some(engine.create_image(ao_desc_history)?);
-        }
-
-        let ao_raw      = self.ao_raw.as_ref().unwrap();
-        let ao_filtered = self.ao_filtered.as_ref().unwrap();
-        let ao_history  = self.ao_history.as_ref().unwrap();
+        let ao_raw = frame.image("gtao_raw", ao_desc("gtao_raw"))?;
+        let ao_filtered = frame.image("ao_filtered", ao_desc("ao_filtered"))?;
 
         let groups_x = (width + 7) / 8;
         let groups_y = (height + 7) / 8;
 
         // ── Pass 1: GTAO ─────────────────────────────────────────────────────
         let gtao_push = GtaoPush {
-            inv_proj:        inv_proj.to_cols_array_2d(),
-            inv_view:        inv_view.to_cols_array_2d(),
-            view:            view.to_cols_array_2d(),
-            viewport:        [1.0 / width as f32, 1.0 / height as f32,
-                              width as f32, height as f32],
-            radius_world:    self.config.radius_world,
-            falloff_start:   self.config.falloff_start,
-            falloff_end:     self.config.falloff_end,
-            intensity:       self.config.intensity,
-            slice_count:     self.config.slice_count,
+            inv_proj: inv_proj.to_cols_array_2d(),
+            inv_view: inv_view.to_cols_array_2d(),
+            view: view.to_cols_array_2d(),
+            viewport: [
+                1.0 / width as f32,
+                1.0 / height as f32,
+                width as f32,
+                height as f32,
+            ],
+            radius_world: self.config.radius_world,
+            falloff_start: self.config.falloff_start,
+            falloff_end: self.config.falloff_end,
+            intensity: self.config.intensity,
+            slice_count: self.config.slice_count,
             steps_per_slice: self.config.steps_per_slice,
             _pad0: 0.0,
             _pad1: 0.0,
         };
-        frame.bind_image("gbuffer_depth",        depth);
-        frame.bind_image("gbuffer_normal_rough",  normal_rough);
-        frame.bind_image("gtao_out", &frame.storage_image("gtao_raw_store", ao_raw)?);
-        frame.dispatch_compute_auto(
-            "gtao",
-            &self.gtao_program,
-            &gtao_push,
-            [groups_x, groups_y, 1],
-        )?;
+        frame
+            .shader_pass("gtao")
+            .target_as("gtao_out", &ao_raw)
+            .image("gbuffer_depth", depth)
+            .image("gbuffer_normal_rough", normal_rough)
+            .sampler("gtao_sampler", SamplerPreset::Linear)
+            .constants_auto(&gtao_push)
+            .compute(&self.gtao_program, [groups_x, groups_y, 1])?;
 
         // ── Pass 2: Bilateral filter ─────────────────────────────────────────
         let bi_push = BilateralPush {
             inv_resolution: [1.0 / width as f32, 1.0 / height as f32],
-            sigma_depth:   0.05,
-            normal_power:  8.0,
+            sigma_depth: 0.05,
+            normal_power: 8.0,
         };
-        frame.bind_image("ao_raw",               &frame.sampled_image("ao_raw_read", ao_raw)?);
-        frame.bind_image("gbuffer_depth",        depth);
-        frame.bind_image("gbuffer_normal_rough", normal_rough);
-        frame.bind_image("ao_filtered",          &frame.storage_image("ao_filtered_store", ao_filtered)?);
-        frame.dispatch_compute_auto(
-            "ao_bilateral",
-            &self.bilateral_program,
-            &bi_push,
-            [groups_x, groups_y, 1],
-        )?;
+        frame
+            .shader_pass("ao_bilateral")
+            .target(&ao_filtered)
+            .image("ao_raw", &ao_raw)
+            .image("gbuffer_depth", depth)
+            .image("gbuffer_normal_rough", normal_rough)
+            .constants_auto(&bi_push)
+            .compute(&self.bilateral_program, [groups_x, groups_y, 1])?;
 
         // ── Pass 3: Temporal accumulation ────────────────────────────────────
+        let Some(motion_vecs) = motion_vecs else {
+            ao_filtered.register_as("gtao_result");
+            return Ok(ao_filtered);
+        };
+
+        let history =
+            frame.history_images(&mut self.history, "gtao_history", ao_desc("gtao_history"))?;
+        let history_src = if history.has_history {
+            &history.read
+        } else {
+            &ao_filtered
+        };
+
         let temporal_push = TemporalPush {
             inv_resolution: [1.0 / width as f32, 1.0 / height as f32],
             temporal_blend: self.config.temporal_blend,
             _pad: 0.0,
         };
-        frame.bind_image("ao_current",  &frame.sampled_image("ao_filtered_read", ao_filtered)?);
-        frame.bind_image("ao_history",  &frame.sampled_image("ao_history_read", ao_history)?);
-        if let Some(mv) = motion_vecs {
-            frame.bind_image("motion_vectors", mv);
-        }
-        frame.bind_image("gbuffer_depth", depth);
-        // Accumulate into ao_history directly (ping-pong would need two buffers).
-        frame.bind_image("ao_accumulated", &frame.storage_image("ao_accum_store", ao_history)?);
-        frame.dispatch_compute_auto(
-            "ao_temporal",
-            &self.temporal_program,
-            &temporal_push,
-            [groups_x, groups_y, 1],
-        )?;
+        frame
+            .shader_pass("ao_temporal")
+            .target_as("ao_accumulated", &history.write)
+            .image("ao_current", &ao_filtered)
+            .image("ao_history", history_src)
+            .image("motion_vectors", motion_vecs)
+            .image("gbuffer_depth", depth)
+            .constants_auto(&temporal_push)
+            .compute(&self.temporal_program, [groups_x, groups_y, 1])?;
 
-        // Return the history buffer as the final AO result.
-        frame.sampled_image("gtao_result", ao_history)
+        history.write.register_as("gtao_result");
+        Ok(history.write)
     }
 }

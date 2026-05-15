@@ -20,8 +20,8 @@ Texture2D<float>  gbuffer_depth;    // hardware depth [0,1] — used for world p
 SamplerState      gbuffer_sampler;
 
 // ── Ambient occlusion (Track AO) ──────────────────────────────────────────────
-// Bound as R32Float by AoPass when ambient occlusion is enabled.
-// When not bound, falls back to `gtao_result_fallback` (1×1 white = no occlusion).
+// Bound by AoPass when ambient occlusion is enabled, or a 1x1 white fallback
+// when AO is disabled.
 Texture2D<float>  gtao_result;           // AO value [0,1]; 1 = no occlusion
 
 // ── Shadow atlas ──────────────────────────────────────────────────────────────
