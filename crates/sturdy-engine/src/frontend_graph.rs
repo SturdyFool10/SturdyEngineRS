@@ -518,8 +518,10 @@ impl RenderFrame {
 
     /// Dispatch a compute shader that reads and writes GPU buffers (no image target).
     ///
-    /// All `StructuredBuffer` and `RWStructuredBuffer` bindings are resolved by name
-    /// from the frame's `bind_buffer()` registry. Bind all needed buffers before calling:
+    /// `StructuredBuffer` and `RWStructuredBuffer` bindings are resolved by name
+    /// from the frame's `bind_buffer()` registry. Sampled images are resolved by
+    /// name from graph images registered in the frame or external images
+    /// registered via `bind_image()`.
     ///
     /// ```ignore
     /// frame.bind_buffer("instance_bounds",   &bounds_buf);
@@ -547,6 +549,7 @@ impl RenderFrame {
         // Snapshot eager buffer bindings from the current frame registry.
         let buf_read_names = reflected_buffer_read_names(program.reflection());
         let buf_write_names = reflected_buffer_write_names(program.reflection());
+        let image_read_names = reflected_image_reads(program.reflection());
 
         let mut eager_buffers: HashMap<String, (core::BufferHandle, core::BufferDesc)> =
             HashMap::new();
@@ -560,7 +563,29 @@ impl RenderFrame {
             }
         }
 
+        for n in &image_read_names {
+            if let Some(record) = inner.images_by_name.get(n.as_str()).copied() {
+                inner
+                    .frame
+                    .inner
+                    .graph_mut(|g| g.import_image(record.handle, record.desc))?;
+            }
+        }
+        let (eager_bindings, unresolved_read_names, eager_uses) =
+            split_read_names(&image_read_names, "", &inner.images_by_name);
+
         let pass_name = format!("{declaration_index:04}-compute-{}", name.into());
+        inner.pass_records.push(PassRecord {
+            name: pass_name.clone(),
+            kind: PassKind::Compute,
+            queue: core::QueueType::Compute,
+            reads: eager_uses.clone(),
+            writes: Vec::new(),
+            buffer_read_names: buf_read_names.clone(),
+            buffer_write_names: buf_write_names.clone(),
+            deferred_read_names: unresolved_read_names.clone(),
+            skip_read_name: String::new(),
+        });
         inner.pending_passes.push(PendingPass {
             desc: PassDesc {
                 name: pass_name.clone(),
@@ -574,7 +599,7 @@ impl RenderFrame {
                     y: groups[1],
                     z: groups[2],
                 }),
-                reads: Vec::new(),
+                reads: eager_uses,
                 writes: Vec::new(),
                 buffer_reads: buf_read_names
                     .iter()
@@ -610,10 +635,10 @@ impl RenderFrame {
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
                 reflection: program.reflection().clone(),
-                eager_bindings: HashMap::new(),
+                eager_bindings,
                 eager_samplers: HashMap::new(),
                 eager_buffers,
-                unresolved_read_names: Vec::new(),
+                unresolved_read_names,
                 skip_name: String::new(),
                 storage_output: None,
             }),

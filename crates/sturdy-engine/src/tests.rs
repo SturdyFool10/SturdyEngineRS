@@ -9,6 +9,10 @@ mod shader_fixtures {
         env!("CARGO_MANIFEST_DIR"),
         "/shaders/tests/storage_image_compute.slang"
     );
+    pub const SAMPLE_IMAGE_COMPUTE_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/shaders/tests/sample_image_compute.slang"
+    );
 }
 
 fn sampled_image_sampler_layout() -> CanonicalPipelineLayout {
@@ -193,6 +197,113 @@ fn shader_pass_intent_records_compute_sampled_reads_and_named_storage_output() {
 }
 
 #[test]
+fn dispatch_compute_auto_records_sampled_image_reads() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let program = ComputeProgram::load(&engine, shader_fixtures::SAMPLE_IMAGE_COMPUTE_PATH)
+        .unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let source = frame
+        .image(
+            "sampled_image",
+            ImageDesc {
+                usage: ImageUsage::SAMPLED,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+    let output = engine
+        .create_buffer(BufferDesc {
+            size: 16,
+            usage: BufferUsage::STORAGE,
+        })
+        .unwrap();
+    #[repr(C)]
+    #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+    struct SamplePush {
+        pixel: [u32; 2],
+        _pad0: u32,
+        _pad1: u32,
+    }
+
+    source.register_as("sampled_image");
+    frame.bind_buffer("output_buffer", &output);
+    frame
+        .dispatch_compute_auto(
+            "sample-image",
+            &program,
+            &SamplePush {
+                pixel: [0, 0],
+                _pad0: 0,
+                _pad1: 0,
+            },
+            [1, 1, 1],
+        )
+        .unwrap();
+
+    let report = frame.describe();
+    let pass = report
+        .passes
+        .iter()
+        .find(|pass| pass.name.ends_with("sample-image"))
+        .expect("sample-image compute pass should be recorded");
+    assert_eq!(pass.reads, vec!["sampled_image".to_owned()]);
+    assert_eq!(pass.buffer_writes, vec!["output_buffer".to_owned()]);
+}
+
+#[test]
+fn dispatch_compute_auto_rejects_sampled_image_without_sampled_usage() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let program = ComputeProgram::load(&engine, shader_fixtures::SAMPLE_IMAGE_COMPUTE_PATH)
+        .unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    frame
+        .image(
+            "sampled_image",
+            ImageDesc {
+                usage: ImageUsage::RENDER_TARGET,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+    let output = engine
+        .create_buffer(BufferDesc {
+            size: 16,
+            usage: BufferUsage::STORAGE,
+        })
+        .unwrap();
+    #[repr(C)]
+    #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+    struct SamplePush {
+        pixel: [u32; 2],
+        _pad0: u32,
+        _pad1: u32,
+    }
+
+    frame.bind_buffer("output_buffer", &output);
+    frame
+        .dispatch_compute_auto(
+            "bad-sample-image",
+            &program,
+            &SamplePush {
+                pixel: [0, 0],
+                _pad0: 0,
+                _pad1: 0,
+            },
+            [1, 1, 1],
+        )
+        .unwrap();
+
+    let err = frame
+        .flush()
+        .expect_err("flush should reject sampled image without sampled usage");
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(
+        err.to_string().contains("sampled_image"),
+        "diagnostic should name the sampled image, got {err}"
+    );
+}
+
+#[test]
 fn graph_image_history_ping_pongs_and_resets_on_descriptor_change() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     let frame = engine.begin_render_frame().unwrap();
@@ -234,6 +345,202 @@ fn graph_image_history_ping_pongs_and_resets_on_descriptor_change() {
         .unwrap();
     assert!(!resized.has_history);
     assert_eq!(resized.frame_index, 0);
+}
+
+#[test]
+fn hiz_pass_constructs_builtin_shader() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    HizPass::new(&engine).unwrap();
+}
+
+#[test]
+fn hiz_pass_records_depth_pyramid_contract() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let pass = HizPass::with_config(&engine, HizConfig { max_mip_levels: 3 }).unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let depth = frame
+        .image(
+            "gbuffer_depth",
+            ImageDesc {
+                dimension: ImageDimension::D2,
+                extent: Extent3d {
+                    width: 7,
+                    height: 5,
+                    depth: 1,
+                },
+                mip_levels: 1,
+                layers: 1,
+                samples: 1,
+                format: Format::Depth32Float,
+                usage: ImageUsage::SAMPLED | ImageUsage::DEPTH_STENCIL,
+                transient: false,
+                clear_value: None,
+                debug_name: Some("gbuffer_depth"),
+            },
+        )
+        .unwrap();
+
+    let pyramid = pass.execute_named(&frame, "test_hiz", &depth).unwrap();
+
+    assert_eq!(pyramid.base_name(), "test_hiz");
+    assert_eq!(pyramid.width(), 7);
+    assert_eq!(pyramid.height(), 5);
+    assert_eq!(pyramid.len(), 3);
+    assert_eq!(pyramid.base().name(), "test_hiz_mip_0");
+    assert_eq!(pyramid.mip(1).desc().extent.width, 3);
+    assert_eq!(pyramid.mip(1).desc().extent.height, 2);
+    assert_eq!(pyramid.coarsest().name(), "test_hiz_mip_2");
+
+    let report = frame.describe();
+    let pass0 = report
+        .passes
+        .iter()
+        .find(|pass| pass.name == "test_hiz_mip_0")
+        .expect("base Hi-Z pass should be recorded");
+    assert_eq!(pass0.reads, vec!["gbuffer_depth".to_owned()]);
+    assert_eq!(pass0.writes, vec!["test_hiz_mip_0".to_owned()]);
+
+    let pass1 = report
+        .passes
+        .iter()
+        .find(|pass| pass.name == "test_hiz_mip_1")
+        .expect("downsample Hi-Z pass should be recorded");
+    assert_eq!(pass1.reads, vec!["test_hiz_mip_0".to_owned()]);
+    assert_eq!(pass1.writes, vec!["test_hiz_mip_1".to_owned()]);
+}
+
+#[test]
+fn hiz_history_ping_pongs_previous_pyramid() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let pass = HizPass::with_config(&engine, HizConfig { max_mip_levels: 2 }).unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let depth = frame
+        .image(
+            "history_depth",
+            ImageDesc {
+                dimension: ImageDimension::D2,
+                extent: Extent3d {
+                    width: 8,
+                    height: 4,
+                    depth: 1,
+                },
+                mip_levels: 1,
+                layers: 1,
+                samples: 1,
+                format: Format::Depth32Float,
+                usage: ImageUsage::SAMPLED | ImageUsage::DEPTH_STENCIL,
+                transient: false,
+                clear_value: None,
+                debug_name: Some("history_depth"),
+            },
+        )
+        .unwrap();
+    let mut history = HizHistory::new();
+
+    let first = pass
+        .execute_history_named(&frame, "history_hiz", &depth, &mut history)
+        .unwrap();
+    assert_eq!(first.frame_index, 0);
+    assert!(first.previous.is_none());
+    assert_eq!(first.current.len(), 2);
+    assert_eq!(first.current.base().name(), "history_hiz_mip_0_1");
+    assert_eq!(history.len(), 2);
+
+    let second = pass
+        .execute_history_named(&frame, "history_hiz", &depth, &mut history)
+        .unwrap();
+    assert_eq!(second.frame_index, 1);
+    let previous = second.previous.expect("second frame should have history");
+    assert_eq!(previous.base().name(), "history_hiz_mip_0_1");
+    assert_eq!(second.current.base().name(), "history_hiz_mip_0_0");
+}
+
+#[test]
+fn hiz_history_resets_when_level_descriptor_changes() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let pass = HizPass::with_config(&engine, HizConfig { max_mip_levels: 3 }).unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let mut history = HizHistory::new();
+    let depth_desc = |width, height| ImageDesc {
+        dimension: ImageDimension::D2,
+        extent: Extent3d {
+            width,
+            height,
+            depth: 1,
+        },
+        mip_levels: 1,
+        layers: 1,
+        samples: 1,
+        format: Format::Depth32Float,
+        usage: ImageUsage::SAMPLED | ImageUsage::DEPTH_STENCIL,
+        transient: false,
+        clear_value: None,
+        debug_name: None,
+    };
+    let depth_a = frame.image("history_depth_a", depth_desc(16, 8)).unwrap();
+    pass.execute_history_named(&frame, "resize_hiz", &depth_a, &mut history)
+        .unwrap();
+    let second = pass
+        .execute_history_named(&frame, "resize_hiz", &depth_a, &mut history)
+        .unwrap();
+    assert!(second.previous.is_some());
+
+    let depth_b = frame.image("history_depth_b", depth_desc(8, 8)).unwrap();
+    let resized = pass
+        .execute_history_named(&frame, "resize_hiz", &depth_b, &mut history)
+        .unwrap();
+    assert!(
+        resized.previous.is_none(),
+        "resized Hi-Z descriptors must invalidate previous history"
+    );
+    assert_eq!(resized.current.width(), 8);
+    assert_eq!(resized.current.height(), 8);
+}
+
+#[test]
+fn hiz_pyramid_registers_levels_for_later_shader_binding() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let pass = HizPass::with_config(&engine, HizConfig { max_mip_levels: 2 }).unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let depth = frame
+        .image(
+            "register_depth",
+            ImageDesc {
+                dimension: ImageDimension::D2,
+                extent: Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth: 1,
+                },
+                mip_levels: 1,
+                layers: 1,
+                samples: 1,
+                format: Format::Depth32Float,
+                usage: ImageUsage::SAMPLED | ImageUsage::DEPTH_STENCIL,
+                transient: false,
+                clear_value: None,
+                debug_name: None,
+            },
+        )
+        .unwrap();
+    let pyramid = pass.execute_named(&frame, "bind_hiz", &depth).unwrap();
+
+    pyramid.register_levels("bound_hiz");
+    pyramid.register_coarsest_as("hiz_coarse");
+
+    let report = frame.describe();
+    assert!(
+        report
+            .images
+            .iter()
+            .any(|image| image.name == "bound_hiz_mip_0")
+    );
+    assert!(
+        report
+            .images
+            .iter()
+            .any(|image| image.name == "hiz_coarse")
+    );
 }
 
 #[test]
@@ -845,6 +1152,18 @@ fn engine_exposes_backend_raw_capabilities() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
 
     assert_eq!(engine.raw_capabilities(), BackendRawCapabilities::None);
+}
+
+#[test]
+fn null_backend_reports_no_sparse_residency_features() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let features = engine.caps().features;
+
+    assert!(!features.sparse_binding);
+    assert!(!features.supports_sparse_2d_textures());
+    assert!(!features.supports_sparse_3d_textures());
+    assert!(!features.supports_sparse_buffers());
+    assert!(!features.supports_gpu_draw_compaction());
 }
 
 #[test]

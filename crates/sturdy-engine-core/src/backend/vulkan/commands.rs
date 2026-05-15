@@ -696,6 +696,78 @@ impl CommandContext {
                     },
                 )?;
             }
+            PassWork::DrawIndirectCount(desc) => {
+                let pipeline = bound_pipeline.ok_or_else(|| {
+                    Error::InvalidInput(
+                        "draw-indirect-count pass requires a graphics pipeline".into(),
+                    )
+                })?;
+                if pipeline.bind_point != vk::PipelineBindPoint::GRAPHICS {
+                    return Err(Error::InvalidInput(
+                        "draw-indirect-count pass pipeline must bind to the graphics pipeline bind point"
+                            .into(),
+                    ));
+                }
+                let indirect_buf = resources.buffer(desc.indirect_buffer)?;
+                let count_buf = resources.buffer(desc.count_buffer)?;
+                let vertex_buffer = desc
+                    .vertex_buffer
+                    .map(|b| {
+                        resources
+                            .buffer(b.buffer)
+                            .map(|vb| (b.binding, vb, b.offset))
+                    })
+                    .transpose()?;
+                let index_buffer = desc
+                    .index_buffer
+                    .map(|b| {
+                        resources
+                            .buffer(b.buffer)
+                            .map(|ib| (ib, b.offset, vk_index_type(b.format)))
+                    })
+                    .transpose()?;
+                self.record_draw_pass(
+                    device,
+                    command_buffer,
+                    pass,
+                    pipeline.render_pass,
+                    resources,
+                    pipelines,
+                    None,
+                    || unsafe {
+                        if let Some((binding, vb, offset)) = vertex_buffer {
+                            device.cmd_bind_vertex_buffers(
+                                command_buffer,
+                                binding,
+                                &[vb],
+                                &[offset],
+                            );
+                        }
+                        if let Some((ib, offset, index_type)) = index_buffer {
+                            device.cmd_bind_index_buffer(command_buffer, ib, offset, index_type);
+                            device.cmd_draw_indexed_indirect_count(
+                                command_buffer,
+                                indirect_buf,
+                                desc.indirect_offset,
+                                count_buf,
+                                desc.count_offset,
+                                desc.max_draw_count,
+                                desc.stride,
+                            );
+                        } else {
+                            device.cmd_draw_indirect_count(
+                                command_buffer,
+                                indirect_buf,
+                                desc.indirect_offset,
+                                count_buf,
+                                desc.count_offset,
+                                desc.max_draw_count,
+                                desc.stride,
+                            );
+                        }
+                    },
+                )?;
+            }
             PassWork::DrawMeshShader(desc) => {
                 let pipeline = bound_pipeline.ok_or_else(|| {
                     Error::InvalidInput("mesh shader draw pass requires a graphics pipeline".into())

@@ -34,6 +34,8 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         properties.api_version >= vk::API_VERSION_1_2 || has(b"VK_KHR_timeline_semaphore\0");
     let hdr_output = has(b"VK_EXT_hdr_metadata\0") || has(b"VK_AMD_display_native_hdr\0");
     let variable_rate_shading = has(b"VK_KHR_fragment_shading_rate\0");
+    let draw_indirect_count =
+        properties.api_version >= vk::API_VERSION_1_2 || has(b"VK_KHR_draw_indirect_count\0");
     let core_features = unsafe { instance.get_physical_device_features(physical_device) };
     let feature_chain = available_feature_chain(instance, physical_device);
     let mesh_shading =
@@ -46,6 +48,12 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
             == vk::TRUE;
     let shader_fp16 = feature_chain.shader_float16_int8.shader_float16 == vk::TRUE;
     let shader_fp64 = core_features.shader_float64 == vk::TRUE;
+    let multi_draw_indirect = core_features.multi_draw_indirect == vk::TRUE;
+    let sparse_binding = core_features.sparse_binding == vk::TRUE;
+    let sparse_residency_buffer = core_features.sparse_residency_buffer == vk::TRUE;
+    let sparse_residency_image_2d = core_features.sparse_residency_image2_d == vk::TRUE;
+    let sparse_residency_image_3d = core_features.sparse_residency_image3_d == vk::TRUE;
+    let sparse_residency_aliased = core_features.sparse_residency_aliased == vk::TRUE;
     let image_fp16_render = format_supports_color_attachment(
         instance,
         physical_device,
@@ -72,6 +80,13 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         image_fp16_render,
         image_fp32_render,
         variable_rate_shading,
+        multi_draw_indirect,
+        draw_indirect_count,
+        sparse_binding,
+        sparse_residency_buffer,
+        sparse_residency_image_2d,
+        sparse_residency_image_3d,
+        sparse_residency_aliased,
     };
 
     let limits = Limits {

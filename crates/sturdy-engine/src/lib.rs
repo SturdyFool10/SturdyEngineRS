@@ -39,6 +39,7 @@ mod graph_frame;
 pub mod graph_report;
 mod hdr_pipeline;
 mod headless;
+mod hiz_pass;
 mod input;
 mod light_bvh;
 mod mesh;
@@ -162,6 +163,7 @@ pub use gpu_procedural_texture::GpuProceduralTexture;
 pub use graph_frame::{FullscreenPassBuilder, GraphFrame, ImageNode};
 pub use hdr_pipeline::{HdrMode, HdrPipelineDesc, HdrPreference, ToneMappingOp};
 pub use headless::{HeadlessApp, render_to_rgba8, render_to_rgba8_with_engine, run_headless};
+pub use hiz_pass::{HizConfig, HizHistory, HizHistoryFrame, HizPass, HizPyramid};
 pub use input::{
     ActionAxisDirection, ActionBinding, ActionBindingRegistry, ActionMap, BindingChange,
     GamepadAxis, GamepadAxisInput, GamepadButton, GamepadButtonInput, GamepadId, InputHub,
@@ -244,8 +246,8 @@ pub use sturdy_engine_core::{
     BufferDesc, BufferUsage, BufferUse, CanonicalBinding, CanonicalGroupLayout,
     CanonicalPipelineLayout, Caps, ColorTargetDesc, CompareOp, CompiledShaderArtifact,
     ComputePipelineDesc, CopyBufferToImageDesc, CopyImageToBufferDesc, CullMode,
-    D3d12RawCapabilities, DispatchDesc, DispatchIndirectDesc, DrawDesc, DrawIndirectDesc,
-    DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, Error, ErrorCategory, Extent3d,
+    D3d12RawCapabilities, DispatchDesc, DispatchIndirectDesc, DrawDesc, DrawIndirectCountDesc,
+    DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, Error, ErrorCategory, Extent3d,
     ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode,
     Format, FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GpuMemoryBudget,
     GraphicsPipelineDesc, ImageBuilder, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse,
@@ -277,8 +279,8 @@ pub use sturdy_engine_platform::{
     current_window_appearance_caps, native_window_appearance_protocol, requested_backdrop_name,
 };
 pub use texture::{ImageCopyRegion, TextureUploadDesc};
-pub use ui_renderer::UiRenderer;
 pub use texture_compression::{CompressedTexture, TextureKind, compress_texture};
+pub use ui_renderer::UiRenderer;
 pub use window_registry::{WindowHandle, WindowId, WindowRegistry};
 
 use sturdy_engine_core as core;

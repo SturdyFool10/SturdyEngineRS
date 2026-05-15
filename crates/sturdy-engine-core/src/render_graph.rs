@@ -195,6 +195,24 @@ pub struct DrawIndirectDesc {
     pub index_buffer: Option<IndexBufferBinding>,
 }
 
+/// Indirect draw with a GPU-populated count buffer.
+///
+/// `max_draw_count` is the upper bound consumed from `indirect_buffer`; the
+/// actual command count is read from `count_buffer`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DrawIndirectCountDesc {
+    pub indirect_buffer: BufferHandle,
+    pub indirect_offset: u64,
+    pub count_buffer: BufferHandle,
+    pub count_offset: u64,
+    pub max_draw_count: u32,
+    /// Stride between commands in bytes (>= 16 for unindexed, >= 20 for indexed).
+    pub stride: u32,
+    pub indexed: bool,
+    pub vertex_buffer: Option<VertexBufferBinding>,
+    pub index_buffer: Option<IndexBufferBinding>,
+}
+
 /// Indirect compute dispatch: GPU-populated buffer drives group counts.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DispatchIndirectDesc {
@@ -295,6 +313,8 @@ pub enum PassWork {
     Draw(DrawDesc),
     /// Indirect vertex/index draw — draw commands come from a GPU buffer.
     DrawIndirect(DrawIndirectDesc),
+    /// Indirect vertex/index draw limited by a GPU-written command count.
+    DrawIndirectCount(DrawIndirectCountDesc),
     /// Direct mesh-shader dispatch (no task shader).
     DrawMeshShader(DrawMeshShaderDesc),
     /// Indirect mesh-shader dispatch — workgroup counts come from a GPU buffer.
@@ -541,6 +561,29 @@ impl RenderGraph {
             if pass.pipeline.is_none() {
                 return Err(Error::InvalidInput(
                     "draw pass requires a graphics pipeline".into(),
+                ));
+            }
+        }
+        if let PassWork::DrawIndirectCount(draw) = pass.work {
+            if draw.max_draw_count == 0 {
+                return Err(Error::InvalidInput(
+                    "draw-indirect-count max_draw_count must be non-zero".into(),
+                ));
+            }
+            if draw.stride < if draw.indexed { 20 } else { 16 } || draw.stride % 4 != 0 {
+                return Err(Error::InvalidInput(
+                    "draw-indirect-count stride must be a multiple of 4 and large enough for the command type"
+                        .into(),
+                ));
+            }
+            if draw.indexed && draw.index_buffer.is_none() {
+                return Err(Error::InvalidInput(
+                    "indexed draw-indirect-count requires an index buffer binding".into(),
+                ));
+            }
+            if pass.pipeline.is_none() {
+                return Err(Error::InvalidInput(
+                    "draw-indirect-count pass requires a graphics pipeline".into(),
                 ));
             }
         }
@@ -1509,6 +1552,151 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn draw_indirect_count_requires_valid_count_contract() {
+        let mut graph = RenderGraph::new();
+        let indirect = BufferHandle(1);
+        let count = BufferHandle(2);
+        graph
+            .import_buffer(
+                indirect,
+                BufferDesc {
+                    size: 64,
+                    usage: BufferUsage::INDIRECT,
+                },
+            )
+            .unwrap();
+        graph
+            .import_buffer(
+                count,
+                BufferDesc {
+                    size: 4,
+                    usage: BufferUsage::INDIRECT,
+                },
+            )
+            .unwrap();
+
+        let err = graph
+            .add_pass(PassDesc {
+                name: "bad-indirect-count".into(),
+                queue: QueueType::Graphics,
+                shader: None,
+                pipeline: Some(PipelineHandle(1)),
+                bind_groups: Vec::new(),
+                push_constants: None,
+                work: PassWork::DrawIndirectCount(DrawIndirectCountDesc {
+                    indirect_buffer: indirect,
+                    indirect_offset: 0,
+                    count_buffer: count,
+                    count_offset: 0,
+                    max_draw_count: 0,
+                    stride: 20,
+                    indexed: true,
+                    vertex_buffer: None,
+                    index_buffer: None,
+                }),
+                reads: Vec::new(),
+                writes: Vec::new(),
+                buffer_reads: Vec::new(),
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            })
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn draw_indirect_count_tracks_indirect_and_count_buffer_reads() {
+        let mut graph = RenderGraph::new();
+        let indirect = BufferHandle(1);
+        let count = BufferHandle(2);
+        let buffer_desc = BufferDesc {
+            size: 64,
+            usage: BufferUsage::INDIRECT | BufferUsage::STORAGE,
+        };
+        graph.import_buffer(indirect, buffer_desc).unwrap();
+        graph.import_buffer(count, buffer_desc).unwrap();
+
+        graph
+            .add_pass(PassDesc {
+                name: "write-count".into(),
+                queue: QueueType::Compute,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                work: PassWork::None,
+                reads: Vec::new(),
+                writes: Vec::new(),
+                buffer_reads: Vec::new(),
+                buffer_writes: vec![BufferUse {
+                    buffer: count,
+                    access: Access::Write,
+                    state: RgState::ShaderWrite,
+                    offset: 0,
+                    size: 4,
+                }],
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            })
+            .unwrap();
+
+        graph
+            .add_pass(PassDesc {
+                name: "consume-count".into(),
+                queue: QueueType::Graphics,
+                shader: None,
+                pipeline: Some(PipelineHandle(2)),
+                bind_groups: Vec::new(),
+                push_constants: None,
+                work: PassWork::DrawIndirectCount(DrawIndirectCountDesc {
+                    indirect_buffer: indirect,
+                    indirect_offset: 0,
+                    count_buffer: count,
+                    count_offset: 0,
+                    max_draw_count: 3,
+                    stride: 20,
+                    indexed: false,
+                    vertex_buffer: None,
+                    index_buffer: None,
+                }),
+                reads: Vec::new(),
+                writes: Vec::new(),
+                buffer_reads: vec![
+                    BufferUse {
+                        buffer: indirect,
+                        access: Access::Read,
+                        state: RgState::IndirectRead,
+                        offset: 0,
+                        size: u64::MAX,
+                    },
+                    BufferUse {
+                        buffer: count,
+                        access: Access::Read,
+                        state: RgState::IndirectRead,
+                        offset: 0,
+                        size: 4,
+                    },
+                ],
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            })
+            .unwrap();
+
+        let compiled = graph.compile().unwrap();
+        assert_eq!(compiled.passes[0].name, "write-count");
+        assert_eq!(compiled.passes[1].name, "consume-count");
+        assert!(
+            compiled.buffer_barriers_per_pass[1]
+                .iter()
+                .any(|barrier| barrier.buffer == count
+                    && barrier.before == RgState::ShaderWrite
+                    && barrier.after == RgState::IndirectRead)
+        );
     }
 
     #[test]
