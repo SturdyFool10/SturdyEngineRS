@@ -83,12 +83,14 @@ The items below are ordered so that each layer multiplies the value of what come
 
 ```
 Foundation (performance ceiling)
+  └─ Vulkan extension coverage (Track GFX-1 + GFX-2)  → prerequisite for all foundation work
   └─ GPU-driven scene + bindless          → unlocks 100k+ draw counts
   └─ Temporal upscaling (FSR 3.1)         → makes expensive GI/RT viable at 60fps
   └─ Texture compression                  → VRAM headroom for real content
   └─ Async compute                        → free perf from queue overlap
 
-Visual quality (dependency order)
+Visual quality (Track GFX-3 required first, then in dependency order)
+  └─ RT pipeline foundation (Track GFX-3) → prerequisite for all RT visual features
   └─ Ambient occlusion (GTAO + RTAO)      → biggest cheap visual leap
   └─ Reflections (SSR → RT)              → correct specular from scene geometry
   └─ Global illumination (SSGI → RTGI → PTGI)
@@ -102,6 +104,12 @@ Geometry
   └─ Virtual geometry system (full Nanite equivalent)
        DAG → cluster select → software raster → vis buffer → material resolve → streaming
   └─ Ray tracing geometry integration (TLAS/BLAS for RT AO, shadows, reflections, GI)
+
+Application capabilities (parallel with visual quality, after GFX-1 + GFX-2)
+  └─ Video encode/decode (Track GFX-4)    → cutscenes, replay, streaming, video textures
+  └─ External resource interop (GFX-5)    → camera capture, compositor, cross-process GPU memory
+  └─ GPU enhancements (GFX-6)             → DGC, Reflex/Anti-Lag, cooperative matrix, optical flow
+  └─ Next-gen descriptors (GFX-7)         → descriptor buffer, descriptor heap
 
 Engine + ECS thread safety (foundational — do alongside GPU-driven work)
   └─ Engine::global() OnceLock accessor ✓ — any thread, zero cost
@@ -208,6 +216,396 @@ The block sub-allocator (256 MiB blocks) already exists. `Engine::memory_budget(
 - [ ] Aliased memory for G-Buffer images: the render graph already tracks lifetimes — commit the alias plan to the allocator so non-overlapping transient images share VkDeviceMemory. Saves ~50–100 MB/frame on a full G-Buffer + shadow atlas.
 - [ ] Warn in console when `memory_budget().over_budget()` is true (device_local > 80%).
 - [ ] Dedicated allocations for resources > 64 MiB: skip the pool and use a direct `vkAllocateMemory`; prevents a single large texture from fragmenting the whole pool.
+
+---
+
+## Graphics API Extension Coverage (Track GFX)
+
+All visual-quality tracks, GPU-driven rendering, ray tracing, video, and async compute depend on specific Vulkan extensions being wired and active in the backend. This track makes every detected extension actually usable, adds detection for extensions currently absent, and sequences new infrastructure work in dependency order.
+
+**Rule**: no visual-quality, RT, video, or high-level GPU-driven feature may be marked complete while a GFX item it depends on remains open.
+
+The phases are ordered by dependency. GFX-1 must finish before Foundation tracks move beyond their current state. GFX-2 must finish before visual quality tracks begin. GFX-3 must finish before any RT feature. GFX-4, GFX-5, and GFX-6 are independent and can proceed in parallel with visual quality work after GFX-1 and GFX-2.
+
+---
+
+### GFX-1 — Core API modernization
+
+The highest-leverage changes: extensions already detected but unused, plus infrastructure that everything else depends on. No feature track starts until these are done.
+
+**GFX-1a — `VK_KHR_synchronization2` (detected, not used)**
+
+Every `cmd_pipeline_barrier` in `commands.rs` uses the legacy two-stage API. Sync2 provides `StageMask2` + `AccessMask2` — fine-grained pairs that eliminate false dependencies. Also simplifies queue submission.
+
+- [ ] Replace all `cmd_pipeline_barrier` calls with `cmd_pipeline_barrier2` + `DependencyInfo`. Gate on `features.synchronization2`; fall back to legacy on pre-1.3 devices.
+- [ ] Replace both `cmd_write_timestamp` calls (lines 236, 265 in `commands.rs`) with `cmd_write_timestamp2` using `PipelineStageFlags2::TOP_OF_PIPE` / `BOTTOM_OF_PIPE`.
+- [ ] Replace per-batch wait-stage arrays with `SemaphoreSubmitInfo2` in the queue submission path (`commands.rs` line 320).
+- [ ] Add `synchronization2_khr: Option<ash::khr::synchronization2::Device>` to `VulkanBackend`; initialize when enabled on sub-1.3 devices; dispatch all sync2 calls through it.
+
+**GFX-1b — `VK_KHR_dynamic_rendering` (detected, not used)**
+
+Currently using legacy render passes and framebuffers. Dynamic rendering eliminates both, reduces pipeline coupling, removes the render-pass–to–pipeline compatibility constraint, and is required before VRS attachment mode (GFX-2a) works cleanly.
+
+- [ ] Implement `cmd_begin_rendering` / `cmd_end_rendering` path in `commands.rs`. Replace `cmd_begin_render_pass` / `cmd_end_render_pass` for all graphics passes.
+- [ ] Construct `VkRenderingAttachmentInfo` from `ColorTarget` / `DepthTarget` descriptors; pass via `VkRenderingInfo` to `cmd_begin_rendering`.
+- [ ] Add `VkPipelineRenderingCreateInfo` to graphics pipeline creation in `pipelines.rs`. Thread attachment formats from `GraphicsPipelineDesc` into the create-info chain instead of a render pass handle.
+- [ ] Delete `FramebufferCache` and all render pass object management from `PipelineRegistry`.
+- [ ] Gate on `features.dynamic_rendering`; keep the legacy path behind a compile-time flag for portability subset devices (MoltenVK, older Android Vulkan 1.1 only).
+- [ ] **Enables**: GFX-2a (VRS attachment), GFX-2c (graphics pipeline library input/output stages), `VK_KHR_dynamic_rendering_local_read` (input-attachment feedback loops without subpasses).
+
+**GFX-1c — `VK_KHR_timeline_semaphore` (detected, not used)**
+
+`surfaces.rs` has `render_finished: Vec<vk::Semaphore>` — one binary semaphore per swapchain image. Inter-batch chain semaphores are also binary. Timeline semaphores collapse this to two monotonic counters and are a prerequisite for async compute cross-queue synchronization (Track 11b).
+
+- [ ] Replace per-surface `render_finished: Vec<vk::Semaphore>` with a single `render_finished_timeline: vk::Semaphore` + `render_finished_value: AtomicU64`. Each frame increments and signals the timeline value.
+- [ ] Replace inter-batch chain semaphores in `commands.rs` with timeline signal/wait pairs using a monotonically increasing frame counter.
+- [ ] Expose `Engine::wait_for_timeline(semaphore, value)` and `Engine::signal_timeline(semaphore, value)` for engine consumers that need explicit cross-queue coordination.
+- [ ] Gate on `features.timeline_semaphores`; fall back to binary semaphores on Vulkan 1.0 devices.
+- [ ] **Enables**: Track 11b (async compute, cross-queue semaphore chains).
+
+**GFX-1d — `VK_KHR_buffer_device_address` (Vulkan 1.2 core)**
+
+Raw GPU virtual addresses for buffers. Required by ray tracing acceleration structures, descriptor buffer, device-generated commands, and any GPU-side linked structure. Nearly universal — this is Vulkan 1.2 core.
+
+- [ ] Detect `VK_KHR_buffer_device_address` (or `api_version >= 1.2`); add `BackendFeatures::buffer_device_address`.
+- [ ] Enable `bufferDeviceAddress = VK_TRUE` in `VkPhysicalDeviceVulkan12Features` during device creation.
+- [ ] Add `Buffer::device_address(&self) -> Option<u64>` — returns `None` when unavailable or the buffer was not created with `BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT`.
+- [ ] Gate `SHADER_DEVICE_ADDRESS_BIT` on buffer creation behind `features.buffer_device_address`.
+- [ ] **Required by**: GFX-3a (RT acceleration structures), GFX-6a (device-generated commands), GFX-7a (descriptor buffer).
+
+**GFX-1e — Memory management extensions**
+
+The current `GpuAllocator` has no budget awareness. Exceeding the budget causes silent performance cliffs on integrated and mobile GPUs.
+
+- [ ] Detect `VK_EXT_memory_budget`; add `BackendFeatures::memory_budget`. When available, call `vkGetPhysicalDeviceMemoryProperties2` with `VkPhysicalDeviceMemoryBudgetPropertiesEXT` each frame. Expose `Engine::memory_budget_ext() -> MemoryBudgetReport` with per-heap `budget` and `usage` in bytes.
+- [ ] Integrate budget into the allocator: when `device_local_usage > 80% of device_local_budget`, scale down new block sizes and emit a structured warning via debug utils.
+- [ ] Detect `VK_EXT_memory_priority`; add `BackendFeatures::memory_priority`. When available, assign priority during `vkAllocateMemory`: render targets 1.0, G-Buffer 0.9, scene geometry 0.7, staging 0.1.
+- [ ] Detect `VK_EXT_pageable_device_local_memory`; when available alongside `memory_priority`, call `vkSetDeviceMemoryPriorityEXT` at allocation time.
+- [ ] Detect `VK_KHR_dedicated_allocation` (Vulkan 1.1 core); query `VkMemoryDedicatedRequirementsKHR` for every resource; allocate a dedicated `VkDeviceMemory` for resources where `prefersDedicatedAllocation` is true (typically large render targets and streaming textures). This pairs with the existing Track 11a item for resources > 64 MiB.
+- [ ] **Improves**: Track 11a (GPU memory infrastructure), streaming texture residency (Track 7f, Full Asset Pipeline).
+
+**GFX-1f — Push descriptors (`VK_KHR_push_descriptor`, Vulkan 1.4 core)**
+
+Eliminates descriptor pool allocation for per-draw data. Complements bindless: bindless for the resource heap, push descriptors for per-pass data too large for push constants.
+
+- [ ] Detect `VK_KHR_push_descriptor`; add `BackendFeatures::push_descriptors`.
+- [ ] Add `push_descriptor_khr: Option<ash::khr::push_descriptor::Device>` to `VulkanBackend`.
+- [ ] Add `PassDesc::push_descriptor_set: Option<PushDescriptorSetDesc>` to the render graph. Record `cmd_push_descriptor_set_khr` before pass work when present.
+- [ ] `PushDescriptorSetDesc` mirrors `BindGroupDesc` but without a persistent `VkDescriptorSet` allocation.
+
+**GFX-1g — Device fault and diagnostic breadcrumbs**
+
+`VK_ERROR_DEVICE_LOST` currently produces no actionable information. These extensions provide pass-level crash attribution.
+
+- [ ] Detect `VK_EXT_device_fault`; add `BackendFeatures::device_fault`. On `VK_ERROR_DEVICE_LOST`, call `vkGetDeviceFaultInfoEXT`; log the structured fault report (address records, vendor info strings) via debug utils before the panic.
+- [ ] Detect `VK_NV_device_diagnostic_checkpoints` (NVIDIA); insert checkpoint markers at the start and end of each render graph pass in debug builds. On device loss, surviving checkpoints identify the faulting pass.
+- [ ] Detect `VK_AMD_buffer_marker` (AMD); write a 32-bit pass index into a host-visible breadcrumb buffer at the start and end of each pass in debug builds. On device loss, the last-written index identifies the faulting pass.
+- [ ] Detect `VK_EXT_device_address_binding_report`; register the callback when available to log GPU VA binding events for postmortem address resolution.
+- [ ] Detect `VK_EXT_device_memory_report`; register the callback in debug builds for driver-internal allocation tracking by tooling.
+
+**GFX-1h — Host image copy (`VK_EXT_host_image_copy`, Vulkan 1.4 core)**
+
+Copies images from the CPU without staging buffers. Eliminates the staging round-trip on unified-memory hardware (Apple Silicon, integrated GPUs).
+
+- [ ] Detect `VK_EXT_host_image_copy` (or `api_version >= 1.4`); add `BackendFeatures::host_image_copy`.
+- [ ] In the texture upload path: when `host_image_copy` is available and the memory type is compatible, use `vkCopyMemoryToImageEXT` instead of staging buffer + `vkCmdCopyBufferToImage`.
+- [ ] When available, use `vkTransitionImageLayoutEXT` for CPU-side layout transitions on textures that have not yet been touched by the GPU. Eliminates a submit just to do an initial transition.
+- [ ] **Improves**: Full Asset Pipeline (staging ring allocator savings on integrated/mobile).
+
+---
+
+### GFX-2 — Feature enablement
+
+Complete these before beginning Tracks AO, Reflections, GI, Shadows, VRS, Fog, and GPU-driven culling.
+
+**GFX-2a — VRS command recording (`VK_KHR_fragment_shading_rate`, detected, no commands)**
+
+Three sub-modes (pipeline, primitive, attachment) are fully detected in `caps.rs` and `device.rs`. The command recording path and `PassDesc` slot do not exist.
+
+- [ ] Add `PassDesc::pipeline_shading_rate: Option<ShadingRate>` (enabled when `features.variable_rate_shading` and pipeline-tier VRS are both available). Record `cmd_set_fragment_shading_rate_khr` before draws.
+- [ ] Add `PassDesc::shading_rate_image: Option<VirtualImageId>` (enabled when attachment-tier VRS is available). Bind `VkRenderingFragmentShadingRateAttachmentInfoKHR` inside `cmd_begin_rendering` (requires GFX-1b).
+- [ ] Add `RgState::ShadingRateAttachment` to the render graph state enum; insert correct barriers before passes that consume a shading rate image.
+- [ ] Split `BackendFeatures::variable_rate_shading` into `vrs_pipeline: bool`, `vrs_primitive: bool`, `vrs_attachment: bool` matching the three sub-modes detected in `caps.rs`.
+- [ ] **Depends on**: GFX-1b (dynamic rendering required for attachment VRS). **Enables**: Track 8c.
+
+**GFX-2b — Conditional rendering (`VK_EXT_conditional_rendering`)**
+
+Required for GPU-driven occlusion culling to skip draw calls without a CPU readback.
+
+- [ ] Detect `VK_EXT_conditional_rendering`; add `BackendFeatures::conditional_rendering`.
+- [ ] Add `conditional_rendering_ext: Option<ash::ext::conditional_rendering::Device>` to `VulkanBackend`.
+- [ ] Add `PassDesc::predicate: Option<ConditionalRenderingDesc>` to the render graph where `ConditionalRenderingDesc` holds a buffer handle, byte offset, and invert flag.
+- [ ] Wrap passes with a predicate in `cmd_begin_conditional_rendering_ext` / `cmd_end_conditional_rendering_ext`.
+- [ ] **Enables**: Track 8b (two-phase occlusion culling — Phase 2 predicate skips draws for fully occluded instances without CPU readback).
+
+**GFX-2c — Graphics pipeline library (`VK_EXT_graphics_pipeline_library`)**
+
+Pre-compiles disjoint pipeline state chunks that are linked at draw time. Eliminates PSO stutter for the pre-rasterization and fragment-shader stages.
+
+- [ ] Detect `VK_EXT_graphics_pipeline_library`; add `BackendFeatures::graphics_pipeline_library`.
+- [ ] Split `create_graphics_pipeline` into four library linkage stages: `VertexInput`, `PreRasterization`, `FragmentShader`, `FragmentOutput`. Pre-compile vertex-input and fragment-output libraries at startup (they are material-independent and rarely change).
+- [ ] Material variant compilation only produces `PreRasterization` + `FragmentShader` libraries; link against the cached vertex-input and fragment-output libraries to produce the final pipeline. First-draw compile time drops proportionally.
+- [ ] Detect `VK_EXT_pipeline_creation_cache_control` (Vulkan 1.3 core); gate pipeline compilation behind `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` to return `VK_PIPELINE_COMPILE_REQUIRED_EXT` on cache miss instead of stalling the calling thread.
+- [ ] **Enables**: Track 8e (PSO pre-warm pass, `PsoWarmupReport`). Reduces first-draw stutter from Track ECS-MT-d-6.
+
+**GFX-2d — Extended dynamic state 3 (`VK_EXT_extended_dynamic_state3`)**
+
+Makes almost all remaining pipeline state dynamic. Eliminates PSO variants for state that changes per-pass but is currently baked at creation time.
+
+- [ ] Detect `VK_EXT_extended_dynamic_state3`; add `BackendFeatures::extended_dynamic_state3`.
+- [ ] Add `GraphicsPipelineDesc` fields for polygon mode, rasterizer discard, color blend equation, and depth clamp as "use dynamic if available" options.
+- [ ] Record the corresponding `cmd_set_polygon_mode_ext`, `cmd_set_color_blend_equation_ext`, etc. in the render graph pass recording path when the feature is active.
+- [ ] **Reduces PSO variant count** — debug wireframe overlay, discard toggle, and color blend mode changes no longer require separate PSO variants.
+
+**GFX-2e — Vertex input dynamic state (`VK_EXT_vertex_input_dynamic_state`)**
+
+Fully dynamic vertex binding and attribute descriptions. Required for virtual geometry (Track 7) where vertex formats vary per cluster.
+
+- [ ] Detect `VK_EXT_vertex_input_dynamic_state`; add `BackendFeatures::vertex_input_dynamic_state`.
+- [ ] When available, create graphics pipelines with `VK_DYNAMIC_STATE_VERTEX_INPUT_EXT`; record `cmd_set_vertex_input_ext` per draw when the vertex format differs from the previous draw.
+- [ ] **Enables**: Track 7d (hardware rasterization path where mesh shader is unavailable), dynamic mesh format switching in the virtual geometry pipeline.
+
+**GFX-2f — Conservative rasterization (`VK_EXT_conservative_rasterization`)**
+
+Required for voxelization, SDF generation, and shadow map rendering without sub-texel gaps.
+
+- [ ] Detect `VK_EXT_conservative_rasterization`; add `BackendFeatures::conservative_rasterization` with `overestimation: bool` and `underestimation: bool`.
+- [ ] Add `GraphicsPipelineDesc::conservative_raster: ConservativeRasterMode` (Off / Overestimate / Underestimate).
+- [ ] **Enables**: Track 7c (software rasterizer coverage validation), voxelization passes for GI probes.
+
+**GFX-2g — Global queue priority (`VK_KHR_global_priority`, Vulkan 1.4 core)**
+
+Async compute needs its queue at `MEDIUM` priority. Without this, OS scheduling may starve the compute queue under GPU load.
+
+- [ ] Detect `VK_KHR_global_priority`; add `BackendFeatures::global_queue_priority`.
+- [ ] When available, assign `VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR` to the graphics queue and `VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR` to the async compute queue via `VkDeviceQueueGlobalPriorityCreateInfoKHR`.
+- [ ] **Enables**: Track 11b (async compute — correct scheduling under GPU contention).
+
+**GFX-2h — Presentation extensions**
+
+Track LL requires several of these. Wire them here so Track LL items do not carry extension detection work.
+
+- [ ] Detect `VK_EXT_swapchain_colorspace`; expose `SurfaceCaps::supported_color_spaces: Vec<ColorSpace>` including HDR10, scRGB, and DCI-P3. Required for correct HDR output alongside `VK_EXT_hdr_metadata`.
+- [ ] Detect `VK_KHR_present_id`; attach a monotonic `u64` present ID per frame via `VkPresentIdKHR` in `vkQueuePresentKHR`.
+- [ ] Detect `VK_KHR_present_wait`; expose `Surface::wait_for_present(id: u64, timeout: Duration)` for CPU-side vblank blocking.
+- [ ] Detect `VK_KHR_swapchain_maintenance1`; expose `SwapchainConfig::present_mode` as a mutable runtime field (change without recreation) and expose a per-present release fence.
+- [ ] Detect `VK_EXT_full_screen_exclusive` (Windows only); expose `SurfaceConfig::exclusive_fullscreen: ExclusiveFullscreenMode` (Allowed / Disallowed / ApplicationControlled).
+- [ ] Detect `VK_GOOGLE_display_timing`; query `vkGetPastPresentationTimingGOOGLE` each frame; feed actual display latency into `FrameTimingReport::present_to_display_ms`.
+- [ ] Detect `VK_EXT_present_mode_fifo_latest_ready`; expose as `PresentMode::FifoLatestReady` in the surface present mode enum.
+- [ ] **Enables**: Track LL (low-latency presentation), `BackendFeatures::hdr_output` (pair swapchain colorspace with HDR metadata).
+
+**GFX-2i — HDR metadata (`VK_EXT_hdr_metadata`, detected, not wired)**
+
+`BackendFeatures::hdr_output` is set on supported hardware but `vkSetHdrMetadataEXT` is never called. Engine consumers cannot specify color primaries or luminance.
+
+- [ ] Add `Surface::set_hdr_metadata(meta: HdrMetadata)` where `HdrMetadata` carries SMPTE 2086 display primaries, white point xy, mastering max/min luminance, MaxCLL, and MaxFALL.
+- [ ] Auto-call `vkSetHdrMetadataEXT` when the surface color space is HDR10 (`VK_COLOR_SPACE_HDR10_ST2084_EXT`) and metadata is provided.
+- [ ] Expose `SurfaceCaps::hdr_metadata_supported: bool`. Gate on `features.hdr_output`.
+- [ ] **Depends on**: GFX-2h (`VK_EXT_swapchain_colorspace` for HDR10 color space selection). **Enables**: Track Post (HDR display output, `ToneMapConfig::hdr_output`).
+
+**GFX-2j — Performance query and pipeline statistics**
+
+Without hardware counters, profiling data is timestamps only. These expose ROP throughput, cache hit rates, and compiled shader stats.
+
+- [ ] Detect `VK_KHR_performance_query`; add `BackendFeatures::performance_query`. Expose `Engine::enumerate_performance_counters() -> Vec<PerfCounter>` listing available counters by category.
+- [ ] Add `PassDesc::perf_counters: Option<Vec<PerfCounterHandle>>` to record selected counters for specific passes.
+- [ ] Detect `VK_KHR_pipeline_executable_properties`; expose `Engine::pipeline_executable_stats(pipeline) -> Vec<ExecutableStat>` for per-stage register usage, code size, and IR.
+- [ ] Detect `VK_AMD_shader_info`; expose AMD-specific compiled shader statistics (`VkShaderStatisticsInfoAMD`) alongside the KHR path.
+- [ ] Detect `VK_AMD_shader_core_properties` and `VK_NV_shader_sm_builtins`; expose shader core / SM count via `Engine::shader_core_count() -> Option<u32>` for workgroup size tuning.
+- [ ] Expose GPU profiling readback through the existing per-pass timing API — add a `PassTimingReport::perf_counters: HashMap<PerfCounterHandle, u64>` field alongside the existing GPU timestamp data.
+
+**GFX-2k — Sampler and image quality extensions**
+
+- [ ] Detect `VK_EXT_sampler_filter_minmax` (Vulkan 1.2 core); expose `SamplerDesc::reduction_mode: SamplerReductionMode` (WeightedAverage / Min / Max). The Max reduction mode is required for Hi-Z pyramid construction (Track 7b, 8b).
+- [ ] Detect `VK_EXT_custom_border_color`; expose `SamplerDesc::border_color: BorderColor` with an `Custom([f32; 4])` variant.
+- [ ] Detect `VK_EXT_filter_cubic`; expose `SamplerDesc::filter: Filter::Cubic` for Catmull-Rom upscaling.
+- [ ] Detect `VK_EXT_image_view_min_lod`; expose `ImageViewDesc::min_lod: Option<f32>` for mipmap streaming (clamp visible mips to what is resident).
+- [ ] Detect `VK_EXT_image_compression_control`; add `ImageDesc::compression: ImageCompression` (Default / Fixed { bits_per_component: u32 } / Disabled). Expose `Image::actual_compression_ratio() -> Option<f32>` via `VkImageCompressionPropertiesEXT`.
+- [ ] Detect `VK_EXT_image_compression_control_swapchain`; propagate compression preference to swapchain image creation.
+- [ ] Detect `VK_EXT_multisampled_render_to_single_sampled`; expose as `ImageDesc::msaa_resolve_to_single_sampled: bool`. On tile-based hardware this eliminates the MSAA allocation entirely — the GPU resolves on-chip.
+
+---
+
+### GFX-3 — Ray tracing pipeline completion
+
+Complete before Track AO (RTAO), Track Refl (RT Reflections), Track GI (RTGI, PTGI), Track Shadow (RT shadows), and Track 7g (RT geometry integration). GFX-1d (buffer device address) is a hard prerequisite.
+
+**GFX-3a — RT command recording (detected, zero commands implemented)**
+
+`VK_KHR_ray_tracing_pipeline` and `VK_KHR_acceleration_structure` are detected in `caps.rs` and device structs exist in `device.rs`, but there is no resource type, no build command, no trace command, and no SBT management.
+
+- [ ] Add `AccelerationStructure` resource type to `ResourceRegistry`: backed by `vk::AccelerationStructureKHR` + its own `vk::Buffer` allocation (separate from the main allocator pool — AS memory has special alignment requirements).
+- [ ] Add `PassWork::BuildBlas(BlasBuildDesc)` and `PassWork::BuildTlas(TlasBuildDesc)`. The render graph compiler treats AS builds as compute-queue passes with UAV dependencies on source geometry buffers. Add `RgState::AccelerationStructureBuild` to the state enum.
+- [ ] `BlasBuildDesc`: geometry inputs (vertex buffer handle, index buffer handle, vertex format, stride, transform buffer), build mode (Build / Update / Compact), scratch buffer (auto-allocated from a per-frame scratch pool).
+- [ ] `TlasBuildDesc`: instance buffer handle (array of `VkAccelerationStructureInstanceKHR`), scratch buffer, update-in-place flag.
+- [ ] Add `PassWork::TraceRays(TraceRaysDesc)` for dispatching ray tracing pipelines.
+- [ ] `TraceRaysDesc`: ray tracing pipeline handle, `ShaderBindingTable` (holds handles for raygen, miss, hit groups, callable shaders), dispatch dimensions (width, height, depth).
+- [ ] Add `RayTracingPipeline` resource type; add `Engine::create_ray_tracing_pipeline(RayTracingPipelineDesc) -> RayTracingPipeline`. `RayTracingPipelineDesc` lists shader stages (raygen, miss, closest-hit, any-hit, intersection, callable) and hit groups.
+- [ ] `ShaderBindingTable` helper: allocates a strided `vk::Buffer` and fills it with the pipeline's shader group handles via `vkGetRayTracingShaderGroupHandlesKHR`. Auto-aligns to `VkPhysicalDeviceRayTracingPipelinePropertiesKHR::shaderGroupHandleAlignment`.
+- [ ] Mark `BackendFeatures::ray_tracing` as only `true` when command recording is actually functional (not just detected).
+- [ ] **Depends on**: GFX-1d (buffer device address). **Enables**: every RT visual feature.
+
+**GFX-3b — Inline ray queries (`VK_KHR_ray_query`)**
+
+Traces rays from any shader stage without a separate RT pipeline. Simpler than full RT pipelines for AO and shadow rays — many RT AO and hard shadow implementations only need this.
+
+- [ ] Detect `VK_KHR_ray_query`; add `BackendFeatures::ray_query`.
+- [ ] Enable `VkPhysicalDeviceRayQueryFeaturesKHR::rayQuery = VK_TRUE` in device creation.
+- [ ] No new command recording required — ray queries work via SPIR-V instructions in any existing shader stage. Expose `ShaderDesc::requires_ray_query: bool` so the pipeline builder enables the `RayQueryKHR` SPIR-V capability when compiling that shader.
+- [ ] **Simpler path than GFX-3a** for AO and hard shadows. Implement this first.
+
+**GFX-3c — RT acceleration structure enhancements**
+
+- [ ] Detect `VK_KHR_ray_tracing_position_fetch`; when available, add `VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR` to BLAS build flags. Exposes `gl_HitTriangleVertexPositionsEXT` in hit shaders — eliminates the vertex buffer fetch in closest-hit shaders.
+- [ ] Detect `VK_KHR_ray_tracing_maintenance1`; add `BackendFeatures::ray_tracing_maintenance1`. Enables `vkCmdTraceRaysIndirectKHR2` with an SBT in a buffer (needed for GPU-driven RT dispatch from Track 7g and Track GI).
+- [ ] Detect `VK_KHR_pipeline_library` (already requested alongside RT in `device.rs`); expose `RayTracingPipelineDesc::use_pipeline_libraries: bool`. Pre-compile hit group shader libraries once per material; link them into per-scene RT pipelines at TLAS build time instead of recompiling on every material combination change.
+- [ ] Detect `VK_EXT_opacity_micromap`; add `BackendFeatures::opacity_micromap`. Expose `MicromapBuildDesc` for building per-subtriangle opacity micromaps from source triangle data; expose an `AttachMicromap` option in `BlasBuildDesc`. Eliminates any-hit shader invocations for fully opaque or fully transparent sub-triangles — critical for alpha-tested foliage.
+- [ ] Detect `VK_EXT_ray_tracing_invocation_reorder` (Shader Execution Reordering, SER); add `BackendFeatures::shader_execution_reordering`. Expose `ShaderDesc::uses_ser: bool` to enable the `ShaderInvocationReorderNV` SPIR-V capability. SER reorders ray invocations across a warp to reduce divergence — 30–60% throughput uplift on complex scenes with many materials.
+- [ ] Detect `VK_NV_cluster_acceleration_structure` (NVIDIA Mega Geometry); add `BackendFeatures::cluster_acceleration_structure`. Exposes cluster-based AS build and traversal for scenes with billions of micro-triangles. Required for the NVIDIA path in Track 7g.
+
+---
+
+### GFX-4 — Video encode/decode
+
+Hardware video is present on most modern GPUs but entirely absent from the engine. Required for in-engine cutscenes, replay recording, streaming, and video texture use cases. This track is independent of GFX-3 and can proceed in parallel with visual quality work.
+
+**GFX-4a — Video decode (H.264, H.265, AV1, VP9)**
+
+- [ ] Detect `VK_KHR_video_queue`; add `BackendFeatures::video_queue`. Create a `VK_QUEUE_VIDEO_DECODE_BIT_KHR` queue family when available (may overlap with compute or transfer).
+- [ ] Detect `VK_KHR_video_decode_queue`, `VK_KHR_video_decode_h264`, `VK_KHR_video_decode_h265`, `VK_KHR_video_decode_av1`, `VK_KHR_video_decode_vp9`; add per-codec booleans to `BackendFeatures` (`video_decode_h264`, `video_decode_h265`, `video_decode_av1`, `video_decode_vp9`).
+- [ ] Add `VideoDecodeSession` resource: creates `VkVideoSessionKHR` + `VkVideoSessionParametersKHR`, allocates session memory, manages the DPB (decoded picture buffer) image array.
+- [ ] Add `PassWork::DecodeVideoFrame(DecodeFrameDesc)` to the render graph. The compiler routes this to the video decode queue with correct semaphore chain to the graphics queue.
+- [ ] `DecodeFrameDesc`: session handle, compressed bitstream buffer handle, output image handle, reference frame DPB indices.
+- [ ] Expose `Engine::create_video_decode_session(codec, resolution, profile, max_dpb_slots) -> VideoDecodeSession`.
+- [ ] `DecodedFrame` images are importable into the render graph as `RgState::ShaderRead` (sampled texture, after YCbCr conversion if needed).
+- [ ] Detect `VK_KHR_video_maintenance1` and `VK_KHR_video_maintenance2`; enable when present (they simplify session parameter management).
+
+**GFX-4b — Video encode (H.264, H.265, AV1)**
+
+- [ ] Detect `VK_KHR_video_encode_queue`, `VK_KHR_video_encode_h264`, `VK_KHR_video_encode_h265`, `VK_KHR_video_encode_av1`; add `BackendFeatures::video_encode_h264`, `video_encode_h265`, `video_encode_av1`.
+- [ ] Detect `VK_KHR_video_encode_quantization_map`; when available, expose `EncodeFrameDesc::quantization_map: Option<ImageHandle>` for per-coding-block quality control. Essential for streaming: reduce quality in peripheral regions while keeping the focal region sharp.
+- [ ] Add `VideoEncodeSession` resource: manages `VkVideoSessionKHR` for encode, reference picture management, and rate control state.
+- [ ] Add `PassWork::EncodeVideoFrame(EncodeFrameDesc)` to the render graph. Input = HDR/SDR image handle; output = compressed bitstream in a CPU-readable buffer.
+- [ ] Expose `Engine::create_video_encode_session(codec, resolution, config) -> VideoEncodeSession`.
+- [ ] `VideoEncodeConfig { codec: VideoCodec, resolution: Extent2D, bitrate: BitRateControl, quality_preset: QualityPreset, profile: VideoProfile }`. `Default` = H.265, CBR 10 Mbps, medium quality.
+- [ ] `VideoEncodeSession::read_bitstream() -> Vec<u8>` — CPU readback of the encoded output after the encode frame command completes.
+
+---
+
+### GFX-5 — External resource interop
+
+Required before multi-process GPU memory sharing, camera capture pipelines, CUDA/OpenCL interop, and zero-copy Wayland compositing. Independent of GFX-3 and GFX-4; can proceed in parallel.
+
+**GFX-5a — External memory**
+
+- [ ] Detect `VK_KHR_external_memory_fd` (Linux/macOS); expose `Buffer::export_fd() -> RawFd`, `Image::export_fd() -> RawFd`, `Engine::import_buffer_fd(fd, size) -> Buffer`, `Engine::import_image_fd(fd, format, extent) -> Image`.
+- [ ] Detect `VK_KHR_external_memory_win32` (Windows); expose corresponding `export_win32_handle()` and import methods using `HANDLE`.
+- [ ] Detect `VK_EXT_external_memory_dma_buf` (Linux); expose `Image::export_dma_buf() -> (RawFd, DrmModifier)` for zero-copy with V4L2 camera capture, KMS display output, and Wayland compositors.
+- [ ] Detect `VK_EXT_image_drm_format_modifier`; expose `ImageDesc::drm_format_modifier: Option<u64>` for creating images with GPU-private tiling formats compatible with the DRM display pipeline (eliminates tiling conversion on import/export).
+- [ ] Detect `VK_EXT_external_memory_host`; expose `Engine::import_host_memory(ptr: *const u8, size: usize) -> Buffer` for zero-copy CPU→GPU access to CPU-allocated data.
+- [ ] Add `BackendFeatures::external_memory_fd`, `external_memory_win32`, `external_memory_dma_buf`, `external_memory_host`, `drm_format_modifier`.
+
+**GFX-5b — External semaphores and fences**
+
+- [ ] Detect `VK_KHR_external_semaphore_fd` + `VK_KHR_external_fence_fd` (Linux/macOS); expose `Engine::create_exportable_semaphore(HandleType) -> Semaphore`, `Semaphore::export_fd() -> RawFd`, `Engine::import_semaphore_fd(fd, HandleType) -> Semaphore`. Same for fences. Include `SYNC_FD` handle type for Android and V4L2 sync points.
+- [ ] Detect `VK_KHR_external_semaphore_win32` + `VK_KHR_external_fence_win32` (Windows); expose `export_win32_handle()` and corresponding import methods.
+- [ ] Add `BackendFeatures::external_semaphore_fd`, `external_semaphore_win32`.
+- [ ] **Enables**: CUDA interop, OpenGL interop, Android `ANativeWindow` pipeline, V4L2 camera capture with GPU-side YCbCr decode.
+
+---
+
+### GFX-6 — Application-layer GPU capabilities
+
+These do not block rendering quality work. They can proceed in parallel with visual quality tracks after GFX-1 and GFX-2 are complete.
+
+**GFX-6a — Device-generated commands (`VK_EXT_device_generated_commands`)**
+
+GPU-generated command streams with state switches and pipeline binds. Required for fully GPU-driven rendering where the CPU does zero per-draw work.
+
+- [ ] Detect `VK_EXT_device_generated_commands` (cross-vendor); add `BackendFeatures::device_generated_commands`. Detect `VK_NV_device_generated_commands` as a fallback for NVIDIA hardware that predates the EXT; add `BackendFeatures::device_generated_commands_nv`.
+- [ ] Add `IndirectCommandLayout` resource: describes the token sequence (index buffer bind, push constant, pipeline bind, draw, dispatch) that the GPU will execute.
+- [ ] Add `PassWork::ExecuteGeneratedCommands(DgcDesc)` to the render graph. `DgcDesc`: layout handle, preprocessing buffer handle, max command count, optional state pipeline.
+- [ ] Add `PassWork::PreprocessGeneratedCommands(DgcPreprocessDesc)` for the mandatory preprocessing pass that must precede execution.
+- [ ] **Depends on**: GFX-1d (buffer device address). **Enables**: fully GPU-driven scene with GPU-side pipeline switching for material batching.
+
+**GFX-6b — Latency reduction (NVIDIA Reflex 2 and AMD Anti-Lag)**
+
+Reduce input-to-display latency by letting the driver control when the engine submits GPU work relative to the display vblank.
+
+- [ ] Detect `VK_NV_low_latency2`; add `BackendFeatures::reflex`. Expose `Engine::set_reflex_mode(mode: ReflexMode)` (Off / On / OnPlusBoost). Call `vkSetLatencySleepModeNV` and `vkLatencySleepNV` at the start of each frame before input sampling.
+- [ ] Detect `VK_AMD_anti_lag`; add `BackendFeatures::anti_lag`. Expose `Engine::set_anti_lag_mode(mode: AntiLagMode)`. Call `vkAntiLagUpdateAMD` each frame.
+- [ ] Expose `Engine::latency_mode() -> Option<LatencyMode>` reporting which (if any) driver-level latency reduction is currently active.
+- [ ] **Depends on**: GFX-2h (`VK_KHR_present_id` for frame correlation in Reflex). **Enables**: Track LL `Surface::present_latency_hint()` to give accurate driver-derived latency estimates.
+
+**GFX-6c — Cooperative matrix (`VK_KHR_cooperative_matrix`)**
+
+GEMM-style matrix multiply-accumulate across a subgroup. Required for neural denoising and ML inference directly in shaders.
+
+- [ ] Detect `VK_KHR_cooperative_matrix`; add `BackendFeatures::cooperative_matrix`. Detect `VK_NV_cooperative_matrix` as a fallback for older NVIDIA hardware. Detect `VK_NV_cooperative_matrix2` for the extended NV version (type conversions, reductions, tensor addressing).
+- [ ] Expose `Engine::enumerate_cooperative_matrix_properties() -> Vec<CoopMatrixProperty>` listing valid combinations of scope, element type, rows, and columns for multiply-accumulate operations.
+- [ ] No new command recording required — cooperative matrix instructions are SPIR-V extensions. Expose `ShaderDesc::requires_cooperative_matrix: bool` so the pipeline builder enables the required SPIR-V capability.
+- [ ] **Enables**: Research Horizons — neural denoising (replaceable kernel slot in the SVGF denoiser pass), ML inference passes for upscaling fallbacks.
+
+**GFX-6d — Advanced shader features**
+
+A collection of shader-stage capabilities that unlock specific rendering algorithms. None require new command recording — they are SPIR-V capabilities gated behind feature detection.
+
+- [ ] Detect `VK_KHR_fragment_shader_barycentric`; add `BackendFeatures::fragment_shader_barycentric`. Enables `BaryCoordKHR` and `BaryCoordNoPerspKHR` built-ins for custom interpolation. **Needed by**: Track 7e (visibility buffer material resolve — compute analytic barycentrics from hit triangle data).
+- [ ] Detect `VK_EXT_fragment_shader_interlock`; add `BackendFeatures::fragment_shader_interlock`. Enables per-pixel, per-sample, or per-shading-rate-tile critical sections between fragment invocations. Required for correct linked-list OIT without depth-sorted draw order.
+- [ ] Detect `VK_EXT_shader_atomic_float` and `VK_EXT_shader_atomic_float2`; add `BackendFeatures::shader_atomic_float` and `shader_atomic_float16`. Enable for HDR luminance histogram accumulation (`autoexposure` compute pass) and RTXGI reservoir weight writes.
+- [ ] Detect `VK_KHR_compute_shader_derivatives`; add `BackendFeatures::compute_shader_derivatives`. Enables `dFdx`/`dFdy` in compute shaders for screen-space filtering without a separate full-quad pass.
+- [ ] Detect `VK_KHR_shader_clock`; add `BackendFeatures::shader_clock`. Exposes `clock2x32ARB()` and `clockRealtimeEXT()` for micro-timing of shader sub-expressions during profiling.
+- [ ] Detect `VK_EXT_post_depth_coverage`; add `BackendFeatures::post_depth_coverage`. Enables accessing the post-depth-test coverage mask in fragment shaders (required for some MSAA resolve techniques and coverage-based transparency).
+
+**GFX-6e — Optical flow (`VK_NV_optical_flow`)**
+
+Hardware optical flow estimation. Supplement or replace compute-shader optical flow in FSR 3.1 frame generation (Track 10) on NVIDIA hardware.
+
+- [ ] Detect `VK_NV_optical_flow`; add `BackendFeatures::optical_flow_nv`.
+- [ ] Add `OpticalFlowSession` resource: creates `VkOpticalFlowSessionNV` with configurable output grid size and output type.
+- [ ] Add `PassWork::EstimateOpticalFlow(OpticalFlowDesc)` to the render graph. `OpticalFlowDesc`: session handle, current frame image handle, previous frame image handle, output motion vector image handle, optional hint image for temporal seeding from previous flow.
+- [ ] **Enables**: Track 10 (FSR 3 frame generation — provides better motion vectors than the compute optical flow path on NVIDIA).
+
+---
+
+### GFX-7 — Next-gen descriptor model
+
+These require a larger architectural change to the descriptor management layer. Do after GFX-1 through GFX-2 are stable and the bindless heap (Track 8a) is fully exercised.
+
+**GFX-7a — Descriptor buffer (`VK_EXT_descriptor_buffer`)**
+
+Moves descriptors into application-managed buffers, composable with the existing bindless heap. Eliminates descriptor pool management entirely.
+
+- [ ] Detect `VK_EXT_descriptor_buffer`; add `BackendFeatures::descriptor_buffer`. Query `VkPhysicalDeviceDescriptorBufferPropertiesEXT` for descriptor sizes and alignment requirements.
+- [ ] Implement `DescriptorBufferHeap`: a `Buffer` (created with `DESCRIPTOR_BUFFER_BIT_EXT`) holding all descriptor data addressed by byte offset. When `descriptor_buffer` is available, offer it as an alternative backing for the `DescriptorRegistry`.
+- [ ] Expose `Engine::descriptor_buffer_offset_alignment() -> u64` from the physical device properties.
+- [ ] Map `BindGroupDesc` to a `DescriptorBufferHeap` sub-range. Bind groups become CPU-written buffer regions rather than `VkDescriptorSet`s; bind via `cmd_bind_descriptor_buffer_embedded_samplers_ext` + `cmd_set_descriptor_buffer_offsets_ext`.
+- [ ] **Depends on**: GFX-1d (buffer device address required for descriptor buffer binding). **Improves**: bindless heap management and per-draw descriptor binding overhead at scale.
+
+**GFX-7b — Descriptor heap (`VK_EXT_descriptor_heap`, Roadmap 2026)**
+
+D3D12-style two-heap model (resource heap + sampler heap). Planned KHR extension; design the bindless heap layout now to avoid future incompatibility.
+
+- [ ] Track `VK_EXT_descriptor_heap` availability; add `BackendFeatures::descriptor_heap`.
+- [ ] Design the existing `BindlessHeap` in `bindless.rs` as a logical two-heap model even today: resource descriptors (sampled images, storage images, storage buffers) in one address range, sampler descriptors in another. This makes migrating to `VK_EXT_descriptor_heap` a change to the backing allocation, not the public API.
+- [ ] When `descriptor_heap` is available, replace the `UPDATE_AFTER_BIND` pool-based heap with a `VkDescriptorHeapEXT`-backed implementation.
+
+**GFX-7c — Work graphs (`VK_AMDX_shader_enqueue`) — already in roadmap**
+
+Already referenced in the "Backend and Platform Maturity" section. Cross-reference: complete GFX-1 through GFX-2 before beginning this.
+
+- [ ] `VK_AMDX_shader_enqueue`: add `BackendFeatures::work_graphs`. Port cluster LOD selection (Track 7b) to a Work Graph once GFX-1 and GFX-2 are complete. Work graphs allow a cluster traversal shader to directly enqueue mesh shader workgroups without a CPU-side indirect buffer round-trip.
+
+---
+
+### GFX-8 — Shader object (optional alternative rendering path)
+
+`VK_EXT_shader_object` compiles shaders into standalone `VkShaderEXT` objects that bind individually per draw, bypassing the monolithic `VkPipeline`. Not a prerequisite for anything but valuable for the shader playground product direction.
+
+- [ ] Detect `VK_EXT_shader_object`; add `BackendFeatures::shader_object`.
+- [ ] Expose `Engine::create_shader_object(ShaderObjectDesc) -> ShaderObject` alongside the existing pipeline path.
+- [ ] Add `PassDesc::shader_binding: ShaderBinding` enum: `Pipeline(PipelineHandle)` or `ShaderObjects { vertex, fragment, ... }`. The dispatch path in `commands.rs` selects `cmd_bind_shaders_ext` vs `cmd_bind_pipeline` based on the active variant.
+- [ ] The pipeline path remains primary. Shader objects are an opt-in alternative; useful for real-time shader permutation switching and the shader playground (Track 1 product direction).
 
 ---
 
