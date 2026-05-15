@@ -183,6 +183,7 @@ impl Frame {
             pipeline: None,
             bind_groups: Vec::new(),
             push_constants: None,
+            pipeline_shading_rate: None,
             work: PassWork::CopyBufferToImage(CopyBufferToImageDesc {
                 buffer: buffer.handle(),
                 image: image.image_handle(),
@@ -245,6 +246,7 @@ impl Frame {
             pipeline: None,
             bind_groups: Vec::new(),
             push_constants: None,
+            pipeline_shading_rate: None,
             work: PassWork::CopyImageToBuffer(CopyImageToBufferDesc {
                 image: image.image_handle(),
                 buffer: buffer.handle(),
@@ -334,6 +336,7 @@ impl Frame {
             pipeline: None,
             bind_groups: Vec::new(),
             push_constants: None,
+            pipeline_shading_rate: None,
             work: PassWork::CopyBufferToImage(CopyBufferToImageDesc {
                 buffer: staging_handle,
                 image: image.handle(),
@@ -375,6 +378,7 @@ impl Frame {
             pipeline: None,
             bind_groups: Vec::new(),
             push_constants: None,
+            pipeline_shading_rate: None,
             work: PassWork::None,
             reads: vec![ImageUse {
                 image: image.handle(),
@@ -434,6 +438,7 @@ impl Frame {
             pipeline: None,
             bind_groups: Vec::new(),
             push_constants: None,
+            pipeline_shading_rate: None,
             work: PassWork::CopyBufferToImage(CopyBufferToImageDesc {
                 buffer: staging_handle,
                 image: image.handle(),
@@ -475,6 +480,7 @@ impl Frame {
             pipeline: None,
             bind_groups: Vec::new(),
             push_constants: None,
+            pipeline_shading_rate: None,
             work: PassWork::None,
             reads: vec![ImageUse {
                 image: image.handle(),

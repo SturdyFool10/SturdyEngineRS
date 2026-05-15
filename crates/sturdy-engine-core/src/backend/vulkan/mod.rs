@@ -62,6 +62,12 @@ pub struct VulkanBackend {
     bindless_heap: Option<bindless::BindlessHeap>,
     /// VK_EXT_mesh_shader commands. Present only when the mesh shader feature was enabled.
     mesh_shader_ext: Option<ash::ext::mesh_shader::Device>,
+    /// VK_KHR_synchronization2 commands. Present when sync2 is enabled.
+    synchronization2_khr: Option<ash::khr::synchronization2::Device>,
+    /// VK_KHR_dynamic_rendering commands. Present when dynamic rendering is enabled.
+    dynamic_rendering_khr: Option<ash::khr::dynamic_rendering::Device>,
+    /// VK_EXT_device_fault commands. Present when device fault extension is available.
+    device_fault_ext: Option<ash::ext::device_fault::Device>,
 }
 
 impl VulkanBackend {
@@ -79,7 +85,12 @@ impl VulkanBackend {
         let instance = create_instance(&entry, &config)?;
         let selection = DeviceSelection::pick(&instance, &config.adapter_selection)?;
         let logical = create_logical_device(&instance, &selection, &config)?;
-        let caps = caps::query_caps(&instance, selection.physical_device);
+        let mut caps = caps::query_caps(&instance, selection.physical_device);
+        // Override feature flags with what was actually enabled in the logical device.
+        caps.features.synchronization2 = logical.synchronization2_enabled;
+        caps.features.dynamic_rendering = logical.dynamic_rendering_enabled;
+        caps.features.timeline_semaphores = logical.timeline_semaphores_enabled;
+        caps.features.memory_priority = logical.memory_priority_enabled;
         let props = unsafe { instance.get_physical_device_properties(selection.physical_device) };
         let timestamp_period_ns = props.limits.timestamp_period;
         let memory_properties =
@@ -91,12 +102,37 @@ impl VulkanBackend {
             timestamp_period_ns,
         )?;
         let cache_data = load_pipeline_cache_file();
-        let pipeline_registry =
+        let mut pipeline_registry =
             pipelines::PipelineRegistry::create(&logical.device, cache_data.as_deref())?;
+        pipeline_registry.dynamic_rendering_enabled = logical.dynamic_rendering_enabled;
 
         let debug_utils = debug::DebugUtils::new(&instance, &logical.device);
         let mesh_shader_ext = if logical.mesh_shader_enabled {
             Some(ash::ext::mesh_shader::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        let synchronization2_khr = if logical.synchronization2_enabled {
+            Some(ash::khr::synchronization2::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        let dynamic_rendering_khr = if logical.dynamic_rendering_enabled {
+            Some(ash::khr::dynamic_rendering::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        let device_fault_ext = if caps.features.device_fault {
+            Some(ash::ext::device_fault::Device::new(
                 &instance,
                 &logical.device,
             ))
@@ -138,6 +174,9 @@ impl VulkanBackend {
             active_surface: Mutex::new(None),
             bindless_heap,
             mesh_shader_ext,
+            synchronization2_khr,
+            dynamic_rendering_khr,
+            device_fault_ext,
         })
     }
 
@@ -498,6 +537,7 @@ impl Backend for VulkanBackend {
                 self.queue_families.graphics,
                 handle,
                 desc,
+                self.caps.features.timeline_semaphores,
             )
     }
 
@@ -708,7 +748,7 @@ impl Backend for VulkanBackend {
             .commands
             .lock()
             .expect("vulkan command context mutex poisoned");
-        let handle = commands.submit(
+        let submit_result = commands.submit(
             &self.device,
             self.queues,
             self.queue_families,
@@ -719,9 +759,23 @@ impl Backend for VulkanBackend {
             &self.debug,
             self.bindless_vk_info(),
             self.mesh_shader_ext.as_ref(),
+            self.synchronization2_khr.as_ref(),
+            self.dynamic_rendering_khr.as_ref(),
             wait_sem,
             signal_sem,
-        )?;
+        );
+        let handle = match submit_result {
+            Ok(h) => h,
+            Err(Error::DeviceLost(msg)) => {
+                // Attempt to enrich with VK_EXT_device_fault breadcrumbs.
+                if let Some(fault_ext) = self.device_fault_ext.as_ref() {
+                    let enriched = gather_device_fault_info(fault_ext, &msg);
+                    return Err(Error::DeviceLost(enriched));
+                }
+                return Err(Error::DeviceLost(msg));
+            }
+            Err(e) => return Err(e),
+        };
 
         // Incrementally save the pipeline cache after enough new pipelines have
         // been compiled, so data is not lost if the process is killed before shutdown.
@@ -856,6 +910,52 @@ fn align_up(value: u64, alignment: u64) -> u64 {
         return value;
     }
     (value + alignment - 1) & !(alignment - 1)
+}
+
+/// Collect VK_EXT_device_fault breadcrumbs and append them to an existing
+/// device-lost message. Returns the original message if the call fails.
+fn gather_device_fault_info(
+    fault_ext: &ash::ext::device_fault::Device,
+    original_msg: &str,
+) -> String {
+    let device_handle = fault_ext.device();
+    let get_fault = fault_ext.fp().get_device_fault_info_ext;
+    let mut fault_counts = ash::vk::DeviceFaultCountsEXT::default();
+    // First call: get counts only (fault_info = null).
+    let count_result =
+        unsafe { get_fault(device_handle, &mut fault_counts, std::ptr::null_mut()) };
+    if count_result != ash::vk::Result::SUCCESS {
+        return original_msg.to_string();
+    }
+    // Second call: fill vendor info structs.
+    let mut vendor_infos =
+        vec![ash::vk::DeviceFaultVendorInfoEXT::default(); fault_counts.vendor_info_count as usize];
+    let vendor_ptr = if vendor_infos.is_empty() {
+        std::ptr::null_mut()
+    } else {
+        vendor_infos.as_mut_ptr()
+    };
+    let mut fault_info = ash::vk::DeviceFaultInfoEXT {
+        p_vendor_infos: vendor_ptr,
+        ..Default::default()
+    };
+    let _ = unsafe { get_fault(device_handle, &mut fault_counts, &mut fault_info) };
+    let mut msg = original_msg.to_string();
+    if !vendor_infos.is_empty() {
+        msg.push_str("\n[device_fault vendor info]");
+        for (i, vi) in vendor_infos.iter().enumerate() {
+            // description is a [i8; 256] C-string
+            let desc = unsafe { std::ffi::CStr::from_ptr(vi.description.as_ptr()) };
+            msg.push_str(&format!(
+                "\n  [{}] code=0x{:x} data=0x{:x} desc={}",
+                i,
+                vi.vendor_fault_code,
+                vi.vendor_fault_data,
+                desc.to_string_lossy()
+            ));
+        }
+    }
+    msg
 }
 
 impl Drop for VulkanBackend {

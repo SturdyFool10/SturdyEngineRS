@@ -76,6 +76,7 @@ impl ScreenshotCapture {
             pipeline: None,
             bind_groups: Vec::new(),
             push_constants: None,
+            pipeline_shading_rate: None,
             work: PassWork::CopyImageToBuffer(CopyImageToBufferDesc {
                 image: image_handle,
                 buffer: buffer_handle,

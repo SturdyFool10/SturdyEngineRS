@@ -832,6 +832,9 @@ fn vk_buffer_usage(usage: BufferUsage) -> vk::BufferUsageFlags {
     if usage.contains(BufferUsage::ACCELERATION_STRUCTURE) {
         flags |= vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR;
     }
+    if usage.contains(BufferUsage::SHADER_DEVICE_ADDRESS) {
+        flags |= vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+    }
     flags
 }
 

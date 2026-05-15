@@ -8,7 +8,7 @@ use crate::backend::{Backend, BackendKind, factory};
 use crate::handles::HandleAllocator;
 use crate::{
     AdapterInfo, AdapterSelection, BackendRawCapabilities, BindGroupDesc, BindGroupHandle,
-    BindingKind, BufferDesc, BufferHandle, BufferStateKey, CanonicalGroupLayout,
+    BindingKind, BufferDesc, BufferHandle, BufferStateKey, BufferUsage, CanonicalGroupLayout,
     CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error, ExternalBufferDesc,
     ExternalImageDesc, Format, FormatCapabilities, FrameHandle, GpuCaptureDesc, GpuCaptureTool,
     GraphicsPipelineDesc, ImageDesc, ImageHandle, ImageStateKey, NativeHandleCapabilities,
@@ -31,6 +31,40 @@ pub struct DeviceDesc {
     pub disabled_extensions: Vec<String>,
 }
 
+/// Backend-agnostic device features that an app can require, prefer, or disable.
+///
+/// Required features make device creation fail when the selected backend or
+/// adapter cannot provide them. Preferred features are enabled when available,
+/// allowing the app to inspect [`Caps::features`] and choose a runtime fallback.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum DeviceFeature {
+    RayTracing,
+    MeshShading,
+    BindlessResources,
+    BufferDeviceAddress,
+    VrsPipeline,
+    VrsPrimitive,
+    VrsAttachment,
+    VariableRateShading,
+    SamplerAnisotropy,
+}
+
+impl DeviceFeature {
+    pub const fn backend_feature_names(self) -> &'static [&'static str] {
+        match self {
+            Self::RayTracing => &["ray_tracing"],
+            Self::MeshShading => &["mesh_shading"],
+            Self::BindlessResources => &["bindless_resources"],
+            Self::BufferDeviceAddress => &["buffer_device_address"],
+            Self::VrsPipeline => &["pipeline_fragment_shading_rate"],
+            Self::VrsPrimitive => &["primitive_fragment_shading_rate"],
+            Self::VrsAttachment => &["attachment_fragment_shading_rate"],
+            Self::VariableRateShading => &["variable_rate_shading"],
+            Self::SamplerAnisotropy => &["sampler_anisotropy"],
+        }
+    }
+}
+
 impl Default for DeviceDesc {
     fn default() -> Self {
         Self {
@@ -48,16 +82,43 @@ impl Default for DeviceDesc {
 }
 
 impl DeviceDesc {
+    pub fn require_feature(mut self, feature: DeviceFeature) -> Self {
+        push_device_feature(&mut self.required_features, feature);
+        self
+    }
+
+    pub fn prefer_feature(mut self, feature: DeviceFeature) -> Self {
+        push_device_feature(&mut self.optional_features, feature);
+        self
+    }
+
+    pub fn disable_feature(mut self, feature: DeviceFeature) -> Self {
+        push_device_feature(&mut self.disabled_features, feature);
+        self
+    }
+
+    /// Require a backend-specific feature by name.
+    ///
+    /// Prefer [`DeviceDesc::require_feature`] for portable app-facing feature
+    /// policy. This is an escape hatch for backend experiments and diagnostics.
     pub fn require_backend_feature(mut self, name: impl Into<String>) -> Self {
         self.required_features.push(name.into());
         self
     }
 
+    /// Prefer a backend-specific feature by name when it is available.
+    ///
+    /// Prefer [`DeviceDesc::prefer_feature`] for portable app-facing feature
+    /// policy. This is an escape hatch for backend experiments and diagnostics.
     pub fn prefer_backend_feature(mut self, name: impl Into<String>) -> Self {
         self.optional_features.push(name.into());
         self
     }
 
+    /// Disable a backend-specific feature by name.
+    ///
+    /// Prefer [`DeviceDesc::disable_feature`] for portable app-facing feature
+    /// policy. This is an escape hatch for backend experiments and diagnostics.
     pub fn disable_backend_feature(mut self, name: impl Into<String>) -> Self {
         self.disabled_features.push(name.into());
         self
@@ -76,6 +137,14 @@ impl DeviceDesc {
     pub fn disable_backend_extension(mut self, name: impl Into<String>) -> Self {
         self.disabled_extensions.push(name.into());
         self
+    }
+}
+
+fn push_device_feature(features: &mut Vec<String>, feature: DeviceFeature) {
+    for name in feature.backend_feature_names() {
+        if !features.iter().any(|existing| existing == name) {
+            features.push((*name).to_string());
+        }
     }
 }
 
@@ -411,6 +480,13 @@ impl Device {
         desc.validate()?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self.inner.lock().expect("device mutex poisoned");
+        if desc.usage.contains(BufferUsage::SHADER_DEVICE_ADDRESS)
+            && !inner.backend.caps().features.buffer_device_address
+        {
+            return Err(Error::Unsupported(
+                "buffer device address is not supported by this backend".into(),
+            ));
+        }
         let handle = BufferHandle(inner.buffer_handles.alloc());
         inner.backend.create_buffer(handle, desc)?;
         inner.buffers.insert(handle, desc);
@@ -488,6 +564,22 @@ impl Device {
             .get(&handle)
             .copied()
             .ok_or(Error::InvalidHandle)
+    }
+
+    /// Return this buffer's GPU virtual address when buffer-device-address is
+    /// enabled and the buffer was created with `SHADER_DEVICE_ADDRESS` usage.
+    ///
+    /// `Ok(None)` means the app should use a non-address fallback path.
+    pub fn buffer_device_address(&self, handle: BufferHandle) -> Result<Option<u64>> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        let desc = inner.buffers.get(&handle).ok_or(Error::InvalidHandle)?;
+        if !desc.usage.contains(BufferUsage::SHADER_DEVICE_ADDRESS)
+            || !inner.backend.caps().features.buffer_device_address
+        {
+            return Ok(None);
+        }
+        inner.backend.buffer_device_address(handle)
     }
 
     pub fn create_sampler(&self, desc: SamplerDesc) -> Result<SamplerHandle> {
@@ -1490,5 +1582,94 @@ mod tests {
 
         let unsupported = validate_sample_count(8, 4, "test image").unwrap_err();
         assert!(format!("{unsupported}").contains("exceeds device max color sample count 4"));
+    }
+
+    #[test]
+    fn device_desc_accepts_portable_feature_policy() {
+        let desc = DeviceDesc::default()
+            .require_feature(DeviceFeature::RayTracing)
+            .prefer_feature(DeviceFeature::MeshShading)
+            .disable_feature(DeviceFeature::VrsPipeline);
+
+        assert_eq!(desc.required_features, vec!["ray_tracing"]);
+        assert_eq!(desc.optional_features, vec!["mesh_shading"]);
+        assert_eq!(
+            desc.disabled_features,
+            vec!["pipeline_fragment_shading_rate"]
+        );
+    }
+
+    #[test]
+    fn device_desc_deduplicates_portable_feature_policy_names() {
+        let desc = DeviceDesc::default()
+            .prefer_feature(DeviceFeature::BindlessResources)
+            .prefer_feature(DeviceFeature::BindlessResources);
+
+        assert_eq!(desc.optional_features, vec!["bindless_resources"]);
+    }
+
+    #[test]
+    fn required_portable_feature_rejects_null_backend() {
+        let err = match Device::create(
+            DeviceDesc {
+                backend: BackendKind::Null,
+                ..DeviceDesc::default()
+            }
+            .require_feature(DeviceFeature::RayTracing),
+        ) {
+            Ok(_) => panic!("required ray tracing should reject the null backend"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, Error::InvalidInput(_)));
+        assert!(format!("{err}").contains("ray_tracing"));
+    }
+
+    #[test]
+    fn preferred_portable_feature_allows_null_backend_fallback() {
+        Device::create(
+            DeviceDesc {
+                backend: BackendKind::Null,
+                ..DeviceDesc::default()
+            }
+            .prefer_feature(DeviceFeature::RayTracing),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn buffer_device_address_usage_requires_backend_feature() {
+        let device = Device::create(DeviceDesc {
+            backend: BackendKind::Null,
+            ..DeviceDesc::default()
+        })
+        .unwrap();
+
+        let err = device
+            .create_buffer(BufferDesc {
+                size: 64,
+                usage: BufferUsage::STORAGE | BufferUsage::SHADER_DEVICE_ADDRESS,
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Unsupported(_)));
+        assert!(format!("{err}").contains("buffer device address"));
+    }
+
+    #[test]
+    fn buffer_device_address_query_returns_none_for_fallback_path() {
+        let device = Device::create(DeviceDesc {
+            backend: BackendKind::Null,
+            ..DeviceDesc::default()
+        })
+        .unwrap();
+        let buffer = device
+            .create_buffer(BufferDesc {
+                size: 64,
+                usage: BufferUsage::STORAGE,
+            })
+            .unwrap();
+
+        assert_eq!(device.buffer_device_address(buffer).unwrap(), None);
     }
 }

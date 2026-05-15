@@ -27,6 +27,17 @@ pub struct BackendFeatures {
     pub sparse_residency_image_3d: bool,
     /// Multiple sparse resources can alias the same memory pages.
     pub sparse_residency_aliased: bool,
+    /// VK_EXT_memory_budget — query per-heap budget and usage.
+    pub memory_budget: bool,
+    /// VK_EXT_memory_priority — assign allocation priority hints.
+    pub memory_priority: bool,
+    /// VK_EXT_pageable_device_local_memory — allow eviction of device-local pages.
+    pub pageable_device_local_memory: bool,
+    /// VK_EXT_device_fault — retrieve breadcrumbs after VK_ERROR_DEVICE_LOST.
+    pub device_fault: bool,
+    /// VK_EXT_host_image_copy (or Vulkan 1.4 core) — CPU→GPU image uploads
+    /// without a staging buffer or explicit transfer command.
+    pub host_image_copy: bool,
 }
 
 #[cfg(test)]

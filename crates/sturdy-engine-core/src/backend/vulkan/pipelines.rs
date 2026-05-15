@@ -101,6 +101,9 @@ pub struct PipelineRegistry {
     framebuffer_cache: FramebufferCache,
     /// Pipelines created since the last incremental cache save.
     pipelines_since_checkpoint: u32,
+    /// When true, graphics pipelines are created without a VkRenderPass,
+    /// using VkPipelineRenderingCreateInfoKHR instead.
+    pub dynamic_rendering_enabled: bool,
 }
 
 impl PipelineRegistry {
@@ -119,6 +122,7 @@ impl PipelineRegistry {
             pipelines: HashMap::new(),
             framebuffer_cache: FramebufferCache::default(),
             pipelines_since_checkpoint: 0,
+            dynamic_rendering_enabled: false,
         })
     }
 
@@ -228,6 +232,22 @@ impl PipelineRegistry {
         let uses_bindless = descriptors.pipeline_uses_bindless(layout_handle)?;
         let push_constants_bytes = descriptors.push_constants_bytes(layout_handle)?;
         let push_constant_stages = descriptors.push_constant_stages(layout_handle)?;
+
+        if self.dynamic_rendering_enabled {
+            // Dynamic rendering path: no render pass needed.
+            return self.create_graphics_pipeline_inner(
+                device,
+                handle,
+                desc,
+                shaders,
+                layout,
+                vk::RenderPass::null(),
+                push_constants_bytes,
+                push_constant_stages,
+                uses_bindless,
+            );
+        }
+
         let render_pass = create_render_pass(device, desc)?;
         let result = self.create_graphics_pipeline_inner(
             device,
@@ -359,7 +379,7 @@ impl PipelineRegistry {
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
-        let info = vk::GraphicsPipelineCreateInfo::default()
+        let base_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
             .vertex_input_state(&vertex_input)
             .input_assembly_state(&input_assembly)
@@ -371,6 +391,36 @@ impl PipelineRegistry {
             .layout(layout)
             .render_pass(render_pass)
             .subpass(0);
+
+        // When using dynamic rendering (render_pass == null), chain
+        // VkPipelineRenderingCreateInfo to specify attachment formats.
+        let color_formats: Vec<vk::Format> = desc
+            .color_targets
+            .iter()
+            .map(|t| vk_format(t.format))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| {
+                Error::InvalidInput(
+                    "graphics pipeline color target has an unsupported format".into(),
+                )
+            })?;
+        let depth_vk_format = desc
+            .depth_format
+            .map(vk_format)
+            .transpose()
+            .map_err(|_| {
+                Error::InvalidInput("graphics pipeline depth format is unsupported".into())
+            })?
+            .unwrap_or(vk::Format::UNDEFINED);
+        let mut pipeline_rendering_info = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(&color_formats)
+            .depth_attachment_format(depth_vk_format);
+
+        let info = if render_pass == vk::RenderPass::null() {
+            base_info.push_next(&mut pipeline_rendering_info)
+        } else {
+            base_info
+        };
 
         let pipeline = unsafe {
             device

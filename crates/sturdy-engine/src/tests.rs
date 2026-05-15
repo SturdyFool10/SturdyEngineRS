@@ -199,8 +199,8 @@ fn shader_pass_intent_records_compute_sampled_reads_and_named_storage_output() {
 #[test]
 fn dispatch_compute_auto_records_sampled_image_reads() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
-    let program = ComputeProgram::load(&engine, shader_fixtures::SAMPLE_IMAGE_COMPUTE_PATH)
-        .unwrap();
+    let program =
+        ComputeProgram::load(&engine, shader_fixtures::SAMPLE_IMAGE_COMPUTE_PATH).unwrap();
     let frame = engine.begin_render_frame().unwrap();
     let source = frame
         .image(
@@ -253,8 +253,8 @@ fn dispatch_compute_auto_records_sampled_image_reads() {
 #[test]
 fn dispatch_compute_auto_rejects_sampled_image_without_sampled_usage() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
-    let program = ComputeProgram::load(&engine, shader_fixtures::SAMPLE_IMAGE_COMPUTE_PATH)
-        .unwrap();
+    let program =
+        ComputeProgram::load(&engine, shader_fixtures::SAMPLE_IMAGE_COMPUTE_PATH).unwrap();
     let frame = engine.begin_render_frame().unwrap();
     frame
         .image(
@@ -535,12 +535,7 @@ fn hiz_pyramid_registers_levels_for_later_shader_binding() {
             .iter()
             .any(|image| image.name == "bound_hiz_mip_0")
     );
-    assert!(
-        report
-            .images
-            .iter()
-            .any(|image| image.name == "hiz_coarse")
-    );
+    assert!(report.images.iter().any(|image| image.name == "hiz_coarse"));
 }
 
 #[test]
@@ -1163,7 +1158,22 @@ fn null_backend_reports_no_sparse_residency_features() {
     assert!(!features.supports_sparse_2d_textures());
     assert!(!features.supports_sparse_3d_textures());
     assert!(!features.supports_sparse_buffers());
+    assert!(!features.buffer_device_address);
     assert!(!features.supports_gpu_draw_compaction());
+}
+
+#[test]
+fn null_backend_buffer_device_address_query_falls_back() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let buffer = engine
+        .create_buffer(BufferDesc {
+            size: 64,
+            usage: BufferUsage::STORAGE,
+        })
+        .unwrap();
+
+    assert_eq!(buffer.device_address().unwrap(), None);
+    assert_eq!(engine.buffer_device_address(&buffer).unwrap(), None);
 }
 
 #[test]

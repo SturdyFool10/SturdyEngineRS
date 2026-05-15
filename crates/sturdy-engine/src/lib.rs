@@ -247,24 +247,26 @@ pub use sturdy_engine_core::{
     CanonicalPipelineLayout, Caps, ColorTargetDesc, CompareOp, CompiledShaderArtifact,
     ComputePipelineDesc, CopyBufferToImageDesc, CopyImageToBufferDesc, CullMode,
     D3d12RawCapabilities, DispatchDesc, DispatchIndirectDesc, DrawDesc, DrawIndirectCountDesc,
-    DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, Error, ErrorCategory, Extent3d,
-    ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode,
-    Format, FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GpuMemoryBudget,
-    GraphicsPipelineDesc, ImageBuilder, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse,
-    IndexBufferBinding, IndexFormat, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
-    NativeHandleCapability, NativeHandleKind, NativeHandleOwnership, PassDesc, PassWork,
-    PrimitiveTopology, PushConstants, QueueType, RasterState, ResolveImageDesc, ResourceBinding,
-    Result, RgState, SamplerDesc, ShaderDesc, ShaderParameterKind, ShaderParameterReflection,
-    ShaderResourceAccess, ShaderSource, ShaderStage, ShaderTarget, SlangCompileDesc, StageMask,
-    SubresourceRange, SurfaceCapabilities, SurfaceColorSpace, SurfaceEvent, SurfaceFormatInfo,
-    SurfaceHdrCaps, SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc,
-    UpdateRate, VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout, VertexFormat,
-    VertexInputRate, VertexInputReflection, VulkanExternalBuffer, VulkanExternalImage,
-    VulkanRawCapabilities, compile_slang, compile_slang_to_file, compile_slang_to_spirv,
-    native_handle_capabilities_for_backend, spirv_words_from_bytes,
+    DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, Error, ErrorCategory,
+    Extent3d, ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle,
+    FilterMode, Format, FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool,
+    GpuMemoryBudget, GraphicsPipelineDesc, ImageBuilder, ImageDesc, ImageDimension, ImageRole,
+    ImageUsage, ImageUse, IndexBufferBinding, IndexFormat, MetalRawCapabilities, MipmapMode,
+    NativeHandleCapabilities, NativeHandleCapability, NativeHandleKind, NativeHandleOwnership,
+    PassDesc, PassWork, PrimitiveTopology, PushConstants, QueueType, RasterState, ResolveImageDesc,
+    ResourceBinding, Result, RgState, SamplerDesc, ShaderDesc, ShaderParameterKind,
+    ShaderParameterReflection, ShaderResourceAccess, ShaderSource, ShaderStage, ShaderTarget,
+    ShadingRate, SlangCompileDesc, StageMask, SubresourceRange, SurfaceCapabilities,
+    SurfaceColorSpace, SurfaceEvent, SurfaceFormatInfo, SurfaceHdrCaps, SurfaceHdrPreference,
+    SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc, UpdateRate, VertexAttributeDesc,
+    VertexBufferBinding, VertexBufferLayout, VertexFormat, VertexInputRate, VertexInputReflection,
+    VulkanExternalBuffer, VulkanExternalImage, VulkanRawCapabilities, compile_slang,
+    compile_slang_to_file, compile_slang_to_spirv, native_handle_capabilities_for_backend,
+    spirv_words_from_bytes,
 };
 pub use sturdy_engine_core::{
-    DeviceDesc, ImageHandle, SamplerHandle, SubmissionHandle, SurfaceHandle, SurfaceSize,
+    DeviceDesc, DeviceFeature, ImageHandle, SamplerHandle, SubmissionHandle, SurfaceHandle,
+    SurfaceSize,
 };
 pub use sturdy_engine_macros::push_constants;
 pub use sturdy_engine_platform as platform;
@@ -345,13 +347,11 @@ impl Engine {
             adapter: core::AdapterSelection::Auto,
             ..core::DeviceDesc::default()
         };
-        desc.optional_features
-            .push("sampler_anisotropy".to_string());
-        // Enable bindless descriptor indexing if supported (Track 8a).
-        // "bindless_resources" is an alias for "descriptor_indexing" in the device builder.
-        desc.optional_features
-            .push("bindless_resources".to_string());
-        desc.optional_features.push("mesh_shading".to_string());
+        desc = desc
+            .prefer_feature(core::DeviceFeature::SamplerAnisotropy)
+            .prefer_feature(core::DeviceFeature::BindlessResources)
+            .prefer_feature(core::DeviceFeature::BufferDeviceAddress)
+            .prefer_feature(core::DeviceFeature::MeshShading);
         Self::with_desc(desc)
     }
 
@@ -526,6 +526,10 @@ impl Engine {
 
     pub fn read_buffer(&self, buffer: &Buffer, offset: u64, out: &mut [u8]) -> Result<()> {
         self.device.read_buffer(buffer.handle, offset, out)
+    }
+
+    pub fn buffer_device_address(&self, buffer: &Buffer) -> Result<Option<u64>> {
+        self.device.buffer_device_address(buffer.handle)
     }
 
     pub fn create_sampler(&self, desc: SamplerDesc) -> Result<Sampler> {
@@ -1193,6 +1197,10 @@ impl Buffer {
         self.device.read_buffer(self.handle, offset, out)
     }
 
+    pub fn device_address(&self) -> Result<Option<u64>> {
+        self.device.buffer_device_address(self.handle)
+    }
+
     pub fn set_debug_name(&self, name: &str) -> Result<()> {
         self.device.set_buffer_debug_name(self.handle, name)
     }
@@ -1512,6 +1520,7 @@ pub struct DrawPassBuilder<'f> {
     first_vertex: u32,
     first_instance: u32,
     push_constants: Option<PushConstants>,
+    pipeline_shading_rate: Option<ShadingRate>,
     /// Clear color per image handle (stored as f32 bit-patterns).
     clear_colors: Vec<(core::ImageHandle, [u32; 4])>,
     clear_depth: Option<(core::ImageHandle, u32, u8)>,
@@ -1581,6 +1590,11 @@ impl<'f> DrawPassBuilder<'f> {
         self
     }
 
+    pub fn pipeline_shading_rate(mut self, rate: ShadingRate) -> Self {
+        self.pipeline_shading_rate = Some(rate);
+        self
+    }
+
     pub fn vertex_buffer(mut self, buffer: &Buffer, binding: u32, offset: u64) -> Self {
         self.vertex_buf = Some((buffer.handle(), buffer.desc(), binding, offset));
         self
@@ -1619,6 +1633,7 @@ impl<'f> DrawPassBuilder<'f> {
             first_vertex,
             first_instance,
             push_constants,
+            pipeline_shading_rate,
             clear_colors,
             clear_depth,
         } = self;
@@ -1722,6 +1737,7 @@ impl<'f> DrawPassBuilder<'f> {
             pipeline,
             bind_groups,
             push_constants,
+            pipeline_shading_rate,
             work: PassWork::Draw(DrawDesc {
                 vertex_count,
                 instance_count,
@@ -1891,6 +1907,7 @@ impl<'f> ComputePassBuilder<'f> {
             pipeline,
             bind_groups,
             push_constants,
+            pipeline_shading_rate: None,
             work: PassWork::Dispatch(dispatch),
             reads,
             writes,
@@ -1959,6 +1976,7 @@ impl Frame {
             pipeline: None,
             bind_groups: Vec::new(),
             push_constants: None,
+            pipeline_shading_rate: None,
             work: PassWork::GenerateMipmaps {
                 image: image.handle(),
                 mip_count: image.desc().mip_levels as u32,
@@ -1980,6 +1998,7 @@ impl Frame {
             pipeline: None,
             bind_groups: Vec::new(),
             push_constants: None,
+            pipeline_shading_rate: None,
             work: PassWork::None,
             reads: Vec::new(),
             writes: Vec::new(),
@@ -2007,6 +2026,7 @@ impl Frame {
             first_vertex: 0,
             first_instance: 0,
             push_constants: None,
+            pipeline_shading_rate: None,
             clear_colors: Vec::new(),
             clear_depth: None,
         }
@@ -2037,6 +2057,7 @@ impl Frame {
             pipeline: None,
             bind_groups: Vec::new(),
             push_constants: None,
+            pipeline_shading_rate: None,
             work: PassWork::None,
             reads: vec![ImageUse {
                 image: image.image_handle(),

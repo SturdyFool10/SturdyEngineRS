@@ -36,6 +36,14 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     let variable_rate_shading = has(b"VK_KHR_fragment_shading_rate\0");
     let draw_indirect_count =
         properties.api_version >= vk::API_VERSION_1_2 || has(b"VK_KHR_draw_indirect_count\0");
+    let memory_budget = has(b"VK_EXT_memory_budget\0");
+    let memory_priority = has(b"VK_EXT_memory_priority\0");
+    let pageable_device_local_memory = has(b"VK_EXT_pageable_device_local_memory\0");
+    let device_fault = has(b"VK_EXT_device_fault\0");
+    // VK_EXT_host_image_copy is core in Vulkan 1.4 (version 0x00401000).
+    let vk_1_4 = vk::make_api_version(0, 1, 4, 0);
+    let host_image_copy =
+        has(b"VK_EXT_host_image_copy\0") || properties.api_version >= vk_1_4;
     let core_features = unsafe { instance.get_physical_device_features(physical_device) };
     let feature_chain = available_feature_chain(instance, physical_device);
     let mesh_shading =
@@ -87,6 +95,11 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         sparse_residency_image_2d,
         sparse_residency_image_3d,
         sparse_residency_aliased,
+        memory_budget,
+        memory_priority,
+        pageable_device_local_memory,
+        device_fault,
+        host_image_copy,
     };
 
     let limits = Limits {
@@ -348,6 +361,7 @@ pub struct AvailableFeatureChain<'a> {
     pub acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'a>,
     pub ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR<'a>,
     pub fragment_shading_rate: vk::PhysicalDeviceFragmentShadingRateFeaturesKHR<'a>,
+    pub memory_priority: vk::PhysicalDeviceMemoryPriorityFeaturesEXT<'a>,
 }
 
 pub fn available_feature_chain(
@@ -364,6 +378,7 @@ pub fn available_feature_chain(
         acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default(),
         ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default(),
         fragment_shading_rate: vk::PhysicalDeviceFragmentShadingRateFeaturesKHR::default(),
+        memory_priority: vk::PhysicalDeviceMemoryPriorityFeaturesEXT::default(),
     };
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut chain.descriptor_indexing)
@@ -374,7 +389,8 @@ pub fn available_feature_chain(
         .push_next(&mut chain.mesh_shader)
         .push_next(&mut chain.acceleration_structure)
         .push_next(&mut chain.ray_tracing)
-        .push_next(&mut chain.fragment_shading_rate);
+        .push_next(&mut chain.fragment_shading_rate)
+        .push_next(&mut chain.memory_priority);
     unsafe { instance.get_physical_device_features2(physical_device, &mut features2) };
     chain
 }

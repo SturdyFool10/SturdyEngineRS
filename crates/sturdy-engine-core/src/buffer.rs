@@ -12,6 +12,7 @@ impl BufferUsage {
     pub const INDEX: Self = Self(1 << 5);
     pub const INDIRECT: Self = Self(1 << 6);
     pub const ACCELERATION_STRUCTURE: Self = Self(1 << 7);
+    pub const SHADER_DEVICE_ADDRESS: Self = Self(1 << 8);
 
     pub const fn empty() -> Self {
         Self(0)

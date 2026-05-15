@@ -170,6 +170,9 @@ pub trait Backend: Send + Sync {
     fn create_buffer(&self, _handle: BufferHandle, _desc: BufferDesc) -> Result<()> {
         Ok(())
     }
+    fn buffer_device_address(&self, _handle: BufferHandle) -> Result<Option<u64>> {
+        Ok(None)
+    }
     unsafe fn import_external_buffer(
         &self,
         _handle: BufferHandle,

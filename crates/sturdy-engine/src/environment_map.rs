@@ -300,6 +300,7 @@ fn prefilter_specular_cpu(
         pipeline: None,
         bind_groups: Vec::new(),
         push_constants: None,
+        pipeline_shading_rate: None,
         work: crate::PassWork::None,
         reads: vec![crate::ImageUse {
             image: image.handle(),

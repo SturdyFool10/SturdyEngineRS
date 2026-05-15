@@ -25,6 +25,8 @@ struct VulkanSurface {
     preferred_present_mode: Option<SurfacePresentMode>,
     /// Signaled by vkAcquireNextImageKHR when the swapchain image is ready.
     image_available: vk::Semaphore,
+    /// Whether timeline semaphores are in use for this surface.
+    use_timeline: bool,
 }
 
 #[allow(dead_code)]
@@ -40,6 +42,11 @@ struct VulkanSwapchain {
     /// A semaphore waited by presentation cannot be reused until the image it
     /// was associated with is acquired again.
     render_finished: Vec<vk::Semaphore>,
+    /// Single timeline semaphore replacing the per-image binary semaphore array.
+    /// Present when `use_timeline` was set at swapchain creation.
+    render_finished_timeline: Option<vk::Semaphore>,
+    /// Monotonically increasing timeline value; incremented each time we signal.
+    render_finished_value: u64,
 }
 
 pub struct AcquiredSurfaceImage {
@@ -60,6 +67,7 @@ impl SurfaceRegistry {
         queue_family: u32,
         handle: SurfaceHandle,
         desc: NativeSurfaceDesc,
+        use_timeline: bool,
     ) -> Result<SurfaceInfo> {
         let surface = unsafe {
             ash_window::create_surface(
@@ -107,6 +115,7 @@ impl SurfaceRegistry {
                 desc.hdr.preferred_formats(),
                 desc.preferred_present_mode.as_ref(),
                 vk::SwapchainKHR::null(),
+                use_timeline,
             )
         })() {
             Ok(swapchain) => swapchain,
@@ -132,6 +141,7 @@ impl SurfaceRegistry {
                 hdr: desc.hdr,
                 preferred_present_mode: desc.preferred_present_mode,
                 image_available,
+                use_timeline,
             },
         );
         Ok(info)
@@ -164,6 +174,7 @@ impl SurfaceRegistry {
             preferred_formats,
             preferred_present_mode,
             old_swapchain,
+            surface.use_timeline,
         )?;
         destroy_swapchain(device, &surface.swapchain_loader, &mut surface.swapchain);
         surface.swapchain = new_swapchain;
@@ -211,6 +222,7 @@ impl SurfaceRegistry {
             preferred_formats,
             preferred_present_mode,
             old_swapchain,
+            surface.use_timeline,
         )?;
         destroy_swapchain(device, &surface.swapchain_loader, &mut surface.swapchain);
         surface.swapchain = new_swapchain;
@@ -266,17 +278,23 @@ impl SurfaceRegistry {
 
     /// Returns `(image_available, render_finished)` semaphores for the acquired image.
     pub fn frame_semaphores(
-        &self,
+        &mut self,
         handle: SurfaceHandle,
     ) -> Result<(vk::Semaphore, vk::Semaphore)> {
-        let surface = self.surfaces.get(&handle).ok_or(Error::InvalidHandle)?;
-        let image_index = surface.acquired_image_index.ok_or_else(|| {
+        let surface = self.surfaces.get_mut(&handle).ok_or(Error::InvalidHandle)?;
+        let _image_index = surface.acquired_image_index.ok_or_else(|| {
             Error::InvalidInput("surface frame semaphores require an acquired image".into())
         })?;
+        // Use the timeline semaphore when available.
+        if let Some(timeline) = surface.swapchain.render_finished_timeline {
+            // Increment the timeline value so each submit signals a unique value.
+            surface.swapchain.render_finished_value += 1;
+            return Ok((surface.image_available, timeline));
+        }
         let render_finished = surface
             .swapchain
             .render_finished
-            .get(image_index as usize)
+            .get(_image_index as usize)
             .copied()
             .ok_or(Error::InvalidHandle)?;
         Ok((surface.image_available, render_finished))
@@ -289,7 +307,13 @@ impl SurfaceRegistry {
         let image_index = surface.acquired_image_index.ok_or_else(|| {
             Error::InvalidInput("surface present requires an acquired image".into())
         })?;
-        let wait_semaphores = [surface.swapchain.render_finished[image_index as usize]];
+        // When using a timeline semaphore, present waits on the current value.
+        let wait_semaphore = if let Some(timeline) = surface.swapchain.render_finished_timeline {
+            timeline
+        } else {
+            surface.swapchain.render_finished[image_index as usize]
+        };
+        let wait_semaphores = [wait_semaphore];
         let swapchains = [surface.swapchain.swapchain];
         let image_indices = [image_index];
         let present_info = vk::PresentInfoKHR::default()
@@ -422,6 +446,7 @@ fn create_swapchain(
     preferred_formats: &[(Format, SurfaceColorSpace)],
     preferred_present_mode: Option<&SurfacePresentMode>,
     old_swapchain: vk::SwapchainKHR,
+    use_timeline: bool,
 ) -> Result<VulkanSwapchain> {
     let capabilities = unsafe {
         surface_loader
@@ -511,26 +536,50 @@ fn create_swapchain(
         };
         image_views.push(image_view);
     }
-    let sem_info = vk::SemaphoreCreateInfo::default();
-    for _ in 0..images.len() {
+    // Create semaphores: either a single timeline semaphore or one binary per image.
+    let mut render_finished_timeline = None;
+    if use_timeline {
+        let mut type_info = vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(0);
+        let sem_info = vk::SemaphoreCreateInfo::default().push_next(&mut type_info);
         let semaphore = unsafe {
             match device.create_semaphore(&sem_info, None) {
-                Ok(semaphore) => semaphore,
+                Ok(s) => s,
                 Err(error) => {
-                    for semaphore in render_finished.drain(..) {
-                        device.destroy_semaphore(semaphore, None);
-                    }
                     for image_view in image_views.drain(..) {
                         device.destroy_image_view(image_view, None);
                     }
                     swapchain_loader.destroy_swapchain(swapchain, None);
                     return Err(Error::Backend(format!(
-                        "vkCreateSemaphore failed: {error:?}"
+                        "vkCreateSemaphore (timeline) failed: {error:?}"
                     )));
                 }
             }
         };
-        render_finished.push(semaphore);
+        render_finished_timeline = Some(semaphore);
+    } else {
+        let sem_info = vk::SemaphoreCreateInfo::default();
+        for _ in 0..images.len() {
+            let semaphore = unsafe {
+                match device.create_semaphore(&sem_info, None) {
+                    Ok(semaphore) => semaphore,
+                    Err(error) => {
+                        for semaphore in render_finished.drain(..) {
+                            device.destroy_semaphore(semaphore, None);
+                        }
+                        for image_view in image_views.drain(..) {
+                            device.destroy_image_view(image_view, None);
+                        }
+                        swapchain_loader.destroy_swapchain(swapchain, None);
+                        return Err(Error::Backend(format!(
+                            "vkCreateSemaphore failed: {error:?}"
+                        )));
+                    }
+                }
+            };
+            render_finished.push(semaphore);
+        }
     }
 
     Ok(VulkanSwapchain {
@@ -541,6 +590,8 @@ fn create_swapchain(
         images,
         image_views,
         render_finished,
+        render_finished_timeline,
+        render_finished_value: 0,
     })
 }
 
@@ -664,6 +715,9 @@ fn destroy_swapchain(
     unsafe {
         for semaphore in swapchain.render_finished.drain(..) {
             device.destroy_semaphore(semaphore, None);
+        }
+        if let Some(timeline) = swapchain.render_finished_timeline.take() {
+            device.destroy_semaphore(timeline, None);
         }
         for image_view in swapchain.image_views.drain(..) {
             device.destroy_image_view(image_view, None);

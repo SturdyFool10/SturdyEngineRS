@@ -594,6 +594,7 @@ impl RenderFrame {
                 pipeline: Some(program.pipeline.handle()),
                 bind_groups: Vec::new(),
                 push_constants: push,
+                pipeline_shading_rate: None,
                 work: PassWork::Dispatch(DispatchDesc {
                     x: groups[0],
                     y: groups[1],
@@ -1127,6 +1128,7 @@ impl RenderFrame {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::None,
                 reads: vec![crate::ImageUse {
                     image: image.handle(),
@@ -1169,6 +1171,7 @@ impl RenderFrame {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::CopyImageToBuffer(CopyImageToBufferDesc {
                     image: image_handle,
                     buffer: buffer_handle,
@@ -2007,6 +2010,7 @@ impl GraphImage {
                 pipeline: Some(pipeline),
                 bind_groups: Vec::new(),
                 push_constants,
+                pipeline_shading_rate: None,
                 work: PassWork::Draw(DrawDesc {
                     vertex_count: draw_count,
                     instance_count,
@@ -2206,6 +2210,7 @@ impl GraphImage {
                 pipeline: Some(pipeline),
                 bind_groups: Vec::new(),
                 push_constants,
+                pipeline_shading_rate: None,
                 work: PassWork::Draw(DrawDesc {
                     vertex_count: draw_count,
                     instance_count,
@@ -2404,6 +2409,7 @@ impl GraphImage {
                 pipeline: Some(pipeline),
                 bind_groups: Vec::new(),
                 push_constants,
+                pipeline_shading_rate: None,
                 work: PassWork::DrawIndirect(DrawIndirectDesc {
                     indirect_buffer: indirect_buf.handle(),
                     offset: 0,
@@ -2576,6 +2582,7 @@ impl GraphImage {
                 pipeline: Some(pipeline),
                 bind_groups: Vec::new(), // filled at flush time
                 push_constants,
+                pipeline_shading_rate: None,
                 work: PassWork::Draw(DrawDesc {
                     vertex_count: draw_count,
                     instance_count,
@@ -2706,6 +2713,7 @@ impl GraphImage {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::ResolveImage(ResolveImageDesc {
                     src: src.handle(),
                     dst: self.handle,
@@ -2885,6 +2893,7 @@ fn record_fullscreen_shader_pass(
             pipeline: Some(pipeline),
             bind_groups: Vec::new(),
             push_constants,
+            pipeline_shading_rate: None,
             work: PassWork::Draw(DrawDesc {
                 vertex_count: 3,
                 instance_count: 1,
@@ -2984,6 +2993,7 @@ fn record_compute_shader_pass(
             pipeline: Some(program.pipeline.handle()),
             bind_groups: Vec::new(),
             push_constants,
+            pipeline_shading_rate: None,
             work: PassWork::Dispatch(DispatchDesc {
                 x: groups[0],
                 y: groups[1],
@@ -3384,6 +3394,7 @@ mod tests {
             pipeline: None,
             bind_groups: Vec::new(),
             push_constants: None,
+            pipeline_shading_rate: None,
             work: PassWork::None,
             reads: reads
                 .iter()
@@ -3414,6 +3425,7 @@ mod tests {
             pipeline: None,
             bind_groups: Vec::new(),
             push_constants: None,
+            pipeline_shading_rate: None,
             work: PassWork::None,
             reads,
             writes,

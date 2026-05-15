@@ -42,7 +42,7 @@ pub use binding::{
 };
 pub use buffer::{BufferDesc, BufferUsage};
 pub use caps::Caps;
-pub use device::{Device, DeviceDesc, Frame, enumerate_adapters};
+pub use device::{Device, DeviceDesc, DeviceFeature, Frame, enumerate_adapters};
 pub use error::{Error, ErrorCategory, Result};
 pub use external_resource::{
     ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle,
@@ -79,7 +79,7 @@ pub use render_graph::{
     DrawIndirectCountDesc, DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc,
     ImageBarrier, ImageStateKey, ImageUse, IndexBufferBinding, IndexFormat, PassDesc, PassWork,
     QueueType, RecordBatch, RenderGraph, ResolveImageDesc, ResourceLifetime, ResourceUse, RgState,
-    SubresourceRange, VertexBufferBinding,
+    ShadingRate, SubresourceRange, VertexBufferBinding,
 };
 pub use sampler::{AddressMode, BorderColor, CompareOp, FilterMode, MipmapMode, SamplerDesc};
 pub use shader::{

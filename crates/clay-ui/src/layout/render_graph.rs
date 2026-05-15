@@ -49,6 +49,7 @@ impl UiGraphPassBuilder {
                     pipeline: Some(pipeline),
                     bind_groups: Vec::new(),
                     push_constants,
+                    pipeline_shading_rate: None,
                     work: PassWork::Draw(DrawDesc {
                         vertex_count: 4,
                         instance_count: batch.command_indices.len() as u32,

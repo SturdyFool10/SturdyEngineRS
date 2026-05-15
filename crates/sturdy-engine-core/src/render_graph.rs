@@ -301,6 +301,17 @@ pub struct ResolveImageDesc {
     pub height: u32,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ShadingRate {
+    Rate1x1,
+    Rate1x2,
+    Rate2x1,
+    Rate2x2,
+    Rate2x4,
+    Rate4x2,
+    Rate4x4,
+}
+
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum PassWork {
     #[default]
@@ -354,6 +365,11 @@ pub struct PassDesc {
     pub pipeline: Option<PipelineHandle>,
     pub bind_groups: Vec<BindGroupHandle>,
     pub push_constants: Option<PushConstants>,
+    /// Pipeline-tier variable rate shading for graphics work.
+    ///
+    /// Backends ignore `None`. Callers should check
+    /// `BackendFeatures::vrs_pipeline` before requesting a non-default rate.
+    pub pipeline_shading_rate: Option<ShadingRate>,
     pub work: PassWork,
     pub reads: Vec<ImageUse>,
     pub writes: Vec<ImageUse>,
@@ -539,6 +555,13 @@ impl RenderGraph {
                     "push constants require a pass pipeline".into(),
                 ));
             }
+        }
+        if pass.pipeline_shading_rate.is_some()
+            && (pass.queue != QueueType::Graphics || !is_graphics_work(pass.work))
+        {
+            return Err(Error::InvalidInput(
+                "pipeline shading rate requires graphics pass work".into(),
+            ));
         }
         if let PassWork::Dispatch(dispatch) = pass.work {
             if dispatch.x == 0 || dispatch.y == 0 || dispatch.z == 0 {
@@ -1022,6 +1045,17 @@ fn build_batches(passes: &[PassDesc]) -> Vec<RecordBatch> {
     batches
 }
 
+fn is_graphics_work(work: PassWork) -> bool {
+    matches!(
+        work,
+        PassWork::Draw(_)
+            | PassWork::DrawIndirect(_)
+            | PassWork::DrawIndirectCount(_)
+            | PassWork::DrawMeshShader(_)
+            | PassWork::DrawMeshShaderIndirect(_)
+    )
+}
+
 fn validate_copy_extent(
     width: u32,
     height: u32,
@@ -1305,6 +1339,7 @@ mod tests {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::ResolveImage(ResolveImageDesc {
                     src,
                     dst,
@@ -1368,6 +1403,7 @@ mod tests {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::ResolveImage(ResolveImageDesc {
                     src,
                     dst,
@@ -1407,6 +1443,7 @@ mod tests {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::CopyBufferToImage(CopyBufferToImageDesc {
                     buffer,
                     image,
@@ -1470,6 +1507,7 @@ mod tests {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::CopyBufferToImage(CopyBufferToImageDesc {
                     buffer,
                     image,
@@ -1507,6 +1545,7 @@ mod tests {
                     stages: crate::StageMask::VERTEX,
                     bytes: vec![0, 1, 2, 3],
                 }),
+                pipeline_shading_rate: None,
                 work: PassWork::Draw(DrawDesc {
                     vertex_count: 3,
                     instance_count: 1,
@@ -1542,6 +1581,7 @@ mod tests {
                     stages: crate::StageMask::VERTEX,
                     bytes: vec![0, 1, 2, 3],
                 }),
+                pipeline_shading_rate: None,
                 work: PassWork::None,
                 reads: Vec::new(),
                 writes: Vec::new(),
@@ -1552,6 +1592,32 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn pipeline_shading_rate_requires_graphics_work() {
+        let mut graph = RenderGraph::new();
+        let err = graph
+            .add_pass(PassDesc {
+                name: "bad-vrs-compute".into(),
+                queue: QueueType::Compute,
+                shader: None,
+                pipeline: Some(PipelineHandle(1)),
+                bind_groups: Vec::new(),
+                push_constants: None,
+                pipeline_shading_rate: Some(ShadingRate::Rate2x2),
+                work: PassWork::Dispatch(DispatchDesc { x: 1, y: 1, z: 1 }),
+                reads: Vec::new(),
+                writes: Vec::new(),
+                buffer_reads: Vec::new(),
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidInput(_)));
+        assert!(format!("{err}").contains("pipeline shading rate"));
     }
 
     #[test]
@@ -1586,6 +1652,7 @@ mod tests {
                 pipeline: Some(PipelineHandle(1)),
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::DrawIndirectCount(DrawIndirectCountDesc {
                     indirect_buffer: indirect,
                     indirect_offset: 0,
@@ -1628,6 +1695,7 @@ mod tests {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::None,
                 reads: Vec::new(),
                 writes: Vec::new(),
@@ -1652,6 +1720,7 @@ mod tests {
                 pipeline: Some(PipelineHandle(2)),
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::DrawIndirectCount(DrawIndirectCountDesc {
                     indirect_buffer: indirect,
                     indirect_offset: 0,
@@ -1713,6 +1782,7 @@ mod tests {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::None,
                 reads: vec![ImageUse {
                     image,
@@ -1786,6 +1856,7 @@ mod tests {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::None,
                 reads: vec![ImageUse {
                     image,
@@ -1837,6 +1908,7 @@ mod tests {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::None,
                 reads: Vec::new(),
                 writes: vec![ImageUse {
@@ -1865,6 +1937,7 @@ mod tests {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::None,
                 reads: vec![ImageUse {
                     image,
@@ -1924,6 +1997,7 @@ mod tests {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::None,
                 reads: Vec::new(),
                 writes: Vec::new(),
@@ -1947,6 +2021,7 @@ mod tests {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::None,
                 reads: Vec::new(),
                 writes: vec![ImageUse {
@@ -1975,6 +2050,7 @@ mod tests {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::None,
                 reads: Vec::new(),
                 writes: vec![ImageUse {
@@ -2066,6 +2142,7 @@ mod tests {
                 pipeline: None,
                 bind_groups: Vec::new(),
                 push_constants: None,
+                pipeline_shading_rate: None,
                 work: PassWork::CopyBufferToImage(CopyBufferToImageDesc {
                     buffer: staging,
                     image: uploaded,
@@ -2109,6 +2186,7 @@ mod tests {
                     stages: crate::StageMask::VERTEX | crate::StageMask::FRAGMENT,
                     bytes: vec![0x11; 16],
                 }),
+                pipeline_shading_rate: None,
                 work: PassWork::Draw(DrawDesc {
                     vertex_count: 3,
                     instance_count: 2,
@@ -2155,6 +2233,7 @@ mod tests {
                     stages: crate::StageMask::COMPUTE,
                     bytes: vec![0x22; 16],
                 }),
+                pipeline_shading_rate: None,
                 work: PassWork::Dispatch(DispatchDesc { x: 8, y: 8, z: 1 }),
                 reads: vec![ImageUse {
                     image: gbuffer,
@@ -2193,6 +2272,7 @@ mod tests {
                     stages: crate::StageMask::FRAGMENT,
                     bytes: vec![0x33; 16],
                 }),
+                pipeline_shading_rate: None,
                 work: PassWork::Draw(DrawDesc {
                     vertex_count: 3,
                     instance_count: 1,

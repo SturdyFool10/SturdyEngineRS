@@ -20,6 +20,10 @@ pub struct LogicalDevice {
     pub queue_families: QueueFamilyMap,
     pub queues: VulkanQueues,
     pub mesh_shader_enabled: bool,
+    pub synchronization2_enabled: bool,
+    pub dynamic_rendering_enabled: bool,
+    pub timeline_semaphores_enabled: bool,
+    pub memory_priority_enabled: bool,
 }
 
 impl DeviceSelection {
@@ -65,6 +69,10 @@ pub fn create_logical_device(
         .collect::<Vec<_>>();
     let mut feature_request = FeatureRequest::resolve(instance, selection.physical_device, config)?;
     let mesh_shader_enabled = feature_request.mesh_shader.mesh_shader == vk::TRUE;
+    let synchronization2_enabled = feature_request.synchronization2.synchronization2 == vk::TRUE;
+    let dynamic_rendering_enabled = feature_request.dynamic_rendering.dynamic_rendering == vk::TRUE;
+    let timeline_semaphores_enabled = feature_request.timeline.timeline_semaphore == vk::TRUE;
+    let memory_priority_enabled = feature_request.memory_priority.memory_priority == vk::TRUE;
     let extension_request = ExtensionRequest::resolve(
         instance,
         selection.physical_device,
@@ -99,6 +107,10 @@ pub fn create_logical_device(
         queue_families: selection.queue_families,
         queues,
         mesh_shader_enabled,
+        synchronization2_enabled,
+        dynamic_rendering_enabled,
+        timeline_semaphores_enabled,
+        memory_priority_enabled,
     })
 }
 
@@ -202,6 +214,7 @@ struct FeatureRequest<'a> {
     acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'a>,
     ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR<'a>,
     fragment_shading_rate: vk::PhysicalDeviceFragmentShadingRateFeaturesKHR<'a>,
+    memory_priority: vk::PhysicalDeviceMemoryPriorityFeaturesEXT<'a>,
     use_feature_chain: bool,
     required_extensions: Vec<&'static CStr>,
 }
@@ -236,6 +249,7 @@ impl FeatureRequest<'static> {
             acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default(),
             ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default(),
             fragment_shading_rate: vk::PhysicalDeviceFragmentShadingRateFeaturesKHR::default(),
+            memory_priority: vk::PhysicalDeviceMemoryPriorityFeaturesEXT::default(),
             use_feature_chain: false,
             required_extensions: Vec::new(),
         };
@@ -445,6 +459,13 @@ impl FeatureRequest<'static> {
                 self.fragment_shading_rate.attachment_fragment_shading_rate = vk::TRUE;
                 true
             }
+            "memory_priority" => {
+                if available.memory_priority.memory_priority != vk::TRUE {
+                    return false;
+                }
+                self.memory_priority.memory_priority = vk::TRUE;
+                true
+            }
             _ => self.enable_descriptor_indexing_field(name, &available.descriptor_indexing),
         }
     }
@@ -545,6 +566,9 @@ impl FeatureRequest<'static> {
             | "attachment_fragment_shading_rate" => {
                 self.require_extension(ash::khr::fragment_shading_rate::NAME, available_extensions)?
             }
+            "memory_priority" => {
+                self.require_extension(ash::ext::memory_priority::NAME, available_extensions)?
+            }
             _ if is_descriptor_indexing_field(name) && api_version < vk::API_VERSION_1_2 => {
                 self.require_extension(ash::ext::descriptor_indexing::NAME, available_extensions)?
             }
@@ -613,6 +637,10 @@ impl FeatureRequest<'static> {
             push_feature_chain(&mut self.features2, &mut self.fragment_shading_rate);
             self.use_feature_chain = true;
         }
+        if self.memory_priority.memory_priority == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.memory_priority);
+            self.use_feature_chain = true;
+        }
     }
 
     fn has_descriptor_indexing_features(&self) -> bool {
@@ -669,6 +697,7 @@ fn is_known_feature_name(name: &str) -> bool {
                 | "pipeline_fragment_shading_rate"
                 | "primitive_fragment_shading_rate"
                 | "attachment_fragment_shading_rate"
+                | "memory_priority"
         )
 }
 

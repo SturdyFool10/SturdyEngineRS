@@ -102,6 +102,7 @@ impl GraphFrame {
             pipeline: None,
             bind_groups: Vec::new(),
             push_constants: None,
+            pipeline_shading_rate: None,
             work: PassWork::None,
             reads: Vec::new(),
             writes: vec![ImageUse {
@@ -157,6 +158,7 @@ impl GraphFrame {
             pipeline: None,
             bind_groups: Vec::new(),
             push_constants: None,
+            pipeline_shading_rate: None,
             work: PassWork::CopyImageToBuffer(crate::CopyImageToBufferDesc {
                 image: src.handle(),
                 buffer: staging_handle,
@@ -194,6 +196,7 @@ impl GraphFrame {
             pipeline: None,
             bind_groups: Vec::new(),
             push_constants: None,
+            pipeline_shading_rate: None,
             work: PassWork::CopyBufferToImage(crate::CopyBufferToImageDesc {
                 buffer: staging_handle,
                 image: dst.handle(),
@@ -384,6 +387,7 @@ impl<'f> FullscreenPassBuilder<'f> {
             pipeline,
             bind_groups,
             push_constants,
+            pipeline_shading_rate: None,
             work: PassWork::Draw(DrawDesc {
                 vertex_count: 3,
                 instance_count: 1,

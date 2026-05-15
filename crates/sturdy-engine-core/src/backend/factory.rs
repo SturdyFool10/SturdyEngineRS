@@ -21,10 +21,13 @@ pub(crate) fn create_backend(desc: &DeviceDesc) -> Result<Box<dyn Backend>> {
             }
             Err(last_error.unwrap_or(Error::Unsupported("no backend is available on this target")))
         }
-        BackendKind::Null => Ok(Box::new(NullBackend::new())),
+        BackendKind::Null => {
+            reject_required_backend_capabilities(desc, "Null")?;
+            Ok(Box::new(NullBackend::new()))
+        }
         BackendKind::Vulkan => create_vulkan_backend(desc),
-        BackendKind::D3d12 => create_available_backend(BackendKind::D3d12, "D3D12"),
-        BackendKind::Metal => create_available_backend(BackendKind::Metal, "Metal"),
+        BackendKind::D3d12 => create_available_backend(desc, BackendKind::D3d12, "D3D12"),
+        BackendKind::Metal => create_available_backend(desc, BackendKind::Metal, "Metal"),
     }
 }
 
@@ -79,7 +82,11 @@ fn enumerate_vulkan_adapters() -> Result<Vec<AdapterInfo>> {
     Ok(Vec::new())
 }
 
-fn create_available_backend(kind: BackendKind, name: &'static str) -> Result<Box<dyn Backend>> {
+fn create_available_backend(
+    desc: &DeviceDesc,
+    kind: BackendKind,
+    name: &'static str,
+) -> Result<Box<dyn Backend>> {
     if !kind.is_available_on_target() {
         return Err(Error::Unsupported(match kind {
             BackendKind::Vulkan => "Vulkan is not available on this target",
@@ -89,8 +96,24 @@ fn create_available_backend(kind: BackendKind, name: &'static str) -> Result<Box
         }));
     }
 
+    reject_required_backend_capabilities(desc, name)?;
+
     let _name = name;
     Ok(Box::new(NullBackend::for_kind(kind)))
+}
+
+fn reject_required_backend_capabilities(desc: &DeviceDesc, backend_name: &str) -> Result<()> {
+    if let Some(feature) = desc.required_features.first() {
+        return Err(Error::InvalidInput(format!(
+            "{backend_name} backend does not support required feature {feature}"
+        )));
+    }
+    if let Some(extension) = desc.required_extensions.first() {
+        return Err(Error::InvalidInput(format!(
+            "{backend_name} backend does not support required extension {extension}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
