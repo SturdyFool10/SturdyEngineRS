@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 
-use ash::{vk, Instance};
+use ash::{Instance, vk};
 
 use crate::{BackendFeatures, Caps, Format, FormatCapabilities, Limits};
 
@@ -29,10 +29,11 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     // GFX-3c: ray query extension detection only.
     let ray_query = has(b"VK_KHR_ray_query\0");
     // GFX-3c: RT enhancement detection (extension presence only, no device feature enabling).
-    let ray_tracing_position_fetch = has(b"VK_KHR_ray_tracing_position_fetch\0");
+    let ray_tracing_position_fetch_ext = has(b"VK_KHR_ray_tracing_position_fetch\0");
     let ray_tracing_maintenance1 = has(b"VK_KHR_ray_tracing_maintenance1\0");
     let opacity_micromap = has(b"VK_EXT_opacity_micromap\0");
     let shader_execution_reordering = has(b"VK_EXT_ray_tracing_invocation_reorder\0");
+    let cluster_acceleration_structure = has(b"VK_NV_cluster_acceleration_structure\0");
     let descriptor_indexing = has(b"VK_EXT_descriptor_indexing\0");
     let dynamic_rendering = has(b"VK_KHR_dynamic_rendering\0");
     let synchronization2 = has(b"VK_KHR_synchronization2\0");
@@ -63,6 +64,11 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
 
     let core_features = unsafe { instance.get_physical_device_features(physical_device) };
     let feature_chain = available_feature_chain(instance, physical_device);
+    let ray_tracing_position_fetch = ray_tracing_position_fetch_ext
+        && feature_chain
+            .ray_tracing_position_fetch
+            .ray_tracing_position_fetch
+            == vk::TRUE;
     let mesh_shading =
         has(b"VK_EXT_mesh_shader\0") && feature_chain.mesh_shader.mesh_shader == vk::TRUE;
     let bindless = descriptor_indexing
@@ -146,6 +152,54 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
             .multisampled_render_to_single_sampled
             == vk::TRUE;
 
+    // GFX-4: Video encode/decode
+    let video_queue = has(b"VK_KHR_video_queue\0");
+    let video_decode_h264 = video_queue && has(b"VK_KHR_video_decode_h264\0");
+    let video_decode_h265 = video_queue && has(b"VK_KHR_video_decode_h265\0");
+    let video_decode_av1 = video_queue && has(b"VK_KHR_video_decode_av1\0");
+    let video_decode_vp9 = video_queue && has(b"VK_KHR_video_decode_vp9\0");
+    let video_encode_h264 = video_queue && has(b"VK_KHR_video_encode_h264\0");
+    let video_encode_h265 = video_queue && has(b"VK_KHR_video_encode_h265\0");
+    let video_encode_av1 = video_queue && has(b"VK_KHR_video_encode_av1\0");
+    let video_encode_quantization_map =
+        video_queue && has(b"VK_KHR_video_encode_quantization_map\0");
+
+    // GFX-5: External resource interop
+    let external_memory_fd = has(b"VK_KHR_external_memory_fd\0");
+    let external_memory_win32 = has(b"VK_KHR_external_memory_win32\0");
+    let external_memory_dma_buf = has(b"VK_EXT_external_memory_dma_buf\0");
+    let external_memory_host = has(b"VK_EXT_external_memory_host\0");
+    let drm_format_modifier = has(b"VK_EXT_image_drm_format_modifier\0");
+    let external_semaphore_fd = has(b"VK_KHR_external_semaphore_fd\0");
+    let external_semaphore_win32 = has(b"VK_KHR_external_semaphore_win32\0");
+    let external_fence_fd = has(b"VK_KHR_external_fence_fd\0");
+    let external_fence_win32 = has(b"VK_KHR_external_fence_win32\0");
+
+    // GFX-6a: Device-generated commands
+    let device_generated_commands = has(b"VK_EXT_device_generated_commands\0");
+    let device_generated_commands_nv = has(b"VK_NV_device_generated_commands\0");
+
+    // GFX-6b: Latency reduction
+    let reflex = has(b"VK_NV_low_latency2\0");
+    let anti_lag = has(b"VK_AMD_anti_lag\0");
+
+    // GFX-6c: Cooperative matrix
+    let cooperative_matrix = has(b"VK_KHR_cooperative_matrix\0");
+    let cooperative_matrix_nv = has(b"VK_NV_cooperative_matrix\0");
+    let cooperative_matrix_nv2 = has(b"VK_NV_cooperative_matrix2\0");
+
+    // GFX-6d: Advanced shader features
+    let fragment_shader_barycentric = has(b"VK_KHR_fragment_shader_barycentric\0");
+    let fragment_shader_interlock = has(b"VK_EXT_fragment_shader_interlock\0");
+    let shader_atomic_float = has(b"VK_EXT_shader_atomic_float\0");
+    let shader_atomic_float16 = has(b"VK_EXT_shader_atomic_float2\0");
+    let compute_shader_derivatives = has(b"VK_KHR_compute_shader_derivatives\0");
+    let shader_clock = has(b"VK_KHR_shader_clock\0");
+    let post_depth_coverage = has(b"VK_EXT_post_depth_coverage\0");
+
+    // GFX-6e: Optical flow
+    let optical_flow_nv = has(b"VK_NV_optical_flow\0");
+
     let features = BackendFeatures {
         ray_tracing,
         ray_query,
@@ -153,6 +207,7 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         ray_tracing_maintenance1,
         opacity_micromap,
         shader_execution_reordering,
+        cluster_acceleration_structure,
         mesh_shading,
         bindless,
         descriptor_indexing,
@@ -193,6 +248,46 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         image_view_min_lod,
         image_compression_control,
         msaa_render_to_single_sampled,
+        // GFX-4: video
+        video_queue,
+        video_decode_h264,
+        video_decode_h265,
+        video_decode_av1,
+        video_decode_vp9,
+        video_encode_h264,
+        video_encode_h265,
+        video_encode_av1,
+        video_encode_quantization_map,
+        // GFX-5: external interop
+        external_memory_fd,
+        external_memory_win32,
+        external_memory_dma_buf,
+        external_memory_host,
+        drm_format_modifier,
+        external_semaphore_fd,
+        external_semaphore_win32,
+        external_fence_fd,
+        external_fence_win32,
+        // GFX-6a: DGC
+        device_generated_commands,
+        device_generated_commands_nv,
+        // GFX-6b: latency
+        reflex,
+        anti_lag,
+        // GFX-6c: cooperative matrix
+        cooperative_matrix,
+        cooperative_matrix_nv,
+        cooperative_matrix_nv2,
+        // GFX-6d: advanced shader features
+        fragment_shader_barycentric,
+        fragment_shader_interlock,
+        shader_atomic_float,
+        shader_atomic_float16,
+        compute_shader_derivatives,
+        shader_clock,
+        post_depth_coverage,
+        // GFX-6e: optical flow
+        optical_flow_nv,
     };
 
     let limits = Limits {
@@ -513,6 +608,8 @@ pub struct AvailableFeatureChain<'a> {
     pub mesh_shader: vk::PhysicalDeviceMeshShaderFeaturesEXT<'a>,
     pub acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'a>,
     pub ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR<'a>,
+    pub ray_query: vk::PhysicalDeviceRayQueryFeaturesKHR<'a>,
+    pub ray_tracing_position_fetch: vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR<'a>,
     pub fragment_shading_rate: vk::PhysicalDeviceFragmentShadingRateFeaturesKHR<'a>,
     pub memory_priority: vk::PhysicalDeviceMemoryPriorityFeaturesEXT<'a>,
     pub conditional_rendering: vk::PhysicalDeviceConditionalRenderingFeaturesEXT<'a>,
@@ -539,6 +636,8 @@ pub fn available_feature_chain(
         mesh_shader: vk::PhysicalDeviceMeshShaderFeaturesEXT::default(),
         acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default(),
         ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default(),
+        ray_query: vk::PhysicalDeviceRayQueryFeaturesKHR::default(),
+        ray_tracing_position_fetch: vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR::default(),
         fragment_shading_rate: vk::PhysicalDeviceFragmentShadingRateFeaturesKHR::default(),
         memory_priority: vk::PhysicalDeviceMemoryPriorityFeaturesEXT::default(),
         conditional_rendering: vk::PhysicalDeviceConditionalRenderingFeaturesEXT::default(),
@@ -560,6 +659,8 @@ pub fn available_feature_chain(
         .push_next(&mut chain.mesh_shader)
         .push_next(&mut chain.acceleration_structure)
         .push_next(&mut chain.ray_tracing)
+        .push_next(&mut chain.ray_query)
+        .push_next(&mut chain.ray_tracing_position_fetch)
         .push_next(&mut chain.fragment_shading_rate)
         .push_next(&mut chain.memory_priority)
         .push_next(&mut chain.conditional_rendering)

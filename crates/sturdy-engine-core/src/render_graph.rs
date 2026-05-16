@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    AccelerationStructureHandle, BindGroupHandle, BufferDesc, BufferHandle, Error, ImageDesc,
-    ImageHandle, PipelineHandle, PushConstants, Result, SamplerHandle, ShaderHandle,
+    AccelerationStructureHandle, BindGroupHandle, BufferDesc, BufferHandle, DecodeFrameDesc,
+    DgcExecuteDesc, DgcPreprocessDesc, EncodeFrameDesc, Error, ImageDesc, ImageHandle,
+    OpticalFlowEstimateDesc, PipelineHandle, PushConstants, Result, SamplerHandle, ShaderHandle,
     VertexFormat,
 };
 
@@ -349,6 +350,8 @@ pub struct BlasGeometryDesc {
 pub struct BlasBuildDesc {
     pub dst: AccelerationStructureHandle,
     pub src: Option<AccelerationStructureHandle>,
+    /// Optional caller-provided scratch buffer. When `None`, backends may allocate
+    /// transient scratch for the submitted frame.
     pub scratch_buffer: Option<BufferHandle>,
     pub geometries: Vec<BlasGeometryDesc>,
     pub mode: AccelerationStructureBuildMode,
@@ -359,6 +362,8 @@ pub struct BlasBuildDesc {
 pub struct TlasBuildDesc {
     pub dst: AccelerationStructureHandle,
     pub src: Option<AccelerationStructureHandle>,
+    /// Optional caller-provided scratch buffer. When `None`, backends may allocate
+    /// transient scratch for the submitted frame.
     pub scratch_buffer: Option<BufferHandle>,
     pub instance_buffer: BufferHandle,
     pub instance_offset: u64,
@@ -443,6 +448,16 @@ pub enum PassWork {
     BuildTlas(TlasBuildDesc),
     /// Dispatch rays using a ray-tracing pipeline and a shader binding table.
     TraceRays(TraceRaysDesc),
+    /// Decode a compressed video frame into an output image.
+    DecodeVideoFrame(DecodeFrameDesc),
+    /// Encode an input image into a compressed video bitstream.
+    EncodeVideoFrame(EncodeFrameDesc),
+    /// Execute GPU-generated commands from a pre-processed buffer.
+    ExecuteGeneratedCommands(DgcExecuteDesc),
+    /// Preprocess an indirect command buffer for GPU execution.
+    PreprocessGeneratedCommands(DgcPreprocessDesc),
+    /// Estimate optical flow motion vectors between two frames.
+    EstimateOpticalFlow(OpticalFlowEstimateDesc),
 }
 
 /// Inline descriptor binding pushed into the command stream without a descriptor pool.
@@ -760,21 +775,58 @@ impl RenderGraph {
             self.validate_resolve_image(resolve)?;
         }
         if let PassWork::BuildBlas(ref build) = pass.work {
-            if build.scratch_buffer.is_none() {
-                return Err(Error::InvalidInput(
-                    "BLAS build requires a scratch buffer".into(),
-                ));
-            }
-            if build.geometries.is_empty() {
+            if build.mode == AccelerationStructureBuildMode::Compact {
+                if build.src.is_none() {
+                    return Err(Error::InvalidInput(
+                        "BLAS compaction requires a source acceleration structure".into(),
+                    ));
+                }
+            } else if build.geometries.is_empty() {
                 return Err(Error::InvalidInput(
                     "BLAS build requires at least one geometry".into(),
                 ));
+            } else {
+                for geometry in &build.geometries {
+                    if geometry.vertex_count == 0 {
+                        return Err(Error::InvalidInput(
+                            "BLAS geometry vertex_count must be non-zero".into(),
+                        ));
+                    }
+                    if geometry.vertex_stride == 0 {
+                        return Err(Error::InvalidInput(
+                            "BLAS geometry vertex_stride must be non-zero".into(),
+                        ));
+                    }
+                    if geometry.index_buffer.is_some() {
+                        if geometry.index_count == 0 || geometry.index_count % 3 != 0 {
+                            return Err(Error::InvalidInput(
+                                "indexed BLAS geometry index_count must be a non-zero multiple of 3"
+                                    .into(),
+                            ));
+                        }
+                        if geometry.index_format.is_none() {
+                            return Err(Error::InvalidInput(
+                                "indexed BLAS geometry requires an index format".into(),
+                            ));
+                        }
+                    } else if geometry.vertex_count % 3 != 0 {
+                        return Err(Error::InvalidInput(
+                            "non-indexed BLAS geometry vertex_count must be a multiple of 3".into(),
+                        ));
+                    }
+                }
             }
         }
         if let PassWork::BuildTlas(ref build) = pass.work {
-            if build.scratch_buffer.is_none() {
+            if build.mode == AccelerationStructureBuildMode::Compact {
+                if build.src.is_none() {
+                    return Err(Error::InvalidInput(
+                        "TLAS compaction requires a source acceleration structure".into(),
+                    ));
+                }
+            } else if build.instance_count == 0 {
                 return Err(Error::InvalidInput(
-                    "TLAS build requires a scratch buffer".into(),
+                    "TLAS build instance_count must be non-zero".into(),
                 ));
             }
         }
@@ -1858,6 +1910,86 @@ mod tests {
     }
 
     #[test]
+    fn blas_build_allows_backend_allocated_scratch() {
+        let vertex_buffer = BufferHandle(1);
+        let dst_as = AccelerationStructureHandle(1);
+        let mut graph = RenderGraph::new();
+
+        graph
+            .add_pass(PassDesc {
+                name: "build-blas".into(),
+                queue: QueueType::Compute,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                pipeline_shading_rate: None,
+                work: PassWork::BuildBlas(BlasBuildDesc {
+                    dst: dst_as,
+                    src: None,
+                    scratch_buffer: None,
+                    geometries: vec![BlasGeometryDesc {
+                        vertex_buffer,
+                        vertex_offset: 0,
+                        vertex_count: 3,
+                        vertex_stride: 12,
+                        vertex_format: VertexFormat::Float32x3,
+                        index_buffer: None,
+                        index_offset: 0,
+                        index_count: 0,
+                        index_format: None,
+                        transform_buffer: None,
+                        transform_offset: 0,
+                    }],
+                    mode: AccelerationStructureBuildMode::Build,
+                }),
+                reads: Vec::new(),
+                writes: Vec::new(),
+                buffer_reads: Vec::new(),
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn blas_compaction_requires_source_as() {
+        let mut graph = RenderGraph::new();
+        let err = graph
+            .add_pass(PassDesc {
+                name: "compact-blas".into(),
+                queue: QueueType::Compute,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                pipeline_shading_rate: None,
+                work: PassWork::BuildBlas(BlasBuildDesc {
+                    dst: AccelerationStructureHandle(2),
+                    src: None,
+                    scratch_buffer: None,
+                    geometries: Vec::new(),
+                    mode: AccelerationStructureBuildMode::Compact,
+                }),
+                reads: Vec::new(),
+                writes: Vec::new(),
+                buffer_reads: Vec::new(),
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidInput(_)));
+        assert!(format!("{err}").contains("source acceleration structure"));
+    }
+
+    #[test]
     fn draw_indirect_count_tracks_indirect_and_count_buffer_reads() {
         let mut graph = RenderGraph::new();
         let indirect = BufferHandle(1);
@@ -1945,11 +2077,13 @@ mod tests {
         let compiled = graph.compile().unwrap();
         assert_eq!(compiled.passes[0].name, "write-count");
         assert_eq!(compiled.passes[1].name, "consume-count");
-        assert!(compiled.buffer_barriers_per_pass[1]
-            .iter()
-            .any(|barrier| barrier.buffer == count
-                && barrier.before == RgState::ShaderWrite
-                && barrier.after == RgState::IndirectRead));
+        assert!(
+            compiled.buffer_barriers_per_pass[1]
+                .iter()
+                .any(|barrier| barrier.buffer == count
+                    && barrier.before == RgState::ShaderWrite
+                    && barrier.after == RgState::IndirectRead)
+        );
     }
 
     #[test]

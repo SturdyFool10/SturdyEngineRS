@@ -1425,7 +1425,7 @@ mod tests {
                 source: ShaderSource::Spirv(vec![0x0723_0203, 0, 0, 0, 0]),
                 entry_point: "main".into(),
                 stage: ShaderStage::Compute,
-            requires_ray_query: false,
+                requires_ray_query: false,
             };
             let reflection =
                 reflect_pipeline_layout(&desc).expect("should not error for SPIRV source");
@@ -1439,7 +1439,7 @@ mod tests {
                 source: ShaderSource::MemoryUtf8(shader_fixtures::MEMORY_UTF8_COMPUTE),
                 entry_point: "main".into(),
                 stage: ShaderStage::Compute,
-            requires_ray_query: false,
+                requires_ray_query: false,
             };
 
             let (_compiled, reflection) =
@@ -1460,7 +1460,7 @@ mod tests {
                 source: ShaderSource::MemoryBytes(shader_fixtures::MEMORY_BYTES_VERTEX.as_bytes()),
                 entry_point: "vs_main".into(),
                 stage: ShaderStage::Vertex,
-            requires_ray_query: false,
+                requires_ray_query: false,
             };
 
             let (_compiled, reflection) =

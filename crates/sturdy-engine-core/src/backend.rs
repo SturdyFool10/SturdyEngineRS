@@ -2,13 +2,15 @@
 use crate::NativeSurfaceDesc;
 use crate::native_handle_capabilities_for_backend;
 use crate::{
-    BackendRawCapabilities, BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle,
-    CanonicalPipelineLayout, Caps, CompiledGraph, ComputePipelineDesc, ExternalBufferDesc,
-    ExternalImageDesc, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc, ImageDesc,
-    ImageHandle, NativeHandleCapabilities, PipelineHandle, PipelineLayoutHandle,
-    RayTracingPipelineDesc, Result, SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle,
-    ShaderTarget, SubmissionHandle, SurfaceCapabilities, SurfaceHandle, SurfaceInfo,
-    SurfaceRecreateDesc, SurfaceSize,
+    AccelerationStructureBuildSizes, AccelerationStructureDesc, AccelerationStructureHandle,
+    AntiLagMode, BackendRawCapabilities, BindGroupDesc, BindGroupHandle, BlasBuildDesc, BufferDesc,
+    BufferHandle, CanonicalPipelineLayout, Caps, CompiledGraph, ComputePipelineDesc,
+    ExternalBufferDesc, ExternalImageDesc, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc,
+    ImageDesc, ImageHandle, LatencyMode, NativeHandleCapabilities, PipelineHandle,
+    PipelineLayoutHandle, RayTracingPipelineDesc, ReflexMode, Result, SamplerDesc, SamplerHandle,
+    ShaderBindingTableProperties, ShaderDesc, ShaderHandle, ShaderTarget, SubmissionHandle,
+    SurfaceCapabilities, SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize, TlasBuildDesc,
+    VideoSessionDesc, VideoSessionHandle,
 };
 use crate::{Format, FormatCapabilities, GpuMemoryBudget};
 
@@ -186,6 +188,28 @@ pub trait Backend: Send + Sync {
     fn destroy_buffer(&self, _handle: BufferHandle) -> Result<()> {
         Ok(())
     }
+    fn create_acceleration_structure(
+        &self,
+        _handle: AccelerationStructureHandle,
+        _desc: AccelerationStructureDesc,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "backend does not support acceleration structures",
+        ))
+    }
+    fn destroy_acceleration_structure(&self, _handle: AccelerationStructureHandle) -> Result<()> {
+        Ok(())
+    }
+    fn blas_build_sizes(&self, _desc: &BlasBuildDesc) -> Result<AccelerationStructureBuildSizes> {
+        Err(crate::Error::Unsupported(
+            "backend does not support BLAS build size queries",
+        ))
+    }
+    fn tlas_build_sizes(&self, _desc: &TlasBuildDesc) -> Result<AccelerationStructureBuildSizes> {
+        Err(crate::Error::Unsupported(
+            "backend does not support TLAS build size queries",
+        ))
+    }
     fn create_sampler(&self, _handle: SamplerHandle, _desc: SamplerDesc) -> Result<()> {
         Ok(())
     }
@@ -242,6 +266,21 @@ pub trait Backend: Send + Sync {
     ) -> Result<()> {
         Err(crate::Error::Unsupported(
             "ray tracing pipelines are not supported by this backend",
+        ))
+    }
+    fn shader_binding_table_properties(&self) -> Result<ShaderBindingTableProperties> {
+        Err(crate::Error::Unsupported(
+            "shader binding tables are not supported by this backend",
+        ))
+    }
+    fn ray_tracing_shader_group_handles(
+        &self,
+        _pipeline: PipelineHandle,
+        _first_group: u32,
+        _group_count: u32,
+    ) -> Result<Vec<u8>> {
+        Err(crate::Error::Unsupported(
+            "ray tracing shader group handles are not supported by this backend",
         ))
     }
     fn destroy_pipeline(&self, _handle: PipelineHandle) -> Result<()> {
@@ -316,6 +355,36 @@ pub trait Backend: Send + Sync {
             "backend does not support GPU capture",
         ))
     }
+    // ── GFX-4: Video encode/decode ────────────────────────────────────────────
+
+    fn create_video_session(
+        &self,
+        _handle: VideoSessionHandle,
+        _desc: VideoSessionDesc,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "video sessions are not supported by this backend",
+        ))
+    }
+
+    fn destroy_video_session(&self, _handle: VideoSessionHandle) -> Result<()> {
+        Ok(())
+    }
+
+    // ── GFX-6b: Latency reduction ─────────────────────────────────────────────
+
+    fn set_reflex_mode(&self, _mode: ReflexMode) -> Result<()> {
+        Ok(())
+    }
+
+    fn set_anti_lag_mode(&self, _mode: AntiLagMode) -> Result<()> {
+        Ok(())
+    }
+
+    fn latency_mode(&self) -> Option<LatencyMode> {
+        None
+    }
+
     fn flush(&self, _graph: &CompiledGraph) -> Result<SubmissionHandle>;
     fn wait_submission(&self, _token: SubmissionHandle) -> Result<()> {
         Ok(())

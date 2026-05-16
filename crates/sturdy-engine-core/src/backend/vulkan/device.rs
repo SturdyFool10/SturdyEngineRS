@@ -1,7 +1,7 @@
 use std::collections::HashSet;
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_void};
 
-use ash::{vk, Device as AshDevice, Instance};
+use ash::{Device as AshDevice, Instance, vk};
 
 use crate::{AdapterSelection, Error, Result};
 
@@ -31,6 +31,7 @@ pub struct LogicalDevice {
     pub acceleration_structure_enabled: bool,
     pub ray_tracing_pipeline_enabled: bool,
     pub ray_query_enabled: bool,
+    pub ray_tracing_position_fetch_enabled: bool,
 }
 
 impl DeviceSelection {
@@ -76,10 +77,16 @@ pub fn create_logical_device(
     let memory_priority_enabled = feature_request.memory_priority.memory_priority == vk::TRUE;
     let conditional_rendering_enabled =
         feature_request.conditional_rendering.conditional_rendering == vk::TRUE;
-    let acceleration_structure_enabled =
-        feature_request.acceleration_structure.acceleration_structure == vk::TRUE;
-    let ray_tracing_pipeline_enabled =
-        feature_request.ray_tracing.ray_tracing_pipeline == vk::TRUE;
+    let acceleration_structure_enabled = feature_request
+        .acceleration_structure
+        .acceleration_structure
+        == vk::TRUE;
+    let ray_tracing_pipeline_enabled = feature_request.ray_tracing.ray_tracing_pipeline == vk::TRUE;
+    let ray_query_enabled = feature_request.ray_query.ray_query == vk::TRUE;
+    let ray_tracing_position_fetch_enabled = feature_request
+        .ray_tracing_position_fetch
+        .ray_tracing_position_fetch
+        == vk::TRUE;
     // push_descriptors and global_queue_priority are extension-only (no feature struct).
     // They are enabled if the extension was added to required_extensions by resolve().
     let push_descriptors_enabled = feature_request
@@ -161,7 +168,8 @@ pub fn create_logical_device(
         global_queue_priority_enabled,
         acceleration_structure_enabled,
         ray_tracing_pipeline_enabled,
-        ray_query_enabled: false, // VK_KHR_ray_query not yet wired as a feature request
+        ray_query_enabled,
+        ray_tracing_position_fetch_enabled,
     })
 }
 
@@ -265,6 +273,8 @@ struct FeatureRequest<'a> {
     mesh_shader: vk::PhysicalDeviceMeshShaderFeaturesEXT<'a>,
     acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'a>,
     ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR<'a>,
+    ray_query: vk::PhysicalDeviceRayQueryFeaturesKHR<'a>,
+    ray_tracing_position_fetch: vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR<'a>,
     fragment_shading_rate: vk::PhysicalDeviceFragmentShadingRateFeaturesKHR<'a>,
     memory_priority: vk::PhysicalDeviceMemoryPriorityFeaturesEXT<'a>,
     conditional_rendering: vk::PhysicalDeviceConditionalRenderingFeaturesEXT<'a>,
@@ -302,6 +312,9 @@ impl FeatureRequest<'static> {
             mesh_shader: vk::PhysicalDeviceMeshShaderFeaturesEXT::default(),
             acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default(),
             ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default(),
+            ray_query: vk::PhysicalDeviceRayQueryFeaturesKHR::default(),
+            ray_tracing_position_fetch:
+                vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR::default(),
             fragment_shading_rate: vk::PhysicalDeviceFragmentShadingRateFeaturesKHR::default(),
             memory_priority: vk::PhysicalDeviceMemoryPriorityFeaturesEXT::default(),
             conditional_rendering: vk::PhysicalDeviceConditionalRenderingFeaturesEXT::default(),
@@ -331,6 +344,19 @@ impl FeatureRequest<'static> {
             }
             request.enable_feature(
                 name,
+                false,
+                &available_core,
+                &available_chain,
+                &available_extensions,
+                properties.api_version,
+            )?;
+        }
+
+        if request.ray_tracing.ray_tracing_pipeline == vk::TRUE
+            && !disabled.contains("ray_tracing_position_fetch")
+        {
+            request.enable_feature(
+                "ray_tracing_position_fetch",
                 false,
                 &available_core,
                 &available_chain,
@@ -481,6 +507,27 @@ impl FeatureRequest<'static> {
                 self.ray_tracing.ray_tracing_pipeline = vk::TRUE;
                 true
             }
+            "ray_query" => {
+                if available.ray_query.ray_query != vk::TRUE
+                    || available.acceleration_structure.acceleration_structure != vk::TRUE
+                {
+                    return false;
+                }
+                self.ray_query.ray_query = vk::TRUE;
+                self.acceleration_structure.acceleration_structure = vk::TRUE;
+                true
+            }
+            "ray_tracing_position_fetch" => {
+                if available
+                    .ray_tracing_position_fetch
+                    .ray_tracing_position_fetch
+                    != vk::TRUE
+                {
+                    return false;
+                }
+                self.ray_tracing_position_fetch.ray_tracing_position_fetch = vk::TRUE;
+                true
+            }
             "acceleration_structure" => {
                 if available.acceleration_structure.acceleration_structure != vk::TRUE {
                     return false;
@@ -625,6 +672,23 @@ impl FeatureRequest<'static> {
                     available_extensions,
                 )?;
             }
+            "ray_query" => {
+                self.require_extension(ash::khr::ray_query::NAME, available_extensions)?;
+                self.require_extension(
+                    ash::khr::acceleration_structure::NAME,
+                    available_extensions,
+                )?;
+                self.require_extension(
+                    ash::khr::deferred_host_operations::NAME,
+                    available_extensions,
+                )?;
+            }
+            "ray_tracing_position_fetch" => {
+                self.require_extension(
+                    ash::khr::ray_tracing_position_fetch::NAME,
+                    available_extensions,
+                )?;
+            }
             "acceleration_structure" => {
                 self.require_extension(
                     ash::khr::acceleration_structure::NAME,
@@ -721,6 +785,14 @@ impl FeatureRequest<'static> {
             push_feature_chain(&mut self.features2, &mut self.ray_tracing);
             self.use_feature_chain = true;
         }
+        if self.ray_query.ray_query == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.ray_query);
+            self.use_feature_chain = true;
+        }
+        if self.ray_tracing_position_fetch.ray_tracing_position_fetch == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.ray_tracing_position_fetch);
+            self.use_feature_chain = true;
+        }
         if self.fragment_shading_rate.pipeline_fragment_shading_rate == vk::TRUE
             || self.fragment_shading_rate.primitive_fragment_shading_rate == vk::TRUE
             || self.fragment_shading_rate.attachment_fragment_shading_rate == vk::TRUE
@@ -788,6 +860,8 @@ fn is_known_feature_name(name: &str) -> bool {
                 | "task_shader"
                 | "ray_tracing"
                 | "ray_tracing_pipeline"
+                | "ray_query"
+                | "ray_tracing_position_fetch"
                 | "acceleration_structure"
                 | "variable_rate_shading"
                 | "pipeline_fragment_shading_rate"

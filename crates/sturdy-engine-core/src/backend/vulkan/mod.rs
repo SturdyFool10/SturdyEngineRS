@@ -17,24 +17,27 @@ mod surfaces;
 
 use std::collections::HashMap;
 
-use ash::{vk, Device as AshDevice, Entry, Instance};
+use ash::{Device as AshDevice, Entry, Instance, vk};
 use std::sync::{Mutex, RwLock};
 use std::{fs, path::PathBuf};
 
 use crate::backend::{Backend, BackendKind};
 use crate::{
-    AdapterInfo, BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, CanonicalPipelineLayout,
-    Caps, CompiledGraph, ComputePipelineDesc, Error, ExternalBufferDesc, ExternalBufferHandle,
+    AccelerationStructureBuildMode, AccelerationStructureBuildSizes, AccelerationStructureDesc,
+    AccelerationStructureHandle, AccelerationStructureKind, AdapterInfo, AntiLagMode, BindGroupDesc,
+    BindGroupHandle, BlasBuildDesc, BufferDesc, BufferHandle, CanonicalPipelineLayout, Caps,
+    CompiledGraph, ComputePipelineDesc, Error, ExternalBufferDesc, ExternalBufferHandle,
     ExternalImageDesc, ExternalImageHandle, Format, FormatCapabilities, GraphicsPipelineDesc,
-    ImageDesc, ImageHandle, NativeSurfaceDesc, PipelineHandle, PipelineLayoutHandle,
-    RayTracingPipelineDesc, Result, SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle,
-    SubmissionHandle, SurfaceCapabilities, SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc,
-    SurfaceSize,
+    ImageDesc, ImageHandle, IndexFormat, LatencyMode, NativeSurfaceDesc, PipelineHandle,
+    PipelineLayoutHandle, RayTracingPipelineDesc, ReflexMode, Result, SamplerDesc, SamplerHandle,
+    ShaderBindingTableProperties, ShaderDesc, ShaderHandle, SubmissionHandle, SurfaceCapabilities,
+    SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize, TlasBuildDesc, VertexFormat,
+    VideoSessionDesc, VideoSessionHandle,
 };
 
 pub use bindless::BindlessVkInfo;
 pub use config::VulkanBackendConfig;
-use device::{create_logical_device, DeviceSelection};
+use device::{DeviceSelection, create_logical_device};
 use instance::{create_instance, load_entry};
 use queues::{QueueFamilyMap, VulkanQueues};
 
@@ -79,6 +82,9 @@ pub struct VulkanBackend {
     acceleration_structure_khr: Option<ash::khr::acceleration_structure::Device>,
     /// VK_KHR_ray_tracing_pipeline commands. Present when RT pipeline is enabled.
     ray_tracing_pipeline_khr: Option<ash::khr::ray_tracing_pipeline::Device>,
+    ray_tracing_sbt_properties: Option<ShaderBindingTableProperties>,
+    /// VK_NV_low_latency2 commands. Present when reflex is available.
+    reflex_nv: Option<ash::nv::low_latency2::Device>,
 }
 
 impl VulkanBackend {
@@ -108,6 +114,7 @@ impl VulkanBackend {
         caps.features.global_queue_priority = logical.global_queue_priority_enabled;
         caps.features.ray_tracing = logical.ray_tracing_pipeline_enabled;
         caps.features.ray_query = logical.ray_query_enabled;
+        caps.features.ray_tracing_position_fetch = logical.ray_tracing_position_fetch_enabled;
         let props = unsafe { instance.get_physical_device_properties(selection.physical_device) };
         let timestamp_period_ns = props.limits.timestamp_period;
         let memory_properties =
@@ -190,6 +197,14 @@ impl VulkanBackend {
         } else {
             None
         };
+        let ray_tracing_sbt_properties = logical
+            .ray_tracing_pipeline_enabled
+            .then(|| query_ray_tracing_sbt_properties(&instance, selection.physical_device));
+        let reflex_nv = if caps.features.reflex {
+            Some(ash::nv::low_latency2::Device::new(&instance, &logical.device))
+        } else {
+            None
+        };
 
         // Create the bindless heap if the device supports descriptor_indexing.
         let bindless_heap = if caps.supports_bindless {
@@ -233,6 +248,8 @@ impl VulkanBackend {
             conservative_rasterization_enabled,
             acceleration_structure_khr,
             ray_tracing_pipeline_khr,
+            ray_tracing_sbt_properties,
+            reflex_nv,
         })
     }
 
@@ -406,6 +423,16 @@ impl Backend for VulkanBackend {
             .create_buffer(&self.device, handle, desc)
     }
 
+    fn buffer_device_address(&self, handle: BufferHandle) -> Result<Option<u64>> {
+        let resources = self
+            .resources
+            .read()
+            .expect("vulkan resource registry rwlock poisoned");
+        Ok(Some(
+            resources.buffer_device_address_raw(&self.device, handle)?,
+        ))
+    }
+
     unsafe fn import_external_buffer(
         &self,
         handle: BufferHandle,
@@ -427,6 +454,50 @@ impl Backend for VulkanBackend {
             .write()
             .expect("vulkan resource registry rwlock poisoned")
             .destroy_buffer(&self.device, handle)
+    }
+
+    fn create_acceleration_structure(
+        &self,
+        handle: AccelerationStructureHandle,
+        desc: AccelerationStructureDesc,
+    ) -> Result<()> {
+        let as_ext = self.acceleration_structure_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("VK_KHR_acceleration_structure is not enabled".into())
+        })?;
+        let ty = match desc.kind {
+            AccelerationStructureKind::BottomLevel => {
+                vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL
+            }
+            AccelerationStructureKind::TopLevel => vk::AccelerationStructureTypeKHR::TOP_LEVEL,
+        };
+        self.resources
+            .write()
+            .expect("vulkan resource registry rwlock poisoned")
+            .create_acceleration_structure(&self.device, handle, desc.size, as_ext, ty)
+    }
+
+    fn destroy_acceleration_structure(&self, handle: AccelerationStructureHandle) -> Result<()> {
+        let as_ext = self.acceleration_structure_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("VK_KHR_acceleration_structure is not enabled".into())
+        })?;
+        self.resources
+            .write()
+            .expect("vulkan resource registry rwlock poisoned")
+            .destroy_acceleration_structure(&self.device, handle, as_ext)
+    }
+
+    fn blas_build_sizes(&self, desc: &BlasBuildDesc) -> Result<AccelerationStructureBuildSizes> {
+        let as_ext = self.acceleration_structure_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("VK_KHR_acceleration_structure is not enabled".into())
+        })?;
+        query_blas_build_sizes(as_ext, desc)
+    }
+
+    fn tlas_build_sizes(&self, desc: &TlasBuildDesc) -> Result<AccelerationStructureBuildSizes> {
+        let as_ext = self.acceleration_structure_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("VK_KHR_acceleration_structure is not enabled".into())
+        })?;
+        query_tlas_build_sizes(as_ext, desc)
     }
 
     fn create_sampler(&self, handle: SamplerHandle, desc: SamplerDesc) -> Result<()> {
@@ -607,6 +678,53 @@ impl Backend for VulkanBackend {
             &descriptors,
             rt_ext,
         )
+    }
+
+    fn shader_binding_table_properties(&self) -> Result<ShaderBindingTableProperties> {
+        self.ray_tracing_sbt_properties
+            .ok_or_else(|| Error::Unsupported("VK_KHR_ray_tracing_pipeline is not enabled".into()))
+    }
+
+    fn ray_tracing_shader_group_handles(
+        &self,
+        pipeline: PipelineHandle,
+        first_group: u32,
+        group_count: u32,
+    ) -> Result<Vec<u8>> {
+        let rt_ext = self.ray_tracing_pipeline_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("VK_KHR_ray_tracing_pipeline is not enabled".into())
+        })?;
+        let props = self.shader_binding_table_properties()?;
+        let pipeline = self
+            .pipelines
+            .lock()
+            .expect("vulkan pipeline registry mutex poisoned")
+            .pipeline(pipeline)?;
+        if pipeline.bind_point != vk::PipelineBindPoint::RAY_TRACING_KHR {
+            return Err(Error::InvalidInput(
+                "shader group handles require a ray-tracing pipeline".into(),
+            ));
+        }
+        let data_size = props
+            .shader_group_handle_size
+            .checked_mul(group_count)
+            .ok_or_else(|| {
+                Error::InvalidInput("ray-tracing shader group handle size overflowed".into())
+            })? as usize;
+        unsafe {
+            rt_ext
+                .get_ray_tracing_shader_group_handles(
+                    pipeline.pipeline,
+                    first_group,
+                    group_count,
+                    data_size,
+                )
+                .map_err(|error| {
+                    Error::Backend(format!(
+                        "vkGetRayTracingShaderGroupHandlesKHR failed: {error:?}"
+                    ))
+                })
+        }
     }
 
     fn create_surface(
@@ -818,9 +936,9 @@ impl Backend for VulkanBackend {
         )?;
 
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let resources = self
+        let mut resources = self
             .resources
-            .read()
+            .write()
             .expect("vulkan resource registry rwlock poisoned");
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let descriptors = self
@@ -842,7 +960,7 @@ impl Backend for VulkanBackend {
             self.queues,
             self.queue_families,
             graph,
-            &resources,
+            &mut resources,
             &descriptors,
             &mut pipelines,
             &self.debug,
@@ -852,6 +970,7 @@ impl Backend for VulkanBackend {
             self.dynamic_rendering_khr.as_ref(),
             self.acceleration_structure_khr.as_ref(),
             self.ray_tracing_pipeline_khr.as_ref(),
+            self.caps.features.ray_tracing_position_fetch,
             wait_sem,
             signal_sem,
         );
@@ -908,6 +1027,176 @@ impl Backend for VulkanBackend {
                 .device_wait_idle()
                 .map_err(|error| Error::Backend(format!("vkDeviceWaitIdle failed: {error:?}")))
         }
+    }
+
+    // ── GFX-4: Video encode/decode ────────────────────────────────────────────
+
+    fn create_video_session(
+        &self,
+        _handle: VideoSessionHandle,
+        _desc: VideoSessionDesc,
+    ) -> Result<()> {
+        // TODO(GFX-4): create VkVideoSessionKHR + allocate session memory
+        Ok(())
+    }
+
+    fn destroy_video_session(&self, _handle: VideoSessionHandle) -> Result<()> {
+        Ok(())
+    }
+
+    // ── GFX-6b: Latency reduction ─────────────────────────────────────────────
+
+    fn latency_mode(&self) -> Option<LatencyMode> {
+        if self.caps.features.reflex {
+            return Some(LatencyMode::Reflex(ReflexMode::Off));
+        }
+        if self.caps.features.anti_lag {
+            return Some(LatencyMode::AntiLag(AntiLagMode::Off));
+        }
+        None
+    }
+}
+
+fn query_blas_build_sizes(
+    as_ext: &ash::khr::acceleration_structure::Device,
+    desc: &BlasBuildDesc,
+) -> Result<AccelerationStructureBuildSizes> {
+    if desc.mode == AccelerationStructureBuildMode::Compact {
+        return Err(Error::Unsupported(
+            "BLAS compaction size queries are not implemented yet".into(),
+        ));
+    }
+
+    let geometries = desc
+        .geometries
+        .iter()
+        .map(|geometry| {
+            let triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
+                .vertex_format(vk_vertex_format_for_as(geometry.vertex_format)?)
+                .vertex_stride(geometry.vertex_stride as u64)
+                .max_vertex(geometry.vertex_count.saturating_sub(1))
+                .index_type(
+                    geometry
+                        .index_format
+                        .map(vk_index_type)
+                        .unwrap_or(vk::IndexType::NONE_KHR),
+                );
+            Ok(vk::AccelerationStructureGeometryKHR::default()
+                .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+                .geometry(vk::AccelerationStructureGeometryDataKHR { triangles }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let primitive_counts = desc
+        .geometries
+        .iter()
+        .map(|geometry| {
+            if geometry.index_buffer.is_some() {
+                geometry.index_count / 3
+            } else {
+                geometry.vertex_count / 3
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+        .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+        .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+        .mode(vk_build_mode(desc.mode))
+        .geometries(&geometries);
+    let mut sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
+    unsafe {
+        as_ext.get_acceleration_structure_build_sizes(
+            vk::AccelerationStructureBuildTypeKHR::DEVICE,
+            &build_info,
+            &primitive_counts,
+            &mut sizes,
+        )
+    };
+    Ok(vk_build_sizes(sizes))
+}
+
+fn query_tlas_build_sizes(
+    as_ext: &ash::khr::acceleration_structure::Device,
+    desc: &TlasBuildDesc,
+) -> Result<AccelerationStructureBuildSizes> {
+    if desc.mode == AccelerationStructureBuildMode::Compact {
+        return Err(Error::Unsupported(
+            "TLAS compaction size queries are not implemented yet".into(),
+        ));
+    }
+
+    let instances =
+        vk::AccelerationStructureGeometryInstancesDataKHR::default().array_of_pointers(false);
+    let geometry = vk::AccelerationStructureGeometryKHR::default()
+        .geometry_type(vk::GeometryTypeKHR::INSTANCES)
+        .geometry(vk::AccelerationStructureGeometryDataKHR { instances });
+    let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+        .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+        .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+        .mode(vk_build_mode(desc.mode))
+        .geometries(std::slice::from_ref(&geometry));
+    let primitive_counts = [desc.instance_count];
+    let mut sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
+    unsafe {
+        as_ext.get_acceleration_structure_build_sizes(
+            vk::AccelerationStructureBuildTypeKHR::DEVICE,
+            &build_info,
+            &primitive_counts,
+            &mut sizes,
+        )
+    };
+    Ok(vk_build_sizes(sizes))
+}
+
+fn vk_build_sizes(
+    sizes: vk::AccelerationStructureBuildSizesInfoKHR<'_>,
+) -> AccelerationStructureBuildSizes {
+    AccelerationStructureBuildSizes {
+        acceleration_structure_size: sizes.acceleration_structure_size,
+        build_scratch_size: sizes.build_scratch_size,
+        update_scratch_size: sizes.update_scratch_size,
+    }
+}
+
+fn vk_build_mode(mode: AccelerationStructureBuildMode) -> vk::BuildAccelerationStructureModeKHR {
+    match mode {
+        AccelerationStructureBuildMode::Build | AccelerationStructureBuildMode::Compact => {
+            vk::BuildAccelerationStructureModeKHR::BUILD
+        }
+        AccelerationStructureBuildMode::Update => vk::BuildAccelerationStructureModeKHR::UPDATE,
+    }
+}
+
+fn vk_index_type(format: IndexFormat) -> vk::IndexType {
+    match format {
+        IndexFormat::Uint16 => vk::IndexType::UINT16,
+        IndexFormat::Uint32 => vk::IndexType::UINT32,
+    }
+}
+
+fn vk_vertex_format_for_as(format: VertexFormat) -> Result<vk::Format> {
+    match format {
+        VertexFormat::Float32x2 => Ok(vk::Format::R32G32_SFLOAT),
+        VertexFormat::Float32x3 => Ok(vk::Format::R32G32B32_SFLOAT),
+        VertexFormat::Float32x4 => Ok(vk::Format::R32G32B32A32_SFLOAT),
+    }
+}
+
+fn query_ray_tracing_sbt_properties(
+    instance: &Instance,
+    physical_device: vk::PhysicalDevice,
+) -> ShaderBindingTableProperties {
+    let mut rt_props = vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
+    let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut rt_props);
+    unsafe {
+        instance.get_physical_device_properties2(physical_device, &mut props2);
+    }
+    ShaderBindingTableProperties {
+        shader_group_handle_size: rt_props.shader_group_handle_size,
+        shader_group_handle_alignment: rt_props.shader_group_handle_alignment,
+        shader_group_base_alignment: rt_props.shader_group_base_alignment,
+        max_shader_group_stride: rt_props.max_shader_group_stride,
     }
 }
 
@@ -1070,7 +1359,7 @@ impl Drop for VulkanBackend {
                 shaders.destroy_all(&self.device);
             }
             if let Ok(mut resources) = self.resources.write() {
-                resources.destroy_all(&self.device);
+                resources.destroy_all(&self.device, self.acceleration_structure_khr.as_ref());
             }
             if let Ok(mut surfaces) = self.surfaces.lock() {
                 surfaces.destroy_all(&self.device);

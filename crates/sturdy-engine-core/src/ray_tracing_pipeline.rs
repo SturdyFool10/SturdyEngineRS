@@ -1,4 +1,4 @@
-use crate::{PipelineLayoutHandle, ShaderHandle};
+use crate::{PipelineHandle, PipelineLayoutHandle, ShaderHandle};
 
 /// A single shader stage in a ray-tracing pipeline.
 #[derive(Copy, Clone, Debug)]
@@ -59,4 +59,23 @@ pub struct RayTracingPipelineDesc {
     pub groups: Vec<RtShaderGroupDesc>,
     pub max_recursion_depth: u32,
     pub layout: Option<PipelineLayoutHandle>,
+}
+
+/// Shader group indices to pack into a shader binding table.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShaderBindingTableDesc {
+    pub pipeline: PipelineHandle,
+    pub raygen_group: u32,
+    pub miss_groups: Vec<u32>,
+    pub hit_groups: Vec<u32>,
+    pub callable_groups: Vec<u32>,
+}
+
+/// Backend-reported alignment rules for shader binding table packing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ShaderBindingTableProperties {
+    pub shader_group_handle_size: u32,
+    pub shader_group_handle_alignment: u32,
+    pub shader_group_base_alignment: u32,
+    pub max_shader_group_stride: u32,
 }

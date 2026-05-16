@@ -371,7 +371,9 @@ impl InputHub {
     /// ```
     pub fn route_to_clay(&mut self, ctx: &mut clay_ui::UiContext) {
         let events = self.drain_clay_events();
-        if events.is_empty() { return; }
+        if events.is_empty() {
+            return;
+        }
         // Collect tree names first to avoid borrow conflict.
         let names: Vec<String> = ctx.trees().map(|(n, _)| n.to_owned()).collect();
         // Forward to all registered trees — every tree gets every event and

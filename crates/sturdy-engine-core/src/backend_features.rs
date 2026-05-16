@@ -20,6 +20,8 @@ pub struct BackendFeatures {
     pub opacity_micromap: bool,
     /// VK_EXT_ray_tracing_invocation_reorder — shader execution reordering (SER).
     pub shader_execution_reordering: bool,
+    /// VK_NV_cluster_acceleration_structure — cluster acceleration structures.
+    pub cluster_acceleration_structure: bool,
     pub hdr_output: bool,
     pub shader_fp16: bool,
     pub shader_fp64: bool,
@@ -83,6 +85,86 @@ pub struct BackendFeatures {
     pub image_compression_control: bool,
     /// VK_EXT_multisampled_render_to_single_sampled — render MSAA into single-sample storage.
     pub msaa_render_to_single_sampled: bool,
+
+    // ── GFX-4: Video encode/decode ────────────────────────────────────────────
+    /// VK_KHR_video_queue — base video queue support.
+    pub video_queue: bool,
+    /// VK_KHR_video_decode_h264 — H.264 video decode.
+    pub video_decode_h264: bool,
+    /// VK_KHR_video_decode_h265 — H.265 video decode.
+    pub video_decode_h265: bool,
+    /// VK_KHR_video_decode_av1 — AV1 video decode.
+    pub video_decode_av1: bool,
+    /// VK_KHR_video_decode_vp9 — VP9 video decode.
+    pub video_decode_vp9: bool,
+    /// VK_KHR_video_encode_h264 — H.264 video encode.
+    pub video_encode_h264: bool,
+    /// VK_KHR_video_encode_h265 — H.265 video encode.
+    pub video_encode_h265: bool,
+    /// VK_KHR_video_encode_av1 — AV1 video encode.
+    pub video_encode_av1: bool,
+    /// VK_KHR_video_encode_quantization_map — quantization map for encode quality.
+    pub video_encode_quantization_map: bool,
+
+    // ── GFX-5: External resource interop ─────────────────────────────────────
+    /// VK_KHR_external_memory_fd — POSIX fd-based external memory import/export.
+    pub external_memory_fd: bool,
+    /// VK_KHR_external_memory_win32 — Win32 handle-based external memory import/export.
+    pub external_memory_win32: bool,
+    /// VK_EXT_external_memory_dma_buf — DMA-BUF external memory (Linux/Android).
+    pub external_memory_dma_buf: bool,
+    /// VK_EXT_external_memory_host — host pointer external memory import.
+    pub external_memory_host: bool,
+    /// VK_EXT_image_drm_format_modifier — DRM format modifiers for tiled images.
+    pub drm_format_modifier: bool,
+    /// VK_KHR_external_semaphore_fd — POSIX fd-based external semaphore import/export.
+    pub external_semaphore_fd: bool,
+    /// VK_KHR_external_semaphore_win32 — Win32 handle-based external semaphore import/export.
+    pub external_semaphore_win32: bool,
+    /// VK_KHR_external_fence_fd — POSIX fd-based external fence import/export.
+    pub external_fence_fd: bool,
+    /// VK_KHR_external_fence_win32 — Win32 handle-based external fence import/export.
+    pub external_fence_win32: bool,
+
+    // ── GFX-6a: Device-generated commands ────────────────────────────────────
+    /// VK_EXT_device_generated_commands — Khronos standard DGC.
+    pub device_generated_commands: bool,
+    /// VK_NV_device_generated_commands — NVIDIA proprietary DGC.
+    pub device_generated_commands_nv: bool,
+
+    // ── GFX-6b: Latency reduction ─────────────────────────────────────────────
+    /// VK_NV_low_latency2 — NVIDIA Reflex low-latency mode.
+    pub reflex: bool,
+    /// VK_AMD_anti_lag — AMD Anti-Lag.
+    pub anti_lag: bool,
+
+    // ── GFX-6c: Cooperative matrix ───────────────────────────────────────────
+    /// VK_KHR_cooperative_matrix — Khronos standard cooperative matrix.
+    pub cooperative_matrix: bool,
+    /// VK_NV_cooperative_matrix — NVIDIA cooperative matrix v1.
+    pub cooperative_matrix_nv: bool,
+    /// VK_NV_cooperative_matrix2 — NVIDIA cooperative matrix v2.
+    pub cooperative_matrix_nv2: bool,
+
+    // ── GFX-6d: Advanced shader features ─────────────────────────────────────
+    /// VK_KHR_fragment_shader_barycentric — barycentric coordinates in fragment shaders.
+    pub fragment_shader_barycentric: bool,
+    /// VK_EXT_fragment_shader_interlock — ordered rasterizer invocations (ROV).
+    pub fragment_shader_interlock: bool,
+    /// VK_EXT_shader_atomic_float — fp32 atomic add/min/max on buffers and images.
+    pub shader_atomic_float: bool,
+    /// VK_EXT_shader_atomic_float2 — fp16 atomic and additional fp32 atomics.
+    pub shader_atomic_float16: bool,
+    /// VK_KHR_compute_shader_derivatives — dFdx/dFdy in compute shaders.
+    pub compute_shader_derivatives: bool,
+    /// VK_KHR_shader_clock — realtime clock reads in shaders.
+    pub shader_clock: bool,
+    /// VK_EXT_post_depth_coverage — post-depth coverage sample mask modifier.
+    pub post_depth_coverage: bool,
+
+    // ── GFX-6e: Optical flow ─────────────────────────────────────────────────
+    /// VK_NV_optical_flow — NVIDIA hardware optical flow estimation.
+    pub optical_flow_nv: bool,
 }
 
 #[cfg(test)]
@@ -110,6 +192,53 @@ mod tests {
         assert!(!features.sparse_residency_image_2d);
         assert!(!features.sparse_residency_image_3d);
         assert!(!features.sparse_residency_aliased);
+
+        // GFX-4: video
+        assert!(!features.video_queue);
+        assert!(!features.video_decode_h264);
+        assert!(!features.video_decode_h265);
+        assert!(!features.video_decode_av1);
+        assert!(!features.video_decode_vp9);
+        assert!(!features.video_encode_h264);
+        assert!(!features.video_encode_h265);
+        assert!(!features.video_encode_av1);
+        assert!(!features.video_encode_quantization_map);
+
+        // GFX-5: external interop
+        assert!(!features.external_memory_fd);
+        assert!(!features.external_memory_win32);
+        assert!(!features.external_memory_dma_buf);
+        assert!(!features.external_memory_host);
+        assert!(!features.drm_format_modifier);
+        assert!(!features.external_semaphore_fd);
+        assert!(!features.external_semaphore_win32);
+        assert!(!features.external_fence_fd);
+        assert!(!features.external_fence_win32);
+
+        // GFX-6a: DGC
+        assert!(!features.device_generated_commands);
+        assert!(!features.device_generated_commands_nv);
+
+        // GFX-6b: latency
+        assert!(!features.reflex);
+        assert!(!features.anti_lag);
+
+        // GFX-6c: cooperative matrix
+        assert!(!features.cooperative_matrix);
+        assert!(!features.cooperative_matrix_nv);
+        assert!(!features.cooperative_matrix_nv2);
+
+        // GFX-6d: advanced shader features
+        assert!(!features.fragment_shader_barycentric);
+        assert!(!features.fragment_shader_interlock);
+        assert!(!features.shader_atomic_float);
+        assert!(!features.shader_atomic_float16);
+        assert!(!features.compute_shader_derivatives);
+        assert!(!features.shader_clock);
+        assert!(!features.post_depth_coverage);
+
+        // GFX-6e: optical flow
+        assert!(!features.optical_flow_nv);
     }
 
     #[test]

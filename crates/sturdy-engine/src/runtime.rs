@@ -492,7 +492,12 @@ impl<'a> AppRuntimeFrame<'a> {
         }
         if !output.text_scenes.is_empty() {
             crate::ui_renderer::draw_ui_text(
-                &self.render_frame, &self.runtime.engine, output, target, w, h,
+                &self.render_frame,
+                &self.runtime.engine,
+                output,
+                target,
+                w,
+                h,
             )?;
         }
         Ok(())
@@ -519,9 +524,16 @@ impl<'a> AppRuntimeFrame<'a> {
             let gpu_total: f32 = pass_timings_raw.iter().map(|(_, ms)| ms).sum();
             let pass_timings: Vec<RuntimePassTiming> = pass_timings_raw
                 .into_iter()
-                .map(|(name, ms)| RuntimePassTiming { name, gpu_time_ms: Some(ms) })
+                .map(|(name, ms)| RuntimePassTiming {
+                    name,
+                    gpu_time_ms: Some(ms),
+                })
                 .collect();
-            let gpu_ms = if pass_timings.is_empty() { None } else { Some(gpu_total) };
+            let gpu_ms = if pass_timings.is_empty() {
+                None
+            } else {
+                Some(gpu_total)
+            };
             self.runtime.controller.update_diagnostics(|d| {
                 d.timings.available = true;
                 d.timings.cpu_frame_time_ms = Some(cpu_ms);
@@ -1240,7 +1252,12 @@ pub(crate) struct FrameTimeHistory {
 
 impl FrameTimeHistory {
     pub fn new(capacity: usize) -> Self {
-        Self { samples: vec![0.0; capacity], head: 0, count: 0, capacity }
+        Self {
+            samples: vec![0.0; capacity],
+            head: 0,
+            count: 0,
+            capacity,
+        }
     }
 
     pub fn push(&mut self, ms: f32) {
@@ -1250,7 +1267,9 @@ impl FrameTimeHistory {
     }
 
     pub fn percentiles(&self) -> Option<(f32, f32, f32)> {
-        if self.count < 4 { return None; }
+        if self.count < 4 {
+            return None;
+        }
         let mut sorted: Vec<f32> = self.samples[..self.count].to_vec();
         sorted.sort_by(f32::total_cmp);
         let mean = sorted.iter().sum::<f32>() / sorted.len() as f32;
@@ -2739,17 +2758,31 @@ pub struct UiContext<'a> {
 
 impl<'a> UiContext<'a> {
     pub fn new(runtime: &'a mut AppRuntime, viewport: clay_ui::Size, frame_number: u64) -> Self {
-        Self { runtime, viewport, frame_number }
+        Self {
+            runtime,
+            viewport,
+            frame_number,
+        }
     }
 
-    pub fn runtime(&mut self) -> &mut AppRuntime { self.runtime }
-    pub fn clay(&mut self) -> &mut clay_ui::UiContext { &mut self.runtime.clay_ui }
-    pub fn viewport(&self) -> clay_ui::Size { self.viewport }
-    pub fn frame_number(&self) -> u64 { self.frame_number }
+    pub fn runtime(&mut self) -> &mut AppRuntime {
+        self.runtime
+    }
+    pub fn clay(&mut self) -> &mut clay_ui::UiContext {
+        &mut self.runtime.clay_ui
+    }
+    pub fn viewport(&self) -> clay_ui::Size {
+        self.viewport
+    }
+    pub fn frame_number(&self) -> u64 {
+        self.frame_number
+    }
 
     pub fn build_frame(&mut self) -> clay_ui::UiFrameOutput {
         let limits = self.runtime.engine.caps().limits;
-        self.runtime.clay_ui.build_frame_with_limits(self.viewport, self.frame_number, &limits, 1.0)
+        self.runtime
+            .clay_ui
+            .build_frame_with_limits(self.viewport, self.frame_number, &limits, 1.0)
     }
 }
 

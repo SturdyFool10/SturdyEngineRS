@@ -263,14 +263,14 @@ Currently using legacy render passes and framebuffers. Dynamic rendering elimina
 - [ ] Gate on `features.timeline_semaphores`; fall back to binary semaphores on Vulkan 1.0 devices.
 - [ ] **Enables**: Track 11b (async compute, cross-queue semaphore chains).
 
-**GFX-1d — `VK_KHR_buffer_device_address` (Vulkan 1.2 core)**
+**GFX-1d — `VK_KHR_buffer_device_address` (Vulkan 1.2 core) — complete**
 
 Raw GPU virtual addresses for buffers. Required by ray tracing acceleration structures, descriptor buffer, device-generated commands, and any GPU-side linked structure. Nearly universal — this is Vulkan 1.2 core.
 
-- [ ] Detect `VK_KHR_buffer_device_address` (or `api_version >= 1.2`); add `BackendFeatures::buffer_device_address`.
-- [ ] Enable `bufferDeviceAddress = VK_TRUE` in `VkPhysicalDeviceVulkan12Features` during device creation.
-- [ ] Add `Buffer::device_address(&self) -> Option<u64>` — returns `None` when unavailable or the buffer was not created with `BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT`.
-- [ ] Gate `SHADER_DEVICE_ADDRESS_BIT` on buffer creation behind `features.buffer_device_address`.
+- [x] Detect `VK_KHR_buffer_device_address` (or `api_version >= 1.2`); add `BackendFeatures::buffer_device_address`.
+- [x] Enable `bufferDeviceAddress = VK_TRUE` in `VkPhysicalDeviceBufferDeviceAddressFeatures` during device creation.
+- [x] Add `Device::buffer_device_address(handle) -> Option<u64>` — returns `None` when unavailable or the buffer was not created with `BufferUsage::SHADER_DEVICE_ADDRESS`.
+- [x] Gate `BufferUsage::SHADER_DEVICE_ADDRESS` on buffer creation behind `features.buffer_device_address`.
 - [ ] **Required by**: GFX-3a (RT acceleration structures), GFX-6a (device-generated commands), GFX-7a (descriptor buffer).
 
 **GFX-1e — Memory management extensions**
@@ -430,38 +430,48 @@ Without hardware counters, profiling data is timestamps only. These expose ROP t
 
 Complete before Track AO (RTAO), Track Refl (RT Reflections), Track GI (RTGI, PTGI), Track Shadow (RT shadows), and Track 7g (RT geometry integration). GFX-1d (buffer device address) is a hard prerequisite.
 
-**GFX-3a — RT command recording (detected, zero commands implemented)**
+Current status: the backend foundation is implemented. Vulkan can create acceleration structures, query BLAS/TLAS build sizes, record BLAS/TLAS builds with automatic transient scratch or caller-provided scratch buffers, create ray-tracing pipelines, and record `vkCmdTraceRaysKHR` with caller-provided SBT regions. `BackendFeatures::ray_tracing` is overridden to true only when the logical device enabled the RT pipeline feature. Remaining work in this track is advanced AS/RT features, not the base command-recording substrate.
 
-`VK_KHR_ray_tracing_pipeline` and `VK_KHR_acceleration_structure` are detected in `caps.rs` and device structs exist in `device.rs`, but there is no resource type, no build command, no trace command, and no SBT management.
+**GFX-3a — RT command recording foundation — complete**
 
-- [ ] Add `AccelerationStructure` resource type to `ResourceRegistry`: backed by `vk::AccelerationStructureKHR` + its own `vk::Buffer` allocation (separate from the main allocator pool — AS memory has special alignment requirements).
-- [ ] Add `PassWork::BuildBlas(BlasBuildDesc)` and `PassWork::BuildTlas(TlasBuildDesc)`. The render graph compiler treats AS builds as compute-queue passes with UAV dependencies on source geometry buffers. Add `RgState::AccelerationStructureBuild` to the state enum.
-- [ ] `BlasBuildDesc`: geometry inputs (vertex buffer handle, index buffer handle, vertex format, stride, transform buffer), build mode (Build / Update / Compact), scratch buffer (auto-allocated from a per-frame scratch pool).
-- [ ] `TlasBuildDesc`: instance buffer handle (array of `VkAccelerationStructureInstanceKHR`), scratch buffer, update-in-place flag.
-- [ ] Add `PassWork::TraceRays(TraceRaysDesc)` for dispatching ray tracing pipelines.
-- [ ] `TraceRaysDesc`: ray tracing pipeline handle, `ShaderBindingTable` (holds handles for raygen, miss, hit groups, callable shaders), dispatch dimensions (width, height, depth).
-- [ ] Add `RayTracingPipeline` resource type; add `Engine::create_ray_tracing_pipeline(RayTracingPipelineDesc) -> RayTracingPipeline`. `RayTracingPipelineDesc` lists shader stages (raygen, miss, closest-hit, any-hit, intersection, callable) and hit groups.
-- [ ] `ShaderBindingTable` helper: allocates a strided `vk::Buffer` and fills it with the pipeline's shader group handles via `vkGetRayTracingShaderGroupHandlesKHR`. Auto-aligns to `VkPhysicalDeviceRayTracingPipelinePropertiesKHR::shaderGroupHandleAlignment`.
-- [ ] Mark `BackendFeatures::ray_tracing` as only `true` when command recording is actually functional (not just detected).
-- [ ] **Depends on**: GFX-1d (buffer device address). **Enables**: every RT visual feature.
+- [x] Add `AccelerationStructure` resource type to `ResourceRegistry`: backed by `vk::AccelerationStructureKHR` + its own `vk::Buffer` allocation.
+- [x] Add `Device::{create_acceleration_structure, destroy_acceleration_structure, acceleration_structure_desc}` and export `AccelerationStructureDesc` / `AccelerationStructureKind`.
+- [x] Add BLAS/TLAS build-size queries (`Device::{blas_build_sizes, tlas_build_sizes}`) so callers can allocate AS and scratch storage from driver-reported sizes.
+- [x] Add `PassWork::BuildBlas(BlasBuildDesc)` and `PassWork::BuildTlas(TlasBuildDesc)`. The render graph tracks AS build/read states and records Vulkan AS build commands.
+- [x] `BlasBuildDesc`: geometry inputs (vertex buffer handle, optional index buffer handle, vertex format, stride, transform buffer), build/update mode, optional caller-provided scratch buffer.
+- [x] `TlasBuildDesc`: instance buffer handle (array of `VkAccelerationStructureInstanceKHR`), build/update mode, optional caller-provided scratch buffer.
+- [x] Add `PassWork::TraceRays(TraceRaysDesc)` for dispatching ray tracing pipelines.
+- [x] `TraceRaysDesc`: ray tracing pipeline handle, `ShaderBindingTable` regions for raygen/miss/hit/callable, dispatch dimensions (width, height, depth).
+- [x] Add `RayTracingPipelineDesc`; add `Device::create_ray_tracing_pipeline(RayTracingPipelineDesc) -> PipelineHandle`. `RayTracingPipelineDesc` lists shader stages and shader groups.
+- [x] Mark `BackendFeatures::ray_tracing` as true only when the logical device actually enabled `VK_KHR_ray_tracing_pipeline`.
+- [x] `ShaderBindingTable` helper: allocate a strided buffer and fill it with the pipeline's shader group handles via `vkGetRayTracingShaderGroupHandlesKHR`. Auto-align to `VkPhysicalDeviceRayTracingPipelinePropertiesKHR` handle/base alignment. `TraceRaysDesc` still accepts caller-provided SBT regions for advanced/manual layouts.
+- [x] Per-frame AS scratch allocator: auto-allocate transient scratch buffers from build-size queries when BLAS/TLAS descriptors omit `scratch_buffer`.
+- [x] AS compaction command path: `AccelerationStructureBuildMode::Compact` records `vkCmdCopyAccelerationStructureKHR(... COMPACT)` and requires a source AS.
+- [x] **Depends on**: GFX-1d (buffer device address). **Enables**: every RT visual feature.
 
-**GFX-3b — Inline ray queries (`VK_KHR_ray_query`)**
+**GFX-3b — Inline ray queries (`VK_KHR_ray_query`) — complete**
 
 Traces rays from any shader stage without a separate RT pipeline. Simpler than full RT pipelines for AO and shadow rays — many RT AO and hard shadow implementations only need this.
 
-- [ ] Detect `VK_KHR_ray_query`; add `BackendFeatures::ray_query`.
-- [ ] Enable `VkPhysicalDeviceRayQueryFeaturesKHR::rayQuery = VK_TRUE` in device creation.
-- [ ] No new command recording required — ray queries work via SPIR-V instructions in any existing shader stage. Expose `ShaderDesc::requires_ray_query: bool` so the pipeline builder enables the `RayQueryKHR` SPIR-V capability when compiling that shader.
-- [ ] **Simpler path than GFX-3a** for AO and hard shadows. Implement this first.
+- [x] Detect `VK_KHR_ray_query`; add `BackendFeatures::ray_query`.
+- [x] Enable `VkPhysicalDeviceRayQueryFeaturesKHR::rayQuery = VK_TRUE` in device creation when requested.
+- [x] Add portable `DeviceFeature::RayQuery`.
+- [x] No new command recording required — ray queries work via SPIR-V instructions in any existing shader stage. Expose `ShaderDesc::requires_ray_query: bool`; device-side validation rejects shaders that require ray query when the backend did not enable it.
+- [x] **Simpler path than GFX-3a** for AO and hard shadows. Implement this first.
 
 **GFX-3c — RT acceleration structure enhancements**
 
-- [ ] Detect `VK_KHR_ray_tracing_position_fetch`; when available, add `VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR` to BLAS build flags. Exposes `gl_HitTriangleVertexPositionsEXT` in hit shaders — eliminates the vertex buffer fetch in closest-hit shaders.
-- [ ] Detect `VK_KHR_ray_tracing_maintenance1`; add `BackendFeatures::ray_tracing_maintenance1`. Enables `vkCmdTraceRaysIndirectKHR2` with an SBT in a buffer (needed for GPU-driven RT dispatch from Track 7g and Track GI).
+- [x] Detect `VK_KHR_ray_tracing_position_fetch`; add `BackendFeatures::ray_tracing_position_fetch`.
+- [x] Detect `VK_KHR_ray_tracing_maintenance1`; add `BackendFeatures::ray_tracing_maintenance1`.
+- [x] When `VK_KHR_ray_tracing_position_fetch` is enabled, add `VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR` to BLAS build flags. Exposes `gl_HitTriangleVertexPositionsEXT` in hit shaders — eliminates the vertex buffer fetch in closest-hit shaders.
+- [ ] Add `vkCmdTraceRaysIndirectKHR2` support when `VK_KHR_ray_tracing_maintenance1` is enabled, with an SBT in a buffer (needed for GPU-driven RT dispatch from Track 7g and Track GI).
 - [ ] Detect `VK_KHR_pipeline_library` (already requested alongside RT in `device.rs`); expose `RayTracingPipelineDesc::use_pipeline_libraries: bool`. Pre-compile hit group shader libraries once per material; link them into per-scene RT pipelines at TLAS build time instead of recompiling on every material combination change.
-- [ ] Detect `VK_EXT_opacity_micromap`; add `BackendFeatures::opacity_micromap`. Expose `MicromapBuildDesc` for building per-subtriangle opacity micromaps from source triangle data; expose an `AttachMicromap` option in `BlasBuildDesc`. Eliminates any-hit shader invocations for fully opaque or fully transparent sub-triangles — critical for alpha-tested foliage.
-- [ ] Detect `VK_EXT_ray_tracing_invocation_reorder` (Shader Execution Reordering, SER); add `BackendFeatures::shader_execution_reordering`. Expose `ShaderDesc::uses_ser: bool` to enable the `ShaderInvocationReorderNV` SPIR-V capability. SER reorders ray invocations across a warp to reduce divergence — 30–60% throughput uplift on complex scenes with many materials.
-- [ ] Detect `VK_NV_cluster_acceleration_structure` (NVIDIA Mega Geometry); add `BackendFeatures::cluster_acceleration_structure`. Exposes cluster-based AS build and traversal for scenes with billions of micro-triangles. Required for the NVIDIA path in Track 7g.
+- [x] Detect `VK_EXT_opacity_micromap`; add `BackendFeatures::opacity_micromap`.
+- [ ] Expose `MicromapBuildDesc` for building per-subtriangle opacity micromaps from source triangle data; expose an `AttachMicromap` option in `BlasBuildDesc`. Eliminates any-hit shader invocations for fully opaque or fully transparent sub-triangles — critical for alpha-tested foliage.
+- [x] Detect `VK_EXT_ray_tracing_invocation_reorder` (Shader Execution Reordering, SER); add `BackendFeatures::shader_execution_reordering`.
+- [ ] Expose `ShaderDesc::uses_ser: bool` to enable the `ShaderInvocationReorderNV` SPIR-V capability. SER reorders ray invocations across a warp to reduce divergence — 30–60% throughput uplift on complex scenes with many materials.
+- [x] Detect `VK_NV_cluster_acceleration_structure` (NVIDIA Mega Geometry); add `BackendFeatures::cluster_acceleration_structure`.
+- [ ] Expose cluster-based AS build and traversal for scenes with billions of micro-triangles. Required for the NVIDIA path in Track 7g.
 
 ---
 

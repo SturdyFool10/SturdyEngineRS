@@ -2,7 +2,7 @@
 /target/
 
 # AI session data and memory
-.claude/
+.claude/**
 .codex
 
 # cbindgen-generated C header

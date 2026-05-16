@@ -5,6 +5,7 @@
 //! intentionally has no C ABI concerns and no high-level ergonomic wrappers.
 #![allow(dead_code)]
 
+pub mod acceleration_structure;
 pub mod adapter_info;
 pub mod adapter_kind;
 pub mod adapter_selection;
@@ -19,9 +20,12 @@ pub mod external_resource;
 pub mod gpu_capture;
 pub mod handles;
 pub mod image;
+pub mod indirect_commands;
+pub mod latency;
 pub mod limits;
 pub mod memory_budget;
 pub mod native_handles;
+pub mod optical_flow;
 pub mod pipeline;
 pub mod push_constants;
 pub mod raw_capabilities;
@@ -31,7 +35,11 @@ pub mod sampler;
 pub mod shader;
 pub mod slang;
 pub mod surface;
+pub mod video;
 
+pub use acceleration_structure::{
+    AccelerationStructureBuildSizes, AccelerationStructureDesc, AccelerationStructureKind,
+};
 pub use adapter_info::AdapterInfo;
 pub use adapter_kind::AdapterKind;
 pub use adapter_selection::AdapterSelection;
@@ -52,8 +60,9 @@ pub use external_resource::{
 pub use gpu_capture::{GpuCaptureDesc, GpuCaptureTool};
 pub use handles::{
     AccelerationStructureHandle, BindGroupHandle, BufferHandle, DeviceHandle, FrameHandle,
-    ImageHandle, PassHandle, PipelineHandle, PipelineLayoutHandle, SamplerHandle, ShaderHandle,
-    SubmissionHandle, SurfaceHandle,
+    ImageHandle, IndirectCommandLayoutHandle, OpticalFlowSessionHandle, PassHandle, PipelineHandle,
+    PipelineLayoutHandle, SamplerHandle, ShaderHandle, SubmissionHandle, SurfaceHandle,
+    VideoSessionHandle,
 };
 pub use image::{
     Extent3d, Format, FormatCapabilities, ImageBuilder, ImageClearValue, ImageDesc, ImageDimension,
@@ -71,12 +80,24 @@ pub use pipeline::{
     VertexInputRate,
 };
 pub use push_constants::PushConstants;
-pub use ray_tracing_pipeline::{RayTracingPipelineDesc, RayTracingStageDesc, RtShaderGroupDesc, RtShaderGroupKind};
 pub use raw_capabilities::{
     BackendRawCapabilities, D3d12RawCapabilities, MetalRawCapabilities, VulkanRawCapabilities,
 };
+pub use indirect_commands::{
+    DgcExecuteDesc, DgcPreprocessDesc, IndirectCommandLayoutDesc, IndirectCommandToken,
+};
+pub use latency::{AntiLagMode, LatencyMode, ReflexMode};
+pub use optical_flow::{OpticalFlowEstimateDesc, OpticalFlowSessionDesc};
+pub use ray_tracing_pipeline::{
+    RayTracingPipelineDesc, RayTracingStageDesc, RtShaderGroupDesc, RtShaderGroupKind,
+    ShaderBindingTableDesc, ShaderBindingTableProperties,
+};
+pub use video::{
+    BitRateControl, DecodeFrameDesc, EncodeFrameDesc, QualityPreset, VideoCodec, VideoEncodeConfig,
+    VideoSessionDesc, VideoSessionKind,
+};
 pub use render_graph::{
-    Access, AccelerationStructureBuildMode, AliasPlan, Barrier, BlasGeometryDesc, BlasBuildDesc,
+    AccelerationStructureBuildMode, Access, AliasPlan, Barrier, BlasBuildDesc, BlasGeometryDesc,
     BufferBarrier, BufferStateKey, BufferUse, CompiledGraph, CopyBufferToImageDesc,
     CopyImageToBufferDesc, DispatchDesc, DispatchIndirectDesc, DrawDesc, DrawIndirectCountDesc,
     DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, ImageBarrier, ImageStateKey,

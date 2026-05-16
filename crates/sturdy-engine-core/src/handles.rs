@@ -52,6 +52,15 @@ pub struct SurfaceHandle(pub u64);
 #[derive(Copy, Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SubmissionHandle(pub u64);
 
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct VideoSessionHandle(pub u64);
+
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct IndirectCommandLayoutHandle(pub u64);
+
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct OpticalFlowSessionHandle(pub u64);
+
 #[derive(Debug, Default)]
 pub(crate) struct HandleAllocator {
     next: u64,

@@ -17,14 +17,18 @@ pub struct VulkanAccelerationStructure {
     pub allocation: Allocation,
 }
 
+pub struct VulkanScratchBuffer {
+    pub buffer: vk::Buffer,
+    pub allocation: Allocation,
+}
+
 pub struct ResourceRegistry {
     allocator: GpuAllocator,
     images: HashMap<ImageHandle, VulkanImage>,
     image_views: Mutex<HashMap<ImageViewKey, vk::ImageView>>,
     buffers: HashMap<BufferHandle, VulkanBuffer>,
     samplers: HashMap<SamplerHandle, vk::Sampler>,
-    acceleration_structures:
-        HashMap<AccelerationStructureHandle, VulkanAccelerationStructure>,
+    acceleration_structures: HashMap<AccelerationStructureHandle, VulkanAccelerationStructure>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
@@ -512,7 +516,11 @@ impl ResourceRegistry {
         Ok(())
     }
 
-    pub fn destroy_all(&mut self, device: &Device) {
+    pub fn destroy_all(
+        &mut self,
+        device: &Device,
+        as_ext: Option<&ash::khr::acceleration_structure::Device>,
+    ) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         for (_, view) in self
             .image_views
@@ -547,6 +555,17 @@ impl ResourceRegistry {
             unsafe {
                 device.destroy_sampler(sampler, None);
             }
+        }
+        for (_, entry) in self.acceleration_structures.drain() {
+            if let Some(as_ext) = as_ext {
+                unsafe {
+                    as_ext.destroy_acceleration_structure(entry.acceleration_structure, None);
+                }
+            }
+            unsafe {
+                device.destroy_buffer(entry.buffer, None);
+            }
+            let _ = self.allocator.dealloc(device, entry.allocation);
         }
         self.allocator.destroy_all(device);
     }
@@ -644,11 +663,7 @@ impl ResourceRegistry {
     }
 
     /// Return the `VkDeviceAddress` of a buffer (base address, offset = 0).
-    pub fn buffer_device_address_raw(
-        &self,
-        device: &Device,
-        handle: BufferHandle,
-    ) -> Result<u64> {
+    pub fn buffer_device_address_raw(&self, device: &Device, handle: BufferHandle) -> Result<u64> {
         let buf = self.buffers.get(&handle).ok_or(Error::InvalidHandle)?;
         let info = vk::BufferDeviceAddressInfo::default().buffer(buf.buffer);
         let base = unsafe { device.get_buffer_device_address(&info) };
@@ -668,6 +683,76 @@ impl ResourceRegistry {
         offset: u64,
     ) -> Result<u64> {
         Ok(self.buffer_device_address_raw(device, handle)? + offset)
+    }
+
+    pub fn create_scratch_buffer(
+        &mut self,
+        device: &Device,
+        size: u64,
+    ) -> Result<VulkanScratchBuffer> {
+        if size == 0 {
+            return Err(Error::InvalidInput(
+                "scratch buffer size must be non-zero".into(),
+            ));
+        }
+        let info = vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let buffer = unsafe {
+            device
+                .create_buffer(&info, None)
+                .map_err(|e| Error::Backend(format!("vkCreateBuffer (AS scratch) failed: {e:?}")))?
+        };
+        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+        let allocation =
+            match self
+                .allocator
+                .alloc(device, requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            {
+                Ok(allocation) => allocation,
+                Err(error) => {
+                    unsafe { device.destroy_buffer(buffer, None) };
+                    return Err(error);
+                }
+            };
+        if let Err(error) =
+            unsafe { device.bind_buffer_memory(buffer, allocation.memory, allocation.offset) }
+        {
+            let _ = self.allocator.dealloc(device, allocation);
+            unsafe { device.destroy_buffer(buffer, None) };
+            return Err(Error::Backend(format!(
+                "vkBindBufferMemory (AS scratch) failed: {error:?}"
+            )));
+        }
+        Ok(VulkanScratchBuffer { buffer, allocation })
+    }
+
+    pub fn destroy_scratch_buffer(
+        &mut self,
+        device: &Device,
+        scratch: VulkanScratchBuffer,
+    ) -> Result<()> {
+        unsafe {
+            device.destroy_buffer(scratch.buffer, None);
+        }
+        self.allocator.dealloc(device, scratch.allocation)
+    }
+
+    pub fn scratch_buffer_device_address(
+        device: &Device,
+        scratch: &VulkanScratchBuffer,
+    ) -> Result<u64> {
+        let info = vk::BufferDeviceAddressInfo::default().buffer(scratch.buffer);
+        let base = unsafe { device.get_buffer_device_address(&info) };
+        if base == 0 {
+            return Err(Error::Backend(
+                "vkGetBufferDeviceAddress returned 0 for AS scratch buffer".into(),
+            ));
+        }
+        Ok(base)
     }
 
     /// Look up a `VkAccelerationStructureKHR` by handle.
@@ -703,20 +788,20 @@ impl ResourceRegistry {
                 .map_err(|e| Error::Backend(format!("vkCreateBuffer (AS) failed: {e:?}")))?
         };
         let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-        let allocation = match self.allocator.alloc(
-            device,
-            requirements,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-        ) {
-            Ok(a) => a,
-            Err(e) => {
-                unsafe { device.destroy_buffer(buffer, None) };
-                return Err(e);
-            }
-        };
-        if let Err(e) = unsafe {
-            device.bind_buffer_memory(buffer, allocation.memory, allocation.offset)
-        } {
+        let allocation =
+            match self
+                .allocator
+                .alloc(device, requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            {
+                Ok(a) => a,
+                Err(e) => {
+                    unsafe { device.destroy_buffer(buffer, None) };
+                    return Err(e);
+                }
+            };
+        if let Err(e) =
+            unsafe { device.bind_buffer_memory(buffer, allocation.memory, allocation.offset) }
+        {
             let _ = self.allocator.dealloc(device, allocation);
             unsafe { device.destroy_buffer(buffer, None) };
             return Err(Error::Backend(format!(
@@ -728,18 +813,17 @@ impl ResourceRegistry {
             .offset(0)
             .size(size)
             .ty(ty);
-        let acceleration_structure = match unsafe {
-            as_ext.create_acceleration_structure(&as_info, None)
-        } {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = self.allocator.dealloc(device, allocation);
-                unsafe { device.destroy_buffer(buffer, None) };
-                return Err(Error::Backend(format!(
-                    "vkCreateAccelerationStructureKHR failed: {e:?}"
-                )));
-            }
-        };
+        let acceleration_structure =
+            match unsafe { as_ext.create_acceleration_structure(&as_info, None) } {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = self.allocator.dealloc(device, allocation);
+                    unsafe { device.destroy_buffer(buffer, None) };
+                    return Err(Error::Backend(format!(
+                        "vkCreateAccelerationStructureKHR failed: {e:?}"
+                    )));
+                }
+            };
         self.acceleration_structures.insert(
             handle,
             VulkanAccelerationStructure {

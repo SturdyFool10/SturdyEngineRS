@@ -7,15 +7,18 @@ use crate::backend::factory::create_backend;
 use crate::backend::{Backend, BackendKind, factory};
 use crate::handles::HandleAllocator;
 use crate::{
-    AdapterInfo, AdapterSelection, BackendRawCapabilities, BindGroupDesc, BindGroupHandle,
-    BindingKind, BufferDesc, BufferHandle, BufferStateKey, BufferUsage, CanonicalGroupLayout,
-    CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error, ExternalBufferDesc,
-    ExternalImageDesc, Format, FormatCapabilities, FrameHandle, GpuCaptureDesc, GpuCaptureTool,
-    GraphicsPipelineDesc, ImageDesc, ImageHandle, ImageStateKey, NativeHandleCapabilities,
-    PipelineHandle, PipelineLayoutHandle, RayTracingPipelineDesc, RenderGraph, ResourceBinding,
-    Result, RgState, SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection,
-    ShaderSource, StageMask, SubmissionHandle, SurfaceCapabilities, SurfaceEvent, SurfaceHandle,
-    SurfaceHdrCaps, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
+    AccelerationStructureBuildSizes, AccelerationStructureDesc, AccelerationStructureHandle,
+    AdapterInfo, AdapterSelection, AntiLagMode, BackendRawCapabilities, BindGroupDesc,
+    BindGroupHandle, BindingKind, BlasBuildDesc, BufferDesc, BufferHandle, BufferStateKey,
+    BufferUsage, CanonicalGroupLayout, CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error,
+    ExternalBufferDesc, ExternalImageDesc, Format, FormatCapabilities, FrameHandle, GpuCaptureDesc,
+    GpuCaptureTool, GraphicsPipelineDesc, ImageDesc, ImageHandle, ImageStateKey, LatencyMode,
+    NativeHandleCapabilities, PipelineHandle, PipelineLayoutHandle, RayTracingPipelineDesc,
+    ReflexMode, RenderGraph, ResourceBinding, Result, RgState, SamplerDesc, SamplerHandle,
+    ShaderBindingTable, ShaderBindingTableDesc, ShaderBindingTableRegion, ShaderDesc, ShaderHandle,
+    ShaderReflection, ShaderSource, StageMask, SubmissionHandle, SurfaceCapabilities, SurfaceEvent,
+    SurfaceHandle, SurfaceHdrCaps, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize, TlasBuildDesc,
+    VideoSessionDesc, VideoSessionHandle,
 };
 
 #[derive(Clone, Debug)]
@@ -39,6 +42,7 @@ pub struct DeviceDesc {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum DeviceFeature {
     RayTracing,
+    RayQuery,
     MeshShading,
     BindlessResources,
     BufferDeviceAddress,
@@ -53,6 +57,7 @@ impl DeviceFeature {
     pub const fn backend_feature_names(self) -> &'static [&'static str] {
         match self {
             Self::RayTracing => &["ray_tracing"],
+            Self::RayQuery => &["ray_query"],
             Self::MeshShading => &["mesh_shading"],
             Self::BindlessResources => &["bindless_resources"],
             Self::BufferDeviceAddress => &["buffer_device_address"],
@@ -161,17 +166,20 @@ pub struct Device {
 enum DeferredDestroy {
     Image(ImageHandle),
     Buffer(BufferHandle),
+    AccelerationStructure(AccelerationStructureHandle),
     Sampler(SamplerHandle),
     Shader(ShaderHandle),
     Pipeline(PipelineHandle),
     PipelineLayout(PipelineLayoutHandle),
     BindGroup(BindGroupHandle),
+    VideoSession(VideoSessionHandle),
 }
 
 struct DeviceInner {
     backend: Box<dyn Backend>,
     images: HashMap<ImageHandle, ImageDesc>,
     buffers: HashMap<BufferHandle, BufferDesc>,
+    acceleration_structures: HashMap<AccelerationStructureHandle, AccelerationStructureDesc>,
     image_states: HashMap<ImageStateKey, RgState>,
     buffer_states: HashMap<BufferStateKey, RgState>,
     samplers: HashMap<SamplerHandle, SamplerDesc>,
@@ -199,6 +207,7 @@ struct DeviceInner {
     pending_transient_destroys: Vec<ImageHandle>,
     image_handles: HandleAllocator,
     buffer_handles: HandleAllocator,
+    acceleration_structure_handles: HandleAllocator,
     sampler_handles: HandleAllocator,
     shader_handles: HandleAllocator,
     pipeline_layout_handles: HandleAllocator,
@@ -206,6 +215,8 @@ struct DeviceInner {
     bind_group_handles: HandleAllocator,
     surface_handles: HandleAllocator,
     frame_handles: HandleAllocator,
+    video_sessions: HashMap<VideoSessionHandle, VideoSessionDesc>,
+    video_session_handles: HandleAllocator,
 }
 
 struct SurfaceState {
@@ -222,6 +233,7 @@ impl Device {
                 backend,
                 images: HashMap::new(),
                 buffers: HashMap::new(),
+                acceleration_structures: HashMap::new(),
                 image_states: HashMap::new(),
                 buffer_states: HashMap::new(),
                 samplers: HashMap::new(),
@@ -237,6 +249,7 @@ impl Device {
                 pending_transient_destroys: Vec::new(),
                 image_handles: HandleAllocator::default(),
                 buffer_handles: HandleAllocator::default(),
+                acceleration_structure_handles: HandleAllocator::default(),
                 sampler_handles: HandleAllocator::default(),
                 shader_handles: HandleAllocator::default(),
                 pipeline_layout_handles: HandleAllocator::default(),
@@ -244,6 +257,8 @@ impl Device {
                 bind_group_handles: HandleAllocator::default(),
                 surface_handles: HandleAllocator::default(),
                 frame_handles: HandleAllocator::default(),
+                video_sessions: HashMap::new(),
+                video_session_handles: HandleAllocator::default(),
             })),
         })
     }
@@ -582,6 +597,97 @@ impl Device {
         inner.backend.buffer_device_address(handle)
     }
 
+    pub fn create_acceleration_structure(
+        &self,
+        desc: AccelerationStructureDesc,
+    ) -> Result<AccelerationStructureHandle> {
+        desc.validate()?;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.backend.caps().features.ray_tracing && !inner.backend.caps().features.ray_query {
+            return Err(Error::Unsupported(
+                "acceleration structures require ray_tracing or ray_query backend support".into(),
+            ));
+        }
+        let handle = AccelerationStructureHandle(inner.acceleration_structure_handles.alloc());
+        inner.backend.create_acceleration_structure(handle, desc)?;
+        inner.acceleration_structures.insert(handle, desc);
+        Ok(handle)
+    }
+
+    pub fn destroy_acceleration_structure(
+        &self,
+        handle: AccelerationStructureHandle,
+    ) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        let _desc = inner
+            .acceleration_structures
+            .remove(&handle)
+            .ok_or(Error::InvalidHandle)?;
+        inner
+            .deferred_destroys
+            .push(DeferredDestroy::AccelerationStructure(handle));
+        Ok(())
+    }
+
+    pub fn acceleration_structure_desc(
+        &self,
+        handle: AccelerationStructureHandle,
+    ) -> Result<AccelerationStructureDesc> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        inner
+            .acceleration_structures
+            .get(&handle)
+            .copied()
+            .ok_or(Error::InvalidHandle)
+    }
+
+    pub fn blas_build_sizes(
+        &self,
+        desc: &BlasBuildDesc,
+    ) -> Result<AccelerationStructureBuildSizes> {
+        validate_blas_build_desc(desc)?;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        validate_as_handle(&inner, desc.dst)?;
+        if let Some(src) = desc.src {
+            validate_as_handle(&inner, src)?;
+        }
+        for geometry in &desc.geometries {
+            validate_buffer_handle(&inner, geometry.vertex_buffer)?;
+            if let Some(index_buffer) = geometry.index_buffer {
+                validate_buffer_handle(&inner, index_buffer)?;
+            }
+            if let Some(transform_buffer) = geometry.transform_buffer {
+                validate_buffer_handle(&inner, transform_buffer)?;
+            }
+        }
+        if let Some(scratch) = desc.scratch_buffer {
+            validate_buffer_handle(&inner, scratch)?;
+        }
+        inner.backend.blas_build_sizes(desc)
+    }
+
+    pub fn tlas_build_sizes(
+        &self,
+        desc: &TlasBuildDesc,
+    ) -> Result<AccelerationStructureBuildSizes> {
+        validate_tlas_build_desc(desc)?;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        validate_as_handle(&inner, desc.dst)?;
+        if let Some(src) = desc.src {
+            validate_as_handle(&inner, src)?;
+        }
+        validate_buffer_handle(&inner, desc.instance_buffer)?;
+        if let Some(scratch) = desc.scratch_buffer {
+            validate_buffer_handle(&inner, scratch)?;
+        }
+        inner.backend.tlas_build_sizes(desc)
+    }
+
     pub fn create_sampler(&self, desc: SamplerDesc) -> Result<SamplerHandle> {
         desc.validate()?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
@@ -897,15 +1003,119 @@ impl Device {
             layout: Some(layout_handle),
             ..desc
         };
+        let group_count = resolved.groups.len() as u32;
         let handle = PipelineHandle(inner.pipeline_handles.alloc());
-        inner.backend.create_ray_tracing_pipeline(handle, &resolved)?;
+        inner
+            .backend
+            .create_ray_tracing_pipeline(handle, &resolved)?;
         // RT pipelines do not auto-create a layout, so owned_layout is always None here
         // (the layout was externally supplied).
         inner.pipelines.insert(
             handle,
-            PipelineDesc::RayTracing { owned_layout: None },
+            PipelineDesc::RayTracing {
+                group_count,
+                owned_layout: None,
+            },
         );
         Ok(handle)
+    }
+
+    pub fn create_shader_binding_table(
+        &self,
+        desc: ShaderBindingTableDesc,
+    ) -> Result<ShaderBindingTable> {
+        let (props, handles) = {
+            //panic allowed, reason = "poisoned mutex is unrecoverable"
+            let inner = self.inner.lock().expect("device mutex poisoned");
+            if !inner.backend.caps().features.ray_tracing {
+                return Err(Error::Unsupported(
+                    "shader binding tables require BackendFeatures::ray_tracing".into(),
+                ));
+            }
+            let group_count = match inner.pipelines.get(&desc.pipeline) {
+                Some(PipelineDesc::RayTracing { group_count, .. }) => *group_count,
+                Some(_) => {
+                    return Err(Error::InvalidInput(
+                        "shader binding table requires a ray-tracing pipeline".into(),
+                    ));
+                }
+                None => return Err(Error::InvalidHandle),
+            };
+            validate_sbt_groups(&desc, group_count)?;
+            let props = inner.backend.shader_binding_table_properties()?;
+            validate_sbt_properties(props)?;
+            let handles = collect_sbt_group_handles(&*inner.backend, &desc, props)?;
+            (props, handles)
+        };
+
+        let layout = SbtLayout::new(&desc, props)?;
+        let mut data = vec![0u8; layout.total_size as usize];
+        write_sbt_region(
+            &mut data,
+            layout.raygen_offset,
+            layout.stride,
+            props.shader_group_handle_size,
+            &handles.raygen,
+        );
+        write_sbt_region(
+            &mut data,
+            layout.miss_offset,
+            layout.stride,
+            props.shader_group_handle_size,
+            &handles.miss,
+        );
+        write_sbt_region(
+            &mut data,
+            layout.hit_offset,
+            layout.stride,
+            props.shader_group_handle_size,
+            &handles.hit,
+        );
+        write_sbt_region(
+            &mut data,
+            layout.callable_offset,
+            layout.stride,
+            props.shader_group_handle_size,
+            &handles.callable,
+        );
+
+        let buffer = self.create_buffer(BufferDesc {
+            size: layout.total_size,
+            usage: BufferUsage::COPY_SRC
+                | BufferUsage::STORAGE
+                | BufferUsage::SHADER_DEVICE_ADDRESS,
+        })?;
+        if let Err(error) = self.write_buffer(buffer, 0, &data) {
+            let _ = self.destroy_buffer(buffer);
+            return Err(error);
+        }
+
+        Ok(ShaderBindingTable {
+            raygen: ShaderBindingTableRegion {
+                buffer,
+                offset: layout.raygen_offset,
+                stride: layout.stride,
+                size: layout.raygen_size,
+            },
+            miss: ShaderBindingTableRegion {
+                buffer,
+                offset: layout.miss_offset,
+                stride: layout.stride,
+                size: layout.miss_size,
+            },
+            hit: ShaderBindingTableRegion {
+                buffer,
+                offset: layout.hit_offset,
+                stride: layout.stride,
+                size: layout.hit_size,
+            },
+            callable: (!desc.callable_groups.is_empty()).then_some(ShaderBindingTableRegion {
+                buffer,
+                offset: layout.callable_offset,
+                stride: layout.stride,
+                size: layout.callable_size,
+            }),
+        })
     }
 
     pub fn set_image_debug_name(&self, handle: ImageHandle, name: &str) -> Result<()> {
@@ -1145,6 +1355,61 @@ impl Device {
             .backend
             .wait_idle()
     }
+
+    // ── GFX-4: Video encode/decode ────────────────────────────────────────────
+
+    pub fn create_video_session(&self, desc: VideoSessionDesc) -> Result<VideoSessionHandle> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.backend.caps().features.video_queue {
+            return Err(Error::Unsupported(
+                "video sessions require BackendFeatures::video_queue".into(),
+            ));
+        }
+        let handle = VideoSessionHandle(inner.video_session_handles.alloc());
+        inner.backend.create_video_session(handle, desc)?;
+        inner.video_sessions.insert(handle, desc);
+        Ok(handle)
+    }
+
+    pub fn destroy_video_session(&self, handle: VideoSessionHandle) {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        if inner.video_sessions.remove(&handle).is_some() {
+            inner
+                .deferred_destroys
+                .push(DeferredDestroy::VideoSession(handle));
+        }
+    }
+
+    // ── GFX-6b: Latency reduction ─────────────────────────────────────────────
+
+    pub fn set_reflex_mode(&self, mode: ReflexMode) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .set_reflex_mode(mode)
+    }
+
+    pub fn set_anti_lag_mode(&self, mode: AntiLagMode) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .set_anti_lag_mode(mode)
+    }
+
+    pub fn latency_mode(&self) -> Option<LatencyMode> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .latency_mode()
+    }
 }
 
 impl DeviceInner {
@@ -1239,6 +1504,7 @@ enum PipelineDesc {
         owned_layout: Option<PipelineLayoutHandle>,
     },
     RayTracing {
+        group_count: u32,
         owned_layout: Option<PipelineLayoutHandle>,
     },
 }
@@ -1248,7 +1514,7 @@ impl PipelineDesc {
         match self {
             PipelineDesc::Compute { owned_layout, .. } => *owned_layout,
             PipelineDesc::Graphics { owned_layout, .. } => *owned_layout,
-            PipelineDesc::RayTracing { owned_layout } => *owned_layout,
+            PipelineDesc::RayTracing { owned_layout, .. } => *owned_layout,
         }
     }
 }
@@ -1372,6 +1638,224 @@ fn merge_shader_layouts<const N: usize>(
     }
 }
 
+fn validate_buffer_handle(inner: &DeviceInner, handle: BufferHandle) -> Result<()> {
+    inner
+        .buffers
+        .contains_key(&handle)
+        .then_some(())
+        .ok_or(Error::InvalidHandle)
+}
+
+fn validate_as_handle(inner: &DeviceInner, handle: AccelerationStructureHandle) -> Result<()> {
+    inner
+        .acceleration_structures
+        .contains_key(&handle)
+        .then_some(())
+        .ok_or(Error::InvalidHandle)
+}
+
+struct SbtHandles {
+    raygen: Vec<Vec<u8>>,
+    miss: Vec<Vec<u8>>,
+    hit: Vec<Vec<u8>>,
+    callable: Vec<Vec<u8>>,
+}
+
+struct SbtLayout {
+    stride: u64,
+    total_size: u64,
+    raygen_offset: u64,
+    raygen_size: u64,
+    miss_offset: u64,
+    miss_size: u64,
+    hit_offset: u64,
+    hit_size: u64,
+    callable_offset: u64,
+    callable_size: u64,
+}
+
+impl SbtLayout {
+    fn new(
+        desc: &ShaderBindingTableDesc,
+        props: crate::ShaderBindingTableProperties,
+    ) -> Result<Self> {
+        let stride = align_up_u64(
+            props.shader_group_handle_size as u64,
+            props.shader_group_handle_alignment as u64,
+        )?;
+        if stride > props.max_shader_group_stride as u64 {
+            return Err(Error::InvalidInput(format!(
+                "shader binding table stride {stride} exceeds max shader group stride {}",
+                props.max_shader_group_stride
+            )));
+        }
+        let base_alignment = props.shader_group_base_alignment as u64;
+        let raygen_offset = 0;
+        let raygen_size = stride;
+        let miss_offset = align_up_u64(raygen_offset + raygen_size, base_alignment)?;
+        let miss_size = checked_region_size(desc.miss_groups.len(), stride, "miss")?;
+        let hit_offset = align_up_u64(miss_offset + miss_size, base_alignment)?;
+        let hit_size = checked_region_size(desc.hit_groups.len(), stride, "hit")?;
+        let callable_offset = align_up_u64(hit_offset + hit_size, base_alignment)?;
+        let callable_size = checked_region_size(desc.callable_groups.len(), stride, "callable")?;
+        let total_size = (callable_offset + callable_size).max(raygen_size);
+
+        Ok(Self {
+            stride,
+            total_size,
+            raygen_offset,
+            raygen_size,
+            miss_offset,
+            miss_size,
+            hit_offset,
+            hit_size,
+            callable_offset,
+            callable_size,
+        })
+    }
+}
+
+fn validate_sbt_groups(desc: &ShaderBindingTableDesc, group_count: u32) -> Result<()> {
+    let validate = |group: u32, label: &str| {
+        if group >= group_count {
+            return Err(Error::InvalidInput(format!(
+                "{label} shader group index {group} exceeds ray-tracing pipeline group count {group_count}"
+            )));
+        }
+        Ok(())
+    };
+    validate(desc.raygen_group, "raygen")?;
+    for &group in &desc.miss_groups {
+        validate(group, "miss")?;
+    }
+    for &group in &desc.hit_groups {
+        validate(group, "hit")?;
+    }
+    for &group in &desc.callable_groups {
+        validate(group, "callable")?;
+    }
+    Ok(())
+}
+
+fn validate_sbt_properties(props: crate::ShaderBindingTableProperties) -> Result<()> {
+    if props.shader_group_handle_size == 0
+        || props.shader_group_handle_alignment == 0
+        || props.shader_group_base_alignment == 0
+        || props.max_shader_group_stride == 0
+    {
+        return Err(Error::Backend(
+            "Vulkan returned invalid ray-tracing SBT properties".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn collect_sbt_group_handles(
+    backend: &dyn Backend,
+    desc: &ShaderBindingTableDesc,
+    props: crate::ShaderBindingTableProperties,
+) -> Result<SbtHandles> {
+    let handle_size = props.shader_group_handle_size as usize;
+    let fetch_one = |group| {
+        let handles = backend.ray_tracing_shader_group_handles(desc.pipeline, group, 1)?;
+        if handles.len() != handle_size {
+            return Err(Error::Backend(format!(
+                "expected ray-tracing shader group handle size {handle_size}, got {}",
+                handles.len()
+            )));
+        }
+        Ok(handles)
+    };
+    let collect_many =
+        |groups: &[u32]| groups.iter().copied().map(fetch_one).collect::<Result<_>>();
+
+    Ok(SbtHandles {
+        raygen: vec![fetch_one(desc.raygen_group)?],
+        miss: collect_many(&desc.miss_groups)?,
+        hit: collect_many(&desc.hit_groups)?,
+        callable: collect_many(&desc.callable_groups)?,
+    })
+}
+
+fn write_sbt_region(
+    data: &mut [u8],
+    offset: u64,
+    stride: u64,
+    handle_size: u32,
+    handles: &[Vec<u8>],
+) {
+    let handle_size = handle_size as usize;
+    for (index, handle) in handles.iter().enumerate() {
+        let start = offset as usize + index * stride as usize;
+        data[start..start + handle_size].copy_from_slice(handle);
+    }
+}
+
+fn checked_region_size(group_count: usize, stride: u64, label: &str) -> Result<u64> {
+    (group_count as u64).checked_mul(stride).ok_or_else(|| {
+        Error::InvalidInput(format!(
+            "shader binding table {label} region size overflowed"
+        ))
+    })
+}
+
+fn align_up_u64(value: u64, alignment: u64) -> Result<u64> {
+    if alignment == 0 {
+        return Err(Error::InvalidInput("alignment must be non-zero".into()));
+    }
+    let add = alignment - 1;
+    let value = value
+        .checked_add(add)
+        .ok_or_else(|| Error::InvalidInput("alignment overflowed".into()))?;
+    Ok(value / alignment * alignment)
+}
+
+fn validate_blas_build_desc(desc: &BlasBuildDesc) -> Result<()> {
+    if desc.geometries.is_empty() {
+        return Err(Error::InvalidInput(
+            "BLAS build requires at least one geometry".into(),
+        ));
+    }
+    for geometry in &desc.geometries {
+        if geometry.vertex_count == 0 {
+            return Err(Error::InvalidInput(
+                "BLAS geometry vertex_count must be non-zero".into(),
+            ));
+        }
+        if geometry.vertex_stride == 0 {
+            return Err(Error::InvalidInput(
+                "BLAS geometry vertex_stride must be non-zero".into(),
+            ));
+        }
+        if geometry.index_buffer.is_some() {
+            if geometry.index_count == 0 || geometry.index_count % 3 != 0 {
+                return Err(Error::InvalidInput(
+                    "indexed BLAS geometry index_count must be a non-zero multiple of 3".into(),
+                ));
+            }
+            if geometry.index_format.is_none() {
+                return Err(Error::InvalidInput(
+                    "indexed BLAS geometry requires an index format".into(),
+                ));
+            }
+        } else if geometry.vertex_count % 3 != 0 {
+            return Err(Error::InvalidInput(
+                "non-indexed BLAS geometry vertex_count must be a multiple of 3".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_tlas_build_desc(desc: &TlasBuildDesc) -> Result<()> {
+    if desc.instance_count == 0 {
+        return Err(Error::InvalidInput(
+            "TLAS build instance_count must be non-zero".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_sample_count(samples: u8, max_supported: u8, label: &str) -> Result<()> {
     if !matches!(samples, 1 | 2 | 4 | 8 | 16) {
         return Err(Error::InvalidInput(format!(
@@ -1476,11 +1960,15 @@ impl Frame {
                 let _ = match item {
                     DeferredDestroy::Image(h) => inner.backend.destroy_image(h),
                     DeferredDestroy::Buffer(h) => inner.backend.destroy_buffer(h),
+                    DeferredDestroy::AccelerationStructure(h) => {
+                        inner.backend.destroy_acceleration_structure(h)
+                    }
                     DeferredDestroy::Sampler(h) => inner.backend.destroy_sampler(h),
                     DeferredDestroy::Shader(h) => inner.backend.destroy_shader(h),
                     DeferredDestroy::Pipeline(h) => inner.backend.destroy_pipeline(h),
                     DeferredDestroy::PipelineLayout(h) => inner.backend.destroy_pipeline_layout(h),
                     DeferredDestroy::BindGroup(h) => inner.backend.destroy_bind_group(h),
+                    DeferredDestroy::VideoSession(h) => inner.backend.destroy_video_session(h),
                 };
             }
 
@@ -1631,10 +2119,11 @@ mod tests {
     fn device_desc_accepts_portable_feature_policy() {
         let desc = DeviceDesc::default()
             .require_feature(DeviceFeature::RayTracing)
+            .require_feature(DeviceFeature::RayQuery)
             .prefer_feature(DeviceFeature::MeshShading)
             .disable_feature(DeviceFeature::VrsPipeline);
 
-        assert_eq!(desc.required_features, vec!["ray_tracing"]);
+        assert_eq!(desc.required_features, vec!["ray_tracing", "ray_query"]);
         assert_eq!(desc.optional_features, vec!["mesh_shading"]);
         assert_eq!(
             desc.disabled_features,
@@ -1714,5 +2203,56 @@ mod tests {
             .unwrap();
 
         assert_eq!(device.buffer_device_address(buffer).unwrap(), None);
+    }
+
+    #[test]
+    fn acceleration_structure_creation_requires_backend_support() {
+        let device = Device::create(DeviceDesc {
+            backend: BackendKind::Null,
+            ..DeviceDesc::default()
+        })
+        .unwrap();
+
+        let err = device
+            .create_acceleration_structure(AccelerationStructureDesc {
+                kind: crate::AccelerationStructureKind::BottomLevel,
+                size: 1024,
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Unsupported(_)));
+        assert!(format!("{err}").contains("acceleration structures"));
+    }
+
+    #[test]
+    fn shader_binding_table_layout_aligns_regions() {
+        let desc = ShaderBindingTableDesc {
+            pipeline: PipelineHandle(1),
+            raygen_group: 0,
+            miss_groups: vec![1, 2],
+            hit_groups: vec![3],
+            callable_groups: vec![4],
+        };
+        let layout = SbtLayout::new(
+            &desc,
+            crate::ShaderBindingTableProperties {
+                shader_group_handle_size: 24,
+                shader_group_handle_alignment: 16,
+                shader_group_base_alignment: 64,
+                max_shader_group_stride: 64,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(layout.stride, 32);
+        assert_eq!(layout.raygen_offset, 0);
+        assert_eq!(layout.raygen_size, 32);
+        assert_eq!(layout.miss_offset, 64);
+        assert_eq!(layout.miss_size, 64);
+        assert_eq!(layout.hit_offset, 128);
+        assert_eq!(layout.hit_size, 32);
+        assert_eq!(layout.callable_offset, 192);
+        assert_eq!(layout.callable_size, 32);
+        assert_eq!(layout.total_size, 224);
     }
 }

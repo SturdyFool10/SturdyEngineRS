@@ -148,7 +148,7 @@ impl ShaderProgram {
                     source: ShaderSource::Inline(source.to_owned()),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
-            requires_ray_query: false,
+                    requires_ray_query: false,
                 },
             },
         )
@@ -164,7 +164,7 @@ impl ShaderProgram {
                     source: ShaderSource::Inline(source.to_owned()),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Compute,
-            requires_ray_query: false,
+                    requires_ray_query: false,
                 },
             },
         )
@@ -198,7 +198,7 @@ impl ShaderProgram {
                     source,
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
-            requires_ray_query: false,
+                    requires_ray_query: false,
                 },
             },
         )?;
@@ -239,7 +239,7 @@ impl ShaderProgram {
                     source,
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Compute,
-            requires_ray_query: false,
+                    requires_ray_query: false,
                 },
             },
         )?;
@@ -438,6 +438,6 @@ fn default_vertex_desc() -> ShaderDesc {
         source: ShaderSource::Inline(FULLSCREEN_VERTEX_SHADER.to_owned()),
         entry_point: "main".to_owned(),
         stage: ShaderStage::Vertex,
-            requires_ray_query: false,
+        requires_ray_query: false,
     }
 }

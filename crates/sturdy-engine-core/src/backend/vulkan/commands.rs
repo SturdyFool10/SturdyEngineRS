@@ -15,7 +15,7 @@ use super::debug::DebugUtils;
 use super::descriptors::DescriptorRegistry;
 use super::pipelines::PipelineRegistry;
 use super::queues::{QueueFamilyMap, VulkanQueues, queue_family_index};
-use super::resources::ResourceRegistry;
+use super::resources::{ResourceRegistry, VulkanScratchBuffer};
 use batch_pool::BatchPool;
 
 /// Maximum number of render-graph passes we track per frame with GPU timestamps.
@@ -40,6 +40,7 @@ pub struct CommandContext {
     /// Per-pass GPU timings from the previous frame (name, milliseconds).
     /// Empty until the second `submit_graph` call (first readback).
     pub pass_timings: Vec<(String, f32)>,
+    acceleration_structure_scratch: Vec<VulkanScratchBuffer>,
 }
 
 impl CommandContext {
@@ -79,6 +80,7 @@ impl CommandContext {
             pending_pass_names: Vec::new(),
             pending_pass_count: 0,
             pass_timings: Vec::new(),
+            acceleration_structure_scratch: Vec::new(),
         })
     }
 
@@ -90,7 +92,7 @@ impl CommandContext {
         queues: VulkanQueues,
         queue_families: QueueFamilyMap,
         graph: &CompiledGraph,
-        resources: &ResourceRegistry,
+        resources: &mut ResourceRegistry,
         descriptors: &DescriptorRegistry,
         pipelines: &mut PipelineRegistry,
         debug: &DebugUtils,
@@ -100,6 +102,7 @@ impl CommandContext {
         dynamic_rendering: Option<&ash::khr::dynamic_rendering::Device>,
         as_khr: Option<&ash::khr::acceleration_structure::Device>,
         rt_khr: Option<&ash::khr::ray_tracing_pipeline::Device>,
+        ray_tracing_position_fetch: bool,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
     ) -> Result<SubmissionHandle> {
@@ -156,7 +159,13 @@ impl CommandContext {
                     device.destroy_semaphore(semaphore, None);
                 }
             }
+            for scratch in self.acceleration_structure_scratch.drain(..) {
+                resources.destroy_scratch_buffer(device, scratch)?;
+            }
             self.frame_submitted = false;
+        }
+        for scratch in self.acceleration_structure_scratch.drain(..) {
+            resources.destroy_scratch_buffer(device, scratch)?;
         }
 
         let num_batches = graph.batches.len().max(1);
@@ -273,6 +282,7 @@ impl CommandContext {
                             dynamic_rendering,
                             as_khr,
                             rt_khr,
+                            ray_tracing_position_fetch,
                         )?;
                         if !pass.name.is_empty() {
                             debug.end_region(cmd);
@@ -483,11 +493,11 @@ impl CommandContext {
     }
 
     fn record_pass(
-        &self,
+        &mut self,
         device: &Device,
         command_buffer: vk::CommandBuffer,
         pass: &PassDesc,
-        resources: &ResourceRegistry,
+        resources: &mut ResourceRegistry,
         descriptors: &DescriptorRegistry,
         pipelines: &mut PipelineRegistry,
         bindless: Option<BindlessVkInfo>,
@@ -496,6 +506,7 @@ impl CommandContext {
         dynamic_rendering: Option<&ash::khr::dynamic_rendering::Device>,
         as_khr: Option<&ash::khr::acceleration_structure::Device>,
         rt_khr: Option<&ash::khr::ray_tracing_pipeline::Device>,
+        ray_tracing_position_fetch: bool,
     ) -> Result<()> {
         let mut bound_pipeline = None;
         if let Some(pipeline) = pass.pipeline {
@@ -965,8 +976,8 @@ impl CommandContext {
                             base_array_layer: 0,
                             layer_count: 1,
                         })];
-                    let dep_info = vk::DependencyInfo::default()
-                        .image_memory_barriers(&src_barrier2);
+                    let dep_info =
+                        vk::DependencyInfo::default().image_memory_barriers(&src_barrier2);
                     s2.cmd_pipeline_barrier2(command_buffer, &dep_info);
 
                     for mip in 1..mips {
@@ -991,8 +1002,8 @@ impl CommandContext {
                                 base_array_layer: 0,
                                 layer_count: 1,
                             })];
-                        let dep_info = vk::DependencyInfo::default()
-                            .image_memory_barriers(&dst_barrier2);
+                        let dep_info =
+                            vk::DependencyInfo::default().image_memory_barriers(&dst_barrier2);
                         s2.cmd_pipeline_barrier2(command_buffer, &dep_info);
 
                         let blit = vk::ImageBlit::default()
@@ -1004,7 +1015,11 @@ impl CommandContext {
                             })
                             .src_offsets([
                                 vk::Offset3D { x: 0, y: 0, z: 0 },
-                                vk::Offset3D { x: src_w, y: src_h, z: 1 },
+                                vk::Offset3D {
+                                    x: src_w,
+                                    y: src_h,
+                                    z: 1,
+                                },
                             ])
                             .dst_subresource(vk::ImageSubresourceLayers {
                                 aspect_mask: aspect,
@@ -1014,7 +1029,11 @@ impl CommandContext {
                             })
                             .dst_offsets([
                                 vk::Offset3D { x: 0, y: 0, z: 0 },
-                                vk::Offset3D { x: dst_w, y: dst_h, z: 1 },
+                                vk::Offset3D {
+                                    x: dst_w,
+                                    y: dst_h,
+                                    z: 1,
+                                },
                             ]);
                         device.cmd_blit_image(
                             command_buffer,
@@ -1042,8 +1061,8 @@ impl CommandContext {
                                 base_array_layer: 0,
                                 layer_count: 1,
                             })];
-                        let dep_info = vk::DependencyInfo::default()
-                            .image_memory_barriers(&to_src2);
+                        let dep_info =
+                            vk::DependencyInfo::default().image_memory_barriers(&to_src2);
                         s2.cmd_pipeline_barrier2(command_buffer, &dep_info);
                     }
 
@@ -1066,8 +1085,8 @@ impl CommandContext {
                             base_array_layer: 0,
                             layer_count: 1,
                         })];
-                    let dep_info = vk::DependencyInfo::default()
-                        .image_memory_barriers(&final_barrier2);
+                    let dep_info =
+                        vk::DependencyInfo::default().image_memory_barriers(&final_barrier2);
                     s2.cmd_pipeline_barrier2(command_buffer, &dep_info);
                 } else {
                     // Legacy path.
@@ -1311,114 +1330,138 @@ impl CommandContext {
                     .src
                     .map(|h| resources.acceleration_structure(h))
                     .transpose()?;
-                let scratch_addr = if let Some(scratch) = build.scratch_buffer {
-                    resources.buffer_device_address_raw(device, scratch)?
+
+                if build.mode == AccelerationStructureBuildMode::Compact {
+                    let src_as = src_as.ok_or_else(|| {
+                        Error::InvalidInput(
+                            "BLAS compaction requires a source acceleration structure".into(),
+                        )
+                    })?;
+                    let info = vk::CopyAccelerationStructureInfoKHR::default()
+                        .src(src_as)
+                        .dst(dst_as)
+                        .mode(vk::CopyAccelerationStructureModeKHR::COMPACT);
+                    unsafe {
+                        as_ext.cmd_copy_acceleration_structure(command_buffer, &info);
+                    }
                 } else {
-                    return Err(Error::InvalidInput(
-                        "BLAS build requires a scratch buffer".into(),
-                    ));
-                };
+                    let geometries: Vec<vk::AccelerationStructureGeometryKHR> = build
+                        .geometries
+                        .iter()
+                        .map(|g| {
+                            let vertex_addr = resources.buffer_device_address_at(
+                                device,
+                                g.vertex_buffer,
+                                g.vertex_offset,
+                            )?;
+                            let index_data = if let Some(idx_buf) = g.index_buffer {
+                                vk::DeviceOrHostAddressConstKHR {
+                                    device_address: resources.buffer_device_address_at(
+                                        device,
+                                        idx_buf,
+                                        g.index_offset,
+                                    )?,
+                                }
+                            } else {
+                                vk::DeviceOrHostAddressConstKHR { device_address: 0 }
+                            };
+                            let transform_data = if let Some(tf_buf) = g.transform_buffer {
+                                vk::DeviceOrHostAddressConstKHR {
+                                    device_address: resources.buffer_device_address_at(
+                                        device,
+                                        tf_buf,
+                                        g.transform_offset,
+                                    )?,
+                                }
+                            } else {
+                                vk::DeviceOrHostAddressConstKHR { device_address: 0 }
+                            };
+                            let triangles =
+                                vk::AccelerationStructureGeometryTrianglesDataKHR::default()
+                                    .vertex_format(vk_vertex_format_for_as(g.vertex_format)?)
+                                    .vertex_data(vk::DeviceOrHostAddressConstKHR {
+                                        device_address: vertex_addr,
+                                    })
+                                    .vertex_stride(g.vertex_stride as u64)
+                                    .max_vertex(g.vertex_count.saturating_sub(1))
+                                    .index_type(
+                                        g.index_format
+                                            .map(vk_index_type)
+                                            .unwrap_or(vk::IndexType::NONE_KHR),
+                                    )
+                                    .index_data(index_data)
+                                    .transform_data(transform_data);
+                            Ok(vk::AccelerationStructureGeometryKHR::default()
+                                .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+                                .geometry(vk::AccelerationStructureGeometryDataKHR { triangles }))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
 
-                let geometries: Vec<vk::AccelerationStructureGeometryKHR> = build
-                    .geometries
-                    .iter()
-                    .map(|g| {
-                        let vertex_addr = resources.buffer_device_address_at(
-                            device,
-                            g.vertex_buffer,
-                            g.vertex_offset,
-                        )?;
-                        let index_data = if let Some(idx_buf) = g.index_buffer {
-                            vk::DeviceOrHostAddressConstKHR {
-                                device_address: resources.buffer_device_address_at(
-                                    device,
-                                    idx_buf,
-                                    g.index_offset,
-                                )?,
+                    let build_range_infos: Vec<vk::AccelerationStructureBuildRangeInfoKHR> = build
+                        .geometries
+                        .iter()
+                        .map(|g| {
+                            let primitive_count = if g.index_buffer.is_some() {
+                                g.index_count / 3
+                            } else {
+                                g.vertex_count / 3
+                            };
+                            vk::AccelerationStructureBuildRangeInfoKHR {
+                                primitive_count,
+                                primitive_offset: 0,
+                                first_vertex: 0,
+                                transform_offset: 0,
                             }
-                        } else {
-                            vk::DeviceOrHostAddressConstKHR { device_address: 0 }
-                        };
-                        let transform_data = if let Some(tf_buf) = g.transform_buffer {
-                            vk::DeviceOrHostAddressConstKHR {
-                                device_address: resources.buffer_device_address_at(
-                                    device,
-                                    tf_buf,
-                                    g.transform_offset,
-                                )?,
+                        })
+                        .collect();
+
+                    let mut build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+                        .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+                        .flags(vk_blas_build_flags(ray_tracing_position_fetch))
+                        .mode(match build.mode {
+                            AccelerationStructureBuildMode::Build => {
+                                vk::BuildAccelerationStructureModeKHR::BUILD
                             }
-                        } else {
-                            vk::DeviceOrHostAddressConstKHR { device_address: 0 }
-                        };
-                        let triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
-                            .vertex_format(vk_vertex_format_for_as(g.vertex_format)?)
-                            .vertex_data(vk::DeviceOrHostAddressConstKHR {
-                                device_address: vertex_addr,
-                            })
-                            .vertex_stride(g.vertex_stride as u64)
-                            .max_vertex(g.vertex_count.saturating_sub(1))
-                            .index_type(
-                                g.index_format
-                                    .map(vk_index_type)
-                                    .unwrap_or(vk::IndexType::NONE_KHR),
-                            )
-                            .index_data(index_data)
-                            .transform_data(transform_data);
-                        Ok(vk::AccelerationStructureGeometryKHR::default()
-                            .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
-                            .geometry(vk::AccelerationStructureGeometryDataKHR { triangles }))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                            AccelerationStructureBuildMode::Update => {
+                                vk::BuildAccelerationStructureModeKHR::UPDATE
+                            }
+                            AccelerationStructureBuildMode::Compact => {
+                                return Err(Error::Unsupported(
+                                    "BLAS compaction command recording is not implemented yet"
+                                        .into(),
+                                ));
+                            }
+                        })
+                        .src_acceleration_structure(
+                            src_as.unwrap_or(vk::AccelerationStructureKHR::null()),
+                        )
+                        .dst_acceleration_structure(dst_as)
+                        .geometries(&geometries);
 
-                let build_range_infos: Vec<vk::AccelerationStructureBuildRangeInfoKHR> = build
-                    .geometries
-                    .iter()
-                    .map(|g| {
-                        let primitive_count = if g.index_buffer.is_some() {
-                            g.index_count / 3
-                        } else {
-                            g.vertex_count / 3
-                        };
-                        vk::AccelerationStructureBuildRangeInfoKHR {
-                            primitive_count,
-                            primitive_offset: 0,
-                            first_vertex: 0,
-                            transform_offset: 0,
-                        }
-                    })
-                    .collect();
-
-                let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
-                    .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
-                    .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
-                    .mode(match build.mode {
-                        AccelerationStructureBuildMode::Build => {
-                            vk::BuildAccelerationStructureModeKHR::BUILD
-                        }
-                        AccelerationStructureBuildMode::Update => {
-                            vk::BuildAccelerationStructureModeKHR::UPDATE
-                        }
-                        AccelerationStructureBuildMode::Compact => {
-                            vk::BuildAccelerationStructureModeKHR::BUILD
-                        }
-                    })
-                    .src_acceleration_structure(
-                        src_as.unwrap_or(vk::AccelerationStructureKHR::null()),
-                    )
-                    .dst_acceleration_structure(dst_as)
-                    .geometries(&geometries)
-                    .scratch_data(vk::DeviceOrHostAddressKHR {
+                    let scratch_addr = if let Some(scratch) = build.scratch_buffer {
+                        resources.buffer_device_address_raw(device, scratch)?
+                    } else {
+                        let scratch_size =
+                            build_scratch_size(as_ext, &build_info, &build_range_infos)?;
+                        let scratch = resources.create_scratch_buffer(device, scratch_size)?;
+                        let address =
+                            ResourceRegistry::scratch_buffer_device_address(device, &scratch)?;
+                        self.acceleration_structure_scratch.push(scratch);
+                        address
+                    };
+                    build_info = build_info.scratch_data(vk::DeviceOrHostAddressKHR {
                         device_address: scratch_addr,
                     });
 
-                let range_slices: Vec<&[vk::AccelerationStructureBuildRangeInfoKHR]> =
-                    vec![build_range_infos.as_slice()];
-                unsafe {
-                    as_ext.cmd_build_acceleration_structures(
-                        command_buffer,
-                        &[build_info],
-                        &range_slices,
-                    );
+                    let range_slices: Vec<&[vk::AccelerationStructureBuildRangeInfoKHR]> =
+                        vec![build_range_infos.as_slice()];
+                    unsafe {
+                        as_ext.cmd_build_acceleration_structures(
+                            command_buffer,
+                            &[build_info],
+                            &range_slices,
+                        );
+                    }
                 }
             }
 
@@ -1431,72 +1474,91 @@ impl CommandContext {
                     .src
                     .map(|h| resources.acceleration_structure(h))
                     .transpose()?;
-                let scratch_addr = if let Some(scratch) = build.scratch_buffer {
-                    resources.buffer_device_address_raw(device, scratch)?
+                if build.mode == AccelerationStructureBuildMode::Compact {
+                    let src_as = src_as.ok_or_else(|| {
+                        Error::InvalidInput(
+                            "TLAS compaction requires a source acceleration structure".into(),
+                        )
+                    })?;
+                    let info = vk::CopyAccelerationStructureInfoKHR::default()
+                        .src(src_as)
+                        .dst(dst_as)
+                        .mode(vk::CopyAccelerationStructureModeKHR::COMPACT);
+                    unsafe {
+                        as_ext.cmd_copy_acceleration_structure(command_buffer, &info);
+                    }
                 } else {
-                    return Err(Error::InvalidInput(
-                        "TLAS build requires a scratch buffer".into(),
-                    ));
-                };
-                let instance_addr = resources.buffer_device_address_at(
-                    device,
-                    build.instance_buffer,
-                    build.instance_offset,
-                )?;
+                    let instance_addr = resources.buffer_device_address_at(
+                        device,
+                        build.instance_buffer,
+                        build.instance_offset,
+                    )?;
 
-                let instances = vk::AccelerationStructureGeometryInstancesDataKHR::default()
-                    .data(vk::DeviceOrHostAddressConstKHR {
-                        device_address: instance_addr,
-                    });
-                let geometry = vk::AccelerationStructureGeometryKHR::default()
-                    .geometry_type(vk::GeometryTypeKHR::INSTANCES)
-                    .geometry(vk::AccelerationStructureGeometryDataKHR { instances });
+                    let instances = vk::AccelerationStructureGeometryInstancesDataKHR::default()
+                        .data(vk::DeviceOrHostAddressConstKHR {
+                            device_address: instance_addr,
+                        });
+                    let geometry = vk::AccelerationStructureGeometryKHR::default()
+                        .geometry_type(vk::GeometryTypeKHR::INSTANCES)
+                        .geometry(vk::AccelerationStructureGeometryDataKHR { instances });
 
-                let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
-                    .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
-                    .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
-                    .mode(match build.mode {
-                        AccelerationStructureBuildMode::Build => {
-                            vk::BuildAccelerationStructureModeKHR::BUILD
-                        }
-                        AccelerationStructureBuildMode::Update => {
-                            vk::BuildAccelerationStructureModeKHR::UPDATE
-                        }
-                        AccelerationStructureBuildMode::Compact => {
-                            vk::BuildAccelerationStructureModeKHR::BUILD
-                        }
-                    })
-                    .src_acceleration_structure(
-                        src_as.unwrap_or(vk::AccelerationStructureKHR::null()),
-                    )
-                    .dst_acceleration_structure(dst_as)
-                    .geometries(std::slice::from_ref(&geometry))
-                    .scratch_data(vk::DeviceOrHostAddressKHR {
+                    let mut build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+                        .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+                        .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+                        .mode(match build.mode {
+                            AccelerationStructureBuildMode::Build => {
+                                vk::BuildAccelerationStructureModeKHR::BUILD
+                            }
+                            AccelerationStructureBuildMode::Update => {
+                                vk::BuildAccelerationStructureModeKHR::UPDATE
+                            }
+                            AccelerationStructureBuildMode::Compact => {
+                                return Err(Error::Unsupported(
+                                    "TLAS compaction command recording is not implemented yet"
+                                        .into(),
+                                ));
+                            }
+                        })
+                        .src_acceleration_structure(
+                            src_as.unwrap_or(vk::AccelerationStructureKHR::null()),
+                        )
+                        .dst_acceleration_structure(dst_as)
+                        .geometries(std::slice::from_ref(&geometry));
+
+                    let range_info = [vk::AccelerationStructureBuildRangeInfoKHR {
+                        primitive_count: build.instance_count,
+                        primitive_offset: 0,
+                        first_vertex: 0,
+                        transform_offset: 0,
+                    }];
+                    let scratch_addr = if let Some(scratch) = build.scratch_buffer {
+                        resources.buffer_device_address_raw(device, scratch)?
+                    } else {
+                        let scratch_size = build_scratch_size(as_ext, &build_info, &range_info)?;
+                        let scratch = resources.create_scratch_buffer(device, scratch_size)?;
+                        let address =
+                            ResourceRegistry::scratch_buffer_device_address(device, &scratch)?;
+                        self.acceleration_structure_scratch.push(scratch);
+                        address
+                    };
+                    build_info = build_info.scratch_data(vk::DeviceOrHostAddressKHR {
                         device_address: scratch_addr,
                     });
-
-                let range_info = [vk::AccelerationStructureBuildRangeInfoKHR {
-                    primitive_count: build.instance_count,
-                    primitive_offset: 0,
-                    first_vertex: 0,
-                    transform_offset: 0,
-                }];
-                let range_slices: Vec<&[vk::AccelerationStructureBuildRangeInfoKHR]> =
-                    vec![range_info.as_slice()];
-                unsafe {
-                    as_ext.cmd_build_acceleration_structures(
-                        command_buffer,
-                        &[build_info],
-                        &range_slices,
-                    );
+                    let range_slices: Vec<&[vk::AccelerationStructureBuildRangeInfoKHR]> =
+                        vec![range_info.as_slice()];
+                    unsafe {
+                        as_ext.cmd_build_acceleration_structures(
+                            command_buffer,
+                            &[build_info],
+                            &range_slices,
+                        );
+                    }
                 }
             }
 
             PassWork::TraceRays(ref trace) => {
                 let rt_ext = rt_khr.ok_or_else(|| {
-                    Error::Unsupported(
-                        "TraceRays requires VK_KHR_ray_tracing_pipeline".into(),
-                    )
+                    Error::Unsupported("TraceRays requires VK_KHR_ray_tracing_pipeline".into())
                 })?;
                 let pipeline = pipelines.pipeline(trace.pipeline)?;
                 if pipeline.bind_point != vk::PipelineBindPoint::RAY_TRACING_KHR {
@@ -1511,20 +1573,24 @@ impl CommandContext {
                         pipeline.pipeline,
                     );
                 }
-                let region = |sbt: ShaderBindingTableRegion| {
-                    let addr = resources
-                        .buffer_device_address_at(device, sbt.buffer, sbt.offset)
-                        .unwrap_or(0);
-                    vk::StridedDeviceAddressRegionKHR {
+                let region = |sbt: ShaderBindingTableRegion| -> Result<_> {
+                    let addr =
+                        resources.buffer_device_address_at(device, sbt.buffer, sbt.offset)?;
+                    Ok(vk::StridedDeviceAddressRegionKHR {
                         device_address: addr,
                         stride: sbt.stride,
                         size: sbt.size,
-                    }
+                    })
                 };
-                let raygen = region(trace.sbt.raygen);
-                let miss = region(trace.sbt.miss);
-                let hit = region(trace.sbt.hit);
-                let call = trace.sbt.callable.map(region).unwrap_or_default();
+                let raygen = region(trace.sbt.raygen)?;
+                let miss = region(trace.sbt.miss)?;
+                let hit = region(trace.sbt.hit)?;
+                let call = trace
+                    .sbt
+                    .callable
+                    .map(region)
+                    .transpose()?
+                    .unwrap_or_default();
                 unsafe {
                     rt_ext.cmd_trace_rays(
                         command_buffer,
@@ -1538,6 +1604,24 @@ impl CommandContext {
                     );
                 }
             }
+
+            PassWork::DecodeVideoFrame(_) | PassWork::EncodeVideoFrame(_) => {
+                return Err(Error::Unsupported(
+                    "Vulkan video encode/decode command recording is not yet implemented".into(),
+                ));
+            }
+
+            PassWork::ExecuteGeneratedCommands(_) | PassWork::PreprocessGeneratedCommands(_) => {
+                return Err(Error::Unsupported(
+                    "Vulkan device-generated commands recording is not yet implemented".into(),
+                ));
+            }
+
+            PassWork::EstimateOpticalFlow(_) => {
+                return Err(Error::Unsupported(
+                    "Vulkan optical flow command recording is not yet implemented".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -1548,7 +1632,7 @@ impl CommandContext {
         command_buffer: vk::CommandBuffer,
         pass: &PassDesc,
         render_pass: vk::RenderPass,
-        resources: &ResourceRegistry,
+        resources: &mut ResourceRegistry,
         pipelines: &mut PipelineRegistry,
         viewport_override: Option<[u32; 4]>,
         dynamic_rendering: Option<&ash::khr::dynamic_rendering::Device>,
@@ -1632,8 +1716,11 @@ impl CommandContext {
                 let color_attachments = color_uses
                     .iter()
                     .map(|usage| {
-                        let image_view = resources
-                            .image_view_for_subresource(device, usage.image, usage.subresource)?;
+                        let image_view = resources.image_view_for_subresource(
+                            device,
+                            usage.image,
+                            usage.subresource,
+                        )?;
                         Ok(vk::RenderingAttachmentInfo::default()
                             .image_view(image_view)
                             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -1755,7 +1842,7 @@ impl CommandContext {
         command_buffer: vk::CommandBuffer,
         image_barriers: &[ImageBarrier],
         buffer_barriers: &[BufferBarrier],
-        resources: &ResourceRegistry,
+        resources: &mut ResourceRegistry,
         queue_families: QueueFamilyMap,
         sync2: Option<&ash::khr::synchronization2::Device>,
     ) -> Result<()> {
@@ -1924,12 +2011,8 @@ fn access_mask(state: RgState) -> vk::AccessFlags {
         RgState::VertexRead => vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
         RgState::IndexRead => vk::AccessFlags::INDEX_READ,
         RgState::IndirectRead => vk::AccessFlags::INDIRECT_COMMAND_READ,
-        RgState::AccelerationStructureBuild => {
-            vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR
-        }
-        RgState::AccelerationStructureRead => {
-            vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR
-        }
+        RgState::AccelerationStructureBuild => vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR,
+        RgState::AccelerationStructureRead => vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR,
     }
 }
 
@@ -2022,12 +2105,8 @@ fn access_mask2(state: RgState) -> vk::AccessFlags2 {
         RgState::VertexRead => vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
         RgState::IndexRead => vk::AccessFlags2::INDEX_READ,
         RgState::IndirectRead => vk::AccessFlags2::INDIRECT_COMMAND_READ,
-        RgState::AccelerationStructureBuild => {
-            vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR
-        }
-        RgState::AccelerationStructureRead => {
-            vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR
-        }
+        RgState::AccelerationStructureBuild => vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR,
+        RgState::AccelerationStructureRead => vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR,
     }
 }
 
@@ -2044,6 +2123,44 @@ fn vk_vertex_format_for_as(format: VertexFormat) -> Result<vk::Format> {
         VertexFormat::Float32x3 => Ok(vk::Format::R32G32B32_SFLOAT),
         VertexFormat::Float32x4 => Ok(vk::Format::R32G32B32A32_SFLOAT),
     }
+}
+
+fn vk_blas_build_flags(ray_tracing_position_fetch: bool) -> vk::BuildAccelerationStructureFlagsKHR {
+    let mut flags = vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE;
+    if ray_tracing_position_fetch {
+        flags |= vk::BuildAccelerationStructureFlagsKHR::ALLOW_DATA_ACCESS;
+    }
+    flags
+}
+
+fn build_scratch_size(
+    as_ext: &ash::khr::acceleration_structure::Device,
+    build_info: &vk::AccelerationStructureBuildGeometryInfoKHR<'_>,
+    ranges: &[vk::AccelerationStructureBuildRangeInfoKHR],
+) -> Result<u64> {
+    let primitive_counts = ranges
+        .iter()
+        .map(|range| range.primitive_count)
+        .collect::<Vec<_>>();
+    let mut sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
+    unsafe {
+        as_ext.get_acceleration_structure_build_sizes(
+            vk::AccelerationStructureBuildTypeKHR::DEVICE,
+            build_info,
+            &primitive_counts,
+            &mut sizes,
+        );
+    }
+    let size = match build_info.mode {
+        vk::BuildAccelerationStructureModeKHR::UPDATE => sizes.update_scratch_size,
+        _ => sizes.build_scratch_size,
+    };
+    if size == 0 {
+        return Err(Error::Backend(
+            "Vulkan returned zero AS scratch size".into(),
+        ));
+    }
+    Ok(size)
 }
 
 fn record_push_constants(
@@ -2194,7 +2311,7 @@ impl FramedCommands {
         queues: VulkanQueues,
         queue_families: QueueFamilyMap,
         graph: &CompiledGraph,
-        resources: &ResourceRegistry,
+        resources: &mut ResourceRegistry,
         descriptors: &DescriptorRegistry,
         pipelines: &mut PipelineRegistry,
         debug: &DebugUtils,
@@ -2204,6 +2321,7 @@ impl FramedCommands {
         dynamic_rendering: Option<&ash::khr::dynamic_rendering::Device>,
         as_khr: Option<&ash::khr::acceleration_structure::Device>,
         rt_khr: Option<&ash::khr::ray_tracing_pipeline::Device>,
+        ray_tracing_position_fetch: bool,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
     ) -> Result<SubmissionHandle> {
@@ -2224,6 +2342,7 @@ impl FramedCommands {
             dynamic_rendering,
             as_khr,
             rt_khr,
+            ray_tracing_position_fetch,
             wait_semaphore,
             signal_semaphore,
         )?;

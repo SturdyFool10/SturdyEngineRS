@@ -12,6 +12,13 @@ pub struct AccelerationStructureDesc {
     pub size: u64,
 }
 
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct AccelerationStructureBuildSizes {
+    pub acceleration_structure_size: u64,
+    pub build_scratch_size: u64,
+    pub update_scratch_size: u64,
+}
+
 impl AccelerationStructureDesc {
     pub fn validate(&self) -> Result<()> {
         if self.size == 0 {

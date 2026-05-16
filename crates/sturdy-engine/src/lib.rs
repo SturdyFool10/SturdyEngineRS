@@ -241,7 +241,7 @@ pub use shader_program::{ShaderName, ShaderProgram, ShaderProgramDesc, SlangEntr
 pub use sturdy_engine_core::NativeSurfaceDesc;
 pub use sturdy_engine_core::ShaderReflection;
 pub use sturdy_engine_core::{
-    Access, AccelerationStructureDesc, AccelerationStructureKind, AdapterInfo, AdapterKind,
+    AccelerationStructureDesc, AccelerationStructureKind, Access, AdapterInfo, AdapterKind,
     AdapterSelection, AddressMode, BackendKind, BackendRawCapabilities, BindGroupDesc,
     BindGroupEntry, BindingKind, BlendMode, BorderColor, BufferDesc, BufferUsage, BufferUse,
     CanonicalBinding, CanonicalGroupLayout, CanonicalPipelineLayout, Caps, ColorTargetDesc,
@@ -572,13 +572,13 @@ impl Engine {
                         source: source.clone(),
                         entry_point: vertex,
                         stage: ShaderStage::Vertex,
-            requires_ray_query: false,
+                        requires_ray_query: false,
                     }),
                     fragment: ShaderDesc {
                         source,
                         entry_point: fragment,
                         stage: ShaderStage::Fragment,
-            requires_ray_query: false,
+                        requires_ray_query: false,
                     },
                 })
             }
@@ -589,7 +589,7 @@ impl Engine {
                         source,
                         entry_point: fragment,
                         stage: ShaderStage::Fragment,
-            requires_ray_query: false,
+                        requires_ray_query: false,
                     },
                 })
             }
@@ -600,7 +600,7 @@ impl Engine {
                         source,
                         entry_point: compute,
                         stage: ShaderStage::Compute,
-            requires_ray_query: false,
+                        requires_ray_query: false,
                     },
                 })
             }
