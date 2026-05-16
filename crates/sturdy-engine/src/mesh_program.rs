@@ -392,6 +392,7 @@ impl MeshProgram {
                     cull_mode: CullMode::None,
                     front_face: FrontFace::CounterClockwise,
                 },
+                conservative_raster: core::ConservativeRasterMode::Off,
             })?;
             pipeline.set_debug_name("mesh-program")?;
             pipelines.insert(key, pipeline);
@@ -459,6 +460,7 @@ impl MeshProgram {
                     cull_mode: CullMode::None,
                     front_face: FrontFace::CounterClockwise,
                 },
+                conservative_raster: core::ConservativeRasterMode::Off,
             })?;
             pipeline.set_debug_name("mesh-program-mrt")?;
             pipelines.insert(key.clone(), pipeline);

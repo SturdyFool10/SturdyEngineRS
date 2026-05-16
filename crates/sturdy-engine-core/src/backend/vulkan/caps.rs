@@ -41,7 +41,7 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     let timeline_semaphores =
         properties.api_version >= vk::API_VERSION_1_2 || has(b"VK_KHR_timeline_semaphore\0");
     let hdr_output = has(b"VK_EXT_hdr_metadata\0") || has(b"VK_AMD_display_native_hdr\0");
-    let variable_rate_shading = has(b"VK_KHR_fragment_shading_rate\0");
+    // Replaced by sub-mode detection below (after feature_chain is available).
     let draw_indirect_count =
         properties.api_version >= vk::API_VERSION_1_2 || has(b"VK_KHR_draw_indirect_count\0");
     let buffer_device_address =
@@ -50,6 +50,10 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     let memory_priority = has(b"VK_EXT_memory_priority\0");
     let pageable_device_local_memory = has(b"VK_EXT_pageable_device_local_memory\0");
     let device_fault = has(b"VK_EXT_device_fault\0");
+    let device_diagnostic_checkpoints_nv = has(b"VK_NV_device_diagnostic_checkpoints\0");
+    let buffer_marker_amd = has(b"VK_AMD_buffer_marker\0");
+    let device_address_binding_report = has(b"VK_EXT_device_address_binding_report\0");
+    let device_memory_report = has(b"VK_EXT_device_memory_report\0");
     // VK_EXT_host_image_copy is core in Vulkan 1.4 (version 0x00401000).
     let vk_1_4 = vk::make_api_version(0, 1, 4, 0);
     let host_image_copy = has(b"VK_EXT_host_image_copy\0") || properties.api_version >= vk_1_4;
@@ -57,13 +61,34 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     let push_descriptors = has(b"VK_KHR_push_descriptor\0");
     // GFX-2g: VK_KHR_global_priority — no feature struct, purely extension presence.
     let global_queue_priority = has(b"VK_KHR_global_priority\0");
-    // GFX-2f: VK_EXT_conservative_rasterization — no feature struct, extension presence only.
+    // GFX-2f: VK_EXT_conservative_rasterization — overestimation is part of
+    // the extension; underestimation is reported in the extension properties.
     let conservative_rasterization_ext = has(b"VK_EXT_conservative_rasterization\0");
     // GFX-2k: VK_EXT_filter_cubic — no feature struct.
     let filter_cubic = has(b"VK_EXT_filter_cubic\0");
 
     let core_features = unsafe { instance.get_physical_device_features(physical_device) };
     let feature_chain = available_feature_chain(instance, physical_device);
+    let conservative_rasterization_properties = conservative_rasterization_ext
+        .then(|| conservative_rasterization_properties(instance, physical_device));
+    // GFX-2a: VRS sub-mode detection.
+    let vrs_pipeline = has(b"VK_KHR_fragment_shading_rate\0")
+        && feature_chain
+            .fragment_shading_rate
+            .pipeline_fragment_shading_rate
+            == vk::TRUE;
+    let vrs_primitive = has(b"VK_KHR_fragment_shading_rate\0")
+        && feature_chain
+            .fragment_shading_rate
+            .primitive_fragment_shading_rate
+            == vk::TRUE;
+    let vrs_attachment = has(b"VK_KHR_fragment_shading_rate\0")
+        && feature_chain
+            .fragment_shading_rate
+            .attachment_fragment_shading_rate
+            == vk::TRUE;
+    let variable_rate_shading = vrs_pipeline || vrs_primitive || vrs_attachment;
+
     let ray_tracing_position_fetch = ray_tracing_position_fetch_ext
         && feature_chain
             .ray_tracing_position_fetch
@@ -133,6 +158,15 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
             .vertex_input_dynamic_state
             == vk::TRUE;
 
+    // GFX-7a: VK_EXT_descriptor_buffer — descriptors stored in app-managed GPU buffers.
+    let descriptor_buffer = has(b"VK_EXT_descriptor_buffer\0");
+    // GFX-7b: VK_EXT_descriptor_heap — D3D12-style resource + sampler descriptor heaps.
+    let descriptor_heap = has(b"VK_EXT_descriptor_heap\0");
+    // GFX-7c: VK_AMDX_shader_enqueue — AMD work graphs (shader-enqueued dispatch).
+    let work_graphs = has(b"VK_AMDX_shader_enqueue\0");
+    // GFX-8: VK_EXT_shader_object — pipeline-free shader binding.
+    let shader_object = has(b"VK_EXT_shader_object\0");
+
     // GFX-2k: sampler/image quality extensions
     let vk_1_2 = vk::make_api_version(0, 1, 2, 0);
     let sampler_filter_minmax =
@@ -200,6 +234,20 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     // GFX-6e: Optical flow
     let optical_flow_nv = has(b"VK_NV_optical_flow\0");
 
+    // GFX-2h: Presentation extensions
+    let swapchain_colorspace = has(b"VK_EXT_swapchain_colorspace\0");
+    let present_id = has(b"VK_KHR_present_id\0");
+    let present_wait = has(b"VK_KHR_present_wait\0");
+    let swapchain_maintenance1 = has(b"VK_KHR_swapchain_maintenance1\0");
+    let full_screen_exclusive = has(b"VK_EXT_full_screen_exclusive\0");
+    let display_timing = has(b"VK_GOOGLE_display_timing\0");
+    let present_mode_fifo_latest_ready = has(b"VK_EXT_present_mode_fifo_latest_ready\0")
+        || has(b"VK_KHR_present_mode_fifo_latest_ready\0");
+
+    // GFX-2j: Performance query
+    let performance_query = has(b"VK_KHR_performance_query\0");
+    let pipeline_executable_properties = has(b"VK_KHR_pipeline_executable_properties\0");
+
     let features = BackendFeatures {
         ray_tracing,
         ray_query,
@@ -221,6 +269,9 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         image_fp16_render,
         image_fp32_render,
         variable_rate_shading,
+        vrs_pipeline,
+        vrs_primitive,
+        vrs_attachment,
         multi_draw_indirect,
         draw_indirect_count,
         sparse_binding,
@@ -232,6 +283,10 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         memory_priority,
         pageable_device_local_memory,
         device_fault,
+        device_diagnostic_checkpoints_nv,
+        buffer_marker_amd,
+        device_address_binding_report,
+        device_memory_report,
         host_image_copy,
         push_descriptors,
         conditional_rendering,
@@ -240,7 +295,8 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         extended_dynamic_state3_color_blend,
         vertex_input_dynamic_state,
         conservative_rasterization_overestimate: conservative_rasterization_ext,
-        conservative_rasterization_underestimate: conservative_rasterization_ext,
+        conservative_rasterization_underestimate: conservative_rasterization_properties
+            .is_some_and(|properties| properties.primitive_underestimation == vk::TRUE),
         global_queue_priority,
         sampler_filter_minmax,
         custom_border_color,
@@ -248,6 +304,10 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         image_view_min_lod,
         image_compression_control,
         msaa_render_to_single_sampled,
+        descriptor_buffer,
+        descriptor_heap,
+        work_graphs,
+        shader_object,
         // GFX-4: video
         video_queue,
         video_decode_h264,
@@ -288,6 +348,17 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         post_depth_coverage,
         // GFX-6e: optical flow
         optical_flow_nv,
+        // GFX-2h: presentation extensions
+        swapchain_colorspace,
+        present_id,
+        present_wait,
+        swapchain_maintenance1,
+        full_screen_exclusive,
+        display_timing,
+        present_mode_fifo_latest_ready,
+        // GFX-2j: performance query
+        performance_query,
+        pipeline_executable_properties,
     };
 
     let limits = Limits {
@@ -584,6 +655,18 @@ pub fn available_feature_names(
     if has_ext("VK_EXT_conservative_rasterization") {
         names.push("conservative_rasterization".into());
     }
+    if has_ext("VK_NV_device_diagnostic_checkpoints") {
+        names.push("device_diagnostic_checkpoints_nv".into());
+    }
+    if has_ext("VK_AMD_buffer_marker") {
+        names.push("buffer_marker_amd".into());
+    }
+    if has_ext("VK_EXT_device_address_binding_report") {
+        names.push("device_address_binding_report".into());
+    }
+    if has_ext("VK_EXT_device_memory_report") {
+        names.push("device_memory_report".into());
+    }
     if has_ext("VK_EXT_sampler_filter_minmax") {
         names.push("sampler_filter_minmax".into());
     }
@@ -793,4 +876,16 @@ fn available_device_extensions(
             .enumerate_device_extension_properties(physical_device)
             .unwrap_or_default()
     }
+}
+
+fn conservative_rasterization_properties(
+    instance: &Instance,
+    physical_device: vk::PhysicalDevice,
+) -> vk::PhysicalDeviceConservativeRasterizationPropertiesEXT<'static> {
+    let mut properties = vk::PhysicalDeviceConservativeRasterizationPropertiesEXT::default();
+    let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut properties);
+    unsafe {
+        instance.get_physical_device_properties2(physical_device, &mut properties2);
+    }
+    properties
 }

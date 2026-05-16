@@ -277,10 +277,13 @@ Raw GPU virtual addresses for buffers. Required by ray tracing acceleration stru
 
 The current `GpuAllocator` has no budget awareness. Exceeding the budget causes silent performance cliffs on integrated and mobile GPUs.
 
-- [ ] Detect `VK_EXT_memory_budget`; add `BackendFeatures::memory_budget`. When available, call `vkGetPhysicalDeviceMemoryProperties2` with `VkPhysicalDeviceMemoryBudgetPropertiesEXT` each frame. Expose `Engine::memory_budget_ext() -> MemoryBudgetReport` with per-heap `budget` and `usage` in bytes.
+- [x] Detect `VK_EXT_memory_budget`; add `BackendFeatures::memory_budget`.
+- [ ] When available, call `vkGetPhysicalDeviceMemoryProperties2` with `VkPhysicalDeviceMemoryBudgetPropertiesEXT` each frame. Expose `Engine::memory_budget_ext() -> MemoryBudgetReport` with per-heap `budget` and `usage` in bytes.
 - [ ] Integrate budget into the allocator: when `device_local_usage > 80% of device_local_budget`, scale down new block sizes and emit a structured warning via debug utils.
-- [ ] Detect `VK_EXT_memory_priority`; add `BackendFeatures::memory_priority`. When available, assign priority during `vkAllocateMemory`: render targets 1.0, G-Buffer 0.9, scene geometry 0.7, staging 0.1.
-- [ ] Detect `VK_EXT_pageable_device_local_memory`; when available alongside `memory_priority`, call `vkSetDeviceMemoryPriorityEXT` at allocation time.
+- [x] Detect `VK_EXT_memory_priority`; add `BackendFeatures::memory_priority`.
+- [ ] When available, assign priority during `vkAllocateMemory`: render targets 1.0, G-Buffer 0.9, scene geometry 0.7, staging 0.1.
+- [x] Detect `VK_EXT_pageable_device_local_memory`; add `BackendFeatures::pageable_device_local_memory`.
+- [ ] When available alongside `memory_priority`, call `vkSetDeviceMemoryPriorityEXT` at allocation time.
 - [ ] Detect `VK_KHR_dedicated_allocation` (Vulkan 1.1 core); query `VkMemoryDedicatedRequirementsKHR` for every resource; allocate a dedicated `VkDeviceMemory` for resources where `prefersDedicatedAllocation` is true (typically large render targets and streaming textures). This pairs with the existing Track 11a item for resources > 64 MiB.
 - [ ] **Improves**: Track 11a (GPU memory infrastructure), streaming texture residency (Track 7f, Full Asset Pipeline).
 
@@ -288,26 +291,32 @@ The current `GpuAllocator` has no budget awareness. Exceeding the budget causes 
 
 Eliminates descriptor pool allocation for per-draw data. Complements bindless: bindless for the resource heap, push descriptors for per-pass data too large for push constants.
 
-- [ ] Detect `VK_KHR_push_descriptor`; add `BackendFeatures::push_descriptors`.
-- [ ] Add `push_descriptor_khr: Option<ash::khr::push_descriptor::Device>` to `VulkanBackend`.
-- [ ] Add `PassDesc::push_descriptor_set: Option<PushDescriptorSetDesc>` to the render graph. Record `cmd_push_descriptor_set_khr` before pass work when present.
-- [ ] `PushDescriptorSetDesc` mirrors `BindGroupDesc` but without a persistent `VkDescriptorSet` allocation.
+- [x] Detect `VK_KHR_push_descriptor`; add `BackendFeatures::push_descriptors`.
+- [x] Add `push_descriptor_khr: Option<ash::khr::push_descriptor::Device>` to `VulkanBackend`.
+- [x] Add `PassDesc::push_descriptor_set: Option<PushDescriptorSetDesc>` to the render graph.
+- [x] Record `cmd_push_descriptor_set_khr` before pass work when present.
+- [x] `PushDescriptorSetDesc` mirrors `BindGroupDesc` but without a persistent `VkDescriptorSet` allocation.
 
 **GFX-1g — Device fault and diagnostic breadcrumbs**
 
 `VK_ERROR_DEVICE_LOST` currently produces no actionable information. These extensions provide pass-level crash attribution.
 
-- [ ] Detect `VK_EXT_device_fault`; add `BackendFeatures::device_fault`. On `VK_ERROR_DEVICE_LOST`, call `vkGetDeviceFaultInfoEXT`; log the structured fault report (address records, vendor info strings) via debug utils before the panic.
-- [ ] Detect `VK_NV_device_diagnostic_checkpoints` (NVIDIA); insert checkpoint markers at the start and end of each render graph pass in debug builds. On device loss, surviving checkpoints identify the faulting pass.
-- [ ] Detect `VK_AMD_buffer_marker` (AMD); write a 32-bit pass index into a host-visible breadcrumb buffer at the start and end of each pass in debug builds. On device loss, the last-written index identifies the faulting pass.
-- [ ] Detect `VK_EXT_device_address_binding_report`; register the callback when available to log GPU VA binding events for postmortem address resolution.
-- [ ] Detect `VK_EXT_device_memory_report`; register the callback in debug builds for driver-internal allocation tracking by tooling.
+- [x] Detect `VK_EXT_device_fault`; add `BackendFeatures::device_fault`.
+- [x] On `VK_ERROR_DEVICE_LOST` from graph submission, call `vkGetDeviceFaultInfoEXT` and return a structured `Error::DeviceLost` report with device-fault description, address records, vendor info strings, and vendor binary size.
+- [x] Detect `VK_NV_device_diagnostic_checkpoints` (NVIDIA); add `BackendFeatures::device_diagnostic_checkpoints_nv`.
+- [ ] Insert checkpoint markers at the start and end of each render graph pass in debug builds. On device loss, surviving checkpoints identify the faulting pass.
+- [x] Detect `VK_AMD_buffer_marker` (AMD); add `BackendFeatures::buffer_marker_amd`.
+- [ ] Write a 32-bit pass index into a host-visible breadcrumb buffer at the start and end of each pass in debug builds. On device loss, the last-written index identifies the faulting pass.
+- [x] Detect `VK_EXT_device_address_binding_report`; add `BackendFeatures::device_address_binding_report`.
+- [ ] Register the device-address-binding-report callback when available to log GPU VA binding events for postmortem address resolution.
+- [x] Detect `VK_EXT_device_memory_report`; add `BackendFeatures::device_memory_report`.
+- [ ] Register the device-memory-report callback in debug builds for driver-internal allocation tracking by tooling.
 
 **GFX-1h — Host image copy (`VK_EXT_host_image_copy`, Vulkan 1.4 core)**
 
 Copies images from the CPU without staging buffers. Eliminates the staging round-trip on unified-memory hardware (Apple Silicon, integrated GPUs).
 
-- [ ] Detect `VK_EXT_host_image_copy` (or `api_version >= 1.4`); add `BackendFeatures::host_image_copy`.
+- [x] Detect `VK_EXT_host_image_copy` (or `api_version >= 1.4`); add `BackendFeatures::host_image_copy`.
 - [ ] In the texture upload path: when `host_image_copy` is available and the memory type is compatible, use `vkCopyMemoryToImageEXT` instead of staging buffer + `vkCmdCopyBufferToImage`.
 - [ ] When available, use `vkTransitionImageLayoutEXT` for CPU-side layout transitions on textures that have not yet been touched by the GPU. Eliminates a submit just to do an initial transition.
 - [ ] **Improves**: Full Asset Pipeline (staging ring allocator savings on integrated/mobile).
@@ -318,25 +327,26 @@ Copies images from the CPU without staging buffers. Eliminates the staging round
 
 Complete these before beginning Tracks AO, Reflections, GI, Shadows, VRS, Fog, and GPU-driven culling.
 
-**GFX-2a — VRS command recording (`VK_KHR_fragment_shading_rate`, detected, no commands)**
+**GFX-2a — VRS command recording (`VK_KHR_fragment_shading_rate`, partially wired)**
 
-Three sub-modes (pipeline, primitive, attachment) are fully detected in `caps.rs` and `device.rs`. The command recording path and `PassDesc` slot do not exist.
+Three sub-modes (pipeline, primitive, attachment) are fully detected in `caps.rs` and `device.rs`. Pipeline-tier VRS is command-recording ready; attachment VRS still needs dynamic rendering attachment plumbing.
 
-- [ ] Add `PassDesc::pipeline_shading_rate: Option<ShadingRate>` (enabled when `features.variable_rate_shading` and pipeline-tier VRS are both available). Record `cmd_set_fragment_shading_rate_khr` before draws.
+- [x] Add `PassDesc::pipeline_shading_rate: Option<ShadingRate>` with graphics-work validation.
+- [x] Record `cmd_set_fragment_shading_rate_khr` before draws when `PassDesc::pipeline_shading_rate` is set.
 - [ ] Add `PassDesc::shading_rate_image: Option<VirtualImageId>` (enabled when attachment-tier VRS is available). Bind `VkRenderingFragmentShadingRateAttachmentInfoKHR` inside `cmd_begin_rendering` (requires GFX-1b).
 - [ ] Add `RgState::ShadingRateAttachment` to the render graph state enum; insert correct barriers before passes that consume a shading rate image.
-- [ ] Split `BackendFeatures::variable_rate_shading` into `vrs_pipeline: bool`, `vrs_primitive: bool`, `vrs_attachment: bool` matching the three sub-modes detected in `caps.rs`.
+- [x] Split `BackendFeatures::variable_rate_shading` into `vrs_pipeline: bool`, `vrs_primitive: bool`, `vrs_attachment: bool` matching the three sub-modes detected in `caps.rs`.
 - [ ] **Depends on**: GFX-1b (dynamic rendering required for attachment VRS). **Enables**: Track 8c.
 
 **GFX-2b — Conditional rendering (`VK_EXT_conditional_rendering`)**
 
 Required for GPU-driven occlusion culling to skip draw calls without a CPU readback.
 
-- [ ] Detect `VK_EXT_conditional_rendering`; add `BackendFeatures::conditional_rendering`.
-- [ ] Add `conditional_rendering_ext: Option<ash::ext::conditional_rendering::Device>` to `VulkanBackend`.
-- [ ] Add `PassDesc::predicate: Option<ConditionalRenderingDesc>` to the render graph where `ConditionalRenderingDesc` holds a buffer handle, byte offset, and invert flag.
-- [ ] Wrap passes with a predicate in `cmd_begin_conditional_rendering_ext` / `cmd_end_conditional_rendering_ext`.
-- [ ] **Enables**: Track 8b (two-phase occlusion culling — Phase 2 predicate skips draws for fully occluded instances without CPU readback).
+- [x] Detect `VK_EXT_conditional_rendering`; add `BackendFeatures::conditional_rendering`.
+- [x] Add `conditional_rendering_ext: Option<ash::ext::conditional_rendering::Device>` to `VulkanBackend`.
+- [x] Add `PassDesc::predicate: Option<ConditionalRenderingDesc>` to the render graph where `ConditionalRenderingDesc` holds a buffer handle, byte offset, and invert flag.
+- [x] Wrap passes with a predicate in `cmd_begin_conditional_rendering_ext` / `cmd_end_conditional_rendering_ext`.
+- [x] **Enables**: Track 8b (two-phase occlusion culling — Phase 2 predicate skips draws for fully occluded instances without CPU readback).
 
 **GFX-2c — Graphics pipeline library (`VK_EXT_graphics_pipeline_library`)**
 
@@ -369,29 +379,29 @@ Fully dynamic vertex binding and attribute descriptions. Required for virtual ge
 
 Required for voxelization, SDF generation, and shadow map rendering without sub-texel gaps.
 
-- [ ] Detect `VK_EXT_conservative_rasterization`; add `BackendFeatures::conservative_rasterization` with `overestimation: bool` and `underestimation: bool`.
-- [ ] Add `GraphicsPipelineDesc::conservative_raster: ConservativeRasterMode` (Off / Overestimate / Underestimate).
-- [ ] **Enables**: Track 7c (software rasterizer coverage validation), voxelization passes for GI probes.
+- [x] Detect `VK_EXT_conservative_rasterization`; add `BackendFeatures` overestimate/underestimate capability flags. Underestimate is exposed only when `primitiveUnderestimation` is reported by the device properties.
+- [x] Add `GraphicsPipelineDesc::conservative_raster: ConservativeRasterMode` (Off / Overestimate / Underestimate) and chain `VkPipelineRasterizationConservativeStateCreateInfoEXT` for requested modes.
+- [x] **Enables**: Track 7c (software rasterizer coverage validation), voxelization passes for GI probes.
 
 **GFX-2g — Global queue priority (`VK_KHR_global_priority`, Vulkan 1.4 core)**
 
 Async compute needs its queue at `MEDIUM` priority. Without this, OS scheduling may starve the compute queue under GPU load.
 
-- [ ] Detect `VK_KHR_global_priority`; add `BackendFeatures::global_queue_priority`.
-- [ ] When available, assign `VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR` to the graphics queue and `VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR` to the async compute queue via `VkDeviceQueueGlobalPriorityCreateInfoKHR`.
-- [ ] **Enables**: Track 11b (async compute — correct scheduling under GPU contention).
+- [x] Detect `VK_KHR_global_priority`; add `BackendFeatures::global_queue_priority`.
+- [x] When requested and enabled, assign `VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR` to the graphics queue and `VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR` to the async compute queue via `VkDeviceQueueGlobalPriorityCreateInfoKHR` (unified queue families keep graphics `HIGH`; transfer-only families use `LOW`).
+- [x] **Enables**: Track 11b (async compute — correct scheduling under GPU contention).
 
 **GFX-2h — Presentation extensions**
 
 Track LL requires several of these. Wire them here so Track LL items do not carry extension detection work.
 
-- [ ] Detect `VK_EXT_swapchain_colorspace`; expose `SurfaceCaps::supported_color_spaces: Vec<ColorSpace>` including HDR10, scRGB, and DCI-P3. Required for correct HDR output alongside `VK_EXT_hdr_metadata`.
-- [ ] Detect `VK_KHR_present_id`; attach a monotonic `u64` present ID per frame via `VkPresentIdKHR` in `vkQueuePresentKHR`.
-- [ ] Detect `VK_KHR_present_wait`; expose `Surface::wait_for_present(id: u64, timeout: Duration)` for CPU-side vblank blocking.
-- [ ] Detect `VK_KHR_swapchain_maintenance1`; expose `SwapchainConfig::present_mode` as a mutable runtime field (change without recreation) and expose a per-present release fence.
-- [ ] Detect `VK_EXT_full_screen_exclusive` (Windows only); expose `SurfaceConfig::exclusive_fullscreen: ExclusiveFullscreenMode` (Allowed / Disallowed / ApplicationControlled).
-- [ ] Detect `VK_GOOGLE_display_timing`; query `vkGetPastPresentationTimingGOOGLE` each frame; feed actual display latency into `FrameTimingReport::present_to_display_ms`.
-- [ ] Detect `VK_EXT_present_mode_fifo_latest_ready`; expose as `PresentMode::FifoLatestReady` in the surface present mode enum.
+- [x] Detect `VK_EXT_swapchain_colorspace`; add `BackendFeatures::swapchain_colorspace`. Surface color-space API wiring remains.
+- [x] Detect `VK_KHR_present_id`; add `BackendFeatures::present_id`. `VkPresentIdKHR` present chaining remains.
+- [x] Detect `VK_KHR_present_wait`; add `BackendFeatures::present_wait`. `Surface::wait_for_present(id, timeout)` remains.
+- [x] Detect `VK_KHR_swapchain_maintenance1`; add `BackendFeatures::swapchain_maintenance1`. Runtime present-mode mutation and release fences remain.
+- [x] Detect `VK_EXT_full_screen_exclusive`; add `BackendFeatures::full_screen_exclusive`. `SurfaceConfig::exclusive_fullscreen` remains.
+- [x] Detect `VK_GOOGLE_display_timing`; add `BackendFeatures::display_timing`. Timing query integration remains.
+- [x] Detect `VK_EXT_present_mode_fifo_latest_ready`; add `BackendFeatures::present_mode_fifo_latest_ready`. `PresentMode::FifoLatestReady` API remains.
 - [ ] **Enables**: Track LL (low-latency presentation), `BackendFeatures::hdr_output` (pair swapchain colorspace with HDR metadata).
 
 **GFX-2i — HDR metadata (`VK_EXT_hdr_metadata`, detected, not wired)**
@@ -407,22 +417,30 @@ Track LL requires several of these. Wire them here so Track LL items do not carr
 
 Without hardware counters, profiling data is timestamps only. These expose ROP throughput, cache hit rates, and compiled shader stats.
 
-- [ ] Detect `VK_KHR_performance_query`; add `BackendFeatures::performance_query`. Expose `Engine::enumerate_performance_counters() -> Vec<PerfCounter>` listing available counters by category.
+- [x] Detect `VK_KHR_performance_query`; add `BackendFeatures::performance_query`.
+- [ ] Expose `Engine::enumerate_performance_counters() -> Vec<PerfCounter>` listing available counters by category.
 - [ ] Add `PassDesc::perf_counters: Option<Vec<PerfCounterHandle>>` to record selected counters for specific passes.
-- [ ] Detect `VK_KHR_pipeline_executable_properties`; expose `Engine::pipeline_executable_stats(pipeline) -> Vec<ExecutableStat>` for per-stage register usage, code size, and IR.
+- [x] Detect `VK_KHR_pipeline_executable_properties`; add `BackendFeatures::pipeline_executable_properties`.
+- [ ] Expose `Engine::pipeline_executable_stats(pipeline) -> Vec<ExecutableStat>` for per-stage register usage, code size, and IR.
 - [ ] Detect `VK_AMD_shader_info`; expose AMD-specific compiled shader statistics (`VkShaderStatisticsInfoAMD`) alongside the KHR path.
 - [ ] Detect `VK_AMD_shader_core_properties` and `VK_NV_shader_sm_builtins`; expose shader core / SM count via `Engine::shader_core_count() -> Option<u32>` for workgroup size tuning.
 - [ ] Expose GPU profiling readback through the existing per-pass timing API — add a `PassTimingReport::perf_counters: HashMap<PerfCounterHandle, u64>` field alongside the existing GPU timestamp data.
 
 **GFX-2k — Sampler and image quality extensions**
 
-- [ ] Detect `VK_EXT_sampler_filter_minmax` (Vulkan 1.2 core); expose `SamplerDesc::reduction_mode: SamplerReductionMode` (WeightedAverage / Min / Max). The Max reduction mode is required for Hi-Z pyramid construction (Track 7b, 8b).
-- [ ] Detect `VK_EXT_custom_border_color`; expose `SamplerDesc::border_color: BorderColor` with an `Custom([f32; 4])` variant.
-- [ ] Detect `VK_EXT_filter_cubic`; expose `SamplerDesc::filter: Filter::Cubic` for Catmull-Rom upscaling.
-- [ ] Detect `VK_EXT_image_view_min_lod`; expose `ImageViewDesc::min_lod: Option<f32>` for mipmap streaming (clamp visible mips to what is resident).
-- [ ] Detect `VK_EXT_image_compression_control`; add `ImageDesc::compression: ImageCompression` (Default / Fixed { bits_per_component: u32 } / Disabled). Expose `Image::actual_compression_ratio() -> Option<f32>` via `VkImageCompressionPropertiesEXT`.
+- [x] Detect `VK_EXT_sampler_filter_minmax` (Vulkan 1.2 core); add `BackendFeatures::sampler_filter_minmax`.
+- [ ] Expose `SamplerDesc::reduction_mode: SamplerReductionMode` (WeightedAverage / Min / Max). The Max reduction mode is required for Hi-Z pyramid construction (Track 7b, 8b).
+- [x] Detect `VK_EXT_custom_border_color`; add `BackendFeatures::custom_border_color`.
+- [ ] Expose `SamplerDesc::border_color: BorderColor` with a `Custom([f32; 4])` variant.
+- [x] Detect `VK_EXT_filter_cubic`; add `BackendFeatures::filter_cubic`.
+- [ ] Expose `SamplerDesc::filter: Filter::Cubic` for Catmull-Rom upscaling.
+- [x] Detect `VK_EXT_image_view_min_lod`; add `BackendFeatures::image_view_min_lod`.
+- [ ] Expose `ImageViewDesc::min_lod: Option<f32>` for mipmap streaming (clamp visible mips to what is resident).
+- [x] Detect `VK_EXT_image_compression_control`; add `BackendFeatures::image_compression_control`.
+- [ ] Add `ImageDesc::compression: ImageCompression` (Default / Fixed { bits_per_component: u32 } / Disabled). Expose `Image::actual_compression_ratio() -> Option<f32>` via `VkImageCompressionPropertiesEXT`.
 - [ ] Detect `VK_EXT_image_compression_control_swapchain`; propagate compression preference to swapchain image creation.
-- [ ] Detect `VK_EXT_multisampled_render_to_single_sampled`; expose as `ImageDesc::msaa_resolve_to_single_sampled: bool`. On tile-based hardware this eliminates the MSAA allocation entirely — the GPU resolves on-chip.
+- [x] Detect `VK_EXT_multisampled_render_to_single_sampled`; add `BackendFeatures::msaa_render_to_single_sampled`.
+- [ ] Expose as `ImageDesc::msaa_resolve_to_single_sampled: bool`. On tile-based hardware this eliminates the MSAA allocation entirely — the GPU resolves on-chip.
 
 ---
 
@@ -481,23 +499,24 @@ Hardware video is present on most modern GPUs but entirely absent from the engin
 
 **GFX-4a — Video decode (H.264, H.265, AV1, VP9)**
 
-- [ ] Detect `VK_KHR_video_queue`; add `BackendFeatures::video_queue`. Create a `VK_QUEUE_VIDEO_DECODE_BIT_KHR` queue family when available (may overlap with compute or transfer).
-- [ ] Detect `VK_KHR_video_decode_queue`, `VK_KHR_video_decode_h264`, `VK_KHR_video_decode_h265`, `VK_KHR_video_decode_av1`, `VK_KHR_video_decode_vp9`; add per-codec booleans to `BackendFeatures` (`video_decode_h264`, `video_decode_h265`, `video_decode_av1`, `video_decode_vp9`).
+- [x] Detect `VK_KHR_video_queue`; add `BackendFeatures::video_queue`.
+- [ ] Create a `VK_QUEUE_VIDEO_DECODE_BIT_KHR` queue family when available (may overlap with compute or transfer).
+- [x] Detect `VK_KHR_video_decode_queue`, `VK_KHR_video_decode_h264`, `VK_KHR_video_decode_h265`, `VK_KHR_video_decode_av1`, `VK_KHR_video_decode_vp9`; add per-codec booleans to `BackendFeatures` (`video_decode_h264`, `video_decode_h265`, `video_decode_av1`, `video_decode_vp9`).
 - [ ] Add `VideoDecodeSession` resource: creates `VkVideoSessionKHR` + `VkVideoSessionParametersKHR`, allocates session memory, manages the DPB (decoded picture buffer) image array.
-- [ ] Add `PassWork::DecodeVideoFrame(DecodeFrameDesc)` to the render graph. The compiler routes this to the video decode queue with correct semaphore chain to the graphics queue.
-- [ ] `DecodeFrameDesc`: session handle, compressed bitstream buffer handle, output image handle, reference frame DPB indices.
+- [x] Add `PassWork::DecodeVideoFrame(DecodeFrameDesc)` to the render graph; Vulkan command recording currently returns `Unsupported`.
+- [x] `DecodeFrameDesc`: session handle, compressed bitstream buffer handle, output image handle, output layer.
 - [ ] Expose `Engine::create_video_decode_session(codec, resolution, profile, max_dpb_slots) -> VideoDecodeSession`.
 - [ ] `DecodedFrame` images are importable into the render graph as `RgState::ShaderRead` (sampled texture, after YCbCr conversion if needed).
 - [ ] Detect `VK_KHR_video_maintenance1` and `VK_KHR_video_maintenance2`; enable when present (they simplify session parameter management).
 
 **GFX-4b — Video encode (H.264, H.265, AV1)**
 
-- [ ] Detect `VK_KHR_video_encode_queue`, `VK_KHR_video_encode_h264`, `VK_KHR_video_encode_h265`, `VK_KHR_video_encode_av1`; add `BackendFeatures::video_encode_h264`, `video_encode_h265`, `video_encode_av1`.
-- [ ] Detect `VK_KHR_video_encode_quantization_map`; when available, expose `EncodeFrameDesc::quantization_map: Option<ImageHandle>` for per-coding-block quality control. Essential for streaming: reduce quality in peripheral regions while keeping the focal region sharp.
+- [x] Detect `VK_KHR_video_encode_queue`, `VK_KHR_video_encode_h264`, `VK_KHR_video_encode_h265`, `VK_KHR_video_encode_av1`; add `BackendFeatures::video_encode_h264`, `video_encode_h265`, `video_encode_av1`.
+- [x] Detect `VK_KHR_video_encode_quantization_map`; expose `EncodeFrameDesc::quantization_map: Option<ImageHandle>` for per-coding-block quality control. Vulkan command recording currently returns `Unsupported`.
 - [ ] Add `VideoEncodeSession` resource: manages `VkVideoSessionKHR` for encode, reference picture management, and rate control state.
-- [ ] Add `PassWork::EncodeVideoFrame(EncodeFrameDesc)` to the render graph. Input = HDR/SDR image handle; output = compressed bitstream in a CPU-readable buffer.
+- [x] Add `PassWork::EncodeVideoFrame(EncodeFrameDesc)` to the render graph. Input = HDR/SDR image handle; output = compressed bitstream in a CPU-readable buffer.
 - [ ] Expose `Engine::create_video_encode_session(codec, resolution, config) -> VideoEncodeSession`.
-- [ ] `VideoEncodeConfig { codec: VideoCodec, resolution: Extent2D, bitrate: BitRateControl, quality_preset: QualityPreset, profile: VideoProfile }`. `Default` = H.265, CBR 10 Mbps, medium quality.
+- [x] `VideoEncodeConfig { codec: VideoCodec, width, height, bitrate: BitRateControl, quality: QualityPreset }`. `Default` = H.265, CBR 10 Mbps, medium quality.
 - [ ] `VideoEncodeSession::read_bitstream() -> Vec<u8>` — CPU readback of the encoded output after the encode frame command completes.
 
 ---
@@ -532,19 +551,21 @@ These do not block rendering quality work. They can proceed in parallel with vis
 
 GPU-generated command streams with state switches and pipeline binds. Required for fully GPU-driven rendering where the CPU does zero per-draw work.
 
-- [ ] Detect `VK_EXT_device_generated_commands` (cross-vendor); add `BackendFeatures::device_generated_commands`. Detect `VK_NV_device_generated_commands` as a fallback for NVIDIA hardware that predates the EXT; add `BackendFeatures::device_generated_commands_nv`.
-- [ ] Add `IndirectCommandLayout` resource: describes the token sequence (index buffer bind, push constant, pipeline bind, draw, dispatch) that the GPU will execute.
-- [ ] Add `PassWork::ExecuteGeneratedCommands(DgcDesc)` to the render graph. `DgcDesc`: layout handle, preprocessing buffer handle, max command count, optional state pipeline.
-- [ ] Add `PassWork::PreprocessGeneratedCommands(DgcPreprocessDesc)` for the mandatory preprocessing pass that must precede execution.
+- [x] Detect `VK_EXT_device_generated_commands` (cross-vendor); add `BackendFeatures::device_generated_commands`. Detect `VK_NV_device_generated_commands` as a fallback for NVIDIA hardware that predates the EXT; add `BackendFeatures::device_generated_commands_nv`.
+- [ ] Add `IndirectCommandLayout` resource: describes the token sequence (index buffer bind, push constant, pipeline bind, draw, dispatch) that the GPU will execute. Descriptor and handle types exist; resource creation is not implemented.
+- [x] Add `PassWork::ExecuteGeneratedCommands(DgcExecuteDesc)` to the render graph. Vulkan command recording currently returns `Unsupported`.
+- [x] Add `PassWork::PreprocessGeneratedCommands(DgcPreprocessDesc)` for the mandatory preprocessing pass that must precede execution. Vulkan command recording currently returns `Unsupported`.
 - [ ] **Depends on**: GFX-1d (buffer device address). **Enables**: fully GPU-driven scene with GPU-side pipeline switching for material batching.
 
 **GFX-6b — Latency reduction (NVIDIA Reflex 2 and AMD Anti-Lag)**
 
 Reduce input-to-display latency by letting the driver control when the engine submits GPU work relative to the display vblank.
 
-- [ ] Detect `VK_NV_low_latency2`; add `BackendFeatures::reflex`. Expose `Engine::set_reflex_mode(mode: ReflexMode)` (Off / On / OnPlusBoost). Call `vkSetLatencySleepModeNV` and `vkLatencySleepNV` at the start of each frame before input sampling.
-- [ ] Detect `VK_AMD_anti_lag`; add `BackendFeatures::anti_lag`. Expose `Engine::set_anti_lag_mode(mode: AntiLagMode)`. Call `vkAntiLagUpdateAMD` each frame.
-- [ ] Expose `Engine::latency_mode() -> Option<LatencyMode>` reporting which (if any) driver-level latency reduction is currently active.
+- [x] Detect `VK_NV_low_latency2`; add `BackendFeatures::reflex`. Expose `Engine::set_reflex_mode(mode: ReflexMode)` (Off / On / OnPlusBoost).
+- [ ] Call `vkSetLatencySleepModeNV` and `vkLatencySleepNV` at the start of each frame before input sampling.
+- [x] Detect `VK_AMD_anti_lag`; add `BackendFeatures::anti_lag`. Expose `Engine::set_anti_lag_mode(mode: AntiLagMode)`.
+- [ ] Call `vkAntiLagUpdateAMD` each frame.
+- [x] Expose `Engine::latency_mode() -> Option<LatencyMode>` reporting which driver-level latency feature is available. Active mode switching still needs backend implementation.
 - [ ] **Depends on**: GFX-2h (`VK_KHR_present_id` for frame correlation in Reflex). **Enables**: Track LL `Surface::present_latency_hint()` to give accurate driver-derived latency estimates.
 
 **GFX-6c — Cooperative matrix (`VK_KHR_cooperative_matrix`)**
@@ -571,7 +592,8 @@ A collection of shader-stage capabilities that unlock specific rendering algorit
 
 Hardware optical flow estimation. Supplement or replace compute-shader optical flow in FSR 3.1 frame generation (Track 10) on NVIDIA hardware.
 
-- [ ] Detect `VK_NV_optical_flow`; add `BackendFeatures::optical_flow_nv`.
+- [x] Detect `VK_NV_optical_flow`; add `BackendFeatures::optical_flow_nv`.
+- [x] Add public `OpticalFlowSessionDesc`, `OpticalFlowEstimateDesc`, and `PassWork::EstimateOpticalFlow`; Vulkan command recording currently returns `Unsupported`.
 - [ ] Add `OpticalFlowSession` resource: creates `VkOpticalFlowSessionNV` with configurable output grid size and output type.
 - [ ] Add `PassWork::EstimateOpticalFlow(OpticalFlowDesc)` to the render graph. `OpticalFlowDesc`: session handle, current frame image handle, previous frame image handle, output motion vector image handle, optional hint image for temporal seeding from previous flow.
 - [ ] **Enables**: Track 10 (FSR 3 frame generation — provides better motion vectors than the compute optical flow path on NVIDIA).
@@ -586,9 +608,9 @@ These require a larger architectural change to the descriptor management layer. 
 
 Moves descriptors into application-managed buffers, composable with the existing bindless heap. Eliminates descriptor pool management entirely.
 
-- [ ] Detect `VK_EXT_descriptor_buffer`; add `BackendFeatures::descriptor_buffer`. Query `VkPhysicalDeviceDescriptorBufferPropertiesEXT` for descriptor sizes and alignment requirements.
+- [x] Detect `VK_EXT_descriptor_buffer`; add `BackendFeatures::descriptor_buffer`. Query `VkPhysicalDeviceDescriptorBufferPropertiesEXT` for descriptor offset alignment.
 - [ ] Implement `DescriptorBufferHeap`: a `Buffer` (created with `DESCRIPTOR_BUFFER_BIT_EXT`) holding all descriptor data addressed by byte offset. When `descriptor_buffer` is available, offer it as an alternative backing for the `DescriptorRegistry`.
-- [ ] Expose `Engine::descriptor_buffer_offset_alignment() -> u64` from the physical device properties.
+- [x] Expose `Device::descriptor_buffer_offset_alignment() -> Option<u64>` from the physical device properties.
 - [ ] Map `BindGroupDesc` to a `DescriptorBufferHeap` sub-range. Bind groups become CPU-written buffer regions rather than `VkDescriptorSet`s; bind via `cmd_bind_descriptor_buffer_embedded_samplers_ext` + `cmd_set_descriptor_buffer_offsets_ext`.
 - [ ] **Depends on**: GFX-1d (buffer device address required for descriptor buffer binding). **Improves**: bindless heap management and per-draw descriptor binding overhead at scale.
 
@@ -596,7 +618,7 @@ Moves descriptors into application-managed buffers, composable with the existing
 
 D3D12-style two-heap model (resource heap + sampler heap). Planned KHR extension; design the bindless heap layout now to avoid future incompatibility.
 
-- [ ] Track `VK_EXT_descriptor_heap` availability; add `BackendFeatures::descriptor_heap`.
+- [x] Track `VK_EXT_descriptor_heap` availability; add `BackendFeatures::descriptor_heap`.
 - [ ] Design the existing `BindlessHeap` in `bindless.rs` as a logical two-heap model even today: resource descriptors (sampled images, storage images, storage buffers) in one address range, sampler descriptors in another. This makes migrating to `VK_EXT_descriptor_heap` a change to the backing allocation, not the public API.
 - [ ] When `descriptor_heap` is available, replace the `UPDATE_AFTER_BIND` pool-based heap with a `VkDescriptorHeapEXT`-backed implementation.
 
@@ -604,7 +626,8 @@ D3D12-style two-heap model (resource heap + sampler heap). Planned KHR extension
 
 Already referenced in the "Backend and Platform Maturity" section. Cross-reference: complete GFX-1 through GFX-2 before beginning this.
 
-- [ ] `VK_AMDX_shader_enqueue`: add `BackendFeatures::work_graphs`. Port cluster LOD selection (Track 7b) to a Work Graph once GFX-1 and GFX-2 are complete. Work graphs allow a cluster traversal shader to directly enqueue mesh shader workgroups without a CPU-side indirect buffer round-trip.
+- [x] `VK_AMDX_shader_enqueue`: add `BackendFeatures::work_graphs`.
+- [ ] Port cluster LOD selection (Track 7b) to a Work Graph once GFX-1 and GFX-2 are complete. Work graphs allow a cluster traversal shader to directly enqueue mesh shader workgroups without a CPU-side indirect buffer round-trip.
 
 ---
 
@@ -612,8 +635,9 @@ Already referenced in the "Backend and Platform Maturity" section. Cross-referen
 
 `VK_EXT_shader_object` compiles shaders into standalone `VkShaderEXT` objects that bind individually per draw, bypassing the monolithic `VkPipeline`. Not a prerequisite for anything but valuable for the shader playground product direction.
 
-- [ ] Detect `VK_EXT_shader_object`; add `BackendFeatures::shader_object`.
-- [ ] Expose `Engine::create_shader_object(ShaderObjectDesc) -> ShaderObject` alongside the existing pipeline path.
+- [x] Detect `VK_EXT_shader_object`; add `BackendFeatures::shader_object`.
+- [x] Expose `Device::create_shader_object(ShaderObjectDesc) -> ShaderObjectHandle` / `destroy_shader_object` API scaffolding.
+- [ ] Implement Vulkan `VkShaderEXT` creation/destruction behind `create_shader_object`; the current backend path still returns `Unsupported`.
 - [ ] Add `PassDesc::shader_binding: ShaderBinding` enum: `Pipeline(PipelineHandle)` or `ShaderObjects { vertex, fragment, ... }`. The dispatch path in `commands.rs` selects `cmd_bind_shaders_ext` vs `cmd_bind_pipeline` based on the active variant.
 - [ ] The pipeline path remains primary. Shader objects are an opt-in alternative; useful for real-time shader permutation switching and the shader playground (Track 1 product direction).
 

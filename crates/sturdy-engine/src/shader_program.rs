@@ -389,6 +389,7 @@ impl ShaderProgram {
                     cull_mode: CullMode::None,
                     front_face: FrontFace::CounterClockwise,
                 },
+                conservative_raster: sturdy_engine_core::ConservativeRasterMode::Off,
             })?;
             pipeline.set_debug_name("reflected-fullscreen-program")?;
             pipelines.insert(key, pipeline);

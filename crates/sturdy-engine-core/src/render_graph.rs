@@ -703,12 +703,40 @@ impl RenderGraph {
         if pass.name.trim().is_empty() {
             return Err(Error::InvalidInput("pass name must be non-empty".into()));
         }
+        if let Some(predicate) = pass.predicate {
+            if predicate.offset % 4 != 0 {
+                return Err(Error::InvalidInput(
+                    "conditional rendering predicate offset must be 4-byte aligned".into(),
+                ));
+            }
+        }
         if let Some(push_constants) = &pass.push_constants {
             push_constants.validate()?;
             if pass.pipeline.is_none() {
                 return Err(Error::InvalidInput(
                     "push constants require a pass pipeline".into(),
                 ));
+            }
+        }
+        if let Some(push_descriptors) = &pass.push_descriptor_set {
+            if pass.pipeline.is_none() {
+                return Err(Error::InvalidInput(
+                    "push descriptors require a pass pipeline".into(),
+                ));
+            }
+            if push_descriptors.bindings.is_empty() {
+                return Err(Error::InvalidInput(
+                    "push descriptor set must contain at least one binding".into(),
+                ));
+            }
+            for binding in &push_descriptors.bindings {
+                if let PushDescriptorBinding::StorageBuffer { range, .. } = binding {
+                    if *range == 0 {
+                        return Err(Error::InvalidInput(
+                            "push descriptor storage buffer range must be non-zero".into(),
+                        ));
+                    }
+                }
             }
         }
         if pass.pipeline_shading_rate.is_some()
@@ -1850,6 +1878,69 @@ mod tests {
 
         assert!(matches!(err, Error::InvalidInput(_)));
         assert!(format!("{err}").contains("pipeline shading rate"));
+    }
+
+    #[test]
+    fn conditional_rendering_predicate_requires_aligned_offset() {
+        let mut graph = RenderGraph::new();
+        let err = graph
+            .add_pass(PassDesc {
+                name: "bad-predicate-offset".into(),
+                queue: QueueType::Graphics,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                pipeline_shading_rate: None,
+                work: PassWork::None,
+                reads: Vec::new(),
+                writes: Vec::new(),
+                buffer_reads: Vec::new(),
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+                push_descriptor_set: None,
+                predicate: Some(ConditionalRenderingDesc {
+                    buffer: BufferHandle(1),
+                    offset: 2,
+                    inverted: false,
+                }),
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidInput(_)));
+        assert!(format!("{err}").contains("4-byte aligned"));
+    }
+
+    #[test]
+    fn push_descriptors_require_pipeline_and_nonempty_bindings() {
+        let mut graph = RenderGraph::new();
+        let err = graph
+            .add_pass(PassDesc {
+                name: "bad-push-descriptor".into(),
+                queue: QueueType::Graphics,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                pipeline_shading_rate: None,
+                work: PassWork::None,
+                reads: Vec::new(),
+                writes: Vec::new(),
+                buffer_reads: Vec::new(),
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+                push_descriptor_set: Some(PushDescriptorSetDesc {
+                    set: 0,
+                    bindings: Vec::new(),
+                }),
+                predicate: None,
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidInput(_)));
+        assert!(format!("{err}").contains("push descriptors"));
     }
 
     #[test]

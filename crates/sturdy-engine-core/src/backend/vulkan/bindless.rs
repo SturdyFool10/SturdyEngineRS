@@ -74,6 +74,10 @@ pub struct BindlessVkInfo {
 ///
 /// One instance lives inside `VulkanBackend` when `supports_bindless` is true.
 /// All Vulkan objects are destroyed in `Drop`.
+///
+// Logical two-heap model: resource descriptors (bindings 1-3) and sampler
+// descriptors (binding 0) occupy separate ranges. When VK_EXT_descriptor_heap
+// is available, these will map directly to a VkDescriptorHeapEXT.
 pub struct BindlessHeap {
     /// The descriptor set layout for the bindless set (set 0).
     pub set_layout: vk::DescriptorSetLayout,

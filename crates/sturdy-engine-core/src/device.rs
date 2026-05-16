@@ -6,6 +6,7 @@ use crate::NativeSurfaceDesc;
 use crate::backend::factory::create_backend;
 use crate::backend::{Backend, BackendKind, factory};
 use crate::handles::HandleAllocator;
+use crate::shader_object::{ShaderObjectDesc, ShaderObjectHandle};
 use crate::{
     AccelerationStructureBuildSizes, AccelerationStructureDesc, AccelerationStructureHandle,
     AdapterInfo, AdapterSelection, AntiLagMode, BackendRawCapabilities, BindGroupDesc,
@@ -172,6 +173,7 @@ enum DeferredDestroy {
     Pipeline(PipelineHandle),
     PipelineLayout(PipelineLayoutHandle),
     BindGroup(BindGroupHandle),
+    ShaderObject(ShaderObjectHandle),
     VideoSession(VideoSessionHandle),
 }
 
@@ -188,6 +190,7 @@ struct DeviceInner {
     pipeline_layouts: HashMap<PipelineLayoutHandle, CanonicalPipelineLayout>,
     pipelines: HashMap<PipelineHandle, PipelineDesc>,
     bind_groups: HashMap<BindGroupHandle, BindGroupDesc>,
+    shader_objects: HashMap<ShaderObjectHandle, ShaderObjectDesc>,
     surfaces: HashMap<SurfaceHandle, SurfaceState>,
     frames: HashMap<FrameHandle, RenderGraph>,
     /// In-process SPIR-V compilation cache keyed by a hash of the shader source
@@ -213,6 +216,7 @@ struct DeviceInner {
     pipeline_layout_handles: HandleAllocator,
     pipeline_handles: HandleAllocator,
     bind_group_handles: HandleAllocator,
+    shader_object_handles: HandleAllocator,
     surface_handles: HandleAllocator,
     frame_handles: HandleAllocator,
     video_sessions: HashMap<VideoSessionHandle, VideoSessionDesc>,
@@ -242,6 +246,7 @@ impl Device {
                 pipeline_layouts: HashMap::new(),
                 pipelines: HashMap::new(),
                 bind_groups: HashMap::new(),
+                shader_objects: HashMap::new(),
                 surfaces: HashMap::new(),
                 frames: HashMap::new(),
                 shader_compile_cache: HashMap::new(),
@@ -255,6 +260,7 @@ impl Device {
                 pipeline_layout_handles: HandleAllocator::default(),
                 pipeline_handles: HandleAllocator::default(),
                 bind_group_handles: HandleAllocator::default(),
+                shader_object_handles: HandleAllocator::default(),
                 surface_handles: HandleAllocator::default(),
                 frame_handles: HandleAllocator::default(),
                 video_sessions: HashMap::new(),
@@ -363,6 +369,49 @@ impl Device {
             .expect("device mutex poisoned")
             .backend
             .register_bindless_storage_buffer(handle)
+    }
+
+    // ── Descriptor buffer (GFX-7a) ────────────────────────────────────────────
+
+    /// Returns the required alignment for descriptor buffer offsets when
+    /// `VK_EXT_descriptor_buffer` is available, or `None` otherwise.
+    pub fn descriptor_buffer_offset_alignment(&self) -> Option<u64> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.backend.caps().features.descriptor_buffer {
+            return None;
+        }
+        inner.backend.descriptor_buffer_offset_alignment()
+    }
+
+    // ── Shader objects (GFX-8) ────────────────────────────────────────────────
+
+    /// Create a standalone shader object that can be bound without a pipeline.
+    ///
+    /// Requires `BackendFeatures::shader_object`.
+    pub fn create_shader_object(&self, desc: ShaderObjectDesc) -> Result<ShaderObjectHandle> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.backend.caps().features.shader_object {
+            return Err(Error::Unsupported(
+                "shader objects require BackendFeatures::shader_object".into(),
+            ));
+        }
+        let handle = ShaderObjectHandle(inner.shader_object_handles.alloc());
+        inner.backend.create_shader_object(handle, &desc)?;
+        inner.shader_objects.insert(handle, desc);
+        Ok(handle)
+    }
+
+    /// Destroy a shader object and queue its GPU resources for deferred cleanup.
+    pub fn destroy_shader_object(&self, handle: ShaderObjectHandle) {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        if inner.shader_objects.remove(&handle).is_some() {
+            inner
+                .deferred_destroys
+                .push(DeferredDestroy::ShaderObject(handle));
+        }
     }
 
     /// Per-pass GPU timings from the most recently completed frame.
@@ -1969,6 +2018,7 @@ impl Frame {
                     DeferredDestroy::PipelineLayout(h) => inner.backend.destroy_pipeline_layout(h),
                     DeferredDestroy::BindGroup(h) => inner.backend.destroy_bind_group(h),
                     DeferredDestroy::VideoSession(h) => inner.backend.destroy_video_session(h),
+                    DeferredDestroy::ShaderObject(h) => inner.backend.destroy_shader_object(h),
                 };
             }
 

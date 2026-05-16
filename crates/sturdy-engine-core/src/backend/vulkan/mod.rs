@@ -24,15 +24,15 @@ use std::{fs, path::PathBuf};
 use crate::backend::{Backend, BackendKind};
 use crate::{
     AccelerationStructureBuildMode, AccelerationStructureBuildSizes, AccelerationStructureDesc,
-    AccelerationStructureHandle, AccelerationStructureKind, AdapterInfo, AntiLagMode, BindGroupDesc,
-    BindGroupHandle, BlasBuildDesc, BufferDesc, BufferHandle, CanonicalPipelineLayout, Caps,
-    CompiledGraph, ComputePipelineDesc, Error, ExternalBufferDesc, ExternalBufferHandle,
-    ExternalImageDesc, ExternalImageHandle, Format, FormatCapabilities, GraphicsPipelineDesc,
-    ImageDesc, ImageHandle, IndexFormat, LatencyMode, NativeSurfaceDesc, PipelineHandle,
-    PipelineLayoutHandle, RayTracingPipelineDesc, ReflexMode, Result, SamplerDesc, SamplerHandle,
-    ShaderBindingTableProperties, ShaderDesc, ShaderHandle, SubmissionHandle, SurfaceCapabilities,
-    SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize, TlasBuildDesc, VertexFormat,
-    VideoSessionDesc, VideoSessionHandle,
+    AccelerationStructureHandle, AccelerationStructureKind, AdapterInfo, AntiLagMode,
+    BindGroupDesc, BindGroupHandle, BlasBuildDesc, BufferDesc, BufferHandle,
+    CanonicalPipelineLayout, Caps, CompiledGraph, ComputePipelineDesc, Error, ExternalBufferDesc,
+    ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, Format, FormatCapabilities,
+    GraphicsPipelineDesc, ImageDesc, ImageHandle, IndexFormat, LatencyMode, NativeSurfaceDesc,
+    PipelineHandle, PipelineLayoutHandle, RayTracingPipelineDesc, ReflexMode, Result, SamplerDesc,
+    SamplerHandle, ShaderBindingTableProperties, ShaderDesc, ShaderHandle, SubmissionHandle,
+    SurfaceCapabilities, SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
+    TlasBuildDesc, VertexFormat, VideoSessionDesc, VideoSessionHandle,
 };
 
 pub use bindless::BindlessVkInfo;
@@ -76,6 +76,8 @@ pub struct VulkanBackend {
     push_descriptor_khr: Option<ash::khr::push_descriptor::Device>,
     /// VK_EXT_conditional_rendering commands. Present when conditional_rendering is enabled.
     conditional_rendering_ext: Option<ash::ext::conditional_rendering::Device>,
+    /// VK_KHR_fragment_shading_rate commands. Present when any VRS tier is enabled.
+    fragment_shading_rate_khr: Option<ash::khr::fragment_shading_rate::Device>,
     /// Whether VK_EXT_conservative_rasterization is available.
     conservative_rasterization_enabled: bool,
     /// VK_KHR_acceleration_structure commands. Present when AS is enabled.
@@ -111,10 +113,22 @@ impl VulkanBackend {
         caps.features.memory_priority = logical.memory_priority_enabled;
         caps.features.push_descriptors = logical.push_descriptors_enabled;
         caps.features.conditional_rendering = logical.conditional_rendering_enabled;
+        caps.features.vrs_pipeline = logical.vrs_pipeline_enabled;
+        caps.features.vrs_primitive = logical.vrs_primitive_enabled;
+        caps.features.vrs_attachment = logical.vrs_attachment_enabled;
+        caps.features.variable_rate_shading = logical.vrs_pipeline_enabled
+            || logical.vrs_primitive_enabled
+            || logical.vrs_attachment_enabled;
         caps.features.global_queue_priority = logical.global_queue_priority_enabled;
         caps.features.ray_tracing = logical.ray_tracing_pipeline_enabled;
         caps.features.ray_query = logical.ray_query_enabled;
         caps.features.ray_tracing_position_fetch = logical.ray_tracing_position_fetch_enabled;
+        caps.features.conservative_rasterization_overestimate = logical
+            .conservative_rasterization_enabled
+            && caps.features.conservative_rasterization_overestimate;
+        caps.features.conservative_rasterization_underestimate = logical
+            .conservative_rasterization_enabled
+            && caps.features.conservative_rasterization_underestimate;
         let props = unsafe { instance.get_physical_device_properties(selection.physical_device) };
         let timestamp_period_ns = props.limits.timestamp_period;
         let memory_properties =
@@ -129,6 +143,11 @@ impl VulkanBackend {
         let mut pipeline_registry =
             pipelines::PipelineRegistry::create(&logical.device, cache_data.as_deref())?;
         pipeline_registry.dynamic_rendering_enabled = logical.dynamic_rendering_enabled;
+        pipeline_registry.vrs_pipeline_enabled = caps.features.vrs_pipeline;
+        pipeline_registry.conservative_rasterization_overestimate_enabled =
+            caps.features.conservative_rasterization_overestimate;
+        pipeline_registry.conservative_rasterization_underestimate_enabled =
+            caps.features.conservative_rasterization_underestimate;
 
         let debug_utils = debug::DebugUtils::new(&instance, &logical.device);
         let mesh_shader_ext = if logical.mesh_shader_enabled {
@@ -179,8 +198,18 @@ impl VulkanBackend {
         } else {
             None
         };
-        let conservative_rasterization_enabled =
-            caps.features.conservative_rasterization_overestimate;
+        let fragment_shading_rate_khr = if logical.vrs_pipeline_enabled
+            || logical.vrs_primitive_enabled
+            || logical.vrs_attachment_enabled
+        {
+            Some(ash::khr::fragment_shading_rate::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        let conservative_rasterization_enabled = logical.conservative_rasterization_enabled;
         let acceleration_structure_khr = if logical.acceleration_structure_enabled {
             Some(ash::khr::acceleration_structure::Device::new(
                 &instance,
@@ -201,7 +230,10 @@ impl VulkanBackend {
             .ray_tracing_pipeline_enabled
             .then(|| query_ray_tracing_sbt_properties(&instance, selection.physical_device));
         let reflex_nv = if caps.features.reflex {
-            Some(ash::nv::low_latency2::Device::new(&instance, &logical.device))
+            Some(ash::nv::low_latency2::Device::new(
+                &instance,
+                &logical.device,
+            ))
         } else {
             None
         };
@@ -245,6 +277,7 @@ impl VulkanBackend {
             device_fault_ext,
             push_descriptor_khr,
             conditional_rendering_ext,
+            fragment_shading_rate_khr,
             conservative_rasterization_enabled,
             acceleration_structure_khr,
             ray_tracing_pipeline_khr,
@@ -968,6 +1001,9 @@ impl Backend for VulkanBackend {
             self.mesh_shader_ext.as_ref(),
             self.synchronization2_khr.as_ref(),
             self.dynamic_rendering_khr.as_ref(),
+            self.push_descriptor_khr.as_ref(),
+            self.conditional_rendering_ext.as_ref(),
+            self.fragment_shading_rate_khr.as_ref(),
             self.acceleration_structure_khr.as_ref(),
             self.ray_tracing_pipeline_khr.as_ref(),
             self.caps.features.ray_tracing_position_fetch,
@@ -1036,8 +1072,9 @@ impl Backend for VulkanBackend {
         _handle: VideoSessionHandle,
         _desc: VideoSessionDesc,
     ) -> Result<()> {
-        // TODO(GFX-4): create VkVideoSessionKHR + allocate session memory
-        Ok(())
+        Err(Error::Unsupported(
+            "Vulkan video session creation is not yet implemented".into(),
+        ))
     }
 
     fn destroy_video_session(&self, _handle: VideoSessionHandle) -> Result<()> {
@@ -1306,24 +1343,71 @@ fn gather_device_fault_info(
     if count_result != ash::vk::Result::SUCCESS {
         return original_msg.to_string();
     }
-    // Second call: fill vendor info structs.
+    // Second call: fill address and vendor info structs.
+    let mut address_infos = vec![
+        ash::vk::DeviceFaultAddressInfoEXT::default();
+        fault_counts.address_info_count as usize
+    ];
     let mut vendor_infos =
         vec![ash::vk::DeviceFaultVendorInfoEXT::default(); fault_counts.vendor_info_count as usize];
+    let address_ptr = if address_infos.is_empty() {
+        std::ptr::null_mut()
+    } else {
+        address_infos.as_mut_ptr()
+    };
     let vendor_ptr = if vendor_infos.is_empty() {
         std::ptr::null_mut()
     } else {
         vendor_infos.as_mut_ptr()
     };
     let mut fault_info = ash::vk::DeviceFaultInfoEXT {
+        p_address_infos: address_ptr,
         p_vendor_infos: vendor_ptr,
         ..Default::default()
     };
-    let _ = unsafe { get_fault(device_handle, &mut fault_counts, &mut fault_info) };
+    let info_result = unsafe { get_fault(device_handle, &mut fault_counts, &mut fault_info) };
+    if info_result != ash::vk::Result::SUCCESS {
+        return original_msg.to_string();
+    }
+
+    format_device_fault_info(
+        original_msg,
+        &fault_info,
+        &address_infos,
+        &vendor_infos,
+        fault_counts.vendor_binary_size,
+    )
+}
+
+fn format_device_fault_info(
+    original_msg: &str,
+    fault_info: &ash::vk::DeviceFaultInfoEXT<'_>,
+    address_infos: &[ash::vk::DeviceFaultAddressInfoEXT],
+    vendor_infos: &[ash::vk::DeviceFaultVendorInfoEXT],
+    vendor_binary_size: u64,
+) -> String {
     let mut msg = original_msg.to_string();
+    let description =
+        unsafe { std::ffi::CStr::from_ptr(fault_info.description.as_ptr()) }.to_string_lossy();
+    if !description.is_empty() {
+        msg.push_str("\n[device_fault] ");
+        msg.push_str(&description);
+    }
+    if !address_infos.is_empty() {
+        msg.push_str("\n[device_fault address info]");
+        for (i, ai) in address_infos.iter().enumerate() {
+            msg.push_str(&format!(
+                "\n  [{}] type={} address=0x{:x} precision={}",
+                i,
+                device_fault_address_type(ai.address_type),
+                ai.reported_address,
+                ai.address_precision
+            ));
+        }
+    }
     if !vendor_infos.is_empty() {
         msg.push_str("\n[device_fault vendor info]");
         for (i, vi) in vendor_infos.iter().enumerate() {
-            // description is a [i8; 256] C-string
             let desc = unsafe { std::ffi::CStr::from_ptr(vi.description.as_ptr()) };
             msg.push_str(&format!(
                 "\n  [{}] code=0x{:x} data=0x{:x} desc={}",
@@ -1334,7 +1418,69 @@ fn gather_device_fault_info(
             ));
         }
     }
+    if vendor_binary_size > 0 {
+        msg.push_str(&format!(
+            "\n[device_fault vendor binary] size={} bytes",
+            vendor_binary_size
+        ));
+    }
     msg
+}
+
+fn device_fault_address_type(address_type: ash::vk::DeviceFaultAddressTypeEXT) -> &'static str {
+    if address_type == ash::vk::DeviceFaultAddressTypeEXT::READ_INVALID {
+        "read_invalid"
+    } else if address_type == ash::vk::DeviceFaultAddressTypeEXT::WRITE_INVALID {
+        "write_invalid"
+    } else if address_type == ash::vk::DeviceFaultAddressTypeEXT::EXECUTE_INVALID {
+        "execute_invalid"
+    } else if address_type == ash::vk::DeviceFaultAddressTypeEXT::INSTRUCTION_POINTER_UNKNOWN {
+        "instruction_pointer_unknown"
+    } else if address_type == ash::vk::DeviceFaultAddressTypeEXT::INSTRUCTION_POINTER_INVALID {
+        "instruction_pointer_invalid"
+    } else if address_type == ash::vk::DeviceFaultAddressTypeEXT::INSTRUCTION_POINTER_FAULT {
+        "instruction_pointer_fault"
+    } else {
+        "none"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_fault_report_includes_description_addresses_and_vendor_info() {
+        let fault_description = std::ffi::CString::new("fault in test pass").unwrap();
+        let fault_info = vk::DeviceFaultInfoEXT::default()
+            .description(&fault_description)
+            .unwrap();
+        let address_info = vk::DeviceFaultAddressInfoEXT::default()
+            .address_type(vk::DeviceFaultAddressTypeEXT::WRITE_INVALID)
+            .reported_address(0xabc0)
+            .address_precision(64);
+        let vendor_description = std::ffi::CString::new("vendor detail").unwrap();
+        let vendor_info = vk::DeviceFaultVendorInfoEXT::default()
+            .description(&vendor_description)
+            .unwrap()
+            .vendor_fault_code(0x12)
+            .vendor_fault_data(0x34);
+
+        let report = format_device_fault_info(
+            "device lost",
+            &fault_info,
+            &[address_info],
+            &[vendor_info],
+            8,
+        );
+
+        assert!(report.contains("[device_fault] fault in test pass"));
+        assert!(report.contains("[device_fault address info]"));
+        assert!(report.contains("type=write_invalid address=0xabc0 precision=64"));
+        assert!(report.contains("[device_fault vendor info]"));
+        assert!(report.contains("code=0x12 data=0x34 desc=vendor detail"));
+        assert!(report.contains("[device_fault vendor binary] size=8 bytes"));
+    }
 }
 
 impl Drop for VulkanBackend {

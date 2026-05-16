@@ -1,6 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::NativeSurfaceDesc;
 use crate::native_handle_capabilities_for_backend;
+use crate::shader_object::{ShaderObjectDesc, ShaderObjectHandle};
 use crate::{
     AccelerationStructureBuildSizes, AccelerationStructureDesc, AccelerationStructureHandle,
     AntiLagMode, BackendRawCapabilities, BindGroupDesc, BindGroupHandle, BlasBuildDesc, BufferDesc,
@@ -9,8 +10,8 @@ use crate::{
     ImageDesc, ImageHandle, LatencyMode, NativeHandleCapabilities, PipelineHandle,
     PipelineLayoutHandle, RayTracingPipelineDesc, ReflexMode, Result, SamplerDesc, SamplerHandle,
     ShaderBindingTableProperties, ShaderDesc, ShaderHandle, ShaderTarget, SubmissionHandle,
-    SurfaceCapabilities, SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize, TlasBuildDesc,
-    VideoSessionDesc, VideoSessionHandle,
+    SurfaceCapabilities, SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
+    TlasBuildDesc, VideoSessionDesc, VideoSessionHandle,
 };
 use crate::{Format, FormatCapabilities, GpuMemoryBudget};
 
@@ -135,6 +136,25 @@ pub trait Backend: Send + Sync {
     /// Returns `true` when the bindless heap is available on this backend.
     fn bindless_supported(&self) -> bool {
         false
+    }
+
+    /// Returns the required alignment for descriptor buffer offsets when
+    /// `VK_EXT_descriptor_buffer` is available, or `None` otherwise.
+    fn descriptor_buffer_offset_alignment(&self) -> Option<u64> {
+        None
+    }
+
+    fn create_shader_object(
+        &self,
+        _handle: ShaderObjectHandle,
+        _desc: &ShaderObjectDesc,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "shader objects are not supported by this backend",
+        ))
+    }
+    fn destroy_shader_object(&self, _handle: ShaderObjectHandle) -> Result<()> {
+        Ok(())
     }
 
     fn native_handle_capabilities(&self) -> NativeHandleCapabilities {
@@ -374,11 +394,15 @@ pub trait Backend: Send + Sync {
     // ── GFX-6b: Latency reduction ─────────────────────────────────────────────
 
     fn set_reflex_mode(&self, _mode: ReflexMode) -> Result<()> {
-        Ok(())
+        Err(crate::Error::Unsupported(
+            "NVIDIA Reflex latency mode is not supported by this backend",
+        ))
     }
 
     fn set_anti_lag_mode(&self, _mode: AntiLagMode) -> Result<()> {
-        Ok(())
+        Err(crate::Error::Unsupported(
+            "AMD Anti-Lag latency mode is not supported by this backend",
+        ))
     }
 
     fn latency_mode(&self) -> Option<LatencyMode> {

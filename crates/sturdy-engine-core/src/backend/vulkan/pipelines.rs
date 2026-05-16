@@ -4,9 +4,9 @@ use std::ffi::CString;
 use ash::{Device, vk};
 
 use crate::{
-    ComputePipelineDesc, CullMode, Error, FrontFace, GraphicsPipelineDesc, PipelineHandle,
-    PrimitiveTopology, RayTracingPipelineDesc, Result, RtShaderGroupKind, VertexFormat,
-    VertexInputRate,
+    ComputePipelineDesc, ConservativeRasterMode, CullMode, Error, FrontFace, GraphicsPipelineDesc,
+    PipelineHandle, PrimitiveTopology, RayTracingPipelineDesc, Result, RtShaderGroupKind,
+    VertexFormat, VertexInputRate,
 };
 
 use super::descriptors::DescriptorRegistry;
@@ -105,6 +105,12 @@ pub struct PipelineRegistry {
     /// When true, graphics pipelines are created without a VkRenderPass,
     /// using VkPipelineRenderingCreateInfoKHR instead.
     pub dynamic_rendering_enabled: bool,
+    /// When true, graphics pipelines expose dynamic fragment shading rate state.
+    pub vrs_pipeline_enabled: bool,
+    /// When true, overestimate conservative rasterization can be requested.
+    pub conservative_rasterization_overestimate_enabled: bool,
+    /// When true, underestimate conservative rasterization can be requested.
+    pub conservative_rasterization_underestimate_enabled: bool,
 }
 
 impl PipelineRegistry {
@@ -124,6 +130,9 @@ impl PipelineRegistry {
             framebuffer_cache: FramebufferCache::default(),
             pipelines_since_checkpoint: 0,
             dynamic_rendering_enabled: false,
+            vrs_pipeline_enabled: false,
+            conservative_rasterization_overestimate_enabled: false,
+            conservative_rasterization_underestimate_enabled: false,
         })
     }
 
@@ -449,11 +458,41 @@ impl PipelineRegistry {
         let viewport_state = vk::PipelineViewportStateCreateInfo::default()
             .viewport_count(1)
             .scissor_count(1);
-        let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+        let conservative_mode = match desc.conservative_raster {
+            ConservativeRasterMode::Off => None,
+            ConservativeRasterMode::Overestimate => {
+                if !self.conservative_rasterization_overestimate_enabled {
+                    return Err(Error::Unsupported(
+                        "conservative rasterization overestimate requires VK_EXT_conservative_rasterization"
+                            .into(),
+                    ));
+                }
+                Some(vk::ConservativeRasterizationModeEXT::OVERESTIMATE)
+            }
+            ConservativeRasterMode::Underestimate => {
+                if !self.conservative_rasterization_underestimate_enabled {
+                    return Err(Error::Unsupported(
+                        "conservative rasterization underestimate requires primitiveUnderestimation support"
+                            .into(),
+                    ));
+                }
+                Some(vk::ConservativeRasterizationModeEXT::UNDERESTIMATE)
+            }
+        };
+        let mut conservative_rasterization =
+            vk::PipelineRasterizationConservativeStateCreateInfoEXT::default();
+        if let Some(mode) = conservative_mode {
+            conservative_rasterization =
+                conservative_rasterization.conservative_rasterization_mode(mode);
+        }
+        let mut rasterization = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
             .cull_mode(vk_cull_mode(desc.raster.cull_mode))
             .front_face(vk_front_face(desc.raster.front_face))
             .line_width(1.0);
+        if let Some(_mode) = conservative_mode {
+            rasterization = rasterization.push_next(&mut conservative_rasterization);
+        }
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk_samples(desc.samples)?);
         let color_blend_attachments = desc
@@ -477,7 +516,10 @@ impl PipelineRegistry {
             .collect::<Vec<_>>();
         let color_blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let mut dynamic_states = vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        if self.vrs_pipeline_enabled {
+            dynamic_states.push(vk::DynamicState::FRAGMENT_SHADING_RATE_KHR);
+        }
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
@@ -518,11 +560,10 @@ impl PipelineRegistry {
             .color_attachment_formats(&color_formats)
             .depth_attachment_format(depth_vk_format);
 
-        let info = if render_pass == vk::RenderPass::null() {
-            base_info.push_next(&mut pipeline_rendering_info)
-        } else {
-            base_info
-        };
+        let mut info = base_info;
+        if render_pass == vk::RenderPass::null() {
+            info = info.push_next(&mut pipeline_rendering_info);
+        }
 
         let pipeline = unsafe {
             device

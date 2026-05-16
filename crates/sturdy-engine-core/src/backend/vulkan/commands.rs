@@ -6,8 +6,9 @@ mod batch_pool;
 
 use crate::{
     AccelerationStructureBuildMode, BufferBarrier, CompiledGraph, Error, Extent3d, Format,
-    ImageBarrier, IndexFormat, PassDesc, PassWork, PushConstants, Result, RgState,
-    ShaderBindingTableRegion, SubmissionHandle, SubresourceRange, VertexFormat,
+    ImageBarrier, IndexFormat, PassDesc, PassWork, PushConstants, PushDescriptorBinding, Result,
+    RgState, ShaderBindingTableRegion, ShadingRate, SubmissionHandle, SubresourceRange,
+    VertexFormat,
 };
 
 use super::bindless::BindlessVkInfo;
@@ -100,6 +101,9 @@ impl CommandContext {
         mesh_shader_ext: Option<&mesh_shader::Device>,
         sync2: Option<&ash::khr::synchronization2::Device>,
         dynamic_rendering: Option<&ash::khr::dynamic_rendering::Device>,
+        push_descriptor: Option<&ash::khr::push_descriptor::Device>,
+        conditional_rendering: Option<&ash::ext::conditional_rendering::Device>,
+        fragment_shading_rate: Option<&ash::khr::fragment_shading_rate::Device>,
         as_khr: Option<&ash::khr::acceleration_structure::Device>,
         rt_khr: Option<&ash::khr::ray_tracing_pipeline::Device>,
         ray_tracing_position_fetch: bool,
@@ -280,6 +284,9 @@ impl CommandContext {
                             mesh_shader_ext,
                             sync2,
                             dynamic_rendering,
+                            push_descriptor,
+                            conditional_rendering,
+                            fragment_shading_rate,
                             as_khr,
                             rt_khr,
                             ray_tracing_position_fetch,
@@ -504,10 +511,38 @@ impl CommandContext {
         mesh_shader_ext: Option<&mesh_shader::Device>,
         sync2: Option<&ash::khr::synchronization2::Device>,
         dynamic_rendering: Option<&ash::khr::dynamic_rendering::Device>,
+        push_descriptor: Option<&ash::khr::push_descriptor::Device>,
+        conditional_rendering: Option<&ash::ext::conditional_rendering::Device>,
+        fragment_shading_rate: Option<&ash::khr::fragment_shading_rate::Device>,
         as_khr: Option<&ash::khr::acceleration_structure::Device>,
         rt_khr: Option<&ash::khr::ray_tracing_pipeline::Device>,
         ray_tracing_position_fetch: bool,
     ) -> Result<()> {
+        if let Some(predicate) = pass.predicate {
+            let conditional_rendering = conditional_rendering.ok_or_else(|| {
+                Error::Unsupported(
+                    "conditional rendering requires VK_EXT_conditional_rendering".into(),
+                )
+            })?;
+            let buffer = resources.buffer(predicate.buffer)?;
+            let flags = if predicate.inverted {
+                vk::ConditionalRenderingFlagsEXT::INVERTED
+            } else {
+                vk::ConditionalRenderingFlagsEXT::empty()
+            };
+            let begin_info = vk::ConditionalRenderingBeginInfoEXT::default()
+                .buffer(buffer)
+                .offset(predicate.offset)
+                .flags(flags);
+            unsafe {
+                (conditional_rendering
+                    .fp()
+                    .cmd_begin_conditional_rendering_ext)(
+                    command_buffer, &begin_info
+                );
+            }
+        }
+
         let mut bound_pipeline = None;
         if let Some(pipeline) = pass.pipeline {
             let pipeline = pipelines.pipeline(pipeline)?;
@@ -560,6 +595,21 @@ impl CommandContext {
                     );
                 }
             }
+            if let Some(push_descriptor_set) = &pass.push_descriptor_set {
+                let push_descriptor = push_descriptor.ok_or_else(|| {
+                    Error::Unsupported("push descriptors require VK_KHR_push_descriptor".into())
+                })?;
+                for binding in &push_descriptor_set.bindings {
+                    record_push_descriptor_binding(
+                        push_descriptor,
+                        command_buffer,
+                        pipeline,
+                        push_descriptor_set.set,
+                        binding,
+                        resources,
+                    )?;
+                }
+            }
             if let Some(push_constants) = &pass.push_constants {
                 record_push_constants(device, command_buffer, pipeline, push_constants)?;
             }
@@ -568,6 +618,29 @@ impl CommandContext {
             return Err(Error::InvalidInput(
                 "push constants require a bound pipeline".into(),
             ));
+        } else if pass.push_descriptor_set.is_some() {
+            return Err(Error::InvalidInput(
+                "push descriptors require a bound pipeline".into(),
+            ));
+        }
+        if let Some(rate) = pass.pipeline_shading_rate {
+            let fragment_shading_rate = fragment_shading_rate.ok_or_else(|| {
+                Error::Unsupported(
+                    "pipeline shading rate requires VK_KHR_fragment_shading_rate".into(),
+                )
+            })?;
+            let extent = vk_fragment_shading_rate(rate);
+            let combiner_ops = [
+                vk::FragmentShadingRateCombinerOpKHR::REPLACE,
+                vk::FragmentShadingRateCombinerOpKHR::KEEP,
+            ];
+            unsafe {
+                (fragment_shading_rate.fp().cmd_set_fragment_shading_rate_khr)(
+                    command_buffer,
+                    &extent,
+                    &combiner_ops,
+                );
+            }
         }
 
         match pass.work {
@@ -1623,6 +1696,13 @@ impl CommandContext {
                 ));
             }
         }
+        if let Some(conditional_rendering) =
+            conditional_rendering.filter(|_| pass.predicate.is_some())
+        {
+            unsafe {
+                (conditional_rendering.fp().cmd_end_conditional_rendering_ext)(command_buffer);
+            }
+        }
         Ok(())
     }
 
@@ -2191,6 +2271,94 @@ fn record_push_constants(
     Ok(())
 }
 
+fn record_push_descriptor_binding(
+    push_descriptor: &ash::khr::push_descriptor::Device,
+    command_buffer: vk::CommandBuffer,
+    pipeline: super::pipelines::VulkanPipeline,
+    set: u32,
+    binding: &PushDescriptorBinding,
+    resources: &ResourceRegistry,
+) -> Result<()> {
+    match binding {
+        PushDescriptorBinding::SampledImage {
+            binding,
+            image_view,
+            layout,
+        } => {
+            let info = [vk::DescriptorImageInfo::default()
+                .image_view(resources.image_view(*image_view)?)
+                .image_layout(image_layout(*layout))];
+            let write = [vk::WriteDescriptorSet::default()
+                .dst_binding(*binding)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&info)];
+            unsafe {
+                push_descriptor.cmd_push_descriptor_set(
+                    command_buffer,
+                    pipeline.bind_point,
+                    pipeline.layout,
+                    set,
+                    &write,
+                );
+            }
+        }
+        PushDescriptorBinding::Sampler { binding, sampler } => {
+            let info = [vk::DescriptorImageInfo::default().sampler(resources.sampler(*sampler)?)];
+            let write = [vk::WriteDescriptorSet::default()
+                .dst_binding(*binding)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .image_info(&info)];
+            unsafe {
+                push_descriptor.cmd_push_descriptor_set(
+                    command_buffer,
+                    pipeline.bind_point,
+                    pipeline.layout,
+                    set,
+                    &write,
+                );
+            }
+        }
+        PushDescriptorBinding::StorageBuffer {
+            binding,
+            buffer,
+            offset,
+            range,
+        } => {
+            let info = [vk::DescriptorBufferInfo::default()
+                .buffer(resources.buffer(*buffer)?)
+                .offset(*offset)
+                .range(*range)];
+            let write = [vk::WriteDescriptorSet::default()
+                .dst_binding(*binding)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&info)];
+            unsafe {
+                push_descriptor.cmd_push_descriptor_set(
+                    command_buffer,
+                    pipeline.bind_point,
+                    pipeline.layout,
+                    set,
+                    &write,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn vk_fragment_shading_rate(rate: ShadingRate) -> vk::Extent2D {
+    let (width, height) = match rate {
+        ShadingRate::Rate1x1 => (1, 1),
+        ShadingRate::Rate1x2 => (1, 2),
+        ShadingRate::Rate2x1 => (2, 1),
+        ShadingRate::Rate2x2 => (2, 2),
+        ShadingRate::Rate2x4 => (2, 4),
+        ShadingRate::Rate4x2 => (4, 2),
+        ShadingRate::Rate4x4 => (4, 4),
+    };
+    vk::Extent2D { width, height }
+}
+
 fn image_layout(state: RgState) -> vk::ImageLayout {
     match state {
         RgState::Undefined => vk::ImageLayout::UNDEFINED,
@@ -2319,6 +2487,9 @@ impl FramedCommands {
         mesh_shader_ext: Option<&mesh_shader::Device>,
         sync2: Option<&ash::khr::synchronization2::Device>,
         dynamic_rendering: Option<&ash::khr::dynamic_rendering::Device>,
+        push_descriptor: Option<&ash::khr::push_descriptor::Device>,
+        conditional_rendering: Option<&ash::ext::conditional_rendering::Device>,
+        fragment_shading_rate: Option<&ash::khr::fragment_shading_rate::Device>,
         as_khr: Option<&ash::khr::acceleration_structure::Device>,
         rt_khr: Option<&ash::khr::ray_tracing_pipeline::Device>,
         ray_tracing_position_fetch: bool,
@@ -2340,6 +2511,9 @@ impl FramedCommands {
             mesh_shader_ext,
             sync2,
             dynamic_rendering,
+            push_descriptor,
+            conditional_rendering,
+            fragment_shading_rate,
             as_khr,
             rt_khr,
             ray_tracing_position_fetch,

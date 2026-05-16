@@ -28,6 +28,12 @@ pub struct BackendFeatures {
     pub image_fp16_render: bool,
     pub image_fp32_render: bool,
     pub variable_rate_shading: bool,
+    /// Per-draw pipeline fragment shading rate is enabled (tier 1).
+    pub vrs_pipeline: bool,
+    /// Per-primitive fragment shading rate is enabled (tier 2).
+    pub vrs_primitive: bool,
+    /// Attachment-based fragment shading rate is enabled (tier 3).
+    pub vrs_attachment: bool,
     /// Multiple indirect draw commands can be submitted by one API call.
     pub multi_draw_indirect: bool,
     /// GPU-visible count buffers can limit indirect draw command consumption.
@@ -50,6 +56,14 @@ pub struct BackendFeatures {
     pub pageable_device_local_memory: bool,
     /// VK_EXT_device_fault — retrieve breadcrumbs after VK_ERROR_DEVICE_LOST.
     pub device_fault: bool,
+    /// VK_NV_device_diagnostic_checkpoints — pass markers that survive device loss.
+    pub device_diagnostic_checkpoints_nv: bool,
+    /// VK_AMD_buffer_marker — command-buffer breadcrumbs written into GPU buffers.
+    pub buffer_marker_amd: bool,
+    /// VK_EXT_device_address_binding_report — debug callback events for GPU VA bindings.
+    pub device_address_binding_report: bool,
+    /// VK_EXT_device_memory_report — debug callback events for driver memory allocations.
+    pub device_memory_report: bool,
     /// VK_EXT_host_image_copy (or Vulkan 1.4 core) — CPU→GPU image uploads
     /// without a staging buffer or explicit transfer command.
     pub host_image_copy: bool,
@@ -85,6 +99,14 @@ pub struct BackendFeatures {
     pub image_compression_control: bool,
     /// VK_EXT_multisampled_render_to_single_sampled — render MSAA into single-sample storage.
     pub msaa_render_to_single_sampled: bool,
+    /// VK_EXT_descriptor_buffer — descriptors stored in app-managed GPU buffers.
+    pub descriptor_buffer: bool,
+    /// VK_EXT_descriptor_heap — D3D12-style resource + sampler descriptor heaps.
+    pub descriptor_heap: bool,
+    /// VK_AMDX_shader_enqueue — AMD work graphs (shader-enqueued dispatch).
+    pub work_graphs: bool,
+    /// VK_EXT_shader_object — pipeline-free shader binding.
+    pub shader_object: bool,
 
     // ── GFX-4: Video encode/decode ────────────────────────────────────────────
     /// VK_KHR_video_queue — base video queue support.
@@ -165,6 +187,28 @@ pub struct BackendFeatures {
     // ── GFX-6e: Optical flow ─────────────────────────────────────────────────
     /// VK_NV_optical_flow — NVIDIA hardware optical flow estimation.
     pub optical_flow_nv: bool,
+
+    // ── GFX-2h: Presentation extensions ──────────────────────────────────────
+    /// VK_EXT_swapchain_colorspace — extended color-space support.
+    pub swapchain_colorspace: bool,
+    /// VK_KHR_present_id — attach a monotonic ID to each present.
+    pub present_id: bool,
+    /// VK_KHR_present_wait — wait for a specific present ID to complete.
+    pub present_wait: bool,
+    /// VK_KHR_swapchain_maintenance1 — swapchain maintenance fixes.
+    pub swapchain_maintenance1: bool,
+    /// VK_EXT_full_screen_exclusive — request exclusive full-screen.
+    pub full_screen_exclusive: bool,
+    /// VK_GOOGLE_display_timing — query and control display timing.
+    pub display_timing: bool,
+    /// VK_EXT_present_mode_fifo_latest_ready — FIFO with latest-ready frames.
+    pub present_mode_fifo_latest_ready: bool,
+
+    // ── GFX-2j: Performance query ─────────────────────────────────────────────
+    /// VK_KHR_performance_query — hardware performance counters.
+    pub performance_query: bool,
+    /// VK_KHR_pipeline_executable_properties — inspect compiled pipeline internals.
+    pub pipeline_executable_properties: bool,
 }
 
 #[cfg(test)]
@@ -192,6 +236,10 @@ mod tests {
         assert!(!features.sparse_residency_image_2d);
         assert!(!features.sparse_residency_image_3d);
         assert!(!features.sparse_residency_aliased);
+        assert!(!features.descriptor_buffer);
+        assert!(!features.descriptor_heap);
+        assert!(!features.work_graphs);
+        assert!(!features.shader_object);
 
         // GFX-4: video
         assert!(!features.video_queue);
@@ -239,6 +287,28 @@ mod tests {
 
         // GFX-6e: optical flow
         assert!(!features.optical_flow_nv);
+
+        // GFX-2a: VRS sub-modes
+        assert!(!features.vrs_pipeline);
+        assert!(!features.vrs_primitive);
+        assert!(!features.vrs_attachment);
+
+        // GFX-2f: conservative rasterization modes
+        assert!(!features.conservative_rasterization_overestimate);
+        assert!(!features.conservative_rasterization_underestimate);
+
+        // GFX-2h: presentation extensions
+        assert!(!features.swapchain_colorspace);
+        assert!(!features.present_id);
+        assert!(!features.present_wait);
+        assert!(!features.swapchain_maintenance1);
+        assert!(!features.full_screen_exclusive);
+        assert!(!features.display_timing);
+        assert!(!features.present_mode_fifo_latest_ready);
+
+        // GFX-2j: performance query
+        assert!(!features.performance_query);
+        assert!(!features.pipeline_executable_properties);
     }
 
     #[test]
@@ -263,9 +333,36 @@ mod tests {
 
         assert!(features.supports_gpu_draw_compaction());
     }
+
+    #[test]
+    fn conservative_rasterization_supports_either_mode() {
+        let overestimate = BackendFeatures {
+            conservative_rasterization_overestimate: true,
+            ..BackendFeatures::default()
+        };
+        let underestimate = BackendFeatures {
+            conservative_rasterization_underestimate: true,
+            ..BackendFeatures::default()
+        };
+
+        assert!(overestimate.supports_conservative_rasterization());
+        assert!(underestimate.supports_conservative_rasterization());
+        assert!(!BackendFeatures::default().supports_conservative_rasterization());
+    }
 }
 
 impl BackendFeatures {
+    /// True when any tier of variable-rate shading is available.
+    pub fn supports_variable_rate_shading(&self) -> bool {
+        self.variable_rate_shading || self.vrs_pipeline || self.vrs_primitive || self.vrs_attachment
+    }
+
+    /// True when at least one conservative rasterization mode is available.
+    pub fn supports_conservative_rasterization(&self) -> bool {
+        self.conservative_rasterization_overestimate
+            || self.conservative_rasterization_underestimate
+    }
+
     /// True when the backend can support sparse/tiled 2D texture residency.
     pub fn supports_sparse_2d_textures(&self) -> bool {
         self.sparse_binding && self.sparse_residency_image_2d

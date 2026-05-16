@@ -27,6 +27,10 @@ pub struct LogicalDevice {
     pub memory_priority_enabled: bool,
     pub push_descriptors_enabled: bool,
     pub conditional_rendering_enabled: bool,
+    pub conservative_rasterization_enabled: bool,
+    pub vrs_pipeline_enabled: bool,
+    pub vrs_primitive_enabled: bool,
+    pub vrs_attachment_enabled: bool,
     pub global_queue_priority_enabled: bool,
     pub acceleration_structure_enabled: bool,
     pub ray_tracing_pipeline_enabled: bool,
@@ -54,6 +58,19 @@ impl DeviceSelection {
     }
 }
 
+fn queue_global_priority(
+    queue_families: QueueFamilyMap,
+    family: u32,
+) -> vk::QueueGlobalPriorityKHR {
+    if family == queue_families.graphics {
+        vk::QueueGlobalPriorityKHR::HIGH
+    } else if family == queue_families.compute {
+        vk::QueueGlobalPriorityKHR::MEDIUM
+    } else {
+        vk::QueueGlobalPriorityKHR::LOW
+    }
+}
+
 pub fn create_logical_device(
     instance: &Instance,
     selection: &DeviceSelection,
@@ -77,6 +94,18 @@ pub fn create_logical_device(
     let memory_priority_enabled = feature_request.memory_priority.memory_priority == vk::TRUE;
     let conditional_rendering_enabled =
         feature_request.conditional_rendering.conditional_rendering == vk::TRUE;
+    let vrs_pipeline_enabled = feature_request
+        .fragment_shading_rate
+        .pipeline_fragment_shading_rate
+        == vk::TRUE;
+    let vrs_primitive_enabled = feature_request
+        .fragment_shading_rate
+        .primitive_fragment_shading_rate
+        == vk::TRUE;
+    let vrs_attachment_enabled = feature_request
+        .fragment_shading_rate
+        .attachment_fragment_shading_rate
+        == vk::TRUE;
     let acceleration_structure_enabled = feature_request
         .acceleration_structure
         .acceleration_structure
@@ -87,12 +116,17 @@ pub fn create_logical_device(
         .ray_tracing_position_fetch
         .ray_tracing_position_fetch
         == vk::TRUE;
-    // push_descriptors and global_queue_priority are extension-only (no feature struct).
+    // push_descriptors, conservative_rasterization, and global_queue_priority are extension-only
+    // (no feature struct).
     // They are enabled if the extension was added to required_extensions by resolve().
     let push_descriptors_enabled = feature_request
         .required_extensions
         .iter()
         .any(|e| *e == ash::khr::push_descriptor::NAME);
+    let conservative_rasterization_enabled = feature_request
+        .required_extensions
+        .iter()
+        .any(|e| *e == ash::ext::conservative_rasterization::NAME);
     let global_queue_priority_enabled = feature_request
         .required_extensions
         .iter()
@@ -112,13 +146,7 @@ pub fn create_logical_device(
     let global_priority_infos = unique_families
         .iter()
         .map(|family| {
-            let priority = if *family == selection.queue_families.graphics {
-                vk::QueueGlobalPriorityKHR::HIGH
-            } else if *family == selection.queue_families.compute {
-                vk::QueueGlobalPriorityKHR::MEDIUM
-            } else {
-                vk::QueueGlobalPriorityKHR::LOW
-            };
+            let priority = queue_global_priority(selection.queue_families, *family);
             vk::DeviceQueueGlobalPriorityCreateInfoKHR::default().global_priority(priority)
         })
         .collect::<Vec<_>>();
@@ -165,6 +193,10 @@ pub fn create_logical_device(
         memory_priority_enabled,
         push_descriptors_enabled,
         conditional_rendering_enabled,
+        conservative_rasterization_enabled,
+        vrs_pipeline_enabled,
+        vrs_primitive_enabled,
+        vrs_attachment_enabled,
         global_queue_priority_enabled,
         acceleration_structure_enabled,
         ray_tracing_pipeline_enabled,
@@ -582,9 +614,13 @@ impl FeatureRequest<'static> {
                 self.conditional_rendering.conditional_rendering = vk::TRUE;
                 true
             }
-            // push_descriptor and global_queue_priority are extension-only — no feature struct.
+            // push_descriptor, conservative_rasterization, and global_queue_priority are
+            // extension-only — no feature struct.
             // They are handled purely via require_feature_extensions.
-            "push_descriptor" | "push_descriptors" | "global_queue_priority" => {
+            "push_descriptor"
+            | "push_descriptors"
+            | "conservative_rasterization"
+            | "global_queue_priority" => {
                 // Return true so require_feature_extensions is called.
                 true
             }
@@ -714,6 +750,10 @@ impl FeatureRequest<'static> {
             "push_descriptor" | "push_descriptors" => {
                 self.require_extension(ash::khr::push_descriptor::NAME, available_extensions)?
             }
+            "conservative_rasterization" => self.require_extension(
+                ash::ext::conservative_rasterization::NAME,
+                available_extensions,
+            )?,
             "global_queue_priority" => {
                 self.require_extension(ash::khr::global_priority::NAME, available_extensions)?
             }
@@ -871,6 +911,7 @@ fn is_known_feature_name(name: &str) -> bool {
                 | "conditional_rendering"
                 | "push_descriptor"
                 | "push_descriptors"
+                | "conservative_rasterization"
                 | "global_queue_priority"
         )
 }
@@ -920,5 +961,36 @@ fn required_device_extensions() -> Vec<&'static CStr> {
     #[cfg(not(target_os = "macos"))]
     {
         vec![ash::khr::swapchain::NAME]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_queue_priority_prefers_graphics_for_unified_family() {
+        let families = QueueFamilyMap::unified(2);
+
+        assert!(queue_global_priority(families, 2) == vk::QueueGlobalPriorityKHR::HIGH);
+    }
+
+    #[test]
+    fn global_queue_priority_assigns_split_queue_tiers() {
+        let families = QueueFamilyMap {
+            graphics: 0,
+            compute: 1,
+            transfer: 2,
+        };
+
+        assert!(
+            queue_global_priority(families, families.graphics) == vk::QueueGlobalPriorityKHR::HIGH
+        );
+        assert!(
+            queue_global_priority(families, families.compute) == vk::QueueGlobalPriorityKHR::MEDIUM
+        );
+        assert!(
+            queue_global_priority(families, families.transfer) == vk::QueueGlobalPriorityKHR::LOW
+        );
     }
 }

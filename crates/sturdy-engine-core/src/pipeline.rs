@@ -101,6 +101,21 @@ pub enum BlendMode {
     Alpha,
 }
 
+/// Conservative rasterization mode for graphics pipelines.
+///
+/// Requires `BackendFeatures::conservative_rasterization_overestimate` or
+/// `conservative_rasterization_underestimate` respectively.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum ConservativeRasterMode {
+    /// Standard (non-conservative) rasterization.
+    #[default]
+    Off,
+    /// Overestimate: a fragment is generated if the primitive partially covers the pixel.
+    Overestimate,
+    /// Underestimate: a fragment is generated only if the primitive fully covers the pixel.
+    Underestimate,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphicsPipelineDesc {
     pub vertex_shader: ShaderHandle,
@@ -114,4 +129,6 @@ pub struct GraphicsPipelineDesc {
     pub samples: u8,
     pub topology: PrimitiveTopology,
     pub raster: RasterState,
+    /// Conservative rasterization mode. Default is `Off`.
+    pub conservative_raster: ConservativeRasterMode,
 }

@@ -33,6 +33,7 @@ pub mod ray_tracing_pipeline;
 pub mod render_graph;
 pub mod sampler;
 pub mod shader;
+pub mod shader_object;
 pub mod slang;
 pub mod surface;
 pub mod video;
@@ -68,43 +69,39 @@ pub use image::{
     Extent3d, Format, FormatCapabilities, ImageBuilder, ImageClearValue, ImageDesc, ImageDimension,
     ImageRole, ImageUsage,
 };
+pub use indirect_commands::{
+    DgcExecuteDesc, DgcPreprocessDesc, IndirectCommandLayoutDesc, IndirectCommandToken,
+};
+pub use latency::{AntiLagMode, LatencyMode, ReflexMode};
 pub use limits::Limits;
 pub use memory_budget::GpuMemoryBudget;
 pub use native_handles::{
     NativeHandleCapabilities, NativeHandleCapability, NativeHandleKind, NativeHandleOwnership,
     native_handle_capabilities_for_backend,
 };
+pub use optical_flow::{OpticalFlowEstimateDesc, OpticalFlowSessionDesc};
 pub use pipeline::{
-    BlendMode, ColorTargetDesc, ComputePipelineDesc, CullMode, FrontFace, GraphicsPipelineDesc,
-    PrimitiveTopology, RasterState, VertexAttributeDesc, VertexBufferLayout, VertexFormat,
-    VertexInputRate,
+    BlendMode, ColorTargetDesc, ComputePipelineDesc, ConservativeRasterMode, CullMode, FrontFace,
+    GraphicsPipelineDesc, PrimitiveTopology, RasterState, VertexAttributeDesc, VertexBufferLayout,
+    VertexFormat, VertexInputRate,
 };
 pub use push_constants::PushConstants;
 pub use raw_capabilities::{
     BackendRawCapabilities, D3d12RawCapabilities, MetalRawCapabilities, VulkanRawCapabilities,
 };
-pub use indirect_commands::{
-    DgcExecuteDesc, DgcPreprocessDesc, IndirectCommandLayoutDesc, IndirectCommandToken,
-};
-pub use latency::{AntiLagMode, LatencyMode, ReflexMode};
-pub use optical_flow::{OpticalFlowEstimateDesc, OpticalFlowSessionDesc};
 pub use ray_tracing_pipeline::{
     RayTracingPipelineDesc, RayTracingStageDesc, RtShaderGroupDesc, RtShaderGroupKind,
     ShaderBindingTableDesc, ShaderBindingTableProperties,
-};
-pub use video::{
-    BitRateControl, DecodeFrameDesc, EncodeFrameDesc, QualityPreset, VideoCodec, VideoEncodeConfig,
-    VideoSessionDesc, VideoSessionKind,
 };
 pub use render_graph::{
     AccelerationStructureBuildMode, Access, AliasPlan, Barrier, BlasBuildDesc, BlasGeometryDesc,
     BufferBarrier, BufferStateKey, BufferUse, CompiledGraph, CopyBufferToImageDesc,
     CopyImageToBufferDesc, DispatchDesc, DispatchIndirectDesc, DrawDesc, DrawIndirectCountDesc,
     DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, ImageBarrier, ImageStateKey,
-    ImageUse, IndexBufferBinding, IndexFormat, PassDesc, PassWork, QueueType, RecordBatch,
-    RenderGraph, ResolveImageDesc, ResourceLifetime, ResourceUse, RgState, ShaderBindingTable,
-    ShaderBindingTableRegion, ShadingRate, SubresourceRange, TlasBuildDesc, TraceRaysDesc,
-    VertexBufferBinding,
+    ImageUse, IndexBufferBinding, IndexFormat, PassDesc, PassWork, PushDescriptorBinding,
+    PushDescriptorSetDesc, QueueType, RecordBatch, RenderGraph, ResolveImageDesc, ResourceLifetime,
+    ResourceUse, RgState, ShaderBindingTable, ShaderBindingTableRegion, ShadingRate,
+    SubresourceRange, TlasBuildDesc, TraceRaysDesc, VertexBufferBinding,
 };
 pub use sampler::{AddressMode, BorderColor, CompareOp, FilterMode, MipmapMode, SamplerDesc};
 pub use shader::{
@@ -123,4 +120,8 @@ pub use surface::NativeSurfaceDesc;
 pub use surface::{
     SurfaceCapabilities, SurfaceColorSpace, SurfaceEvent, SurfaceFormatInfo, SurfaceHdrCaps,
     SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc, SurfaceSize,
+};
+pub use video::{
+    BitRateControl, DecodeFrameDesc, EncodeFrameDesc, QualityPreset, VideoCodec, VideoEncodeConfig,
+    VideoSessionDesc, VideoSessionKind,
 };
