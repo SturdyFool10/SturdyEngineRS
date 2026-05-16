@@ -4,12 +4,18 @@ use ash::{Device, vk};
 use vk::Handle;
 
 use crate::{
-    AddressMode, BorderColor, BufferDesc, BufferHandle, BufferUsage, CompareOp, Error, FilterMode,
-    Format, ImageDesc, ImageHandle, ImageUsage, MipmapMode, Result, SamplerDesc, SamplerHandle,
-    SubresourceRange, VulkanExternalBuffer, VulkanExternalImage,
+    AccelerationStructureHandle, AddressMode, BorderColor, BufferDesc, BufferHandle, BufferUsage,
+    CompareOp, Error, FilterMode, Format, ImageDesc, ImageHandle, ImageUsage, MipmapMode, Result,
+    SamplerDesc, SamplerHandle, SubresourceRange, VulkanExternalBuffer, VulkanExternalImage,
 };
 
 use super::allocator::{Allocation, AllocatorStats, GpuAllocator};
+
+pub struct VulkanAccelerationStructure {
+    pub acceleration_structure: vk::AccelerationStructureKHR,
+    pub buffer: vk::Buffer,
+    pub allocation: Allocation,
+}
 
 pub struct ResourceRegistry {
     allocator: GpuAllocator,
@@ -17,6 +23,8 @@ pub struct ResourceRegistry {
     image_views: Mutex<HashMap<ImageViewKey, vk::ImageView>>,
     buffers: HashMap<BufferHandle, VulkanBuffer>,
     samplers: HashMap<SamplerHandle, vk::Sampler>,
+    acceleration_structures:
+        HashMap<AccelerationStructureHandle, VulkanAccelerationStructure>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
@@ -47,6 +55,7 @@ impl ResourceRegistry {
             image_views: Mutex::new(HashMap::new()),
             buffers: HashMap::new(),
             samplers: HashMap::new(),
+            acceleration_structures: HashMap::new(),
         }
     }
 
@@ -632,6 +641,150 @@ impl ResourceRegistry {
             .get(&handle)
             .copied()
             .ok_or(Error::InvalidHandle)
+    }
+
+    /// Return the `VkDeviceAddress` of a buffer (base address, offset = 0).
+    pub fn buffer_device_address_raw(
+        &self,
+        device: &Device,
+        handle: BufferHandle,
+    ) -> Result<u64> {
+        let buf = self.buffers.get(&handle).ok_or(Error::InvalidHandle)?;
+        let info = vk::BufferDeviceAddressInfo::default().buffer(buf.buffer);
+        let base = unsafe { device.get_buffer_device_address(&info) };
+        if base == 0 {
+            return Err(Error::Backend(
+                "vkGetBufferDeviceAddress returned 0; buffer may not have SHADER_DEVICE_ADDRESS usage".into(),
+            ));
+        }
+        Ok(base)
+    }
+
+    /// Return the `VkDeviceAddress` of a buffer + byte offset.
+    pub fn buffer_device_address_at(
+        &self,
+        device: &Device,
+        handle: BufferHandle,
+        offset: u64,
+    ) -> Result<u64> {
+        Ok(self.buffer_device_address_raw(device, handle)? + offset)
+    }
+
+    /// Look up a `VkAccelerationStructureKHR` by handle.
+    pub fn acceleration_structure(
+        &self,
+        handle: AccelerationStructureHandle,
+    ) -> Result<vk::AccelerationStructureKHR> {
+        self.acceleration_structures
+            .get(&handle)
+            .map(|as_| as_.acceleration_structure)
+            .ok_or(Error::InvalidHandle)
+    }
+
+    /// Create and register a new acceleration structure buffer + VkAccelerationStructureKHR.
+    pub fn create_acceleration_structure(
+        &mut self,
+        device: &Device,
+        handle: AccelerationStructureHandle,
+        size: u64,
+        as_ext: &ash::khr::acceleration_structure::Device,
+        ty: vk::AccelerationStructureTypeKHR,
+    ) -> Result<()> {
+        let buf_info = vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(
+                vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let buffer = unsafe {
+            device
+                .create_buffer(&buf_info, None)
+                .map_err(|e| Error::Backend(format!("vkCreateBuffer (AS) failed: {e:?}")))?
+        };
+        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+        let allocation = match self.allocator.alloc(
+            device,
+            requirements,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                unsafe { device.destroy_buffer(buffer, None) };
+                return Err(e);
+            }
+        };
+        if let Err(e) = unsafe {
+            device.bind_buffer_memory(buffer, allocation.memory, allocation.offset)
+        } {
+            let _ = self.allocator.dealloc(device, allocation);
+            unsafe { device.destroy_buffer(buffer, None) };
+            return Err(Error::Backend(format!(
+                "vkBindBufferMemory (AS) failed: {e:?}"
+            )));
+        }
+        let as_info = vk::AccelerationStructureCreateInfoKHR::default()
+            .buffer(buffer)
+            .offset(0)
+            .size(size)
+            .ty(ty);
+        let acceleration_structure = match unsafe {
+            as_ext.create_acceleration_structure(&as_info, None)
+        } {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = self.allocator.dealloc(device, allocation);
+                unsafe { device.destroy_buffer(buffer, None) };
+                return Err(Error::Backend(format!(
+                    "vkCreateAccelerationStructureKHR failed: {e:?}"
+                )));
+            }
+        };
+        self.acceleration_structures.insert(
+            handle,
+            VulkanAccelerationStructure {
+                acceleration_structure,
+                buffer,
+                allocation,
+            },
+        );
+        Ok(())
+    }
+
+    /// Destroy an acceleration structure by handle.
+    pub fn destroy_acceleration_structure(
+        &mut self,
+        device: &Device,
+        handle: AccelerationStructureHandle,
+        as_ext: &ash::khr::acceleration_structure::Device,
+    ) -> Result<()> {
+        let entry = self
+            .acceleration_structures
+            .remove(&handle)
+            .ok_or(Error::InvalidHandle)?;
+        unsafe {
+            as_ext.destroy_acceleration_structure(entry.acceleration_structure, None);
+            device.destroy_buffer(entry.buffer, None);
+        }
+        self.allocator.dealloc(device, entry.allocation)?;
+        Ok(())
+    }
+
+    /// Return the device address of an acceleration structure's underlying buffer.
+    pub fn acceleration_structure_device_address(
+        &self,
+        _device: &Device,
+        handle: AccelerationStructureHandle,
+        as_ext: &ash::khr::acceleration_structure::Device,
+    ) -> Result<u64> {
+        let entry = self
+            .acceleration_structures
+            .get(&handle)
+            .ok_or(Error::InvalidHandle)?;
+        let info = vk::AccelerationStructureDeviceAddressInfoKHR::default()
+            .acceleration_structure(entry.acceleration_structure);
+        let addr = unsafe { as_ext.get_acceleration_structure_device_address(&info) };
+        Ok(addr)
     }
 }
 

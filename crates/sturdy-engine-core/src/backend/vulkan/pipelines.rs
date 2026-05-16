@@ -5,7 +5,8 @@ use ash::{Device, vk};
 
 use crate::{
     ComputePipelineDesc, CullMode, Error, FrontFace, GraphicsPipelineDesc, PipelineHandle,
-    PrimitiveTopology, Result, VertexFormat, VertexInputRate,
+    PrimitiveTopology, RayTracingPipelineDesc, Result, RtShaderGroupKind, VertexFormat,
+    VertexInputRate,
 };
 
 use super::descriptors::DescriptorRegistry;
@@ -206,6 +207,107 @@ impl PipelineRegistry {
                 pipeline,
                 layout,
                 bind_point: vk::PipelineBindPoint::COMPUTE,
+                render_pass: vk::RenderPass::null(),
+                push_constants_bytes,
+                push_constant_stages,
+                uses_bindless,
+            },
+        );
+        self.note_pipeline_created();
+        Ok(())
+    }
+
+    pub fn create_ray_tracing_pipeline(
+        &mut self,
+        _device: &Device,
+        handle: PipelineHandle,
+        desc: &RayTracingPipelineDesc,
+        shaders: &ShaderRegistry,
+        descriptors: &DescriptorRegistry,
+        rt_ext: &ash::khr::ray_tracing_pipeline::Device,
+    ) -> Result<()> {
+        //panic allowed, reason = "layout is resolved by the caller before the backend; absence is a caller defect"
+        let layout_handle = desc
+            .layout
+            .expect("RT pipeline layout must be resolved before backend call");
+        let layout = descriptors.pipeline_layout(layout_handle)?;
+        let uses_bindless = descriptors.pipeline_uses_bindless(layout_handle)?;
+        let push_constants_bytes = descriptors.push_constants_bytes(layout_handle)?;
+        let push_constant_stages = descriptors.push_constant_stages(layout_handle)?;
+
+        // Build stage CStrings first so they outlive the stage infos.
+        let entry_cstrings = desc
+            .stages
+            .iter()
+            .map(|s| {
+                CString::new(shaders.entry_point(s.shader)?).map_err(|_| {
+                    Error::InvalidInput(
+                        "shader entry point cannot contain interior nul bytes".into(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let stage_infos = desc
+            .stages
+            .iter()
+            .zip(entry_cstrings.iter())
+            .map(|(s, entry)| {
+                let stage = shaders.stage(s.shader)?;
+                Ok(vk::PipelineShaderStageCreateInfo::default()
+                    .stage(shader_stage_flags(stage))
+                    .module(shaders.module(s.shader)?)
+                    .name(entry))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let group_infos = desc
+            .groups
+            .iter()
+            .map(|g| {
+                vk::RayTracingShaderGroupCreateInfoKHR::default()
+                    .ty(match g.kind {
+                        RtShaderGroupKind::General => vk::RayTracingShaderGroupTypeKHR::GENERAL,
+                        RtShaderGroupKind::TrianglesHit => {
+                            vk::RayTracingShaderGroupTypeKHR::TRIANGLES_HIT_GROUP
+                        }
+                        RtShaderGroupKind::ProceduralHit => {
+                            vk::RayTracingShaderGroupTypeKHR::PROCEDURAL_HIT_GROUP
+                        }
+                    })
+                    .general_shader(g.general_shader)
+                    .closest_hit_shader(g.closest_hit_shader)
+                    .any_hit_shader(g.any_hit_shader)
+                    .intersection_shader(g.intersection_shader)
+            })
+            .collect::<Vec<_>>();
+
+        let create_info = vk::RayTracingPipelineCreateInfoKHR::default()
+            .stages(&stage_infos)
+            .groups(&group_infos)
+            .max_pipeline_ray_recursion_depth(desc.max_recursion_depth)
+            .layout(layout);
+
+        let pipeline = unsafe {
+            rt_ext
+                .create_ray_tracing_pipelines(
+                    vk::DeferredOperationKHR::null(),
+                    self.pipeline_cache,
+                    &[create_info],
+                    None,
+                )
+                .map_err(|(_, e)| {
+                    Error::Backend(format!("vkCreateRayTracingPipelinesKHR failed: {e:?}"))
+                })?
+        }
+        .remove(0);
+
+        self.pipelines.insert(
+            handle,
+            VulkanPipeline {
+                pipeline,
+                layout,
+                bind_point: vk::PipelineBindPoint::RAY_TRACING_KHR,
                 render_pass: vk::RenderPass::null(),
                 push_constants_bytes,
                 push_constant_stages,

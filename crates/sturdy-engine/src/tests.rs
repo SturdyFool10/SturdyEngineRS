@@ -1007,6 +1007,7 @@ fn graphics_shader_reflection_populates_vertex_inputs_for_vertex_shader() {
             ),
             entry_point: "vs_main".into(),
             stage: ShaderStage::Vertex,
+            requires_ray_query: false,
         })
         .unwrap();
     let reflection = engine.graphics_shader_reflection(&vertex, None).unwrap();

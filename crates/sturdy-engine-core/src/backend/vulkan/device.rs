@@ -28,6 +28,9 @@ pub struct LogicalDevice {
     pub push_descriptors_enabled: bool,
     pub conditional_rendering_enabled: bool,
     pub global_queue_priority_enabled: bool,
+    pub acceleration_structure_enabled: bool,
+    pub ray_tracing_pipeline_enabled: bool,
+    pub ray_query_enabled: bool,
 }
 
 impl DeviceSelection {
@@ -73,6 +76,10 @@ pub fn create_logical_device(
     let memory_priority_enabled = feature_request.memory_priority.memory_priority == vk::TRUE;
     let conditional_rendering_enabled =
         feature_request.conditional_rendering.conditional_rendering == vk::TRUE;
+    let acceleration_structure_enabled =
+        feature_request.acceleration_structure.acceleration_structure == vk::TRUE;
+    let ray_tracing_pipeline_enabled =
+        feature_request.ray_tracing.ray_tracing_pipeline == vk::TRUE;
     // push_descriptors and global_queue_priority are extension-only (no feature struct).
     // They are enabled if the extension was added to required_extensions by resolve().
     let push_descriptors_enabled = feature_request
@@ -152,6 +159,9 @@ pub fn create_logical_device(
         push_descriptors_enabled,
         conditional_rendering_enabled,
         global_queue_priority_enabled,
+        acceleration_structure_enabled,
+        ray_tracing_pipeline_enabled,
+        ray_query_enabled: false, // VK_KHR_ray_query not yet wired as a feature request
     })
 }
 

@@ -5,9 +5,10 @@ use crate::{
     BackendRawCapabilities, BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle,
     CanonicalPipelineLayout, Caps, CompiledGraph, ComputePipelineDesc, ExternalBufferDesc,
     ExternalImageDesc, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc, ImageDesc,
-    ImageHandle, NativeHandleCapabilities, PipelineHandle, PipelineLayoutHandle, Result,
-    SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, ShaderTarget, SubmissionHandle,
-    SurfaceCapabilities, SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
+    ImageHandle, NativeHandleCapabilities, PipelineHandle, PipelineLayoutHandle,
+    RayTracingPipelineDesc, Result, SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle,
+    ShaderTarget, SubmissionHandle, SurfaceCapabilities, SurfaceHandle, SurfaceInfo,
+    SurfaceRecreateDesc, SurfaceSize,
 };
 use crate::{Format, FormatCapabilities, GpuMemoryBudget};
 
@@ -233,6 +234,15 @@ pub trait Backend: Send + Sync {
         _desc: &GraphicsPipelineDesc,
     ) -> Result<()> {
         Ok(())
+    }
+    fn create_ray_tracing_pipeline(
+        &self,
+        _handle: PipelineHandle,
+        _desc: &RayTracingPipelineDesc,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "ray tracing pipelines are not supported by this backend",
+        ))
     }
     fn destroy_pipeline(&self, _handle: PipelineHandle) -> Result<()> {
         Ok(())

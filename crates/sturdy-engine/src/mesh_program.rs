@@ -92,6 +92,7 @@ impl MeshProgram {
                     source: ShaderSource::File(fragment_path.into()),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
+            requires_ray_query: false,
                 },
                 vertex: None,
                 vertex_kind: MeshVertexKind::V2d,
@@ -110,6 +111,7 @@ impl MeshProgram {
                     source: ShaderSource::File(fragment_path.into()),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
+            requires_ray_query: false,
                 },
                 vertex: None,
                 vertex_kind: MeshVertexKind::V2d,
@@ -133,6 +135,7 @@ impl MeshProgram {
                     source: ShaderSource::Inline(UNLIT_FRAGMENT.to_owned()),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
+            requires_ray_query: false,
                 },
                 vertex: None,
                 vertex_kind: MeshVertexKind::V3d,
@@ -161,6 +164,7 @@ impl MeshProgram {
                     source: ShaderSource::Inline(LIT_FRAGMENT.to_owned()),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
+            requires_ray_query: false,
                 },
                 vertex: None,
                 vertex_kind: MeshVertexKind::V3d,
@@ -186,11 +190,13 @@ impl MeshProgram {
                     source: ShaderSource::File(fragment_path.into()),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
+            requires_ray_query: false,
                 },
                 vertex: vertex_path.map(|p| ShaderDesc {
                     source: ShaderSource::File(p.into()),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Vertex,
+            requires_ray_query: false,
                 }),
                 vertex_kind: MeshVertexKind::V3d,
                 alpha_blend: false,
@@ -217,6 +223,7 @@ impl MeshProgram {
             source: ShaderSource::Inline(default_vertex_src.to_owned()),
             entry_point: "main".to_owned(),
             stage: ShaderStage::Vertex,
+            requires_ray_query: false,
         });
         let vertex = engine.create_shader(vertex_desc)?;
         let fragment = engine.create_shader(desc.fragment)?;
@@ -272,6 +279,7 @@ impl MeshProgram {
             source: ShaderSource::File(path),
             entry_point: "main".to_owned(),
             stage: ShaderStage::Fragment,
+            requires_ray_query: false,
         })?;
         let reflection = self
             .engine
@@ -308,6 +316,7 @@ impl MeshProgram {
             source: ShaderSource::File(path),
             entry_point: "main".to_owned(),
             stage: ShaderStage::Vertex,
+            requires_ray_query: false,
         })?;
         let reflection = self
             .engine

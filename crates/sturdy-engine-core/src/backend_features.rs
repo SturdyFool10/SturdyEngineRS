@@ -10,6 +10,16 @@ pub struct BackendFeatures {
     /// VK_KHR_buffer_device_address (or Vulkan 1.2 core) — expose GPU virtual
     /// addresses for buffers created with SHADER_DEVICE_ADDRESS usage.
     pub buffer_device_address: bool,
+    /// VK_KHR_ray_query — inline ray intersection queries from any shader stage.
+    pub ray_query: bool,
+    /// VK_KHR_ray_tracing_position_fetch — fetch vertex positions in hit shaders.
+    pub ray_tracing_position_fetch: bool,
+    /// VK_KHR_ray_tracing_maintenance1 — maintenance fixes for RT pipelines.
+    pub ray_tracing_maintenance1: bool,
+    /// VK_EXT_opacity_micromap — opacity micromap for alpha-tested geometry.
+    pub opacity_micromap: bool,
+    /// VK_EXT_ray_tracing_invocation_reorder — shader execution reordering (SER).
+    pub shader_execution_reordering: bool,
     pub hdr_output: bool,
     pub shader_fp16: bool,
     pub shader_fp64: bool,

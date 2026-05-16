@@ -36,6 +36,10 @@ pub struct PipelineHandle(pub u64);
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct AccelerationStructureHandle(pub u64);
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct BindGroupHandle(pub u64);
 
 #[repr(transparent)]

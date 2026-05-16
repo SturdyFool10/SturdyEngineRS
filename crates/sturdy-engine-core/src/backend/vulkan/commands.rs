@@ -5,8 +5,9 @@ use ash::{Device, vk};
 mod batch_pool;
 
 use crate::{
-    BufferBarrier, CompiledGraph, Error, Extent3d, Format, ImageBarrier, IndexFormat, PassDesc,
-    PassWork, PushConstants, Result, RgState, SubmissionHandle, SubresourceRange,
+    AccelerationStructureBuildMode, BufferBarrier, CompiledGraph, Error, Extent3d, Format,
+    ImageBarrier, IndexFormat, PassDesc, PassWork, PushConstants, Result, RgState,
+    ShaderBindingTableRegion, SubmissionHandle, SubresourceRange, VertexFormat,
 };
 
 use super::bindless::BindlessVkInfo;
@@ -97,6 +98,8 @@ impl CommandContext {
         mesh_shader_ext: Option<&mesh_shader::Device>,
         sync2: Option<&ash::khr::synchronization2::Device>,
         dynamic_rendering: Option<&ash::khr::dynamic_rendering::Device>,
+        as_khr: Option<&ash::khr::acceleration_structure::Device>,
+        rt_khr: Option<&ash::khr::ray_tracing_pipeline::Device>,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
     ) -> Result<SubmissionHandle> {
@@ -268,6 +271,8 @@ impl CommandContext {
                             mesh_shader_ext,
                             sync2,
                             dynamic_rendering,
+                            as_khr,
+                            rt_khr,
                         )?;
                         if !pass.name.is_empty() {
                             debug.end_region(cmd);
@@ -489,6 +494,8 @@ impl CommandContext {
         mesh_shader_ext: Option<&mesh_shader::Device>,
         sync2: Option<&ash::khr::synchronization2::Device>,
         dynamic_rendering: Option<&ash::khr::dynamic_rendering::Device>,
+        as_khr: Option<&ash::khr::acceleration_structure::Device>,
+        rt_khr: Option<&ash::khr::ray_tracing_pipeline::Device>,
     ) -> Result<()> {
         let mut bound_pipeline = None;
         if let Some(pipeline) = pass.pipeline {
@@ -1294,6 +1301,243 @@ impl CommandContext {
                         })],
                 );
             },
+
+            PassWork::BuildBlas(ref build) => {
+                let as_ext = as_khr.ok_or_else(|| {
+                    Error::Unsupported("BLAS build requires VK_KHR_acceleration_structure".into())
+                })?;
+                let dst_as = resources.acceleration_structure(build.dst)?;
+                let src_as = build
+                    .src
+                    .map(|h| resources.acceleration_structure(h))
+                    .transpose()?;
+                let scratch_addr = if let Some(scratch) = build.scratch_buffer {
+                    resources.buffer_device_address_raw(device, scratch)?
+                } else {
+                    return Err(Error::InvalidInput(
+                        "BLAS build requires a scratch buffer".into(),
+                    ));
+                };
+
+                let geometries: Vec<vk::AccelerationStructureGeometryKHR> = build
+                    .geometries
+                    .iter()
+                    .map(|g| {
+                        let vertex_addr = resources.buffer_device_address_at(
+                            device,
+                            g.vertex_buffer,
+                            g.vertex_offset,
+                        )?;
+                        let index_data = if let Some(idx_buf) = g.index_buffer {
+                            vk::DeviceOrHostAddressConstKHR {
+                                device_address: resources.buffer_device_address_at(
+                                    device,
+                                    idx_buf,
+                                    g.index_offset,
+                                )?,
+                            }
+                        } else {
+                            vk::DeviceOrHostAddressConstKHR { device_address: 0 }
+                        };
+                        let transform_data = if let Some(tf_buf) = g.transform_buffer {
+                            vk::DeviceOrHostAddressConstKHR {
+                                device_address: resources.buffer_device_address_at(
+                                    device,
+                                    tf_buf,
+                                    g.transform_offset,
+                                )?,
+                            }
+                        } else {
+                            vk::DeviceOrHostAddressConstKHR { device_address: 0 }
+                        };
+                        let triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
+                            .vertex_format(vk_vertex_format_for_as(g.vertex_format)?)
+                            .vertex_data(vk::DeviceOrHostAddressConstKHR {
+                                device_address: vertex_addr,
+                            })
+                            .vertex_stride(g.vertex_stride as u64)
+                            .max_vertex(g.vertex_count.saturating_sub(1))
+                            .index_type(
+                                g.index_format
+                                    .map(vk_index_type)
+                                    .unwrap_or(vk::IndexType::NONE_KHR),
+                            )
+                            .index_data(index_data)
+                            .transform_data(transform_data);
+                        Ok(vk::AccelerationStructureGeometryKHR::default()
+                            .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+                            .geometry(vk::AccelerationStructureGeometryDataKHR { triangles }))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                let build_range_infos: Vec<vk::AccelerationStructureBuildRangeInfoKHR> = build
+                    .geometries
+                    .iter()
+                    .map(|g| {
+                        let primitive_count = if g.index_buffer.is_some() {
+                            g.index_count / 3
+                        } else {
+                            g.vertex_count / 3
+                        };
+                        vk::AccelerationStructureBuildRangeInfoKHR {
+                            primitive_count,
+                            primitive_offset: 0,
+                            first_vertex: 0,
+                            transform_offset: 0,
+                        }
+                    })
+                    .collect();
+
+                let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+                    .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+                    .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+                    .mode(match build.mode {
+                        AccelerationStructureBuildMode::Build => {
+                            vk::BuildAccelerationStructureModeKHR::BUILD
+                        }
+                        AccelerationStructureBuildMode::Update => {
+                            vk::BuildAccelerationStructureModeKHR::UPDATE
+                        }
+                        AccelerationStructureBuildMode::Compact => {
+                            vk::BuildAccelerationStructureModeKHR::BUILD
+                        }
+                    })
+                    .src_acceleration_structure(
+                        src_as.unwrap_or(vk::AccelerationStructureKHR::null()),
+                    )
+                    .dst_acceleration_structure(dst_as)
+                    .geometries(&geometries)
+                    .scratch_data(vk::DeviceOrHostAddressKHR {
+                        device_address: scratch_addr,
+                    });
+
+                let range_slices: Vec<&[vk::AccelerationStructureBuildRangeInfoKHR]> =
+                    vec![build_range_infos.as_slice()];
+                unsafe {
+                    as_ext.cmd_build_acceleration_structures(
+                        command_buffer,
+                        &[build_info],
+                        &range_slices,
+                    );
+                }
+            }
+
+            PassWork::BuildTlas(ref build) => {
+                let as_ext = as_khr.ok_or_else(|| {
+                    Error::Unsupported("TLAS build requires VK_KHR_acceleration_structure".into())
+                })?;
+                let dst_as = resources.acceleration_structure(build.dst)?;
+                let src_as = build
+                    .src
+                    .map(|h| resources.acceleration_structure(h))
+                    .transpose()?;
+                let scratch_addr = if let Some(scratch) = build.scratch_buffer {
+                    resources.buffer_device_address_raw(device, scratch)?
+                } else {
+                    return Err(Error::InvalidInput(
+                        "TLAS build requires a scratch buffer".into(),
+                    ));
+                };
+                let instance_addr = resources.buffer_device_address_at(
+                    device,
+                    build.instance_buffer,
+                    build.instance_offset,
+                )?;
+
+                let instances = vk::AccelerationStructureGeometryInstancesDataKHR::default()
+                    .data(vk::DeviceOrHostAddressConstKHR {
+                        device_address: instance_addr,
+                    });
+                let geometry = vk::AccelerationStructureGeometryKHR::default()
+                    .geometry_type(vk::GeometryTypeKHR::INSTANCES)
+                    .geometry(vk::AccelerationStructureGeometryDataKHR { instances });
+
+                let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+                    .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+                    .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+                    .mode(match build.mode {
+                        AccelerationStructureBuildMode::Build => {
+                            vk::BuildAccelerationStructureModeKHR::BUILD
+                        }
+                        AccelerationStructureBuildMode::Update => {
+                            vk::BuildAccelerationStructureModeKHR::UPDATE
+                        }
+                        AccelerationStructureBuildMode::Compact => {
+                            vk::BuildAccelerationStructureModeKHR::BUILD
+                        }
+                    })
+                    .src_acceleration_structure(
+                        src_as.unwrap_or(vk::AccelerationStructureKHR::null()),
+                    )
+                    .dst_acceleration_structure(dst_as)
+                    .geometries(std::slice::from_ref(&geometry))
+                    .scratch_data(vk::DeviceOrHostAddressKHR {
+                        device_address: scratch_addr,
+                    });
+
+                let range_info = [vk::AccelerationStructureBuildRangeInfoKHR {
+                    primitive_count: build.instance_count,
+                    primitive_offset: 0,
+                    first_vertex: 0,
+                    transform_offset: 0,
+                }];
+                let range_slices: Vec<&[vk::AccelerationStructureBuildRangeInfoKHR]> =
+                    vec![range_info.as_slice()];
+                unsafe {
+                    as_ext.cmd_build_acceleration_structures(
+                        command_buffer,
+                        &[build_info],
+                        &range_slices,
+                    );
+                }
+            }
+
+            PassWork::TraceRays(ref trace) => {
+                let rt_ext = rt_khr.ok_or_else(|| {
+                    Error::Unsupported(
+                        "TraceRays requires VK_KHR_ray_tracing_pipeline".into(),
+                    )
+                })?;
+                let pipeline = pipelines.pipeline(trace.pipeline)?;
+                if pipeline.bind_point != vk::PipelineBindPoint::RAY_TRACING_KHR {
+                    return Err(Error::InvalidInput(
+                        "TraceRays requires a ray-tracing pipeline".into(),
+                    ));
+                }
+                unsafe {
+                    device.cmd_bind_pipeline(
+                        command_buffer,
+                        vk::PipelineBindPoint::RAY_TRACING_KHR,
+                        pipeline.pipeline,
+                    );
+                }
+                let region = |sbt: ShaderBindingTableRegion| {
+                    let addr = resources
+                        .buffer_device_address_at(device, sbt.buffer, sbt.offset)
+                        .unwrap_or(0);
+                    vk::StridedDeviceAddressRegionKHR {
+                        device_address: addr,
+                        stride: sbt.stride,
+                        size: sbt.size,
+                    }
+                };
+                let raygen = region(trace.sbt.raygen);
+                let miss = region(trace.sbt.miss);
+                let hit = region(trace.sbt.hit);
+                let call = trace.sbt.callable.map(region).unwrap_or_default();
+                unsafe {
+                    rt_ext.cmd_trace_rays(
+                        command_buffer,
+                        &raygen,
+                        &miss,
+                        &hit,
+                        &call,
+                        trace.width,
+                        trace.height,
+                        trace.depth,
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -1680,6 +1924,12 @@ fn access_mask(state: RgState) -> vk::AccessFlags {
         RgState::VertexRead => vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
         RgState::IndexRead => vk::AccessFlags::INDEX_READ,
         RgState::IndirectRead => vk::AccessFlags::INDIRECT_COMMAND_READ,
+        RgState::AccelerationStructureBuild => {
+            vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR
+        }
+        RgState::AccelerationStructureRead => {
+            vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR
+        }
     }
 }
 
@@ -1716,6 +1966,13 @@ fn stage_mask(state: RgState) -> vk::PipelineStageFlags {
         }
         RgState::VertexRead | RgState::IndexRead => vk::PipelineStageFlags::VERTEX_INPUT,
         RgState::IndirectRead => vk::PipelineStageFlags::DRAW_INDIRECT,
+        RgState::AccelerationStructureBuild => {
+            vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR
+        }
+        RgState::AccelerationStructureRead => {
+            vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR
+                | vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR
+        }
     }
 }
 
@@ -1739,6 +1996,13 @@ fn stage_mask2(state: RgState) -> vk::PipelineStageFlags2 {
         RgState::VertexRead => vk::PipelineStageFlags2::VERTEX_ATTRIBUTE_INPUT,
         RgState::IndexRead => vk::PipelineStageFlags2::INDEX_INPUT,
         RgState::IndirectRead => vk::PipelineStageFlags2::DRAW_INDIRECT,
+        RgState::AccelerationStructureBuild => {
+            vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR
+        }
+        RgState::AccelerationStructureRead => {
+            vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR
+                | vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR
+        }
     }
 }
 
@@ -1758,6 +2022,12 @@ fn access_mask2(state: RgState) -> vk::AccessFlags2 {
         RgState::VertexRead => vk::AccessFlags2::VERTEX_ATTRIBUTE_READ,
         RgState::IndexRead => vk::AccessFlags2::INDEX_READ,
         RgState::IndirectRead => vk::AccessFlags2::INDIRECT_COMMAND_READ,
+        RgState::AccelerationStructureBuild => {
+            vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR
+        }
+        RgState::AccelerationStructureRead => {
+            vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR
+        }
     }
 }
 
@@ -1765,6 +2035,14 @@ fn vk_index_type(format: IndexFormat) -> vk::IndexType {
     match format {
         IndexFormat::Uint16 => vk::IndexType::UINT16,
         IndexFormat::Uint32 => vk::IndexType::UINT32,
+    }
+}
+
+fn vk_vertex_format_for_as(format: VertexFormat) -> Result<vk::Format> {
+    match format {
+        VertexFormat::Float32x2 => Ok(vk::Format::R32G32_SFLOAT),
+        VertexFormat::Float32x3 => Ok(vk::Format::R32G32B32_SFLOAT),
+        VertexFormat::Float32x4 => Ok(vk::Format::R32G32B32A32_SFLOAT),
     }
 }
 
@@ -1808,6 +2086,10 @@ fn image_layout(state: RgState) -> vk::ImageLayout {
         RgState::CopyDst => vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         RgState::Present => vk::ImageLayout::PRESENT_SRC_KHR,
         RgState::UniformRead | RgState::VertexRead | RgState::IndexRead | RgState::IndirectRead => {
+            vk::ImageLayout::GENERAL
+        }
+        // Acceleration structure states don't apply to images, use GENERAL as a safe fallback.
+        RgState::AccelerationStructureBuild | RgState::AccelerationStructureRead => {
             vk::ImageLayout::GENERAL
         }
     }
@@ -1920,6 +2202,8 @@ impl FramedCommands {
         mesh_shader_ext: Option<&mesh_shader::Device>,
         sync2: Option<&ash::khr::synchronization2::Device>,
         dynamic_rendering: Option<&ash::khr::dynamic_rendering::Device>,
+        as_khr: Option<&ash::khr::acceleration_structure::Device>,
+        rt_khr: Option<&ash::khr::ray_tracing_pipeline::Device>,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
     ) -> Result<SubmissionHandle> {
@@ -1938,6 +2222,8 @@ impl FramedCommands {
             mesh_shader_ext,
             sync2,
             dynamic_rendering,
+            as_khr,
+            rt_khr,
             wait_semaphore,
             signal_semaphore,
         )?;

@@ -125,6 +125,7 @@ impl OitPass {
                     source: ShaderSource::File(engine_shader("oit_collect.slang")),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
+            requires_ray_query: false,
                 },
                 vertex: None, // uses mesh_vertex_3d.slang
                 vertex_kind: MeshVertexKind::V3d,

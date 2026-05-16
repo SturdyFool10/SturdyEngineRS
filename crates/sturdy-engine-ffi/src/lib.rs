@@ -177,6 +177,7 @@ pub struct gfx_shader_desc_t {
     pub file_path_utf8: *const c_char,
     pub entry_point_utf8: *const c_char,
     pub stage: u32,
+    pub requires_ray_query: u32,
 }
 
 #[repr(C)]
@@ -543,6 +544,7 @@ pub extern "C" fn gfx_create_shader(
             source,
             entry_point,
             stage: ffi_shader_stage(desc.stage)?,
+            requires_ray_query: desc.requires_ray_query != 0,
         })?;
         let ffi_shader = registry.alloc();
         registry.shaders.insert(

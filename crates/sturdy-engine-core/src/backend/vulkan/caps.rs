@@ -26,6 +26,13 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
 
     let ray_tracing =
         has(b"VK_KHR_ray_tracing_pipeline\0") && has(b"VK_KHR_acceleration_structure\0");
+    // GFX-3c: ray query extension detection only.
+    let ray_query = has(b"VK_KHR_ray_query\0");
+    // GFX-3c: RT enhancement detection (extension presence only, no device feature enabling).
+    let ray_tracing_position_fetch = has(b"VK_KHR_ray_tracing_position_fetch\0");
+    let ray_tracing_maintenance1 = has(b"VK_KHR_ray_tracing_maintenance1\0");
+    let opacity_micromap = has(b"VK_EXT_opacity_micromap\0");
+    let shader_execution_reordering = has(b"VK_EXT_ray_tracing_invocation_reorder\0");
     let descriptor_indexing = has(b"VK_EXT_descriptor_indexing\0");
     let dynamic_rendering = has(b"VK_KHR_dynamic_rendering\0");
     let synchronization2 = has(b"VK_KHR_synchronization2\0");
@@ -141,6 +148,11 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
 
     let features = BackendFeatures {
         ray_tracing,
+        ray_query,
+        ray_tracing_position_fetch,
+        ray_tracing_maintenance1,
+        opacity_micromap,
+        shader_execution_reordering,
         mesh_shading,
         bindless,
         descriptor_indexing,

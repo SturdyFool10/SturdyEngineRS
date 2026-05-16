@@ -25,6 +25,7 @@ pub mod native_handles;
 pub mod pipeline;
 pub mod push_constants;
 pub mod raw_capabilities;
+pub mod ray_tracing_pipeline;
 pub mod render_graph;
 pub mod sampler;
 pub mod shader;
@@ -50,9 +51,9 @@ pub use external_resource::{
 };
 pub use gpu_capture::{GpuCaptureDesc, GpuCaptureTool};
 pub use handles::{
-    BindGroupHandle, BufferHandle, DeviceHandle, FrameHandle, ImageHandle, PassHandle,
-    PipelineHandle, PipelineLayoutHandle, SamplerHandle, ShaderHandle, SubmissionHandle,
-    SurfaceHandle,
+    AccelerationStructureHandle, BindGroupHandle, BufferHandle, DeviceHandle, FrameHandle,
+    ImageHandle, PassHandle, PipelineHandle, PipelineLayoutHandle, SamplerHandle, ShaderHandle,
+    SubmissionHandle, SurfaceHandle,
 };
 pub use image::{
     Extent3d, Format, FormatCapabilities, ImageBuilder, ImageClearValue, ImageDesc, ImageDimension,
@@ -70,16 +71,19 @@ pub use pipeline::{
     VertexInputRate,
 };
 pub use push_constants::PushConstants;
+pub use ray_tracing_pipeline::{RayTracingPipelineDesc, RayTracingStageDesc, RtShaderGroupDesc, RtShaderGroupKind};
 pub use raw_capabilities::{
     BackendRawCapabilities, D3d12RawCapabilities, MetalRawCapabilities, VulkanRawCapabilities,
 };
 pub use render_graph::{
-    Access, AliasPlan, Barrier, BufferBarrier, BufferStateKey, BufferUse, CompiledGraph,
-    CopyBufferToImageDesc, CopyImageToBufferDesc, DispatchDesc, DispatchIndirectDesc, DrawDesc,
-    DrawIndirectCountDesc, DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc,
-    ImageBarrier, ImageStateKey, ImageUse, IndexBufferBinding, IndexFormat, PassDesc, PassWork,
-    QueueType, RecordBatch, RenderGraph, ResolveImageDesc, ResourceLifetime, ResourceUse, RgState,
-    ShadingRate, SubresourceRange, VertexBufferBinding,
+    Access, AccelerationStructureBuildMode, AliasPlan, Barrier, BlasGeometryDesc, BlasBuildDesc,
+    BufferBarrier, BufferStateKey, BufferUse, CompiledGraph, CopyBufferToImageDesc,
+    CopyImageToBufferDesc, DispatchDesc, DispatchIndirectDesc, DrawDesc, DrawIndirectCountDesc,
+    DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, ImageBarrier, ImageStateKey,
+    ImageUse, IndexBufferBinding, IndexFormat, PassDesc, PassWork, QueueType, RecordBatch,
+    RenderGraph, ResolveImageDesc, ResourceLifetime, ResourceUse, RgState, ShaderBindingTable,
+    ShaderBindingTableRegion, ShadingRate, SubresourceRange, TlasBuildDesc, TraceRaysDesc,
+    VertexBufferBinding,
 };
 pub use sampler::{AddressMode, BorderColor, CompareOp, FilterMode, MipmapMode, SamplerDesc};
 pub use shader::{

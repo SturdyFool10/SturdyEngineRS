@@ -901,6 +901,7 @@ pub fn compile_and_reflect(
             source: compiled_source,
             entry_point: desc.entry_point.clone(),
             stage: desc.stage,
+            requires_ray_query: desc.requires_ray_query,
         };
 
         Ok((
@@ -1216,6 +1217,7 @@ mod tests {
             source: ShaderSource::File(testbed_shader("testbed_compute.slang")),
             entry_point: "main".into(),
             stage: ShaderStage::Compute,
+            requires_ray_query: false,
         };
         let reflection = reflect_pipeline_layout(&desc).expect("reflection should succeed");
         assert!(
@@ -1270,6 +1272,7 @@ mod tests {
             source: ShaderSource::File(testbed_shader("textured_fragment.slang")),
             entry_point: "ps_main".into(),
             stage: ShaderStage::Fragment,
+            requires_ray_query: false,
         };
         let reflection = reflect_pipeline_layout(&desc).expect("reflection should succeed");
         let group = reflection
@@ -1293,6 +1296,7 @@ mod tests {
             source: ShaderSource::File(testbed_shader("triangle_vertex.slang")),
             entry_point: "vs_main".into(),
             stage: ShaderStage::Vertex,
+            requires_ray_query: false,
         };
         let reflection = reflect_pipeline_layout(&desc).expect("reflection should succeed");
         assert!(
@@ -1308,6 +1312,7 @@ mod tests {
             source: ShaderSource::File(testbed_shader("push_vertex.slang")),
             entry_point: "vs_main".into(),
             stage: ShaderStage::Vertex,
+            requires_ray_query: false,
         };
         let reflection = reflect_pipeline_layout(&desc).expect("reflection should succeed");
         assert_eq!(reflection.layout.push_constants_bytes, 32);
@@ -1333,6 +1338,7 @@ mod tests {
             source: ShaderSource::File(testbed_shader("textured_fragment.slang")),
             entry_point: "ps_main".into(),
             stage: ShaderStage::Fragment,
+            requires_ray_query: false,
         };
         let reflection = reflect_pipeline_layout(&desc).expect("reflection should succeed");
         let group = reflection
@@ -1381,6 +1387,7 @@ mod tests {
                 source: ShaderSource::Inline(shader_fixtures::BINDLESS_ARRAYS.into()),
                 entry_point: "main".into(),
                 stage: ShaderStage::Fragment,
+                requires_ray_query: false,
             };
 
             let (_, reflection) =
@@ -1418,6 +1425,7 @@ mod tests {
                 source: ShaderSource::Spirv(vec![0x0723_0203, 0, 0, 0, 0]),
                 entry_point: "main".into(),
                 stage: ShaderStage::Compute,
+            requires_ray_query: false,
             };
             let reflection =
                 reflect_pipeline_layout(&desc).expect("should not error for SPIRV source");
@@ -1431,6 +1439,7 @@ mod tests {
                 source: ShaderSource::MemoryUtf8(shader_fixtures::MEMORY_UTF8_COMPUTE),
                 entry_point: "main".into(),
                 stage: ShaderStage::Compute,
+            requires_ray_query: false,
             };
 
             let (_compiled, reflection) =
@@ -1451,6 +1460,7 @@ mod tests {
                 source: ShaderSource::MemoryBytes(shader_fixtures::MEMORY_BYTES_VERTEX.as_bytes()),
                 entry_point: "vs_main".into(),
                 stage: ShaderStage::Vertex,
+            requires_ray_query: false,
             };
 
             let (_compiled, reflection) =
@@ -1468,6 +1478,7 @@ mod tests {
             source: ShaderSource::File(testbed_shader("triangle_vertex.slang")),
             entry_point: "vs_main".into(),
             stage: ShaderStage::Vertex,
+            requires_ray_query: false,
         };
         let (_compiled, reflection) =
             compile_and_reflect(&desc, ShaderTarget::Spirv).expect("vertex shader compiles");
@@ -1491,6 +1502,7 @@ mod tests {
             source: ShaderSource::File(testbed_shader("textured_vertex.slang")),
             entry_point: "vs_main".into(),
             stage: ShaderStage::Vertex,
+            requires_ray_query: false,
         };
         let (_compiled, reflection) =
             compile_and_reflect(&desc, ShaderTarget::Spirv).expect("vertex shader compiles");

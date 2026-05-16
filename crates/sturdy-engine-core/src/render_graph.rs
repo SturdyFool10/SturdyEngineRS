@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    BindGroupHandle, BufferDesc, BufferHandle, Error, ImageDesc, ImageHandle, PipelineHandle,
-    PushConstants, Result, SamplerHandle, ShaderHandle,
+    AccelerationStructureHandle, BindGroupHandle, BufferDesc, BufferHandle, Error, ImageDesc,
+    ImageHandle, PipelineHandle, PushConstants, Result, SamplerHandle, ShaderHandle,
+    VertexFormat,
 };
 
 #[path = "render_graph/alias_plan.rs"]
@@ -42,6 +43,10 @@ pub enum RgState {
     VertexRead,
     IndexRead,
     IndirectRead,
+    /// Buffer/AS being written by a BLAS or TLAS build command.
+    AccelerationStructureBuild,
+    /// Acceleration structure available for shader reads (e.g. traceRayEXT).
+    AccelerationStructureRead,
 }
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
@@ -312,7 +317,84 @@ pub enum ShadingRate {
     Rate4x4,
 }
 
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+/// Build mode for acceleration structure construction commands.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AccelerationStructureBuildMode {
+    /// Full build from scratch.
+    Build,
+    /// Incremental update of an existing structure.
+    Update,
+    /// Compact an existing structure into a smaller allocation.
+    Compact,
+}
+
+/// Geometry entry for a BLAS build.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BlasGeometryDesc {
+    pub vertex_buffer: BufferHandle,
+    pub vertex_offset: u64,
+    pub vertex_count: u32,
+    pub vertex_stride: u32,
+    pub vertex_format: VertexFormat,
+    pub index_buffer: Option<BufferHandle>,
+    pub index_offset: u64,
+    pub index_count: u32,
+    pub index_format: Option<IndexFormat>,
+    pub transform_buffer: Option<BufferHandle>,
+    pub transform_offset: u64,
+}
+
+/// Describes a bottom-level acceleration structure build.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlasBuildDesc {
+    pub dst: AccelerationStructureHandle,
+    pub src: Option<AccelerationStructureHandle>,
+    pub scratch_buffer: Option<BufferHandle>,
+    pub geometries: Vec<BlasGeometryDesc>,
+    pub mode: AccelerationStructureBuildMode,
+}
+
+/// Describes a top-level acceleration structure build.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TlasBuildDesc {
+    pub dst: AccelerationStructureHandle,
+    pub src: Option<AccelerationStructureHandle>,
+    pub scratch_buffer: Option<BufferHandle>,
+    pub instance_buffer: BufferHandle,
+    pub instance_offset: u64,
+    pub instance_count: u32,
+    pub mode: AccelerationStructureBuildMode,
+}
+
+/// One region of a shader binding table buffer.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ShaderBindingTableRegion {
+    pub buffer: BufferHandle,
+    pub offset: u64,
+    pub stride: u64,
+    pub size: u64,
+}
+
+/// Full shader binding table for a TraceRays command.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ShaderBindingTable {
+    pub raygen: ShaderBindingTableRegion,
+    pub miss: ShaderBindingTableRegion,
+    pub hit: ShaderBindingTableRegion,
+    pub callable: Option<ShaderBindingTableRegion>,
+}
+
+/// Describes a ray dispatch (vkCmdTraceRaysKHR).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TraceRaysDesc {
+    pub pipeline: PipelineHandle,
+    pub sbt: ShaderBindingTable,
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum PassWork {
     #[default]
     None,
@@ -355,6 +437,12 @@ pub enum PassWork {
         dst_height: u32,
         aspect: SubresourceRange,
     },
+    /// Build a bottom-level acceleration structure from triangle geometry.
+    BuildBlas(BlasBuildDesc),
+    /// Build a top-level acceleration structure from instance data.
+    BuildTlas(TlasBuildDesc),
+    /// Dispatch rays using a ray-tracing pipeline and a shader binding table.
+    TraceRays(TraceRaysDesc),
 }
 
 /// Inline descriptor binding pushed into the command stream without a descriptor pool.
@@ -609,13 +697,13 @@ impl RenderGraph {
             }
         }
         if pass.pipeline_shading_rate.is_some()
-            && (pass.queue != QueueType::Graphics || !is_graphics_work(pass.work))
+            && (pass.queue != QueueType::Graphics || !is_graphics_work(&pass.work))
         {
             return Err(Error::InvalidInput(
                 "pipeline shading rate requires graphics pass work".into(),
             ));
         }
-        if let PassWork::Dispatch(dispatch) = pass.work {
+        if let PassWork::Dispatch(ref dispatch) = pass.work {
             if dispatch.x == 0 || dispatch.y == 0 || dispatch.z == 0 {
                 return Err(Error::InvalidInput(
                     "dispatch dimensions must be non-zero".into(),
@@ -627,7 +715,7 @@ impl RenderGraph {
                 ));
             }
         }
-        if let PassWork::Draw(draw) = pass.work {
+        if let PassWork::Draw(ref draw) = pass.work {
             if draw.vertex_count == 0 || draw.instance_count == 0 {
                 return Err(Error::InvalidInput(
                     "draw vertex_count and instance_count must be non-zero".into(),
@@ -639,7 +727,7 @@ impl RenderGraph {
                 ));
             }
         }
-        if let PassWork::DrawIndirectCount(draw) = pass.work {
+        if let PassWork::DrawIndirectCount(ref draw) = pass.work {
             if draw.max_draw_count == 0 {
                 return Err(Error::InvalidInput(
                     "draw-indirect-count max_draw_count must be non-zero".into(),
@@ -670,6 +758,32 @@ impl RenderGraph {
         }
         if let PassWork::ResolveImage(resolve) = pass.work {
             self.validate_resolve_image(resolve)?;
+        }
+        if let PassWork::BuildBlas(ref build) = pass.work {
+            if build.scratch_buffer.is_none() {
+                return Err(Error::InvalidInput(
+                    "BLAS build requires a scratch buffer".into(),
+                ));
+            }
+            if build.geometries.is_empty() {
+                return Err(Error::InvalidInput(
+                    "BLAS build requires at least one geometry".into(),
+                ));
+            }
+        }
+        if let PassWork::BuildTlas(ref build) = pass.work {
+            if build.scratch_buffer.is_none() {
+                return Err(Error::InvalidInput(
+                    "TLAS build requires a scratch buffer".into(),
+                ));
+            }
+        }
+        if let PassWork::TraceRays(ref trace) = pass.work {
+            if trace.width == 0 || trace.height == 0 || trace.depth == 0 {
+                return Err(Error::InvalidInput(
+                    "trace rays dimensions must be non-zero".into(),
+                ));
+            }
         }
         self.passes.push(pass);
         Ok(())
@@ -1097,7 +1211,7 @@ fn build_batches(passes: &[PassDesc]) -> Vec<RecordBatch> {
     batches
 }
 
-fn is_graphics_work(work: PassWork) -> bool {
+fn is_graphics_work(work: &PassWork) -> bool {
     matches!(
         work,
         PassWork::Draw(_)

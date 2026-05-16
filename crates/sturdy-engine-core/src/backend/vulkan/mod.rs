@@ -26,9 +26,10 @@ use crate::{
     AdapterInfo, BindGroupDesc, BindGroupHandle, BufferDesc, BufferHandle, CanonicalPipelineLayout,
     Caps, CompiledGraph, ComputePipelineDesc, Error, ExternalBufferDesc, ExternalBufferHandle,
     ExternalImageDesc, ExternalImageHandle, Format, FormatCapabilities, GraphicsPipelineDesc,
-    ImageDesc, ImageHandle, NativeSurfaceDesc, PipelineHandle, PipelineLayoutHandle, Result,
-    SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, SubmissionHandle, SurfaceCapabilities,
-    SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
+    ImageDesc, ImageHandle, NativeSurfaceDesc, PipelineHandle, PipelineLayoutHandle,
+    RayTracingPipelineDesc, Result, SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle,
+    SubmissionHandle, SurfaceCapabilities, SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc,
+    SurfaceSize,
 };
 
 pub use bindless::BindlessVkInfo;
@@ -74,6 +75,10 @@ pub struct VulkanBackend {
     conditional_rendering_ext: Option<ash::ext::conditional_rendering::Device>,
     /// Whether VK_EXT_conservative_rasterization is available.
     conservative_rasterization_enabled: bool,
+    /// VK_KHR_acceleration_structure commands. Present when AS is enabled.
+    acceleration_structure_khr: Option<ash::khr::acceleration_structure::Device>,
+    /// VK_KHR_ray_tracing_pipeline commands. Present when RT pipeline is enabled.
+    ray_tracing_pipeline_khr: Option<ash::khr::ray_tracing_pipeline::Device>,
 }
 
 impl VulkanBackend {
@@ -101,6 +106,8 @@ impl VulkanBackend {
         caps.features.push_descriptors = logical.push_descriptors_enabled;
         caps.features.conditional_rendering = logical.conditional_rendering_enabled;
         caps.features.global_queue_priority = logical.global_queue_priority_enabled;
+        caps.features.ray_tracing = logical.ray_tracing_pipeline_enabled;
+        caps.features.ray_query = logical.ray_query_enabled;
         let props = unsafe { instance.get_physical_device_properties(selection.physical_device) };
         let timestamp_period_ns = props.limits.timestamp_period;
         let memory_properties =
@@ -167,6 +174,22 @@ impl VulkanBackend {
         };
         let conservative_rasterization_enabled =
             caps.features.conservative_rasterization_overestimate;
+        let acceleration_structure_khr = if logical.acceleration_structure_enabled {
+            Some(ash::khr::acceleration_structure::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        let ray_tracing_pipeline_khr = if logical.ray_tracing_pipeline_enabled {
+            Some(ash::khr::ray_tracing_pipeline::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
 
         // Create the bindless heap if the device supports descriptor_indexing.
         let bindless_heap = if caps.supports_bindless {
@@ -208,6 +231,8 @@ impl VulkanBackend {
             push_descriptor_khr,
             conditional_rendering_ext,
             conservative_rasterization_enabled,
+            acceleration_structure_khr,
+            ray_tracing_pipeline_khr,
         })
     }
 
@@ -551,6 +576,39 @@ impl Backend for VulkanBackend {
             .destroy_pipeline(&self.device, handle)
     }
 
+    fn create_ray_tracing_pipeline(
+        &self,
+        handle: PipelineHandle,
+        desc: &RayTracingPipelineDesc,
+    ) -> Result<()> {
+        let rt_ext = self.ray_tracing_pipeline_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("VK_KHR_ray_tracing_pipeline is not enabled".into())
+        })?;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut pipelines = self
+            .pipelines
+            .lock()
+            .expect("vulkan pipeline registry mutex poisoned");
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let shaders = self
+            .shaders
+            .lock()
+            .expect("vulkan shader registry mutex poisoned");
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let descriptors = self
+            .descriptors
+            .read()
+            .expect("vulkan descriptor registry rwlock poisoned");
+        pipelines.create_ray_tracing_pipeline(
+            &self.device,
+            handle,
+            desc,
+            &shaders,
+            &descriptors,
+            rt_ext,
+        )
+    }
+
     fn create_surface(
         &self,
         handle: SurfaceHandle,
@@ -792,6 +850,8 @@ impl Backend for VulkanBackend {
             self.mesh_shader_ext.as_ref(),
             self.synchronization2_khr.as_ref(),
             self.dynamic_rendering_khr.as_ref(),
+            self.acceleration_structure_khr.as_ref(),
+            self.ray_tracing_pipeline_khr.as_ref(),
             wait_sem,
             signal_sem,
         );

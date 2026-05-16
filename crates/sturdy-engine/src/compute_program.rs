@@ -21,6 +21,7 @@ impl ComputeProgram {
             source: ShaderSource::File(path.clone()),
             entry_point: "main".to_owned(),
             stage: ShaderStage::Compute,
+            requires_ray_query: false,
         })?;
         let reflection = engine.shader_reflection(&shader)?;
         let pipeline_layout = engine.create_reflected_compute_pipeline_layout(&shader)?;
@@ -61,6 +62,7 @@ impl ComputeProgram {
             source: ShaderSource::File(path),
             entry_point: "main".to_owned(),
             stage: ShaderStage::Compute,
+            requires_ray_query: false,
         })?;
         let reflection = self.engine.shader_reflection(&shader)?;
         let pipeline_layout = self

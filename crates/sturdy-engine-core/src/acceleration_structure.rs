@@ -1,0 +1,42 @@
+use crate::{Error, Result};
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AccelerationStructureKind {
+    BottomLevel,
+    TopLevel,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct AccelerationStructureDesc {
+    pub kind: AccelerationStructureKind,
+    pub size: u64,
+}
+
+impl AccelerationStructureDesc {
+    pub fn validate(&self) -> Result<()> {
+        if self.size == 0 {
+            return Err(Error::InvalidInput(
+                "acceleration structure size must be non-zero".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn acceleration_structure_desc_rejects_zero_size() {
+        let err = AccelerationStructureDesc {
+            kind: AccelerationStructureKind::BottomLevel,
+            size: 0,
+        }
+        .validate()
+        .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidInput(_)));
+        assert!(format!("{err}").contains("non-zero"));
+    }
+}

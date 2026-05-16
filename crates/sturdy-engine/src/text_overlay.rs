@@ -254,6 +254,7 @@ fn text_program(engine: &Engine, fragment: &str) -> Result<MeshProgram> {
                 source: ShaderSource::Inline(fragment.to_string()),
                 entry_point: "main".to_string(),
                 stage: ShaderStage::Fragment,
+            requires_ray_query: false,
             },
             vertex: None,
             vertex_kind: MeshVertexKind::V2d,

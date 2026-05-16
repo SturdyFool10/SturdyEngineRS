@@ -12,10 +12,10 @@ use crate::{
     CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error, ExternalBufferDesc,
     ExternalImageDesc, Format, FormatCapabilities, FrameHandle, GpuCaptureDesc, GpuCaptureTool,
     GraphicsPipelineDesc, ImageDesc, ImageHandle, ImageStateKey, NativeHandleCapabilities,
-    PipelineHandle, PipelineLayoutHandle, RenderGraph, ResourceBinding, Result, RgState,
-    SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection, ShaderSource,
-    StageMask, SubmissionHandle, SurfaceCapabilities, SurfaceEvent, SurfaceHandle, SurfaceHdrCaps,
-    SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
+    PipelineHandle, PipelineLayoutHandle, RayTracingPipelineDesc, RenderGraph, ResourceBinding,
+    Result, RgState, SamplerDesc, SamplerHandle, ShaderDesc, ShaderHandle, ShaderReflection,
+    ShaderSource, StageMask, SubmissionHandle, SurfaceCapabilities, SurfaceEvent, SurfaceHandle,
+    SurfaceHdrCaps, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
 };
 
 #[derive(Clone, Debug)]
@@ -869,6 +869,45 @@ impl Device {
         Ok(handle)
     }
 
+    pub fn create_ray_tracing_pipeline(
+        &self,
+        desc: RayTracingPipelineDesc,
+    ) -> Result<PipelineHandle> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.backend.caps().features.ray_tracing {
+            return Err(Error::Unsupported(
+                "ray tracing pipelines require BackendFeatures::ray_tracing".into(),
+            ));
+        }
+        let layout_handle = match desc.layout {
+            Some(h) => {
+                if !inner.pipeline_layouts.contains_key(&h) {
+                    return Err(Error::InvalidHandle);
+                }
+                h
+            }
+            None => {
+                return Err(Error::InvalidInput(
+                    "ray tracing pipeline requires an explicit pipeline layout".into(),
+                ));
+            }
+        };
+        let resolved = RayTracingPipelineDesc {
+            layout: Some(layout_handle),
+            ..desc
+        };
+        let handle = PipelineHandle(inner.pipeline_handles.alloc());
+        inner.backend.create_ray_tracing_pipeline(handle, &resolved)?;
+        // RT pipelines do not auto-create a layout, so owned_layout is always None here
+        // (the layout was externally supplied).
+        inner.pipelines.insert(
+            handle,
+            PipelineDesc::RayTracing { owned_layout: None },
+        );
+        Ok(handle)
+    }
+
     pub fn set_image_debug_name(&self, handle: ImageHandle, name: &str) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self.inner.lock().expect("device mutex poisoned");
@@ -1199,6 +1238,9 @@ enum PipelineDesc {
         desc: GraphicsPipelineDesc,
         owned_layout: Option<PipelineLayoutHandle>,
     },
+    RayTracing {
+        owned_layout: Option<PipelineLayoutHandle>,
+    },
 }
 
 impl PipelineDesc {
@@ -1206,6 +1248,7 @@ impl PipelineDesc {
         match self {
             PipelineDesc::Compute { owned_layout, .. } => *owned_layout,
             PipelineDesc::Graphics { owned_layout, .. } => *owned_layout,
+            PipelineDesc::RayTracing { owned_layout } => *owned_layout,
         }
     }
 }

@@ -42,6 +42,10 @@ pub struct ShaderDesc {
     pub source: ShaderSource,
     pub entry_point: String,
     pub stage: ShaderStage,
+    /// Shader uses inline ray query instructions.
+    ///
+    /// Requires `BackendFeatures::ray_query` on the selected backend.
+    pub requires_ray_query: bool,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
