@@ -13,6 +13,8 @@ struct VulkanShader {
     module: vk::ShaderModule,
     stage: ShaderStage,
     entry_point: String,
+    /// Raw SPIR-V words, retained for VK_EXT_shader_object creation.
+    spirv_words: Vec<u32>,
 }
 
 impl ShaderRegistry {
@@ -39,6 +41,7 @@ impl ShaderRegistry {
                 module,
                 stage: desc.stage,
                 entry_point: desc.entry_point.clone(),
+                spirv_words: words.clone(),
             },
         );
         Ok(())
@@ -78,6 +81,15 @@ impl ShaderRegistry {
         self.shaders
             .get(&handle)
             .map(|shader| shader.entry_point.as_str())
+            .ok_or(Error::InvalidHandle)
+    }
+
+    /// Returns the raw SPIR-V words for a shader.
+    /// Used by VK_EXT_shader_object, which consumes the same bytes but requires 4-byte alignment.
+    pub fn spirv_words(&self, handle: ShaderHandle) -> Result<&[u32]> {
+        self.shaders
+            .get(&handle)
+            .map(|shader| shader.spirv_words.as_slice())
             .ok_or(Error::InvalidHandle)
     }
 }

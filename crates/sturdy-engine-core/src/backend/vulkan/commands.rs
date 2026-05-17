@@ -6,21 +6,33 @@ mod batch_pool;
 
 use crate::{
     AccelerationStructureBuildMode, BufferBarrier, CompiledGraph, Error, Extent3d, Format,
-    ImageBarrier, IndexFormat, PassDesc, PassWork, PushConstants, PushDescriptorBinding, Result,
-    RgState, ShaderBindingTableRegion, ShadingRate, SubmissionHandle, SubresourceRange,
-    VertexFormat,
+    ImageBarrier, IndexFormat, PassDesc, PassWork, PipelineHandle, PushConstants,
+    PushDescriptorBinding, Result, RgState, ShaderBinding, ShaderBindingTableRegion, ShadingRate,
+    SubmissionHandle, SubresourceRange, VertexFormat,
 };
 
 use super::bindless::BindlessVkInfo;
 use super::debug::DebugUtils;
 use super::descriptors::DescriptorRegistry;
-use super::pipelines::PipelineRegistry;
+use super::pipelines::{PipelineRegistry, VulkanGraphicsPipelineState, VulkanPipeline};
 use super::queues::{QueueFamilyMap, VulkanQueues, queue_family_index};
 use super::resources::{ResourceRegistry, VulkanScratchBuffer};
 use batch_pool::BatchPool;
 
 /// Maximum number of render-graph passes we track per frame with GPU timestamps.
 const MAX_TIMESTAMP_PASSES: u32 = 256;
+
+struct ActiveShaderBinding {
+    bind_point: vk::PipelineBindPoint,
+    layout: vk::PipelineLayout,
+    render_pass: vk::RenderPass,
+    push_constants_bytes: u32,
+    push_constant_stages: vk::ShaderStageFlags,
+    uses_bindless: bool,
+    uses_shader_objects: bool,
+    shader_object_stages: vk::ShaderStageFlags,
+    graphics_state: Option<VulkanGraphicsPipelineState>,
+}
 
 pub struct CommandContext {
     /// One pool per batch slot; grows to match the largest batch count seen.
@@ -106,6 +118,7 @@ impl CommandContext {
         fragment_shading_rate: Option<&ash::khr::fragment_shading_rate::Device>,
         as_khr: Option<&ash::khr::acceleration_structure::Device>,
         rt_khr: Option<&ash::khr::ray_tracing_pipeline::Device>,
+        shader_object_ext: Option<&ash::ext::shader_object::Device>,
         ray_tracing_position_fetch: bool,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
@@ -289,6 +302,7 @@ impl CommandContext {
                             fragment_shading_rate,
                             as_khr,
                             rt_khr,
+                            shader_object_ext,
                             ray_tracing_position_fetch,
                         )?;
                         if !pass.name.is_empty() {
@@ -516,6 +530,7 @@ impl CommandContext {
         fragment_shading_rate: Option<&ash::khr::fragment_shading_rate::Device>,
         as_khr: Option<&ash::khr::acceleration_structure::Device>,
         rt_khr: Option<&ash::khr::ray_tracing_pipeline::Device>,
+        shader_object_ext: Option<&ash::ext::shader_object::Device>,
         ray_tracing_position_fetch: bool,
     ) -> Result<()> {
         if let Some(predicate) = pass.predicate {
@@ -543,86 +558,17 @@ impl CommandContext {
             }
         }
 
-        let mut bound_pipeline = None;
-        if let Some(pipeline) = pass.pipeline {
-            let pipeline = pipelines.pipeline(pipeline)?;
-            unsafe {
-                device.cmd_bind_pipeline(command_buffer, pipeline.bind_point, pipeline.pipeline);
-            }
-            if pipeline.uses_bindless {
-                let bindless = bindless.ok_or_else(|| {
-                    Error::Backend(
-                        "pipeline requires bindless descriptors but no bindless heap is available"
-                            .into(),
-                    )
-                })?;
-                unsafe {
-                    device.cmd_bind_descriptor_sets(
-                        command_buffer,
-                        pipeline.bind_point,
-                        pipeline.layout,
-                        0,
-                        &[bindless.set],
-                        &[],
-                    );
-                }
-            }
-            let mut sets = Vec::new();
-            let mut first_set = None;
-            for bind_group in &pass.bind_groups {
-                let group_first_set = descriptors.bind_group_first_set(*bind_group)?;
-                if let Some(first) = first_set {
-                    if first != group_first_set {
-                        return Err(Error::InvalidInput(
-                            "a pass cannot bind groups from layouts with different first set indices"
-                                .into(),
-                        ));
-                    }
-                } else {
-                    first_set = Some(group_first_set);
-                }
-                sets.extend_from_slice(descriptors.descriptor_sets(*bind_group)?);
-            }
-            if !sets.is_empty() {
-                unsafe {
-                    device.cmd_bind_descriptor_sets(
-                        command_buffer,
-                        pipeline.bind_point,
-                        pipeline.layout,
-                        first_set.unwrap_or(0),
-                        &sets,
-                        &[],
-                    );
-                }
-            }
-            if let Some(push_descriptor_set) = &pass.push_descriptor_set {
-                let push_descriptor = push_descriptor.ok_or_else(|| {
-                    Error::Unsupported("push descriptors require VK_KHR_push_descriptor".into())
-                })?;
-                for binding in &push_descriptor_set.bindings {
-                    record_push_descriptor_binding(
-                        push_descriptor,
-                        command_buffer,
-                        pipeline,
-                        push_descriptor_set.set,
-                        binding,
-                        resources,
-                    )?;
-                }
-            }
-            if let Some(push_constants) = &pass.push_constants {
-                record_push_constants(device, command_buffer, pipeline, push_constants)?;
-            }
-            bound_pipeline = Some(pipeline);
-        } else if pass.push_constants.is_some() {
-            return Err(Error::InvalidInput(
-                "push constants require a bound pipeline".into(),
-            ));
-        } else if pass.push_descriptor_set.is_some() {
-            return Err(Error::InvalidInput(
-                "push descriptors require a bound pipeline".into(),
-            ));
-        }
+        let bound_binding = bind_pass_shader_binding(
+            device,
+            command_buffer,
+            pass,
+            resources,
+            descriptors,
+            pipelines,
+            bindless,
+            push_descriptor,
+            shader_object_ext,
+        )?;
         if let Some(rate) = pass.pipeline_shading_rate {
             let fragment_shading_rate = fragment_shading_rate.ok_or_else(|| {
                 Error::Unsupported(
@@ -646,13 +592,12 @@ impl CommandContext {
         match pass.work {
             PassWork::None => {}
             PassWork::Dispatch(dispatch) => {
-                let pipeline = bound_pipeline.ok_or_else(|| {
-                    Error::InvalidInput("dispatch pass requires a compute pipeline".into())
+                let binding = bound_binding.as_ref().ok_or_else(|| {
+                    Error::InvalidInput("dispatch pass requires a compute shader binding".into())
                 })?;
-                if pipeline.bind_point != vk::PipelineBindPoint::COMPUTE {
+                if binding.bind_point != vk::PipelineBindPoint::COMPUTE {
                     return Err(Error::InvalidInput(
-                        "dispatch pass pipeline must bind to the compute pipeline bind point"
-                            .into(),
+                        "dispatch pass shader binding must use the compute bind point".into(),
                     ));
                 }
                 unsafe {
@@ -660,14 +605,16 @@ impl CommandContext {
                 }
             }
             PassWork::Draw(draw) => {
-                let pipeline = bound_pipeline.ok_or_else(|| {
-                    Error::InvalidInput("draw pass requires a graphics pipeline".into())
+                let binding = bound_binding.as_ref().ok_or_else(|| {
+                    Error::InvalidInput("draw pass requires a graphics shader binding".into())
                 })?;
-                if pipeline.bind_point != vk::PipelineBindPoint::GRAPHICS {
+                if binding.bind_point != vk::PipelineBindPoint::GRAPHICS {
                     return Err(Error::InvalidInput(
-                        "draw pass pipeline must bind to the graphics pipeline bind point".into(),
+                        "draw pass shader binding must use the graphics bind point".into(),
                     ));
                 }
+                let shader_object_draw_ext =
+                    prepare_shader_object_draw(command_buffer, binding, shader_object_ext)?;
                 let vertex_buffer = draw
                     .vertex_buffer
                     .map(|binding| {
@@ -692,11 +639,12 @@ impl CommandContext {
                     device,
                     command_buffer,
                     pass,
-                    pipeline.render_pass,
+                    binding.render_pass,
                     resources,
                     pipelines,
                     draw.viewport,
                     dynamic_rendering,
+                    shader_object_draw_ext,
                     || unsafe {
                         if let Some((binding, buffer, offset)) = vertex_buffer {
                             let buffers = [buffer];
@@ -786,12 +734,14 @@ impl CommandContext {
                 );
             },
             PassWork::DispatchIndirect(desc) => {
-                let pipeline = bound_pipeline.ok_or_else(|| {
-                    Error::InvalidInput("dispatch-indirect pass requires a compute pipeline".into())
+                let binding = bound_binding.as_ref().ok_or_else(|| {
+                    Error::InvalidInput(
+                        "dispatch-indirect pass requires a compute shader binding".into(),
+                    )
                 })?;
-                if pipeline.bind_point != vk::PipelineBindPoint::COMPUTE {
+                if binding.bind_point != vk::PipelineBindPoint::COMPUTE {
                     return Err(Error::InvalidInput(
-                        "dispatch-indirect pass pipeline must bind to the compute pipeline bind point"
+                        "dispatch-indirect pass shader binding must use the compute bind point"
                             .into(),
                     ));
                 }
@@ -801,15 +751,18 @@ impl CommandContext {
                 }
             }
             PassWork::DrawIndirect(desc) => {
-                let pipeline = bound_pipeline.ok_or_else(|| {
-                    Error::InvalidInput("draw-indirect pass requires a graphics pipeline".into())
+                let binding = bound_binding.as_ref().ok_or_else(|| {
+                    Error::InvalidInput(
+                        "draw-indirect pass requires a graphics shader binding".into(),
+                    )
                 })?;
-                if pipeline.bind_point != vk::PipelineBindPoint::GRAPHICS {
+                if binding.bind_point != vk::PipelineBindPoint::GRAPHICS {
                     return Err(Error::InvalidInput(
-                        "draw-indirect pass pipeline must bind to the graphics pipeline bind point"
-                            .into(),
+                        "draw-indirect pass shader binding must use the graphics bind point".into(),
                     ));
                 }
+                let shader_object_draw_ext =
+                    prepare_shader_object_draw(command_buffer, binding, shader_object_ext)?;
                 let indirect_buf = resources.buffer(desc.indirect_buffer)?;
                 let vertex_buffer = desc
                     .vertex_buffer
@@ -831,11 +784,12 @@ impl CommandContext {
                     device,
                     command_buffer,
                     pass,
-                    pipeline.render_pass,
+                    binding.render_pass,
                     resources,
                     pipelines,
                     None, // DrawIndirect has no per-tile viewport yet
                     dynamic_rendering,
+                    shader_object_draw_ext,
                     || unsafe {
                         if let Some((binding, vb, offset)) = vertex_buffer {
                             device.cmd_bind_vertex_buffers(
@@ -867,17 +821,19 @@ impl CommandContext {
                 )?;
             }
             PassWork::DrawIndirectCount(desc) => {
-                let pipeline = bound_pipeline.ok_or_else(|| {
+                let binding = bound_binding.as_ref().ok_or_else(|| {
                     Error::InvalidInput(
-                        "draw-indirect-count pass requires a graphics pipeline".into(),
+                        "draw-indirect-count pass requires a graphics shader binding".into(),
                     )
                 })?;
-                if pipeline.bind_point != vk::PipelineBindPoint::GRAPHICS {
+                if binding.bind_point != vk::PipelineBindPoint::GRAPHICS {
                     return Err(Error::InvalidInput(
-                        "draw-indirect-count pass pipeline must bind to the graphics pipeline bind point"
+                        "draw-indirect-count pass shader binding must use the graphics bind point"
                             .into(),
                     ));
                 }
+                let shader_object_draw_ext =
+                    prepare_shader_object_draw(command_buffer, binding, shader_object_ext)?;
                 let indirect_buf = resources.buffer(desc.indirect_buffer)?;
                 let count_buf = resources.buffer(desc.count_buffer)?;
                 let vertex_buffer = desc
@@ -900,11 +856,12 @@ impl CommandContext {
                     device,
                     command_buffer,
                     pass,
-                    pipeline.render_pass,
+                    binding.render_pass,
                     resources,
                     pipelines,
                     None,
                     dynamic_rendering,
+                    shader_object_draw_ext,
                     || unsafe {
                         if let Some((binding, vb, offset)) = vertex_buffer {
                             device.cmd_bind_vertex_buffers(
@@ -940,15 +897,19 @@ impl CommandContext {
                 )?;
             }
             PassWork::DrawMeshShader(desc) => {
-                let pipeline = bound_pipeline.ok_or_else(|| {
-                    Error::InvalidInput("mesh shader draw pass requires a graphics pipeline".into())
+                let binding = bound_binding.as_ref().ok_or_else(|| {
+                    Error::InvalidInput(
+                        "mesh shader draw pass requires a graphics shader binding".into(),
+                    )
                 })?;
-                if pipeline.bind_point != vk::PipelineBindPoint::GRAPHICS {
+                if binding.bind_point != vk::PipelineBindPoint::GRAPHICS {
                     return Err(Error::InvalidInput(
-                        "mesh shader draw pass pipeline must bind to the graphics pipeline bind point"
+                        "mesh shader draw pass shader binding must use the graphics bind point"
                             .into(),
                     ));
                 }
+                let shader_object_draw_ext =
+                    prepare_shader_object_mesh_draw(command_buffer, binding, shader_object_ext)?;
                 let mesh_shader_ext = mesh_shader_ext.ok_or_else(|| {
                     Error::Unsupported(
                         "mesh shader draw pass requires VK_EXT_mesh_shader to be enabled".into(),
@@ -958,11 +919,12 @@ impl CommandContext {
                     device,
                     command_buffer,
                     pass,
-                    pipeline.render_pass,
+                    binding.render_pass,
                     resources,
                     pipelines,
                     None,
                     dynamic_rendering,
+                    shader_object_draw_ext,
                     || unsafe {
                         mesh_shader_ext.cmd_draw_mesh_tasks(
                             command_buffer,
@@ -974,14 +936,14 @@ impl CommandContext {
                 )?;
             }
             PassWork::DrawMeshShaderIndirect(desc) => {
-                let pipeline = bound_pipeline.ok_or_else(|| {
+                let binding = bound_binding.as_ref().ok_or_else(|| {
                     Error::InvalidInput(
-                        "indirect mesh shader draw pass requires a graphics pipeline".into(),
+                        "indirect mesh shader draw pass requires a graphics shader binding".into(),
                     )
                 })?;
-                if pipeline.bind_point != vk::PipelineBindPoint::GRAPHICS {
+                if binding.bind_point != vk::PipelineBindPoint::GRAPHICS {
                     return Err(Error::InvalidInput(
-                        "indirect mesh shader draw pass pipeline must bind to the graphics pipeline bind point"
+                        "indirect mesh shader draw pass shader binding must use the graphics bind point"
                             .into(),
                     ));
                 }
@@ -999,16 +961,19 @@ impl CommandContext {
                             .into(),
                     )
                 })?;
+                let shader_object_draw_ext =
+                    prepare_shader_object_mesh_draw(command_buffer, binding, shader_object_ext)?;
                 let indirect_buf = resources.buffer(desc.indirect_buffer)?;
                 self.record_draw_pass(
                     device,
                     command_buffer,
                     pass,
-                    pipeline.render_pass,
+                    binding.render_pass,
                     resources,
                     pipelines,
                     None,
                     dynamic_rendering,
+                    shader_object_draw_ext,
                     || unsafe {
                         mesh_shader_ext.cmd_draw_mesh_tasks_indirect(
                             command_buffer,
@@ -1716,6 +1681,7 @@ impl CommandContext {
         pipelines: &mut PipelineRegistry,
         viewport_override: Option<[u32; 4]>,
         dynamic_rendering: Option<&ash::khr::dynamic_rendering::Device>,
+        shader_object_ext: Option<&ash::ext::shader_object::Device>,
         record_draw: impl FnOnce(),
     ) -> Result<()> {
         let color_uses = pass
@@ -1844,8 +1810,13 @@ impl CommandContext {
 
                 unsafe {
                     dr.cmd_begin_rendering(command_buffer, &rendering_info);
-                    device.cmd_set_viewport(command_buffer, 0, &[vp]);
-                    device.cmd_set_scissor(command_buffer, 0, &[scissor]);
+                    set_viewport_and_scissor(
+                        device,
+                        shader_object_ext,
+                        command_buffer,
+                        vp,
+                        scissor,
+                    );
                 }
 
                 record_draw();
@@ -1904,8 +1875,7 @@ impl CommandContext {
             .clear_values(&clear_values);
         unsafe {
             device.cmd_begin_render_pass(command_buffer, &begin, vk::SubpassContents::INLINE);
-            device.cmd_set_viewport(command_buffer, 0, &[vp]);
-            device.cmd_set_scissor(command_buffer, 0, &[scissor]);
+            set_viewport_and_scissor(device, shader_object_ext, command_buffer, vp, scissor);
         }
 
         record_draw();
@@ -2243,27 +2213,528 @@ fn build_scratch_size(
     Ok(size)
 }
 
+fn bind_pass_shader_binding(
+    device: &Device,
+    command_buffer: vk::CommandBuffer,
+    pass: &PassDesc,
+    resources: &ResourceRegistry,
+    descriptors: &DescriptorRegistry,
+    pipelines: &PipelineRegistry,
+    bindless: Option<BindlessVkInfo>,
+    push_descriptor: Option<&ash::khr::push_descriptor::Device>,
+    shader_object_ext: Option<&ash::ext::shader_object::Device>,
+) -> Result<Option<ActiveShaderBinding>> {
+    let binding = match &pass.shader_binding {
+        Some(ShaderBinding::Pipeline(handle)) => Some(bind_pipeline_shader_binding(
+            device,
+            command_buffer,
+            pipelines,
+            *handle,
+        )?),
+        Some(ShaderBinding::ShaderObjects(handles)) => Some(bind_shader_object_binding(
+            device,
+            command_buffer,
+            pass,
+            resources,
+            descriptors,
+            pipelines,
+            shader_object_ext,
+            handles,
+        )?),
+        None => pass
+            .pipeline
+            .map(|handle| bind_pipeline_shader_binding(device, command_buffer, pipelines, handle))
+            .transpose()?,
+    };
+
+    if let Some(binding) = binding.as_ref() {
+        record_bound_resources(
+            device,
+            command_buffer,
+            pass,
+            resources,
+            descriptors,
+            bindless,
+            push_descriptor,
+            binding,
+        )?;
+    } else if pass.push_constants.is_some() {
+        return Err(Error::InvalidInput(
+            "push constants require a bound shader binding".into(),
+        ));
+    } else if pass.push_descriptor_set.is_some() {
+        return Err(Error::InvalidInput(
+            "push descriptors require a bound shader binding".into(),
+        ));
+    }
+
+    Ok(binding)
+}
+
+fn bind_pipeline_shader_binding(
+    device: &Device,
+    command_buffer: vk::CommandBuffer,
+    pipelines: &PipelineRegistry,
+    handle: PipelineHandle,
+) -> Result<ActiveShaderBinding> {
+    let pipeline = pipelines.pipeline(handle)?;
+    unsafe {
+        device.cmd_bind_pipeline(command_buffer, pipeline.bind_point, pipeline.pipeline);
+    }
+    Ok(active_binding_from_pipeline(pipeline))
+}
+
+fn active_binding_from_pipeline(pipeline: VulkanPipeline) -> ActiveShaderBinding {
+    ActiveShaderBinding {
+        bind_point: pipeline.bind_point,
+        layout: pipeline.layout,
+        render_pass: pipeline.render_pass,
+        push_constants_bytes: pipeline.push_constants_bytes,
+        push_constant_stages: pipeline.push_constant_stages,
+        uses_bindless: pipeline.uses_bindless,
+        uses_shader_objects: false,
+        shader_object_stages: vk::ShaderStageFlags::empty(),
+        graphics_state: None,
+    }
+}
+
+fn bind_shader_object_binding(
+    device: &Device,
+    command_buffer: vk::CommandBuffer,
+    pass: &PassDesc,
+    resources: &ResourceRegistry,
+    descriptors: &DescriptorRegistry,
+    pipelines: &PipelineRegistry,
+    shader_object_ext: Option<&ash::ext::shader_object::Device>,
+    handles: &[crate::shader_object::ShaderObjectHandle],
+) -> Result<ActiveShaderBinding> {
+    let Some(shader_object_ext) = shader_object_ext else {
+        let fallback = pass.pipeline.ok_or_else(|| {
+            Error::Unsupported(
+                "shader object binding requires VK_EXT_shader_object or a fallback pipeline".into(),
+            )
+        })?;
+        return bind_pipeline_shader_binding(device, command_buffer, pipelines, fallback);
+    };
+    if handles.is_empty() {
+        return Err(Error::InvalidInput(
+            "shader object binding requires at least one shader object".into(),
+        ));
+    }
+
+    let mut stages = Vec::with_capacity(handles.len());
+    let mut shaders = Vec::with_capacity(handles.len());
+    let mut seen_stages = vk::ShaderStageFlags::empty();
+    let mut layout_handle: Option<crate::PipelineLayoutHandle> = None;
+    let mut bind_point = None;
+
+    for handle in handles {
+        let shader_object = resources.shader_object(*handle)?;
+        if seen_stages.intersects(shader_object.stage) {
+            return Err(Error::InvalidInput(
+                "shader object binding cannot bind the same stage more than once".into(),
+            ));
+        }
+        seen_stages |= shader_object.stage;
+
+        let object_bind_point = shader_object_bind_point(shader_object.stage)?;
+        if let Some(existing) = bind_point {
+            if existing != object_bind_point {
+                return Err(Error::InvalidInput(
+                    "shader object binding cannot mix compute and graphics stages".into(),
+                ));
+            }
+        } else {
+            bind_point = Some(object_bind_point);
+        }
+
+        if let Some(shader_layout) = shader_object.layout {
+            if let Some(current) = layout_handle {
+                if current != shader_layout {
+                    return Err(Error::InvalidInput(
+                        "all shader objects in a binding must use the same pipeline layout".into(),
+                    ));
+                }
+            } else {
+                layout_handle = Some(shader_layout);
+            }
+        }
+
+        stages.push(shader_object.stage);
+        shaders.push(shader_object.shader);
+    }
+
+    let bind_point = bind_point.ok_or_else(|| {
+        Error::InvalidInput("shader object binding requires at least one stage".into())
+    })?;
+    validate_shader_object_stage_set(bind_point, seen_stages)?;
+    if bind_point == vk::PipelineBindPoint::GRAPHICS
+        && !seen_stages.contains(vk::ShaderStageFlags::FRAGMENT)
+    {
+        stages.push(vk::ShaderStageFlags::FRAGMENT);
+        shaders.push(vk::ShaderEXT::null());
+    }
+    unsafe {
+        shader_object_ext.cmd_bind_shaders(command_buffer, &stages, &shaders);
+    }
+
+    let mut binding = if let Some(layout_handle) = layout_handle {
+        ActiveShaderBinding {
+            bind_point,
+            layout: descriptors.pipeline_layout(layout_handle)?,
+            render_pass: vk::RenderPass::null(),
+            push_constants_bytes: descriptors.push_constants_bytes(layout_handle)?,
+            push_constant_stages: descriptors.push_constant_stages(layout_handle)?,
+            uses_bindless: descriptors.pipeline_uses_bindless(layout_handle)?,
+            uses_shader_objects: true,
+            shader_object_stages: seen_stages,
+            graphics_state: None,
+        }
+    } else {
+        ActiveShaderBinding {
+            bind_point,
+            layout: vk::PipelineLayout::null(),
+            render_pass: vk::RenderPass::null(),
+            push_constants_bytes: 0,
+            push_constant_stages: vk::ShaderStageFlags::empty(),
+            uses_bindless: false,
+            uses_shader_objects: true,
+            shader_object_stages: seen_stages,
+            graphics_state: None,
+        }
+    };
+
+    if bind_point == vk::PipelineBindPoint::GRAPHICS {
+        let anchor = pass.pipeline.ok_or_else(|| {
+            Error::InvalidInput(
+                "graphics shader-object passes require pass.pipeline as render-state/fallback anchor"
+                    .into(),
+            )
+        })?;
+        let anchor_pipeline = pipelines.pipeline(anchor)?;
+        if anchor_pipeline.bind_point != vk::PipelineBindPoint::GRAPHICS {
+            return Err(Error::InvalidInput(
+                "graphics shader-object fallback pipeline must use the graphics bind point".into(),
+            ));
+        }
+        if binding.layout != vk::PipelineLayout::null() && binding.layout != anchor_pipeline.layout
+        {
+            return Err(Error::InvalidInput(
+                "graphics shader-object layout must match the fallback pipeline layout".into(),
+            ));
+        }
+        binding.render_pass = anchor_pipeline.render_pass;
+        binding.graphics_state = Some(pipelines.graphics_state(anchor)?);
+    }
+
+    Ok(binding)
+}
+
+fn shader_object_bind_point(stage: vk::ShaderStageFlags) -> Result<vk::PipelineBindPoint> {
+    if stage == vk::ShaderStageFlags::COMPUTE {
+        return Ok(vk::PipelineBindPoint::COMPUTE);
+    }
+    let graphics_stages = vk::ShaderStageFlags::VERTEX
+        | vk::ShaderStageFlags::TESSELLATION_CONTROL
+        | vk::ShaderStageFlags::TESSELLATION_EVALUATION
+        | vk::ShaderStageFlags::GEOMETRY
+        | vk::ShaderStageFlags::FRAGMENT
+        | vk::ShaderStageFlags::TASK_EXT
+        | vk::ShaderStageFlags::MESH_EXT;
+    if stage.intersects(graphics_stages) && (stage.as_raw() & !graphics_stages.as_raw()) == 0 {
+        Ok(vk::PipelineBindPoint::GRAPHICS)
+    } else {
+        Err(Error::Unsupported(
+            "render-graph shader object binding supports compute and graphics stages only".into(),
+        ))
+    }
+}
+
+fn validate_shader_object_stage_set(
+    bind_point: vk::PipelineBindPoint,
+    stages: vk::ShaderStageFlags,
+) -> Result<()> {
+    if bind_point != vk::PipelineBindPoint::GRAPHICS {
+        return Ok(());
+    }
+    if stages.contains(vk::ShaderStageFlags::TASK_EXT)
+        && !stages.contains(vk::ShaderStageFlags::MESH_EXT)
+    {
+        return Err(Error::InvalidInput(
+            "task shader objects require a mesh shader object in the same binding".into(),
+        ));
+    }
+    if stages.contains(vk::ShaderStageFlags::VERTEX)
+        && stages.contains(vk::ShaderStageFlags::MESH_EXT)
+    {
+        return Err(Error::InvalidInput(
+            "shader object binding cannot mix vertex and mesh shader stages".into(),
+        ));
+    }
+    if !stages.contains(vk::ShaderStageFlags::VERTEX)
+        && !stages.contains(vk::ShaderStageFlags::MESH_EXT)
+    {
+        return Err(Error::InvalidInput(
+            "graphics shader object binding requires a vertex or mesh shader object".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn record_bound_resources(
+    device: &Device,
+    command_buffer: vk::CommandBuffer,
+    pass: &PassDesc,
+    resources: &ResourceRegistry,
+    descriptors: &DescriptorRegistry,
+    bindless: Option<BindlessVkInfo>,
+    push_descriptor: Option<&ash::khr::push_descriptor::Device>,
+    binding: &ActiveShaderBinding,
+) -> Result<()> {
+    let requires_layout = !pass.bind_groups.is_empty()
+        || pass.push_descriptor_set.is_some()
+        || pass.push_constants.is_some()
+        || binding.uses_bindless;
+    if requires_layout && binding.layout == vk::PipelineLayout::null() {
+        return Err(Error::InvalidInput(
+            "descriptor sets, push descriptors, bindless descriptors, and push constants require a shader-object layout"
+                .into(),
+        ));
+    }
+
+    if binding.uses_bindless {
+        let bindless = bindless.ok_or_else(|| {
+            Error::Backend(
+                "shader binding requires bindless descriptors but no bindless heap is available"
+                    .into(),
+            )
+        })?;
+        unsafe {
+            device.cmd_bind_descriptor_sets(
+                command_buffer,
+                binding.bind_point,
+                binding.layout,
+                0,
+                &[bindless.set],
+                &[],
+            );
+        }
+    }
+
+    let mut sets = Vec::new();
+    let mut first_set = None;
+    for bind_group in &pass.bind_groups {
+        let group_first_set = descriptors.bind_group_first_set(*bind_group)?;
+        if let Some(first) = first_set {
+            if first != group_first_set {
+                return Err(Error::InvalidInput(
+                    "a pass cannot bind groups from layouts with different first set indices"
+                        .into(),
+                ));
+            }
+        } else {
+            first_set = Some(group_first_set);
+        }
+        sets.extend_from_slice(descriptors.descriptor_sets(*bind_group)?);
+    }
+    if !sets.is_empty() {
+        unsafe {
+            device.cmd_bind_descriptor_sets(
+                command_buffer,
+                binding.bind_point,
+                binding.layout,
+                first_set.unwrap_or(0),
+                &sets,
+                &[],
+            );
+        }
+    }
+
+    if let Some(push_descriptor_set) = &pass.push_descriptor_set {
+        let push_descriptor = push_descriptor.ok_or_else(|| {
+            Error::Unsupported("push descriptors require VK_KHR_push_descriptor".into())
+        })?;
+        for push_binding in &push_descriptor_set.bindings {
+            record_push_descriptor_binding(
+                push_descriptor,
+                command_buffer,
+                binding,
+                push_descriptor_set.set,
+                push_binding,
+                resources,
+            )?;
+        }
+    }
+    if let Some(push_constants) = &pass.push_constants {
+        record_push_constants(device, command_buffer, binding, push_constants)?;
+    }
+
+    Ok(())
+}
+
+fn prepare_shader_object_draw<'a>(
+    command_buffer: vk::CommandBuffer,
+    binding: &ActiveShaderBinding,
+    shader_object_ext: Option<&'a ash::ext::shader_object::Device>,
+) -> Result<Option<&'a ash::ext::shader_object::Device>> {
+    if !binding.uses_shader_objects {
+        return Ok(None);
+    }
+    if binding
+        .shader_object_stages
+        .intersects(vk::ShaderStageFlags::TASK_EXT | vk::ShaderStageFlags::MESH_EXT)
+    {
+        return Err(Error::InvalidInput(
+            "vertex/index draw passes require vertex shader objects, not mesh shader objects"
+                .into(),
+        ));
+    }
+    if !binding
+        .shader_object_stages
+        .contains(vk::ShaderStageFlags::VERTEX)
+    {
+        return Err(Error::InvalidInput(
+            "vertex/index draw passes require a vertex shader object".into(),
+        ));
+    }
+    let shader_object_ext = shader_object_ext.ok_or_else(|| {
+        Error::Unsupported("graphics shader-object draws require VK_EXT_shader_object".into())
+    })?;
+    let state = binding.graphics_state.as_ref().ok_or_else(|| {
+        Error::InvalidInput("graphics shader-object draws require graphics dynamic state".into())
+    })?;
+    record_shader_object_graphics_state(shader_object_ext, command_buffer, state);
+    Ok(Some(shader_object_ext))
+}
+
+fn prepare_shader_object_mesh_draw<'a>(
+    command_buffer: vk::CommandBuffer,
+    binding: &ActiveShaderBinding,
+    shader_object_ext: Option<&'a ash::ext::shader_object::Device>,
+) -> Result<Option<&'a ash::ext::shader_object::Device>> {
+    if !binding.uses_shader_objects {
+        return Ok(None);
+    }
+    if binding
+        .shader_object_stages
+        .contains(vk::ShaderStageFlags::VERTEX)
+    {
+        return Err(Error::InvalidInput(
+            "mesh draw passes require mesh shader objects, not vertex shader objects".into(),
+        ));
+    }
+    if !binding
+        .shader_object_stages
+        .contains(vk::ShaderStageFlags::MESH_EXT)
+    {
+        return Err(Error::InvalidInput(
+            "mesh draw passes require a mesh shader object".into(),
+        ));
+    }
+    let shader_object_ext = shader_object_ext.ok_or_else(|| {
+        Error::Unsupported("mesh shader-object draws require VK_EXT_shader_object".into())
+    })?;
+    let state = binding.graphics_state.as_ref().ok_or_else(|| {
+        Error::InvalidInput("mesh shader-object draws require graphics dynamic state".into())
+    })?;
+    record_shader_object_graphics_state(shader_object_ext, command_buffer, state);
+    Ok(Some(shader_object_ext))
+}
+
+fn record_shader_object_graphics_state(
+    shader_object_ext: &ash::ext::shader_object::Device,
+    command_buffer: vk::CommandBuffer,
+    state: &VulkanGraphicsPipelineState,
+) {
+    let sample_mask_len = ((state.rasterization_samples.as_raw() + 31) / 32) as usize;
+    let sample_mask = vec![u32::MAX; sample_mask_len];
+    unsafe {
+        shader_object_ext.cmd_set_vertex_input(
+            command_buffer,
+            &state.vertex_bindings,
+            &state.vertex_attributes,
+        );
+        shader_object_ext.cmd_set_primitive_topology(command_buffer, state.topology);
+        shader_object_ext.cmd_set_primitive_restart_enable(command_buffer, false);
+        shader_object_ext.cmd_set_cull_mode(command_buffer, state.cull_mode);
+        shader_object_ext.cmd_set_front_face(command_buffer, state.front_face);
+        shader_object_ext.cmd_set_rasterizer_discard_enable(command_buffer, false);
+        shader_object_ext.cmd_set_depth_bias_enable(command_buffer, false);
+        shader_object_ext.cmd_set_polygon_mode(command_buffer, vk::PolygonMode::FILL);
+        shader_object_ext
+            .cmd_set_rasterization_samples(command_buffer, state.rasterization_samples);
+        shader_object_ext.cmd_set_sample_mask(
+            command_buffer,
+            state.rasterization_samples,
+            &sample_mask,
+        );
+        shader_object_ext.cmd_set_alpha_to_coverage_enable(command_buffer, false);
+        shader_object_ext.cmd_set_alpha_to_one_enable(command_buffer, false);
+        shader_object_ext.cmd_set_depth_test_enable(command_buffer, state.depth_test_enable);
+        shader_object_ext.cmd_set_depth_write_enable(command_buffer, state.depth_write_enable);
+        shader_object_ext.cmd_set_depth_compare_op(command_buffer, state.depth_compare_op);
+        shader_object_ext.cmd_set_depth_bounds_test_enable(command_buffer, false);
+        shader_object_ext.cmd_set_stencil_test_enable(command_buffer, false);
+        shader_object_ext.cmd_set_logic_op_enable(command_buffer, false);
+        if let Some(mode) = state.conservative_rasterization_mode {
+            shader_object_ext.cmd_set_conservative_rasterization_mode(command_buffer, mode);
+            shader_object_ext.cmd_set_extra_primitive_overestimation_size(command_buffer, 0.0);
+        }
+        if !state.color_blend_enables.is_empty() {
+            shader_object_ext.cmd_set_color_blend_enable(
+                command_buffer,
+                0,
+                &state.color_blend_enables,
+            );
+            shader_object_ext.cmd_set_color_blend_equation(
+                command_buffer,
+                0,
+                &state.color_blend_equations,
+            );
+            shader_object_ext.cmd_set_color_write_mask(command_buffer, 0, &state.color_write_masks);
+        }
+    }
+}
+
+fn set_viewport_and_scissor(
+    device: &Device,
+    shader_object_ext: Option<&ash::ext::shader_object::Device>,
+    command_buffer: vk::CommandBuffer,
+    viewport: vk::Viewport,
+    scissor: vk::Rect2D,
+) {
+    unsafe {
+        if let Some(shader_object_ext) = shader_object_ext {
+            shader_object_ext.cmd_set_viewport_with_count(command_buffer, &[viewport]);
+            shader_object_ext.cmd_set_scissor_with_count(command_buffer, &[scissor]);
+        } else {
+            device.cmd_set_viewport(command_buffer, 0, &[viewport]);
+            device.cmd_set_scissor(command_buffer, 0, &[scissor]);
+        }
+    }
+}
+
 fn record_push_constants(
     device: &Device,
     command_buffer: vk::CommandBuffer,
-    pipeline: super::pipelines::VulkanPipeline,
+    binding: &ActiveShaderBinding,
     push_constants: &PushConstants,
 ) -> Result<()> {
     let end = push_constants
         .offset
         .checked_add(push_constants.bytes.len() as u32)
         .ok_or_else(|| Error::InvalidInput("push constant byte range overflowed".into()))?;
-    if end > pipeline.push_constants_bytes {
+    if end > binding.push_constants_bytes {
         return Err(Error::InvalidInput(format!(
             "push constant byte range [{}, {}) exceeds pipeline layout push constant size {}",
-            push_constants.offset, end, pipeline.push_constants_bytes
+            push_constants.offset, end, binding.push_constants_bytes
         )));
     }
     unsafe {
         device.cmd_push_constants(
             command_buffer,
-            pipeline.layout,
-            pipeline.push_constant_stages,
+            binding.layout,
+            binding.push_constant_stages,
             push_constants.offset,
             &push_constants.bytes,
         );
@@ -2274,7 +2745,7 @@ fn record_push_constants(
 fn record_push_descriptor_binding(
     push_descriptor: &ash::khr::push_descriptor::Device,
     command_buffer: vk::CommandBuffer,
-    pipeline: super::pipelines::VulkanPipeline,
+    binding_state: &ActiveShaderBinding,
     set: u32,
     binding: &PushDescriptorBinding,
     resources: &ResourceRegistry,
@@ -2295,8 +2766,8 @@ fn record_push_descriptor_binding(
             unsafe {
                 push_descriptor.cmd_push_descriptor_set(
                     command_buffer,
-                    pipeline.bind_point,
-                    pipeline.layout,
+                    binding_state.bind_point,
+                    binding_state.layout,
                     set,
                     &write,
                 );
@@ -2311,8 +2782,8 @@ fn record_push_descriptor_binding(
             unsafe {
                 push_descriptor.cmd_push_descriptor_set(
                     command_buffer,
-                    pipeline.bind_point,
-                    pipeline.layout,
+                    binding_state.bind_point,
+                    binding_state.layout,
                     set,
                     &write,
                 );
@@ -2335,8 +2806,8 @@ fn record_push_descriptor_binding(
             unsafe {
                 push_descriptor.cmd_push_descriptor_set(
                     command_buffer,
-                    pipeline.bind_point,
-                    pipeline.layout,
+                    binding_state.bind_point,
+                    binding_state.layout,
                     set,
                     &write,
                 );
@@ -2492,6 +2963,7 @@ impl FramedCommands {
         fragment_shading_rate: Option<&ash::khr::fragment_shading_rate::Device>,
         as_khr: Option<&ash::khr::acceleration_structure::Device>,
         rt_khr: Option<&ash::khr::ray_tracing_pipeline::Device>,
+        shader_object_ext: Option<&ash::ext::shader_object::Device>,
         ray_tracing_position_fetch: bool,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
@@ -2516,6 +2988,7 @@ impl FramedCommands {
             fragment_shading_rate,
             as_khr,
             rt_khr,
+            shader_object_ext,
             ray_tracing_position_fetch,
             wait_semaphore,
             signal_semaphore,

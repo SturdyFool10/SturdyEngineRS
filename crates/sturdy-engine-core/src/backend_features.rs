@@ -209,6 +209,12 @@ pub struct BackendFeatures {
     pub performance_query: bool,
     /// VK_KHR_pipeline_executable_properties — inspect compiled pipeline internals.
     pub pipeline_executable_properties: bool,
+
+    // ── GFX-2c: Pipeline library ──────────────────────────────────────────────
+    /// VK_EXT_graphics_pipeline_library — pre-compile disjoint pipeline stages.
+    pub graphics_pipeline_library: bool,
+    /// VK_EXT_pipeline_creation_cache_control — non-blocking PSO compilation.
+    pub pipeline_creation_cache_control: bool,
 }
 
 #[cfg(test)]
@@ -309,6 +315,46 @@ mod tests {
         // GFX-2j: performance query
         assert!(!features.performance_query);
         assert!(!features.pipeline_executable_properties);
+        assert!(!features.graphics_pipeline_library);
+        assert!(!features.pipeline_creation_cache_control);
+
+        // GFX-1 remaining
+        assert!(!features.synchronization2);
+        assert!(!features.descriptor_indexing);
+        assert!(!features.conditional_rendering);
+        assert!(!features.memory_budget);
+        assert!(!features.memory_priority);
+        assert!(!features.pageable_device_local_memory);
+        assert!(!features.push_descriptors);
+        assert!(!features.device_fault);
+        assert!(!features.device_memory_report);
+        assert!(!features.device_address_binding_report);
+        assert!(!features.buffer_marker_amd);
+        assert!(!features.device_diagnostic_checkpoints_nv);
+        assert!(!features.host_image_copy);
+        assert!(!features.buffer_device_address);
+
+        // GFX-2 remaining
+        assert!(!features.variable_rate_shading);
+        assert!(!features.extended_dynamic_state3);
+        assert!(!features.extended_dynamic_state3_polygon_mode);
+        assert!(!features.extended_dynamic_state3_color_blend);
+        assert!(!features.vertex_input_dynamic_state);
+        assert!(!features.global_queue_priority);
+        assert!(!features.sampler_filter_minmax);
+        assert!(!features.custom_border_color);
+        assert!(!features.filter_cubic);
+        assert!(!features.image_view_min_lod);
+        assert!(!features.image_compression_control);
+        assert!(!features.msaa_render_to_single_sampled);
+
+        // GFX-3 remaining
+        assert!(!features.ray_query);
+        assert!(!features.ray_tracing_position_fetch);
+        assert!(!features.ray_tracing_maintenance1);
+        assert!(!features.opacity_micromap);
+        assert!(!features.shader_execution_reordering);
+        assert!(!features.cluster_acceleration_structure);
     }
 
     #[test]

@@ -37,6 +37,7 @@ pub mod shader_object;
 pub mod slang;
 pub mod surface;
 pub mod video;
+pub mod vulkan_version;
 
 pub use acceleration_structure::{
     AccelerationStructureBuildSizes, AccelerationStructureDesc, AccelerationStructureKind,
@@ -100,10 +101,12 @@ pub use render_graph::{
     DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, ImageBarrier, ImageStateKey,
     ImageUse, IndexBufferBinding, IndexFormat, PassDesc, PassWork, PushDescriptorBinding,
     PushDescriptorSetDesc, QueueType, RecordBatch, RenderGraph, ResolveImageDesc, ResourceLifetime,
-    ResourceUse, RgState, ShaderBindingTable, ShaderBindingTableRegion, ShadingRate,
+    ResourceUse, RgState, ShaderBinding, ShaderBindingTable, ShaderBindingTableRegion, ShadingRate,
     SubresourceRange, TlasBuildDesc, TraceRaysDesc, VertexBufferBinding,
 };
-pub use sampler::{AddressMode, BorderColor, CompareOp, FilterMode, MipmapMode, SamplerDesc};
+pub use sampler::{
+    AddressMode, BorderColor, CompareOp, FilterMode, MipmapMode, SamplerDesc, SamplerReductionMode,
+};
 pub use shader::{
     CompiledShaderArtifact, ShaderDesc, ShaderModule, ShaderParameterKind,
     ShaderParameterReflection, ShaderReflection, ShaderResourceAccess, ShaderSource, ShaderStage,
@@ -118,10 +121,12 @@ pub use slang::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use surface::NativeSurfaceDesc;
 pub use surface::{
-    SurfaceCapabilities, SurfaceColorSpace, SurfaceEvent, SurfaceFormatInfo, SurfaceHdrCaps,
-    SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc, SurfaceSize,
+    HdrMetadata, SurfaceCapabilities, SurfaceColorSpace, SurfaceEvent, SurfaceFormatInfo,
+    SurfaceHdrCaps, SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc,
+    SurfaceSize,
 };
 pub use video::{
     BitRateControl, DecodeFrameDesc, EncodeFrameDesc, QualityPreset, VideoCodec, VideoEncodeConfig,
     VideoSessionDesc, VideoSessionKind,
 };
+pub use vulkan_version::VulkanApiVersion;

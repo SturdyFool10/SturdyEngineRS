@@ -441,6 +441,24 @@ impl DescriptorRegistry {
             .ok_or(Error::InvalidHandle)
     }
 
+    pub fn shader_object_layout_info(
+        &self,
+        handle: PipelineLayoutHandle,
+    ) -> Result<(Vec<vk::DescriptorSetLayout>, Vec<vk::PushConstantRange>)> {
+        let layout = self.layouts.get(&handle).ok_or(Error::InvalidHandle)?;
+        let push_ranges = if layout.push_constants_bytes == 0 {
+            Vec::new()
+        } else {
+            vec![
+                vk::PushConstantRange::default()
+                    .stage_flags(layout.push_constant_stages)
+                    .offset(0)
+                    .size(layout.push_constants_bytes),
+            ]
+        };
+        Ok((layout.set_layouts.clone(), push_ranges))
+    }
+
     pub fn descriptor_sets(&self, handle: BindGroupHandle) -> Result<&[vk::DescriptorSet]> {
         self.bind_groups
             .get(&handle)

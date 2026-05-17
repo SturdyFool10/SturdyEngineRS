@@ -107,6 +107,7 @@ impl ScreenshotCapture {
             clear_depth: None,
             push_descriptor_set: None,
             predicate: None,
+            shader_binding: None,
         })
     }
 

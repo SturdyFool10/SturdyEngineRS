@@ -276,6 +276,14 @@ impl SurfaceRegistry {
         })
     }
 
+    /// Returns the raw `VkSwapchainKHR` handle for a surface.
+    pub fn swapchain_handle(&self, handle: SurfaceHandle) -> crate::Result<vk::SwapchainKHR> {
+        self.surfaces
+            .get(&handle)
+            .map(|s| s.swapchain.swapchain)
+            .ok_or(crate::Error::InvalidHandle)
+    }
+
     /// Returns `(image_available, render_finished)` semaphores for the acquired image.
     pub fn frame_semaphores(
         &mut self,

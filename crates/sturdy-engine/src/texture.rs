@@ -219,6 +219,7 @@ impl Frame {
             clear_depth: None,
             push_descriptor_set: None,
             predicate: None,
+            shader_binding: None,
         })
     }
 
@@ -284,6 +285,7 @@ impl Frame {
             clear_depth: None,
             push_descriptor_set: None,
             predicate: None,
+            shader_binding: None,
         })
     }
 
@@ -376,6 +378,7 @@ impl Frame {
             clear_depth: None,
             push_descriptor_set: None,
             predicate: None,
+            shader_binding: None,
         })?;
         self.add_pass(PassDesc {
             name: format!("{name}-shader-read"),
@@ -404,6 +407,7 @@ impl Frame {
             clear_depth: None,
             push_descriptor_set: None,
             predicate: None,
+            shader_binding: None,
         })?;
         Ok(image)
     }
@@ -482,6 +486,7 @@ impl Frame {
             clear_depth: None,
             push_descriptor_set: None,
             predicate: None,
+            shader_binding: None,
         })?;
         self.add_pass(PassDesc {
             name: format!("{name}-shader-read"),
@@ -510,6 +515,7 @@ impl Frame {
             clear_depth: None,
             push_descriptor_set: None,
             predicate: None,
+            shader_binding: None,
         })
     }
 }

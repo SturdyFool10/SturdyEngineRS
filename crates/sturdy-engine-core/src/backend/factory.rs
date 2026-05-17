@@ -64,6 +64,8 @@ fn create_vulkan_backend(desc: &DeviceDesc) -> Result<Box<dyn Backend>> {
         desc.required_extensions.clone(),
         desc.optional_extensions.clone(),
         desc.disabled_extensions.clone(),
+        desc.min_vulkan_version,
+        desc.max_vulkan_version,
     ))?))
 }
 

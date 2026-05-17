@@ -717,6 +717,7 @@ pub extern "C" fn gfx_frame_add_pass(
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
         })
     })

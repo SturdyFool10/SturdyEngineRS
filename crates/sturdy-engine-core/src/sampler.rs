@@ -5,6 +5,7 @@ pub enum FilterMode {
     Nearest,
     #[default]
     Linear,
+    Cubic,
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -36,7 +37,7 @@ pub enum CompareOp {
     Always,
 }
 
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub enum BorderColor {
     FloatTransparentBlack,
     #[default]
@@ -45,6 +46,15 @@ pub enum BorderColor {
     IntOpaqueBlack,
     FloatOpaqueWhite,
     IntOpaqueWhite,
+    Custom([f32; 4]),
+}
+
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum SamplerReductionMode {
+    #[default]
+    WeightedAverage,
+    Min,
+    Max,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -61,6 +71,7 @@ pub struct SamplerDesc {
     pub min_lod: f32,
     pub max_lod: f32,
     pub border_color: BorderColor,
+    pub reduction_mode: SamplerReductionMode,
     pub unnormalized_coordinates: bool,
 }
 
@@ -79,6 +90,7 @@ impl Default for SamplerDesc {
             min_lod: 0.0,
             max_lod: f32::MAX,
             border_color: BorderColor::IntTransparentBlack,
+            reduction_mode: SamplerReductionMode::WeightedAverage,
             unnormalized_coordinates: false,
         }
     }
@@ -108,6 +120,13 @@ impl SamplerDesc {
                 ));
             }
         }
+        if let BorderColor::Custom(color) = self.border_color {
+            if color.iter().any(|component| !component.is_finite()) {
+                return Err(Error::InvalidInput(
+                    "custom sampler border color components must be finite".into(),
+                ));
+            }
+        }
         if self.unnormalized_coordinates {
             if self.mipmap_mode != MipmapMode::Nearest
                 || self.min_lod != 0.0
@@ -132,5 +151,20 @@ impl SamplerDesc {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sampler_desc_rejects_non_finite_custom_border_color() {
+        let desc = SamplerDesc {
+            border_color: BorderColor::Custom([0.0, f32::NAN, 0.0, 1.0]),
+            ..SamplerDesc::default()
+        };
+
+        assert!(matches!(desc.validate(), Err(Error::InvalidInput(_))));
     }
 }

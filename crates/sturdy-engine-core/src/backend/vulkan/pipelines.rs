@@ -99,6 +99,7 @@ const PIPELINE_CACHE_CHECKPOINT_THRESHOLD: u32 = 8;
 pub struct PipelineRegistry {
     pipeline_cache: vk::PipelineCache,
     pipelines: HashMap<PipelineHandle, VulkanPipeline>,
+    graphics_states: HashMap<PipelineHandle, VulkanGraphicsPipelineState>,
     framebuffer_cache: FramebufferCache,
     /// Pipelines created since the last incremental cache save.
     pipelines_since_checkpoint: u32,
@@ -111,6 +112,11 @@ pub struct PipelineRegistry {
     pub conservative_rasterization_overestimate_enabled: bool,
     /// When true, underestimate conservative rasterization can be requested.
     pub conservative_rasterization_underestimate_enabled: bool,
+    /// When true, VK_EXT_extended_dynamic_state3 dynamic states are added to pipelines.
+    pub extended_dynamic_state3_enabled: bool,
+    /// When true, VK_EXT_vertex_input_dynamic_state dynamic state is added and
+    /// vertex input bindings/attributes are omitted from pipeline creation.
+    pub vertex_input_dynamic_state_enabled: bool,
 }
 
 impl PipelineRegistry {
@@ -127,12 +133,15 @@ impl PipelineRegistry {
         Ok(Self {
             pipeline_cache,
             pipelines: HashMap::new(),
+            graphics_states: HashMap::new(),
             framebuffer_cache: FramebufferCache::default(),
             pipelines_since_checkpoint: 0,
             dynamic_rendering_enabled: false,
             vrs_pipeline_enabled: false,
             conservative_rasterization_overestimate_enabled: false,
             conservative_rasterization_underestimate_enabled: false,
+            extended_dynamic_state3_enabled: false,
+            vertex_input_dynamic_state_enabled: false,
         })
     }
 
@@ -170,6 +179,23 @@ pub struct VulkanPipeline {
     pub push_constants_bytes: u32,
     pub push_constant_stages: vk::ShaderStageFlags,
     pub uses_bindless: bool,
+}
+
+#[derive(Clone)]
+pub struct VulkanGraphicsPipelineState {
+    pub topology: vk::PrimitiveTopology,
+    pub cull_mode: vk::CullModeFlags,
+    pub front_face: vk::FrontFace,
+    pub rasterization_samples: vk::SampleCountFlags,
+    pub depth_test_enable: bool,
+    pub depth_write_enable: bool,
+    pub depth_compare_op: vk::CompareOp,
+    pub conservative_rasterization_mode: Option<vk::ConservativeRasterizationModeEXT>,
+    pub vertex_bindings: Vec<vk::VertexInputBindingDescription2EXT<'static>>,
+    pub vertex_attributes: Vec<vk::VertexInputAttributeDescription2EXT<'static>>,
+    pub color_blend_enables: Vec<vk::Bool32>,
+    pub color_blend_equations: Vec<vk::ColorBlendEquationEXT>,
+    pub color_write_masks: Vec<vk::ColorComponentFlags>,
 }
 
 impl PipelineRegistry {
@@ -428,30 +454,43 @@ impl PipelineRegistry {
         }
         let _ = &fragment_entry;
 
-        let vertex_bindings = desc
-            .vertex_buffers
-            .iter()
-            .map(|binding| {
-                vk::VertexInputBindingDescription::default()
-                    .binding(binding.binding)
-                    .stride(binding.stride)
-                    .input_rate(vk_vertex_input_rate(binding.input_rate))
-            })
-            .collect::<Vec<_>>();
-        let vertex_attributes = desc
-            .vertex_attributes
-            .iter()
-            .map(|attribute| {
-                Ok(vk::VertexInputAttributeDescription::default()
-                    .location(attribute.location)
-                    .binding(attribute.binding)
-                    .format(vk_vertex_format(attribute.format)?)
-                    .offset(attribute.offset))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
-            .vertex_binding_descriptions(&vertex_bindings)
-            .vertex_attribute_descriptions(&vertex_attributes);
+        // When vertex_input_dynamic_state is enabled, vertex format is set per-draw via
+        // vkCmdSetVertexInputEXT, so the pipeline can use empty binding/attribute slices.
+        let vertex_bindings;
+        let vertex_attributes;
+        let vertex_input;
+        if self.vertex_input_dynamic_state_enabled {
+            vertex_bindings = Vec::new();
+            vertex_attributes = Vec::new();
+            vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+        } else {
+            vertex_bindings = desc
+                .vertex_buffers
+                .iter()
+                .map(|binding| {
+                    vk::VertexInputBindingDescription::default()
+                        .binding(binding.binding)
+                        .stride(binding.stride)
+                        .input_rate(vk_vertex_input_rate(binding.input_rate))
+                })
+                .collect::<Vec<_>>();
+            vertex_attributes = desc
+                .vertex_attributes
+                .iter()
+                .map(|attribute| {
+                    Ok(vk::VertexInputAttributeDescription::default()
+                        .location(attribute.location)
+                        .binding(attribute.binding)
+                        .format(vk_vertex_format(attribute.format)?)
+                        .offset(attribute.offset))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+                .vertex_binding_descriptions(&vertex_bindings)
+                .vertex_attribute_descriptions(&vertex_attributes);
+        }
+        let _ = &vertex_bindings;
+        let _ = &vertex_attributes;
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk_topology(desc.topology))
             .primitive_restart_enable(false);
@@ -514,6 +553,7 @@ impl PipelineRegistry {
                 }
             })
             .collect::<Vec<_>>();
+        let graphics_state = shader_object_graphics_state(desc)?;
         let color_blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
         let mut dynamic_states = vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
@@ -586,6 +626,7 @@ impl PipelineRegistry {
                 uses_bindless,
             },
         );
+        self.graphics_states.insert(handle, graphics_state);
         self.note_pipeline_created();
         Ok(())
     }
@@ -619,6 +660,7 @@ impl PipelineRegistry {
 
     pub fn destroy_pipeline(&mut self, device: &Device, handle: PipelineHandle) -> Result<()> {
         let pipeline = self.pipelines.remove(&handle).ok_or(Error::InvalidHandle)?;
+        self.graphics_states.remove(&handle);
         if pipeline.render_pass != vk::RenderPass::null() {
             self.framebuffer_cache
                 .invalidate_render_pass(device, pipeline.render_pass);
@@ -634,6 +676,7 @@ impl PipelineRegistry {
 
     pub fn destroy_all(&mut self, device: &Device) {
         self.framebuffer_cache.clear_all(device);
+        self.graphics_states.clear();
         for (_, pipeline) in self.pipelines.drain() {
             unsafe {
                 device.destroy_pipeline(pipeline.pipeline, None);
@@ -649,6 +692,13 @@ impl PipelineRegistry {
         self.pipelines
             .get(&handle)
             .copied()
+            .ok_or(Error::InvalidHandle)
+    }
+
+    pub fn graphics_state(&self, handle: PipelineHandle) -> Result<VulkanGraphicsPipelineState> {
+        self.graphics_states
+            .get(&handle)
+            .cloned()
             .ok_or(Error::InvalidHandle)
     }
 }
@@ -720,6 +770,91 @@ fn create_render_pass(device: &Device, desc: &GraphicsPipelineDesc) -> Result<vk
             .create_render_pass(&info, None)
             .map_err(|error| Error::Backend(format!("vkCreateRenderPass failed: {error:?}")))
     }
+}
+
+fn shader_object_graphics_state(
+    desc: &GraphicsPipelineDesc,
+) -> Result<VulkanGraphicsPipelineState> {
+    let vertex_bindings = desc
+        .vertex_buffers
+        .iter()
+        .map(|binding| {
+            vk::VertexInputBindingDescription2EXT::default()
+                .binding(binding.binding)
+                .stride(binding.stride)
+                .input_rate(vk_vertex_input_rate(binding.input_rate))
+                .divisor(1)
+        })
+        .collect::<Vec<_>>();
+    let vertex_attributes = desc
+        .vertex_attributes
+        .iter()
+        .map(|attribute| {
+            Ok(vk::VertexInputAttributeDescription2EXT::default()
+                .location(attribute.location)
+                .binding(attribute.binding)
+                .format(vk_vertex_format(attribute.format)?)
+                .offset(attribute.offset))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let color_blend_enables = desc
+        .color_targets
+        .iter()
+        .map(|target| match target.blend {
+            crate::BlendMode::Opaque => vk::FALSE,
+            crate::BlendMode::Alpha => vk::TRUE,
+        })
+        .collect::<Vec<_>>();
+    let color_blend_equations = desc
+        .color_targets
+        .iter()
+        .map(|target| match target.blend {
+            crate::BlendMode::Opaque => vk::ColorBlendEquationEXT::default()
+                .src_color_blend_factor(vk::BlendFactor::ONE)
+                .dst_color_blend_factor(vk::BlendFactor::ZERO)
+                .color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+                .alpha_blend_op(vk::BlendOp::ADD),
+            crate::BlendMode::Alpha => vk::ColorBlendEquationEXT::default()
+                .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .alpha_blend_op(vk::BlendOp::ADD),
+        })
+        .collect::<Vec<_>>();
+    let color_write_masks = desc
+        .color_targets
+        .iter()
+        .map(|_| vk::ColorComponentFlags::RGBA)
+        .collect::<Vec<_>>();
+    let depth_enable = desc.depth_format.is_some();
+
+    Ok(VulkanGraphicsPipelineState {
+        topology: vk_topology(desc.topology),
+        cull_mode: vk_cull_mode(desc.raster.cull_mode),
+        front_face: vk_front_face(desc.raster.front_face),
+        rasterization_samples: vk_samples(desc.samples)?,
+        depth_test_enable: depth_enable,
+        depth_write_enable: depth_enable,
+        depth_compare_op: vk::CompareOp::LESS_OR_EQUAL,
+        conservative_rasterization_mode: match desc.conservative_raster {
+            ConservativeRasterMode::Off => None,
+            ConservativeRasterMode::Overestimate => {
+                Some(vk::ConservativeRasterizationModeEXT::OVERESTIMATE)
+            }
+            ConservativeRasterMode::Underestimate => {
+                Some(vk::ConservativeRasterizationModeEXT::UNDERESTIMATE)
+            }
+        },
+        vertex_bindings,
+        vertex_attributes,
+        color_blend_enables,
+        color_blend_equations,
+        color_write_masks,
+    })
 }
 
 fn vk_samples(samples: u8) -> Result<vk::SampleCountFlags> {

@@ -131,6 +131,25 @@ Physics, UI, Platform (parallel, after foundation)
 
 ---
 
+## Immediate Stub And Correctness Queue
+
+These items were found by scanning for stubs, incomplete implementations, and placeholder behavior in the current tree. Handle these before taking more roadmap feature work unless a user explicitly asks for a different item.
+
+- [x] `crates/sturdy-engine-core/src/backend/vulkan/mod.rs`: Vulkan `VkShaderEXT` creation/destruction is implemented behind `create_shader_object`, including aligned SPIR-V storage, descriptor/push-constant layout propagation, explicit destruction, and drop-time cleanup.
+- [x] `crates/sturdy-engine-core/src/backend/vulkan/commands.rs`: `PassDesc::shader_binding` now records either `vkCmdBindPipeline` or `vkCmdBindShadersEXT`, shares descriptor/push-constant binding, records required shader-object dynamic state, and uses `pass.pipeline` as the graphics render-state/fallback anchor.
+- [ ] `crates/sturdy-engine-core/src/backend/vulkan/commands.rs`: `PassWork::DecodeVideoFrame` / `EncodeVideoFrame` return `Unsupported`. Either implement Vulkan video command recording and queue routing, or mark the render-graph video pass scaffolding as explicitly non-executable until sessions exist.
+- [ ] `crates/sturdy-engine-core/src/backend/vulkan/mod.rs`: `create_video_session` returns `Unsupported`; implement `VkVideoSessionKHR` / parameters / memory binding before video passes can be considered usable.
+- [ ] `crates/sturdy-engine-core/src/backend/vulkan/commands.rs`: `PassWork::ExecuteGeneratedCommands` / `PreprocessGeneratedCommands` return `Unsupported`. Implement DGC layouts/resources/recording or move the pass variants back to design-only status.
+- [ ] `crates/sturdy-engine-core/src/backend/vulkan/commands.rs`: `PassWork::EstimateOpticalFlow` returns `Unsupported`. Implement `VkOpticalFlowSessionNV` resources and recording before exposing this as an executable render-graph path.
+- [ ] `crates/sturdy-engine-core/src/backend/vulkan/mod.rs`: BLAS/TLAS build-size queries reject `AccelerationStructureBuildMode::Compact` even though AS compaction command recording exists. Add compacted-size query/readback flow or adjust the compaction API so callers can size destination AS objects correctly.
+- [ ] `crates/sturdy-engine-core/src/backend/vulkan/mod.rs`: `latency_mode()` reports Reflex/Anti-Lag availability, but `set_reflex_mode` / `set_anti_lag_mode` still use backend default `Unsupported`. Implement the driver calls or make `latency_mode()` report capability separately from active controllable mode.
+- [ ] `crates/sturdy-engine/src/ui_renderer.rs`: text atlas quads are rendered as solid white rectangles because atlas texture binding is TODO, and scissor/image commands are skipped. Wire atlas/image descriptors and scissor state before treating Clay/text UI rendering as correct.
+- [ ] `crates/sturdy-engine/src/ui_renderer.rs`: glyph quad coordinates are assumed to already be normalized. Pass viewport size through the renderer and convert pixel-space glyph positions to NDC.
+- [ ] `crates/sturdy-engine/src/post_process.rs`: auto-exposure and lens dirt/flare configs are public but shader implementations are missing. Either implement the passes or mark these config fields as reserved/non-executable in API docs and runtime behavior.
+- [ ] `crates/sturdy-engine/src/ecs/components.rs`: `Transform::look_at(target, up)` ignores the `up` vector. Implement stable world-up alignment or rename/remove the parameter to avoid incorrect camera/object orientation.
+
+---
+
 ## Foundation — Performance Ceiling
 
 These items multiply the value of everything above them. Do them before adding more visual features.
@@ -140,7 +159,7 @@ These items multiply the value of everything above them. Do them before adding m
 Without this, the CPU submits one draw call per mesh. At 10,000 objects the CPU becomes the bottleneck. With it, a single indirect dispatch handles 1,000,000 objects.
 
 **8a — Bindless descriptor system**
-- [ ] Enable `VK_EXT_descriptor_indexing`; create one large descriptor heap for all textures, samplers, and storage buffers; assign stable `u32` indices at resource creation.
+- [x] Enable `VK_EXT_descriptor_indexing`; create one large descriptor heap for textures, samplers, storage images, and storage buffers; assign stable `u32` indices at resource creation when bindless is available.
 - [ ] `BindlessHandle<T>`: a `u32` index valid for the resource lifetime. Binding = storing index; sampling = `textures[handle.index].sample(...)`.
 - [ ] Per-material data in a single GPU-resident `StructuredBuffer<MaterialData>` indexed by `material_id`; eliminate per-draw descriptor set allocation.
 - [ ] Mega-buffer draw path: each draw carries only a 4-byte push constant (index into `DrawData`); vertex shader reads transform, material ID, per-object constants from `DrawData[index]`.
@@ -429,11 +448,11 @@ Without hardware counters, profiling data is timestamps only. These expose ROP t
 **GFX-2k — Sampler and image quality extensions**
 
 - [x] Detect `VK_EXT_sampler_filter_minmax` (Vulkan 1.2 core); add `BackendFeatures::sampler_filter_minmax`.
-- [ ] Expose `SamplerDesc::reduction_mode: SamplerReductionMode` (WeightedAverage / Min / Max). The Max reduction mode is required for Hi-Z pyramid construction (Track 7b, 8b).
-- [x] Detect `VK_EXT_custom_border_color`; add `BackendFeatures::custom_border_color`.
-- [ ] Expose `SamplerDesc::border_color: BorderColor` with a `Custom([f32; 4])` variant.
+- [x] Expose `SamplerDesc::reduction_mode: SamplerReductionMode` (WeightedAverage / Min / Max) and chain `VkSamplerReductionModeCreateInfo` for min/max reduction when `VK_EXT_sampler_filter_minmax` is available. The Max reduction mode is required for Hi-Z pyramid construction (Track 7b, 8b).
+- [x] Detect `VK_EXT_custom_border_color`; add `BackendFeatures::custom_border_color` and logical-device feature enablement.
+- [x] Expose `SamplerDesc::border_color: BorderColor` with a `Custom([f32; 4])` variant and chain `VkSamplerCustomBorderColorCreateInfoEXT` for custom colors when the feature is enabled.
 - [x] Detect `VK_EXT_filter_cubic`; add `BackendFeatures::filter_cubic`.
-- [ ] Expose `SamplerDesc::filter: Filter::Cubic` for Catmull-Rom upscaling.
+- [x] Expose `FilterMode::Cubic` through `SamplerDesc::{mag_filter, min_filter}` for Catmull-Rom upscaling and map it to `VK_FILTER_CUBIC_EXT` when `VK_EXT_filter_cubic` is available.
 - [x] Detect `VK_EXT_image_view_min_lod`; add `BackendFeatures::image_view_min_lod`.
 - [ ] Expose `ImageViewDesc::min_lod: Option<f32>` for mipmap streaming (clamp visible mips to what is resident).
 - [x] Detect `VK_EXT_image_compression_control`; add `BackendFeatures::image_compression_control`.
@@ -637,8 +656,9 @@ Already referenced in the "Backend and Platform Maturity" section. Cross-referen
 
 - [x] Detect `VK_EXT_shader_object`; add `BackendFeatures::shader_object`.
 - [x] Expose `Device::create_shader_object(ShaderObjectDesc) -> ShaderObjectHandle` / `destroy_shader_object` API scaffolding.
-- [ ] Implement Vulkan `VkShaderEXT` creation/destruction behind `create_shader_object`; the current backend path still returns `Unsupported`.
-- [ ] Add `PassDesc::shader_binding: ShaderBinding` enum: `Pipeline(PipelineHandle)` or `ShaderObjects { vertex, fragment, ... }`. The dispatch path in `commands.rs` selects `cmd_bind_shaders_ext` vs `cmd_bind_pipeline` based on the active variant.
+- [x] Implement Vulkan `VkShaderEXT` creation/destruction behind `create_shader_object`.
+- [x] Add `PassDesc::shader_binding: ShaderBinding` enum: `Pipeline(PipelineHandle)` or `ShaderObjects(...)`.
+- [x] Wire the command recording path in `commands.rs` so render/dispatch passes select `cmd_bind_shaders_ext` vs `cmd_bind_pipeline` based on the active binding variant. Graphics shader-object passes use `pass.pipeline` as the render-state/fallback anchor while binding shader stages independently.
 - [ ] The pipeline path remains primary. Shader objects are an opt-in alternative; useful for real-time shader permutation switching and the shader playground (Track 1 product direction).
 
 ---

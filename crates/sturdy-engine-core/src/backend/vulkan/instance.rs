@@ -23,7 +23,7 @@ pub fn create_instance(entry: &Entry, config: &VulkanBackendConfig) -> Result<In
         .application_version(vk::make_api_version(0, 0, 1, 0))
         .engine_name(&engine_name)
         .engine_version(vk::make_api_version(0, 0, 1, 0))
-        .api_version(vk::API_VERSION_1_2);
+        .api_version(config.max_api_version.to_vk());
 
     let layer_names = requested_layers(entry, config.validation)?;
     let layer_ptrs = layer_names

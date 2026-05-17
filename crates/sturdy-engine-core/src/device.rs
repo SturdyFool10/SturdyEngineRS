@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::NativeSurfaceDesc;
+use crate::VulkanApiVersion;
 use crate::backend::factory::create_backend;
 use crate::backend::{Backend, BackendKind, factory};
 use crate::handles::HandleAllocator;
@@ -13,13 +14,13 @@ use crate::{
     BindGroupHandle, BindingKind, BlasBuildDesc, BufferDesc, BufferHandle, BufferStateKey,
     BufferUsage, CanonicalGroupLayout, CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error,
     ExternalBufferDesc, ExternalImageDesc, Format, FormatCapabilities, FrameHandle, GpuCaptureDesc,
-    GpuCaptureTool, GraphicsPipelineDesc, ImageDesc, ImageHandle, ImageStateKey, LatencyMode,
-    NativeHandleCapabilities, PipelineHandle, PipelineLayoutHandle, RayTracingPipelineDesc,
-    ReflexMode, RenderGraph, ResourceBinding, Result, RgState, SamplerDesc, SamplerHandle,
-    ShaderBindingTable, ShaderBindingTableDesc, ShaderBindingTableRegion, ShaderDesc, ShaderHandle,
-    ShaderReflection, ShaderSource, StageMask, SubmissionHandle, SurfaceCapabilities, SurfaceEvent,
-    SurfaceHandle, SurfaceHdrCaps, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize, TlasBuildDesc,
-    VideoSessionDesc, VideoSessionHandle,
+    GpuCaptureTool, GraphicsPipelineDesc, HdrMetadata, ImageDesc, ImageHandle, ImageStateKey,
+    ImageUsage, LatencyMode, NativeHandleCapabilities, PipelineHandle, PipelineLayoutHandle,
+    RayTracingPipelineDesc, ReflexMode, RenderGraph, ResourceBinding, Result, RgState, SamplerDesc,
+    SamplerHandle, ShaderBindingTable, ShaderBindingTableDesc, ShaderBindingTableRegion,
+    ShaderDesc, ShaderHandle, ShaderReflection, ShaderSource, StageMask, SubmissionHandle,
+    SurfaceCapabilities, SurfaceEvent, SurfaceHandle, SurfaceHdrCaps, SurfaceInfo,
+    SurfaceRecreateDesc, SurfaceSize, TlasBuildDesc, VideoSessionDesc, VideoSessionHandle,
 };
 
 #[derive(Clone, Debug)]
@@ -33,6 +34,13 @@ pub struct DeviceDesc {
     pub required_extensions: Vec<String>,
     pub optional_extensions: Vec<String>,
     pub disabled_extensions: Vec<String>,
+    /// Minimum Vulkan API version required. Device creation fails if the physical
+    /// device does not support at least this version. Ignored for non-Vulkan backends.
+    pub min_vulkan_version: VulkanApiVersion,
+    /// Maximum Vulkan API version to request from the instance. Higher versions
+    /// promote more extensions to core. Defaults to `VulkanApiVersion::LATEST`.
+    /// The driver will deliver the highest version it supports up to this cap.
+    pub max_vulkan_version: VulkanApiVersion,
 }
 
 /// Backend-agnostic device features that an app can require, prefer, or disable.
@@ -83,11 +91,27 @@ impl Default for DeviceDesc {
             required_extensions: Vec::new(),
             optional_extensions: Vec::new(),
             disabled_extensions: Vec::new(),
+            min_vulkan_version: VulkanApiVersion::V1_2,
+            max_vulkan_version: VulkanApiVersion::LATEST,
         }
     }
 }
 
 impl DeviceDesc {
+    /// Set the minimum Vulkan API version required. Device creation fails if
+    /// the physical device does not support this version.
+    pub fn require_vulkan_version(mut self, version: VulkanApiVersion) -> Self {
+        self.min_vulkan_version = version;
+        self
+    }
+
+    /// Set the maximum Vulkan API version to request. Higher versions unlock
+    /// more promoted-to-core features. Defaults to `VulkanApiVersion::LATEST`.
+    pub fn cap_vulkan_version(mut self, version: VulkanApiVersion) -> Self {
+        self.max_vulkan_version = version;
+        self
+    }
+
     pub fn require_feature(mut self, feature: DeviceFeature) -> Self {
         push_device_feature(&mut self.required_features, feature);
         self
@@ -185,6 +209,10 @@ struct DeviceInner {
     image_states: HashMap<ImageStateKey, RgState>,
     buffer_states: HashMap<BufferStateKey, RgState>,
     samplers: HashMap<SamplerHandle, SamplerDesc>,
+    bindless_sampled_images: HashMap<ImageHandle, u32>,
+    bindless_storage_images: HashMap<ImageHandle, u32>,
+    bindless_samplers: HashMap<SamplerHandle, u32>,
+    bindless_storage_buffers: HashMap<BufferHandle, u32>,
     shaders: HashMap<ShaderHandle, ShaderDesc>,
     shader_reflections: HashMap<ShaderHandle, ShaderReflection>,
     pipeline_layouts: HashMap<PipelineLayoutHandle, CanonicalPipelineLayout>,
@@ -241,6 +269,10 @@ impl Device {
                 image_states: HashMap::new(),
                 buffer_states: HashMap::new(),
                 samplers: HashMap::new(),
+                bindless_sampled_images: HashMap::new(),
+                bindless_storage_images: HashMap::new(),
+                bindless_samplers: HashMap::new(),
+                bindless_storage_buffers: HashMap::new(),
                 shaders: HashMap::new(),
                 shader_reflections: HashMap::new(),
                 pipeline_layouts: HashMap::new(),
@@ -334,41 +366,29 @@ impl Device {
     /// Returns `None` if bindless is not supported or the heap is full.
     pub fn register_bindless_sampled_image(&self, handle: ImageHandle) -> Option<u32> {
         //panic allowed, reason = "poisoned device mutex is unrecoverable"
-        self.inner
-            .lock()
-            .expect("device mutex poisoned")
-            .backend
-            .register_bindless_sampled_image(handle)
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        register_bindless_sampled_image(&mut inner, handle)
     }
 
     /// Register a sampler in the bindless heap and return its stable index.
     pub fn register_bindless_sampler(&self, handle: SamplerHandle) -> Option<u32> {
         //panic allowed, reason = "poisoned device mutex is unrecoverable"
-        self.inner
-            .lock()
-            .expect("device mutex poisoned")
-            .backend
-            .register_bindless_sampler(handle)
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        register_bindless_sampler(&mut inner, handle)
     }
 
     /// Register a storage (read-write) image in the bindless heap.
     pub fn register_bindless_storage_image(&self, handle: ImageHandle) -> Option<u32> {
         //panic allowed, reason = "poisoned device mutex is unrecoverable"
-        self.inner
-            .lock()
-            .expect("device mutex poisoned")
-            .backend
-            .register_bindless_storage_image(handle)
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        register_bindless_storage_image(&mut inner, handle)
     }
 
     /// Register a storage buffer in the bindless heap.
     pub fn register_bindless_storage_buffer(&self, handle: BufferHandle) -> Option<u32> {
         //panic allowed, reason = "poisoned device mutex is unrecoverable"
-        self.inner
-            .lock()
-            .expect("device mutex poisoned")
-            .backend
-            .register_bindless_storage_buffer(handle)
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        register_bindless_storage_buffer(&mut inner, handle)
     }
 
     // ── Descriptor buffer (GFX-7a) ────────────────────────────────────────────
@@ -454,6 +474,46 @@ impl Device {
             .raw_capabilities()
     }
 
+    pub fn bindless_sampled_image_index(&self, handle: ImageHandle) -> Option<u32> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .bindless_sampled_images
+            .get(&handle)
+            .copied()
+    }
+
+    pub fn bindless_storage_image_index(&self, handle: ImageHandle) -> Option<u32> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .bindless_storage_images
+            .get(&handle)
+            .copied()
+    }
+
+    pub fn bindless_sampler_index(&self, handle: SamplerHandle) -> Option<u32> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .bindless_samplers
+            .get(&handle)
+            .copied()
+    }
+
+    pub fn bindless_storage_buffer_index(&self, handle: BufferHandle) -> Option<u32> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .bindless_storage_buffers
+            .get(&handle)
+            .copied()
+    }
+
     pub fn create_image(&self, desc: ImageDesc) -> Result<ImageHandle> {
         desc.validate()?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
@@ -469,6 +529,7 @@ impl Device {
             inner.backend.set_image_debug_name(handle, name);
         }
         inner.images.insert(handle, desc);
+        register_created_image_bindless_indices(&mut inner, handle, desc);
         Ok(handle)
     }
 
@@ -489,6 +550,7 @@ impl Device {
             inner.backend.import_external_image(handle, desc)?;
         }
         inner.images.insert(handle, desc.desc);
+        register_created_image_bindless_indices(&mut inner, handle, desc.desc);
         Ok(handle)
     }
 
@@ -525,6 +587,8 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let _desc = inner.images.remove(&handle).ok_or(Error::InvalidHandle)?;
+        inner.bindless_sampled_images.remove(&handle);
+        inner.bindless_storage_images.remove(&handle);
         inner.image_states.retain(|key, _| key.image != handle);
         inner.deferred_destroys.push(DeferredDestroy::Image(handle));
         Ok(())
@@ -554,6 +618,9 @@ impl Device {
         let handle = BufferHandle(inner.buffer_handles.alloc());
         inner.backend.create_buffer(handle, desc)?;
         inner.buffers.insert(handle, desc);
+        if desc.usage.contains(BufferUsage::STORAGE) {
+            register_bindless_storage_buffer(&mut inner, handle);
+        }
         Ok(handle)
     }
 
@@ -574,6 +641,9 @@ impl Device {
             inner.backend.import_external_buffer(handle, desc)?;
         }
         inner.buffers.insert(handle, desc.desc);
+        if desc.desc.usage.contains(BufferUsage::STORAGE) {
+            register_bindless_storage_buffer(&mut inner, handle);
+        }
         Ok(handle)
     }
 
@@ -581,6 +651,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let _desc = inner.buffers.remove(&handle).ok_or(Error::InvalidHandle)?;
+        inner.bindless_storage_buffers.remove(&handle);
         inner.buffer_states.retain(|key, _| key.buffer != handle);
         inner
             .deferred_destroys
@@ -744,6 +815,7 @@ impl Device {
         let handle = SamplerHandle(inner.sampler_handles.alloc());
         inner.backend.create_sampler(handle, desc)?;
         inner.samplers.insert(handle, desc);
+        register_bindless_sampler(&mut inner, handle);
         Ok(handle)
     }
 
@@ -751,6 +823,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self.inner.lock().expect("device mutex poisoned");
         let _desc = inner.samplers.remove(&handle).ok_or(Error::InvalidHandle)?;
+        inner.bindless_samplers.remove(&handle);
         inner
             .deferred_destroys
             .push(DeferredDestroy::Sampler(handle));
@@ -1459,6 +1532,22 @@ impl Device {
             .backend
             .latency_mode()
     }
+
+    /// Set SMPTE ST 2086 / CTA 861.3 HDR mastering display metadata on a
+    /// surface.  Has no effect when `BackendFeatures::hdr_output` is false or
+    /// the swapchain is not in an HDR color space.
+    pub fn set_surface_hdr_metadata(
+        &self,
+        surface: SurfaceHandle,
+        metadata: HdrMetadata,
+    ) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .set_surface_hdr_metadata(surface, metadata)
+    }
 }
 
 impl DeviceInner {
@@ -1685,6 +1774,71 @@ fn merge_shader_layouts<const N: usize>(
         push_constants_bytes,
         push_constants_stage_mask,
     }
+}
+
+fn register_created_image_bindless_indices(
+    inner: &mut DeviceInner,
+    handle: ImageHandle,
+    desc: ImageDesc,
+) {
+    if desc.transient {
+        return;
+    }
+    if desc.usage.contains(ImageUsage::SAMPLED) {
+        register_bindless_sampled_image(inner, handle);
+    }
+    if desc.usage.contains(ImageUsage::STORAGE) {
+        register_bindless_storage_image(inner, handle);
+    }
+}
+
+fn register_bindless_sampled_image(inner: &mut DeviceInner, handle: ImageHandle) -> Option<u32> {
+    if let Some(index) = inner.bindless_sampled_images.get(&handle).copied() {
+        return Some(index);
+    }
+    let desc = inner.images.get(&handle)?;
+    if desc.transient || !desc.usage.contains(ImageUsage::SAMPLED) {
+        return None;
+    }
+    let index = inner.backend.register_bindless_sampled_image(handle)?;
+    inner.bindless_sampled_images.insert(handle, index);
+    Some(index)
+}
+
+fn register_bindless_storage_image(inner: &mut DeviceInner, handle: ImageHandle) -> Option<u32> {
+    if let Some(index) = inner.bindless_storage_images.get(&handle).copied() {
+        return Some(index);
+    }
+    let desc = inner.images.get(&handle)?;
+    if desc.transient || !desc.usage.contains(ImageUsage::STORAGE) {
+        return None;
+    }
+    let index = inner.backend.register_bindless_storage_image(handle)?;
+    inner.bindless_storage_images.insert(handle, index);
+    Some(index)
+}
+
+fn register_bindless_sampler(inner: &mut DeviceInner, handle: SamplerHandle) -> Option<u32> {
+    if let Some(index) = inner.bindless_samplers.get(&handle).copied() {
+        return Some(index);
+    }
+    inner.samplers.get(&handle)?;
+    let index = inner.backend.register_bindless_sampler(handle)?;
+    inner.bindless_samplers.insert(handle, index);
+    Some(index)
+}
+
+fn register_bindless_storage_buffer(inner: &mut DeviceInner, handle: BufferHandle) -> Option<u32> {
+    if let Some(index) = inner.bindless_storage_buffers.get(&handle).copied() {
+        return Some(index);
+    }
+    let desc = inner.buffers.get(&handle)?;
+    if !desc.usage.contains(BufferUsage::STORAGE) {
+        return None;
+    }
+    let index = inner.backend.register_bindless_storage_buffer(handle)?;
+    inner.bindless_storage_buffers.insert(handle, index);
+    Some(index)
 }
 
 fn validate_buffer_handle(inner: &DeviceInner, handle: BufferHandle) -> Result<()> {

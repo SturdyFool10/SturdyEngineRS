@@ -634,6 +634,7 @@ impl RenderFrame {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -1145,6 +1146,7 @@ impl RenderFrame {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             },
             deferred: None,
         });
@@ -1206,6 +1208,7 @@ impl RenderFrame {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             },
             deferred: None,
         });
@@ -2034,6 +2037,7 @@ impl GraphImage {
                 clear_depth,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2236,6 +2240,7 @@ impl GraphImage {
                 clear_depth,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2437,6 +2442,7 @@ impl GraphImage {
                 clear_depth,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2612,6 +2618,7 @@ impl GraphImage {
                 clear_depth,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2747,6 +2754,7 @@ impl GraphImage {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             },
             deferred: None,
         });
@@ -2937,6 +2945,7 @@ fn record_fullscreen_shader_pass(
             clear_depth: None,
             push_descriptor_set: None,
             predicate: None,
+            shader_binding: None,
         },
         deferred: Some(DeferredPassResolve {
             layout_handle: shader.pipeline_layout.handle(),
@@ -3025,6 +3034,7 @@ fn record_compute_shader_pass(
             clear_depth: None,
             push_descriptor_set: None,
             predicate: None,
+            shader_binding: None,
         },
         deferred: Some(DeferredPassResolve {
             layout_handle: program.pipeline_layout.handle(),
@@ -3432,6 +3442,7 @@ mod tests {
             clear_depth: None,
             push_descriptor_set: None,
             predicate: None,
+            shader_binding: None,
         }
     }
 
@@ -3457,6 +3468,7 @@ mod tests {
             clear_depth: None,
             push_descriptor_set: None,
             predicate: None,
+            shader_binding: None,
         }
     }
 

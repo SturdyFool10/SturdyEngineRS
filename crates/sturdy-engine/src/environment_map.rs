@@ -315,6 +315,7 @@ fn prefilter_specular_cpu(
         clear_depth: None,
         push_descriptor_set: None,
         predicate: None,
+        shader_binding: None,
     })?;
 
     frame.flush_with_reason(FrameSyncReason::CompatibilityShim)?;

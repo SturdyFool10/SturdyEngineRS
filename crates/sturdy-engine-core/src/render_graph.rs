@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::shader_object::ShaderObjectHandle;
 use crate::{
     AccelerationStructureHandle, BindGroupHandle, BufferDesc, BufferHandle, DecodeFrameDesc,
     DgcExecuteDesc, DgcPreprocessDesc, EncodeFrameDesc, Error, ImageDesc, ImageHandle,
@@ -502,6 +503,24 @@ pub struct ConditionalRenderingDesc {
     pub inverted: bool,
 }
 
+/// Shader binding mode for a render or compute pass.
+///
+/// The default path binds a compiled `VkPipeline` via `PassDesc::pipeline`.
+/// `ShaderObjects` binds individually compiled `VkShaderEXT` objects instead,
+/// which requires `BackendFeatures::shader_object`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ShaderBinding {
+    /// Bind a monolithic compiled pipeline (default).
+    Pipeline(PipelineHandle),
+    /// Bind individual shader objects per stage.
+    ///
+    /// Requires `BackendFeatures::shader_object`. Backends that do not support
+    /// shader objects will fall back to the `PassDesc::pipeline` field. Graphics
+    /// passes also use `PassDesc::pipeline` as their render-state/fallback anchor;
+    /// the pipeline is not bound while shader objects are active.
+    ShaderObjects(Vec<ShaderObjectHandle>),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PassDesc {
     pub name: String,
@@ -537,6 +556,13 @@ pub struct PassDesc {
     ///
     /// Requires `BackendFeatures::conditional_rendering`.
     pub predicate: Option<ConditionalRenderingDesc>,
+    /// Explicit shader binding for this pass, overriding the `pipeline` field.
+    ///
+    /// When `Some(ShaderBinding::ShaderObjects(...))`, individually compiled
+    /// shader objects are bound via `vkCmdBindShadersEXT` rather than a monolithic
+    /// pipeline. Requires `BackendFeatures::shader_object`. Backends that do not
+    /// support shader objects fall back to the `pipeline` field.
+    pub shader_binding: Option<ShaderBinding>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -710,18 +736,34 @@ impl RenderGraph {
                 ));
             }
         }
+        if let Some(ShaderBinding::ShaderObjects(handles)) = &pass.shader_binding {
+            if handles.is_empty() {
+                return Err(Error::InvalidInput(
+                    "shader object binding requires at least one shader object".into(),
+                ));
+            }
+        }
+        let has_pipeline_binding = pass.pipeline.is_some()
+            || matches!(pass.shader_binding, Some(ShaderBinding::Pipeline(_)));
+        let has_shader_object_binding = matches!(
+            pass.shader_binding,
+            Some(ShaderBinding::ShaderObjects(ref handles)) if !handles.is_empty()
+        );
+        let has_compute_shader_binding = has_pipeline_binding || has_shader_object_binding;
+        let has_graphics_shader_binding =
+            has_pipeline_binding || (has_shader_object_binding && pass.pipeline.is_some());
         if let Some(push_constants) = &pass.push_constants {
             push_constants.validate()?;
-            if pass.pipeline.is_none() {
+            if !has_compute_shader_binding {
                 return Err(Error::InvalidInput(
-                    "push constants require a pass pipeline".into(),
+                    "push constants require a pass shader binding".into(),
                 ));
             }
         }
         if let Some(push_descriptors) = &pass.push_descriptor_set {
-            if pass.pipeline.is_none() {
+            if !has_compute_shader_binding {
                 return Err(Error::InvalidInput(
-                    "push descriptors require a pass pipeline".into(),
+                    "push descriptors require a pass shader binding".into(),
                 ));
             }
             if push_descriptors.bindings.is_empty() {
@@ -752,9 +794,9 @@ impl RenderGraph {
                     "dispatch dimensions must be non-zero".into(),
                 ));
             }
-            if pass.pipeline.is_none() {
+            if !has_compute_shader_binding {
                 return Err(Error::InvalidInput(
-                    "dispatch pass requires a compute pipeline".into(),
+                    "dispatch pass requires a compute shader binding".into(),
                 ));
             }
         }
@@ -764,9 +806,9 @@ impl RenderGraph {
                     "draw vertex_count and instance_count must be non-zero".into(),
                 ));
             }
-            if pass.pipeline.is_none() {
+            if !has_graphics_shader_binding {
                 return Err(Error::InvalidInput(
-                    "draw pass requires a graphics pipeline".into(),
+                    "draw pass requires a graphics shader binding; shader-object draws also need pass.pipeline as render-state/fallback anchor".into(),
                 ));
             }
         }
@@ -787,9 +829,9 @@ impl RenderGraph {
                     "indexed draw-indirect-count requires an index buffer binding".into(),
                 ));
             }
-            if pass.pipeline.is_none() {
+            if !has_graphics_shader_binding {
                 return Err(Error::InvalidInput(
-                    "draw-indirect-count pass requires a graphics pipeline".into(),
+                    "draw-indirect-count pass requires a graphics shader binding; shader-object draws also need pass.pipeline as render-state/fallback anchor".into(),
                 ));
             }
         }
@@ -1615,6 +1657,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
 
@@ -1671,6 +1714,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap_err();
 
@@ -1729,6 +1773,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
 
@@ -1779,6 +1824,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -1817,6 +1863,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -1847,6 +1894,99 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
+            })
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn dispatch_accepts_shader_object_binding_without_pipeline() {
+        let mut graph = RenderGraph::new();
+        graph
+            .add_pass(PassDesc {
+                name: "dispatch-shader-object".into(),
+                queue: QueueType::Compute,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                pipeline_shading_rate: None,
+                work: PassWork::Dispatch(DispatchDesc { x: 1, y: 1, z: 1 }),
+                reads: Vec::new(),
+                writes: Vec::new(),
+                buffer_reads: Vec::new(),
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
+                shader_binding: Some(ShaderBinding::ShaderObjects(vec![
+                    crate::shader_object::ShaderObjectHandle(1),
+                ])),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn shader_object_binding_rejects_empty_list() {
+        let mut graph = RenderGraph::new();
+        let err = graph
+            .add_pass(PassDesc {
+                name: "empty-shader-objects".into(),
+                queue: QueueType::Compute,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                pipeline_shading_rate: None,
+                work: PassWork::Dispatch(DispatchDesc { x: 1, y: 1, z: 1 }),
+                reads: Vec::new(),
+                writes: Vec::new(),
+                buffer_reads: Vec::new(),
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
+                shader_binding: Some(ShaderBinding::ShaderObjects(Vec::new())),
+            })
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn graphics_shader_objects_require_pipeline_state_anchor() {
+        let mut graph = RenderGraph::new();
+        let err = graph
+            .add_pass(PassDesc {
+                name: "draw-shader-object-without-anchor".into(),
+                queue: QueueType::Graphics,
+                shader: None,
+                pipeline: None,
+                bind_groups: Vec::new(),
+                push_constants: None,
+                pipeline_shading_rate: None,
+                work: PassWork::Draw(DrawDesc {
+                    vertex_count: 3,
+                    instance_count: 1,
+                    first_vertex: 0,
+                    first_instance: 0,
+                    vertex_buffer: None,
+                    index_buffer: None,
+                    viewport: None,
+                }),
+                reads: Vec::new(),
+                writes: Vec::new(),
+                buffer_reads: Vec::new(),
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth: None,
+                push_descriptor_set: None,
+                predicate: None,
+                shader_binding: Some(ShaderBinding::ShaderObjects(vec![
+                    crate::shader_object::ShaderObjectHandle(1),
+                ])),
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -1873,6 +2013,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap_err();
 
@@ -1905,6 +2046,7 @@ mod tests {
                     offset: 2,
                     inverted: false,
                 }),
+                shader_binding: None,
             })
             .unwrap_err();
 
@@ -1936,6 +2078,7 @@ mod tests {
                     bindings: Vec::new(),
                 }),
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap_err();
 
@@ -1995,6 +2138,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -2042,6 +2186,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
     }
@@ -2073,6 +2218,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap_err();
 
@@ -2116,6 +2262,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
 
@@ -2162,6 +2309,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
 
@@ -2211,6 +2359,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
 
@@ -2297,6 +2446,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
 
@@ -2342,6 +2492,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
         graph
@@ -2373,6 +2524,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
 
@@ -2430,6 +2582,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
         graph
@@ -2461,6 +2614,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
         graph
@@ -2486,6 +2640,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
 
@@ -2596,6 +2751,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
 
@@ -2645,6 +2801,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
 
@@ -2686,6 +2843,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
 
@@ -2735,6 +2893,7 @@ mod tests {
                 clear_depth: None,
                 push_descriptor_set: None,
                 predicate: None,
+                shader_binding: None,
             })
             .unwrap();
 

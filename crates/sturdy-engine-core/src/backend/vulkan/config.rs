@@ -1,6 +1,6 @@
-use crate::AdapterSelection;
+use crate::{AdapterSelection, VulkanApiVersion};
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct VulkanBackendConfig {
     pub validation: bool,
     pub adapter_selection: AdapterSelection,
@@ -10,6 +10,28 @@ pub struct VulkanBackendConfig {
     pub required_extensions: Vec<String>,
     pub optional_extensions: Vec<String>,
     pub disabled_extensions: Vec<String>,
+    /// Minimum API version the selected physical device must support.
+    pub min_api_version: VulkanApiVersion,
+    /// API version to request in VkApplicationInfo. The driver will deliver
+    /// the highest version it supports up to this cap.
+    pub max_api_version: VulkanApiVersion,
+}
+
+impl Default for VulkanBackendConfig {
+    fn default() -> Self {
+        Self {
+            validation: false,
+            adapter_selection: AdapterSelection::default(),
+            required_features: Vec::new(),
+            optional_features: Vec::new(),
+            disabled_features: Vec::new(),
+            required_extensions: Vec::new(),
+            optional_extensions: Vec::new(),
+            disabled_extensions: Vec::new(),
+            min_api_version: VulkanApiVersion::V1_2,
+            max_api_version: VulkanApiVersion::LATEST,
+        }
+    }
 }
 
 impl VulkanBackendConfig {
@@ -22,6 +44,8 @@ impl VulkanBackendConfig {
         required_extensions: Vec<String>,
         optional_extensions: Vec<String>,
         disabled_extensions: Vec<String>,
+        min_api_version: VulkanApiVersion,
+        max_api_version: VulkanApiVersion,
     ) -> Self {
         Self {
             validation,
@@ -32,6 +56,8 @@ impl VulkanBackendConfig {
             required_extensions,
             optional_extensions,
             disabled_extensions,
+            min_api_version,
+            max_api_version,
         }
     }
 }

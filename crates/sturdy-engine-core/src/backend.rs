@@ -7,7 +7,7 @@ use crate::{
     AntiLagMode, BackendRawCapabilities, BindGroupDesc, BindGroupHandle, BlasBuildDesc, BufferDesc,
     BufferHandle, CanonicalPipelineLayout, Caps, CompiledGraph, ComputePipelineDesc,
     ExternalBufferDesc, ExternalImageDesc, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc,
-    ImageDesc, ImageHandle, LatencyMode, NativeHandleCapabilities, PipelineHandle,
+    HdrMetadata, ImageDesc, ImageHandle, LatencyMode, NativeHandleCapabilities, PipelineHandle,
     PipelineLayoutHandle, RayTracingPipelineDesc, ReflexMode, Result, SamplerDesc, SamplerHandle,
     ShaderBindingTableProperties, ShaderDesc, ShaderHandle, ShaderTarget, SubmissionHandle,
     SurfaceCapabilities, SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
@@ -407,6 +407,36 @@ pub trait Backend: Send + Sync {
 
     fn latency_mode(&self) -> Option<LatencyMode> {
         None
+    }
+
+    fn set_surface_hdr_metadata(
+        &self,
+        _surface: SurfaceHandle,
+        _metadata: HdrMetadata,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    // ── GFX-5a: External memory exports (Linux) ───────────────────────────────
+
+    /// Export a file descriptor for a buffer's underlying memory.
+    ///
+    /// Requires the buffer to have been created with external memory flags and
+    /// `VK_KHR_external_memory_fd` to be available. Returns the fd on success.
+    /// The caller is responsible for closing the fd.
+    fn export_buffer_fd(&self, _handle: BufferHandle) -> Result<i32> {
+        Err(crate::Error::Unsupported(
+            "buffer fd export requires VK_KHR_external_memory_fd and a buffer created with external memory flags",
+        ))
+    }
+
+    /// Export a file descriptor for an image's underlying memory.
+    ///
+    /// Same requirements as `export_buffer_fd`.
+    fn export_image_fd(&self, _handle: ImageHandle) -> Result<i32> {
+        Err(crate::Error::Unsupported(
+            "image fd export requires VK_KHR_external_memory_fd and an image created with external memory flags",
+        ))
     }
 
     fn flush(&self, _graph: &CompiledGraph) -> Result<SubmissionHandle>;

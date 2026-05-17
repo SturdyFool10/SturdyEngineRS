@@ -1,12 +1,14 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::{collections::HashMap, ffi::c_void, sync::Mutex};
 
 use ash::{Device, vk};
 use vk::Handle;
 
+use crate::shader_object::ShaderObjectHandle;
 use crate::{
     AccelerationStructureHandle, AddressMode, BorderColor, BufferDesc, BufferHandle, BufferUsage,
-    CompareOp, Error, FilterMode, Format, ImageDesc, ImageHandle, ImageUsage, MipmapMode, Result,
-    SamplerDesc, SamplerHandle, SubresourceRange, VulkanExternalBuffer, VulkanExternalImage,
+    CompareOp, Error, FilterMode, Format, ImageDesc, ImageHandle, ImageUsage, MipmapMode,
+    PipelineLayoutHandle, Result, SamplerDesc, SamplerHandle, SamplerReductionMode,
+    SubresourceRange, VulkanExternalBuffer, VulkanExternalImage,
 };
 
 use super::allocator::{Allocation, AllocatorStats, GpuAllocator};
@@ -29,6 +31,15 @@ pub struct ResourceRegistry {
     buffers: HashMap<BufferHandle, VulkanBuffer>,
     samplers: HashMap<SamplerHandle, vk::Sampler>,
     acceleration_structures: HashMap<AccelerationStructureHandle, VulkanAccelerationStructure>,
+    /// VK_EXT_shader_object handles, keyed by engine handle.
+    shader_objects: HashMap<ShaderObjectHandle, VulkanShaderObject>,
+}
+
+#[derive(Copy, Clone)]
+pub struct VulkanShaderObject {
+    pub shader: vk::ShaderEXT,
+    pub stage: vk::ShaderStageFlags,
+    pub layout: Option<PipelineLayoutHandle>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
@@ -60,6 +71,7 @@ impl ResourceRegistry {
             buffers: HashMap::new(),
             samplers: HashMap::new(),
             acceleration_structures: HashMap::new(),
+            shader_objects: HashMap::new(),
         }
     }
 
@@ -425,7 +437,10 @@ impl ResourceRegistry {
         if self.samplers.contains_key(&handle) {
             return Err(Error::InvalidHandle);
         }
-        let info = vk::SamplerCreateInfo::default()
+        let mut reduction_info = vk::SamplerReductionModeCreateInfo::default()
+            .reduction_mode(vk_sampler_reduction_mode(desc.reduction_mode));
+        let mut custom_border_info = vk_custom_border_color_info(desc.border_color);
+        let mut info = vk::SamplerCreateInfo::default()
             .mag_filter(vk_filter(desc.mag_filter))
             .min_filter(vk_filter(desc.min_filter))
             .mipmap_mode(vk_mipmap_mode(desc.mipmap_mode))
@@ -445,6 +460,20 @@ impl ResourceRegistry {
             .max_lod(desc.max_lod)
             .border_color(vk_border_color(desc.border_color))
             .unnormalized_coordinates(desc.unnormalized_coordinates);
+
+        let mut next: *const c_void = std::ptr::null();
+        if desc.reduction_mode != SamplerReductionMode::WeightedAverage {
+            reduction_info.p_next = next;
+            next = (&reduction_info as *const vk::SamplerReductionModeCreateInfo<'_>).cast();
+        }
+        if let Some(custom_border_info) = custom_border_info.as_mut() {
+            custom_border_info.p_next = next;
+            next =
+                (custom_border_info as *const vk::SamplerCustomBorderColorCreateInfoEXT<'_>).cast();
+        }
+        if !next.is_null() {
+            info.p_next = next;
+        }
         let sampler = unsafe {
             device
                 .create_sampler(&info, None)
@@ -520,6 +549,7 @@ impl ResourceRegistry {
         &mut self,
         device: &Device,
         as_ext: Option<&ash::khr::acceleration_structure::Device>,
+        shader_object_ext: Option<&ash::ext::shader_object::Device>,
     ) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         for (_, view) in self
@@ -567,7 +597,43 @@ impl ResourceRegistry {
             }
             let _ = self.allocator.dealloc(device, entry.allocation);
         }
+        for (_, shader_object) in self.shader_objects.drain() {
+            if let Some(shader_object_ext) = shader_object_ext {
+                unsafe {
+                    shader_object_ext.destroy_shader(shader_object.shader, None);
+                }
+            }
+        }
         self.allocator.destroy_all(device);
+    }
+
+    /// Register a VK_EXT_shader_object handle for an engine ShaderObjectHandle.
+    pub fn register_shader_object(&mut self, handle: ShaderObjectHandle, obj: VulkanShaderObject) {
+        self.shader_objects.insert(handle, obj);
+    }
+
+    /// Look up a VkShaderEXT by engine handle.
+    pub fn shader_object(&self, handle: ShaderObjectHandle) -> Result<VulkanShaderObject> {
+        self.shader_objects
+            .get(&handle)
+            .copied()
+            .ok_or(Error::InvalidHandle)
+    }
+
+    /// Destroy a VkShaderEXT and remove it from the registry.
+    pub fn destroy_shader_object(
+        &mut self,
+        ext: &ash::ext::shader_object::Device,
+        handle: ShaderObjectHandle,
+    ) -> Result<()> {
+        let obj = self
+            .shader_objects
+            .remove(&handle)
+            .ok_or(Error::InvalidHandle)?;
+        unsafe {
+            ext.destroy_shader(obj.shader, None);
+        }
+        Ok(())
     }
 
     pub fn image(&self, handle: ImageHandle) -> Result<vk::Image> {
@@ -1079,6 +1145,7 @@ fn vk_filter(filter: FilterMode) -> vk::Filter {
     match filter {
         FilterMode::Nearest => vk::Filter::NEAREST,
         FilterMode::Linear => vk::Filter::LINEAR,
+        FilterMode::Cubic => vk::Filter::CUBIC_EXT,
     }
 }
 
@@ -1119,5 +1186,27 @@ fn vk_border_color(color: BorderColor) -> vk::BorderColor {
         BorderColor::IntOpaqueBlack => vk::BorderColor::INT_OPAQUE_BLACK,
         BorderColor::FloatOpaqueWhite => vk::BorderColor::FLOAT_OPAQUE_WHITE,
         BorderColor::IntOpaqueWhite => vk::BorderColor::INT_OPAQUE_WHITE,
+        BorderColor::Custom(_) => vk::BorderColor::FLOAT_CUSTOM_EXT,
+    }
+}
+
+fn vk_custom_border_color_info(
+    color: BorderColor,
+) -> Option<vk::SamplerCustomBorderColorCreateInfoEXT<'static>> {
+    match color {
+        BorderColor::Custom(float32) => Some(
+            vk::SamplerCustomBorderColorCreateInfoEXT::default()
+                .custom_border_color(vk::ClearColorValue { float32 })
+                .format(vk::Format::R32G32B32A32_SFLOAT),
+        ),
+        _ => None,
+    }
+}
+
+fn vk_sampler_reduction_mode(mode: SamplerReductionMode) -> vk::SamplerReductionMode {
+    match mode {
+        SamplerReductionMode::WeightedAverage => vk::SamplerReductionMode::WEIGHTED_AVERAGE,
+        SamplerReductionMode::Min => vk::SamplerReductionMode::MIN,
+        SamplerReductionMode::Max => vk::SamplerReductionMode::MAX,
     }
 }

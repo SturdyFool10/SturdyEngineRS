@@ -169,6 +169,7 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
 
     // GFX-2k: sampler/image quality extensions
     let vk_1_2 = vk::make_api_version(0, 1, 2, 0);
+    let vk_1_3 = vk::make_api_version(0, 1, 3, 0);
     let sampler_filter_minmax =
         properties.api_version >= vk_1_2 || has(b"VK_EXT_sampler_filter_minmax\0");
     let custom_border_color = has(b"VK_EXT_custom_border_color\0")
@@ -247,6 +248,9 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     // GFX-2j: Performance query
     let performance_query = has(b"VK_KHR_performance_query\0");
     let pipeline_executable_properties = has(b"VK_KHR_pipeline_executable_properties\0");
+    let graphics_pipeline_library = has(b"VK_EXT_graphics_pipeline_library\0");
+    let pipeline_creation_cache_control =
+        properties.api_version >= vk_1_3 || has(b"VK_EXT_pipeline_creation_cache_control\0");
 
     let features = BackendFeatures {
         ray_tracing,
@@ -359,6 +363,8 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         // GFX-2j: performance query
         performance_query,
         pipeline_executable_properties,
+        graphics_pipeline_library,
+        pipeline_creation_cache_control,
     };
 
     let limits = Limits {
@@ -703,6 +709,7 @@ pub struct AvailableFeatureChain<'a> {
     pub image_compression_control: vk::PhysicalDeviceImageCompressionControlFeaturesEXT<'a>,
     pub msaa_render_to_single_sampled:
         vk::PhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT<'a>,
+    pub shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT<'a>,
 }
 
 pub fn available_feature_chain(
@@ -731,6 +738,7 @@ pub fn available_feature_chain(
         image_compression_control: vk::PhysicalDeviceImageCompressionControlFeaturesEXT::default(),
         msaa_render_to_single_sampled:
             vk::PhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT::default(),
+        shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT::default(),
     };
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut chain.descriptor_indexing)
@@ -752,7 +760,8 @@ pub fn available_feature_chain(
         .push_next(&mut chain.custom_border_color)
         .push_next(&mut chain.image_view_min_lod)
         .push_next(&mut chain.image_compression_control)
-        .push_next(&mut chain.msaa_render_to_single_sampled);
+        .push_next(&mut chain.msaa_render_to_single_sampled)
+        .push_next(&mut chain.shader_object);
     unsafe { instance.get_physical_device_features2(physical_device, &mut features2) };
     chain
 }

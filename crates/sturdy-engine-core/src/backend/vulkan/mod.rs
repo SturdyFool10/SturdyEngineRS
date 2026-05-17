@@ -25,14 +25,15 @@ use crate::backend::{Backend, BackendKind};
 use crate::{
     AccelerationStructureBuildMode, AccelerationStructureBuildSizes, AccelerationStructureDesc,
     AccelerationStructureHandle, AccelerationStructureKind, AdapterInfo, AntiLagMode,
-    BindGroupDesc, BindGroupHandle, BlasBuildDesc, BufferDesc, BufferHandle,
+    BindGroupDesc, BindGroupHandle, BlasBuildDesc, BorderColor, BufferDesc, BufferHandle,
     CanonicalPipelineLayout, Caps, CompiledGraph, ComputePipelineDesc, Error, ExternalBufferDesc,
-    ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, Format, FormatCapabilities,
-    GraphicsPipelineDesc, ImageDesc, ImageHandle, IndexFormat, LatencyMode, NativeSurfaceDesc,
-    PipelineHandle, PipelineLayoutHandle, RayTracingPipelineDesc, ReflexMode, Result, SamplerDesc,
-    SamplerHandle, ShaderBindingTableProperties, ShaderDesc, ShaderHandle, SubmissionHandle,
-    SurfaceCapabilities, SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize,
-    TlasBuildDesc, VertexFormat, VideoSessionDesc, VideoSessionHandle,
+    ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode, Format,
+    FormatCapabilities, GraphicsPipelineDesc, HdrMetadata, ImageDesc, ImageHandle, IndexFormat,
+    LatencyMode, NativeSurfaceDesc, PipelineHandle, PipelineLayoutHandle, RayTracingPipelineDesc,
+    ReflexMode, Result, SamplerDesc, SamplerHandle, SamplerReductionMode,
+    ShaderBindingTableProperties, ShaderDesc, ShaderHandle, SubmissionHandle, SurfaceCapabilities,
+    SurfaceHandle, SurfaceInfo, SurfaceRecreateDesc, SurfaceSize, TlasBuildDesc, VertexFormat,
+    VideoSessionDesc, VideoSessionHandle,
 };
 
 pub use bindless::BindlessVkInfo;
@@ -87,6 +88,16 @@ pub struct VulkanBackend {
     ray_tracing_sbt_properties: Option<ShaderBindingTableProperties>,
     /// VK_NV_low_latency2 commands. Present when reflex is available.
     reflex_nv: Option<ash::nv::low_latency2::Device>,
+    /// Desired Reflex mode; applied per-swapchain during flush when a swapchain is active.
+    reflex_mode: std::sync::atomic::AtomicU8,
+    /// VK_EXT_hdr_metadata commands. Present when hdr_output is available.
+    hdr_metadata_ext: Option<ash::ext::hdr_metadata::Device>,
+    /// VK_EXT_extended_dynamic_state3 commands. Present when the feature is enabled.
+    extended_dynamic_state3_ext: Option<ash::ext::extended_dynamic_state3::Device>,
+    /// VK_EXT_vertex_input_dynamic_state commands. Present when the feature is enabled.
+    vertex_input_dynamic_state_ext: Option<ash::ext::vertex_input_dynamic_state::Device>,
+    /// VK_EXT_shader_object commands. Present when the feature is enabled.
+    shader_object_ext: Option<ash::ext::shader_object::Device>,
 }
 
 impl VulkanBackend {
@@ -113,6 +124,7 @@ impl VulkanBackend {
         caps.features.memory_priority = logical.memory_priority_enabled;
         caps.features.push_descriptors = logical.push_descriptors_enabled;
         caps.features.conditional_rendering = logical.conditional_rendering_enabled;
+        caps.features.custom_border_color = logical.custom_border_color_enabled;
         caps.features.vrs_pipeline = logical.vrs_pipeline_enabled;
         caps.features.vrs_primitive = logical.vrs_primitive_enabled;
         caps.features.vrs_attachment = logical.vrs_attachment_enabled;
@@ -129,6 +141,15 @@ impl VulkanBackend {
         caps.features.conservative_rasterization_underestimate = logical
             .conservative_rasterization_enabled
             && caps.features.conservative_rasterization_underestimate;
+        caps.features.extended_dynamic_state3 =
+            logical.extended_dynamic_state3_enabled && caps.features.extended_dynamic_state3;
+        caps.features.extended_dynamic_state3_polygon_mode = logical
+            .extended_dynamic_state3_enabled
+            && caps.features.extended_dynamic_state3_polygon_mode;
+        caps.features.extended_dynamic_state3_color_blend = logical.extended_dynamic_state3_enabled
+            && caps.features.extended_dynamic_state3_color_blend;
+        caps.features.vertex_input_dynamic_state = logical.vertex_input_dynamic_state_enabled;
+        caps.features.shader_object = logical.shader_object_enabled && caps.features.shader_object;
         let props = unsafe { instance.get_physical_device_properties(selection.physical_device) };
         let timestamp_period_ns = props.limits.timestamp_period;
         let memory_properties =
@@ -237,6 +258,38 @@ impl VulkanBackend {
         } else {
             None
         };
+        let hdr_metadata_ext = if caps.features.hdr_output {
+            Some(ash::ext::hdr_metadata::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        let extended_dynamic_state3_ext = if logical.extended_dynamic_state3_enabled {
+            Some(ash::ext::extended_dynamic_state3::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        let vertex_input_dynamic_state_ext = if logical.vertex_input_dynamic_state_enabled {
+            Some(ash::ext::vertex_input_dynamic_state::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        let shader_object_ext = if logical.shader_object_enabled {
+            Some(ash::ext::shader_object::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
 
         // Create the bindless heap if the device supports descriptor_indexing.
         let bindless_heap = if caps.supports_bindless {
@@ -283,6 +336,11 @@ impl VulkanBackend {
             ray_tracing_pipeline_khr,
             ray_tracing_sbt_properties,
             reflex_nv,
+            reflex_mode: std::sync::atomic::AtomicU8::new(0),
+            hdr_metadata_ext,
+            extended_dynamic_state3_ext,
+            vertex_input_dynamic_state_ext,
+            shader_object_ext,
         })
     }
 
@@ -534,6 +592,27 @@ impl Backend for VulkanBackend {
     }
 
     fn create_sampler(&self, handle: SamplerHandle, desc: SamplerDesc) -> Result<()> {
+        if (desc.mag_filter == FilterMode::Cubic || desc.min_filter == FilterMode::Cubic)
+            && !self.caps.features.filter_cubic
+        {
+            return Err(Error::Unsupported(
+                "cubic sampler filtering requires VK_EXT_filter_cubic".into(),
+            ));
+        }
+        if matches!(desc.border_color, BorderColor::Custom(_))
+            && !self.caps.features.custom_border_color
+        {
+            return Err(Error::Unsupported(
+                "custom sampler border colors require VK_EXT_custom_border_color".into(),
+            ));
+        }
+        if desc.reduction_mode != SamplerReductionMode::WeightedAverage
+            && !self.caps.features.sampler_filter_minmax
+        {
+            return Err(Error::Unsupported(
+                "sampler min/max reduction requires VK_EXT_sampler_filter_minmax".into(),
+            ));
+        }
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
@@ -1006,6 +1085,7 @@ impl Backend for VulkanBackend {
             self.fragment_shading_rate_khr.as_ref(),
             self.acceleration_structure_khr.as_ref(),
             self.ray_tracing_pipeline_khr.as_ref(),
+            self.shader_object_ext.as_ref(),
             self.caps.features.ray_tracing_position_fetch,
             wait_sem,
             signal_sem,
@@ -1091,6 +1171,143 @@ impl Backend for VulkanBackend {
             return Some(LatencyMode::AntiLag(AntiLagMode::Off));
         }
         None
+    }
+
+    fn set_reflex_mode(&self, mode: ReflexMode) -> Result<()> {
+        if self.reflex_nv.is_none() {
+            return Err(Error::Unsupported(
+                "NVIDIA Reflex is not available on this device".into(),
+            ));
+        }
+        // Encode mode as a u8: 0=Off, 1=On, 2=OnPlusBoost
+        let encoded: u8 = match mode {
+            ReflexMode::Off => 0,
+            ReflexMode::On => 1,
+            ReflexMode::OnPlusBoost => 2,
+        };
+        self.reflex_mode
+            .store(encoded, std::sync::atomic::Ordering::Relaxed);
+        // TODO: apply per-swapchain when VkSwapchainKHR handles are accessible from here.
+        // vkSetLatencySleepModeNV requires a swapchain handle; the desired mode is stored
+        // above and should be applied in the present path once surface handles are available.
+        Ok(())
+    }
+
+    fn create_shader_object(
+        &self,
+        handle: crate::shader_object::ShaderObjectHandle,
+        desc: &crate::shader_object::ShaderObjectDesc,
+    ) -> Result<()> {
+        let ext = self
+            .shader_object_ext
+            .as_ref()
+            .ok_or_else(|| Error::Unsupported("VK_EXT_shader_object is not enabled".into()))?;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let shaders = self
+            .shaders
+            .lock()
+            .expect("vulkan shader registry mutex poisoned");
+        let stage = shaders.stage(desc.shader)?;
+        let spirv_words = shaders.spirv_words(desc.shader)?;
+        let spirv_bytes = unsafe {
+            std::slice::from_raw_parts(
+                spirv_words.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(spirv_words),
+            )
+        };
+        let entry_cstr = std::ffi::CString::new(shaders.entry_point(desc.shader)?)
+            .map_err(|_| Error::InvalidInput("shader entry point contains nul bytes".into()))?;
+        let stage_flags = shaders::shader_stage_flags(stage);
+        let (set_layouts, push_constant_ranges) = if let Some(layout) = desc.layout {
+            //panic allowed, reason = "poisoned mutex is unrecoverable"
+            self.descriptors
+                .read()
+                .expect("vulkan descriptor registry rwlock poisoned")
+                .shader_object_layout_info(layout)?
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let create_info = vk::ShaderCreateInfoEXT::default()
+            .stage(stage_flags)
+            .code_type(vk::ShaderCodeTypeEXT::SPIRV)
+            .code(spirv_bytes)
+            .name(&entry_cstr)
+            .set_layouts(&set_layouts)
+            .push_constant_ranges(&push_constant_ranges);
+        let shader_objs = unsafe {
+            ext.create_shaders(&[create_info], None)
+                .map_err(|e| Error::Backend(format!("vkCreateShadersEXT failed: {e:?}")))?
+        };
+        // Release the shaders lock before acquiring resources write lock.
+        drop(shaders);
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.resources
+            .write()
+            .expect("vulkan resource registry rwlock poisoned")
+            .register_shader_object(
+                handle,
+                resources::VulkanShaderObject {
+                    shader: shader_objs[0],
+                    stage: stage_flags,
+                    layout: desc.layout,
+                },
+            );
+        Ok(())
+    }
+
+    fn destroy_shader_object(
+        &self,
+        handle: crate::shader_object::ShaderObjectHandle,
+    ) -> Result<()> {
+        if let Some(ref ext) = self.shader_object_ext {
+            //panic allowed, reason = "poisoned mutex is unrecoverable"
+            if let Ok(mut resources) = self.resources.write() {
+                resources.destroy_shader_object(ext, handle)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn set_surface_hdr_metadata(
+        &self,
+        surface: SurfaceHandle,
+        metadata: HdrMetadata,
+    ) -> Result<()> {
+        let hdr_ext = match self.hdr_metadata_ext.as_ref() {
+            Some(ext) => ext,
+            None => return Ok(()), // HDR not available; silently ignore
+        };
+        let surfaces = self
+            .surfaces
+            .lock()
+            .expect("surface registry mutex poisoned");
+        let swapchain = surfaces.swapchain_handle(surface)?;
+        let primaries = metadata.display_primaries;
+        let vk_meta = ash::vk::HdrMetadataEXT::default()
+            .display_primary_red(ash::vk::XYColorEXT {
+                x: primaries[0][0],
+                y: primaries[0][1],
+            })
+            .display_primary_green(ash::vk::XYColorEXT {
+                x: primaries[1][0],
+                y: primaries[1][1],
+            })
+            .display_primary_blue(ash::vk::XYColorEXT {
+                x: primaries[2][0],
+                y: primaries[2][1],
+            })
+            .white_point(ash::vk::XYColorEXT {
+                x: metadata.white_point[0],
+                y: metadata.white_point[1],
+            })
+            .max_luminance(metadata.max_luminance)
+            .min_luminance(metadata.min_luminance)
+            .max_content_light_level(metadata.max_content_light_level)
+            .max_frame_average_light_level(metadata.max_frame_average_light_level);
+        unsafe {
+            hdr_ext.set_hdr_metadata(&[swapchain], &[vk_meta]);
+        }
+        Ok(())
     }
 }
 
@@ -1505,7 +1722,11 @@ impl Drop for VulkanBackend {
                 shaders.destroy_all(&self.device);
             }
             if let Ok(mut resources) = self.resources.write() {
-                resources.destroy_all(&self.device, self.acceleration_structure_khr.as_ref());
+                resources.destroy_all(
+                    &self.device,
+                    self.acceleration_structure_khr.as_ref(),
+                    self.shader_object_ext.as_ref(),
+                );
             }
             if let Ok(mut surfaces) = self.surfaces.lock() {
                 surfaces.destroy_all(&self.device);

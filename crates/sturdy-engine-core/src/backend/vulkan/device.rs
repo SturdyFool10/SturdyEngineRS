@@ -27,6 +27,7 @@ pub struct LogicalDevice {
     pub memory_priority_enabled: bool,
     pub push_descriptors_enabled: bool,
     pub conditional_rendering_enabled: bool,
+    pub custom_border_color_enabled: bool,
     pub conservative_rasterization_enabled: bool,
     pub vrs_pipeline_enabled: bool,
     pub vrs_primitive_enabled: bool,
@@ -36,6 +37,9 @@ pub struct LogicalDevice {
     pub ray_tracing_pipeline_enabled: bool,
     pub ray_query_enabled: bool,
     pub ray_tracing_position_fetch_enabled: bool,
+    pub extended_dynamic_state3_enabled: bool,
+    pub vertex_input_dynamic_state_enabled: bool,
+    pub shader_object_enabled: bool,
 }
 
 impl DeviceSelection {
@@ -76,6 +80,16 @@ pub fn create_logical_device(
     selection: &DeviceSelection,
     config: &VulkanBackendConfig,
 ) -> Result<LogicalDevice> {
+    // Validate minimum API version before any expensive work.
+    let device_props =
+        unsafe { instance.get_physical_device_properties(selection.physical_device) };
+    let device_version = crate::VulkanApiVersion::from_vk(device_props.api_version);
+    if device_version < config.min_api_version {
+        return Err(crate::Error::Unsupported(
+            "selected Vulkan physical device does not meet the minimum required API version",
+        ));
+    }
+
     let priority = [1.0f32];
     let mut unique_families = vec![
         selection.queue_families.graphics,
@@ -94,6 +108,8 @@ pub fn create_logical_device(
     let memory_priority_enabled = feature_request.memory_priority.memory_priority == vk::TRUE;
     let conditional_rendering_enabled =
         feature_request.conditional_rendering.conditional_rendering == vk::TRUE;
+    let custom_border_color_enabled =
+        feature_request.custom_border_color.custom_border_colors == vk::TRUE;
     let vrs_pipeline_enabled = feature_request
         .fragment_shading_rate
         .pipeline_fragment_shading_rate
@@ -116,6 +132,23 @@ pub fn create_logical_device(
         .ray_tracing_position_fetch
         .ray_tracing_position_fetch
         == vk::TRUE;
+    let extended_dynamic_state3_enabled = feature_request
+        .extended_dynamic_state3
+        .extended_dynamic_state3_polygon_mode
+        == vk::TRUE
+        || feature_request
+            .extended_dynamic_state3
+            .extended_dynamic_state3_rasterization_samples
+            == vk::TRUE
+        || feature_request
+            .extended_dynamic_state3
+            .extended_dynamic_state3_color_blend_enable
+            == vk::TRUE;
+    let vertex_input_dynamic_state_enabled = feature_request
+        .vertex_input_dynamic_state
+        .vertex_input_dynamic_state
+        == vk::TRUE;
+    let shader_object_enabled = feature_request.shader_object.shader_object == vk::TRUE;
     // push_descriptors, conservative_rasterization, and global_queue_priority are extension-only
     // (no feature struct).
     // They are enabled if the extension was added to required_extensions by resolve().
@@ -193,6 +226,7 @@ pub fn create_logical_device(
         memory_priority_enabled,
         push_descriptors_enabled,
         conditional_rendering_enabled,
+        custom_border_color_enabled,
         conservative_rasterization_enabled,
         vrs_pipeline_enabled,
         vrs_primitive_enabled,
@@ -202,6 +236,9 @@ pub fn create_logical_device(
         ray_tracing_pipeline_enabled,
         ray_query_enabled,
         ray_tracing_position_fetch_enabled,
+        extended_dynamic_state3_enabled,
+        vertex_input_dynamic_state_enabled,
+        shader_object_enabled,
     })
 }
 
@@ -310,6 +347,10 @@ struct FeatureRequest<'a> {
     fragment_shading_rate: vk::PhysicalDeviceFragmentShadingRateFeaturesKHR<'a>,
     memory_priority: vk::PhysicalDeviceMemoryPriorityFeaturesEXT<'a>,
     conditional_rendering: vk::PhysicalDeviceConditionalRenderingFeaturesEXT<'a>,
+    custom_border_color: vk::PhysicalDeviceCustomBorderColorFeaturesEXT<'a>,
+    extended_dynamic_state3: vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT<'a>,
+    vertex_input_dynamic_state: vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT<'a>,
+    shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT<'a>,
     use_feature_chain: bool,
     required_extensions: Vec<&'static CStr>,
 }
@@ -350,6 +391,11 @@ impl FeatureRequest<'static> {
             fragment_shading_rate: vk::PhysicalDeviceFragmentShadingRateFeaturesKHR::default(),
             memory_priority: vk::PhysicalDeviceMemoryPriorityFeaturesEXT::default(),
             conditional_rendering: vk::PhysicalDeviceConditionalRenderingFeaturesEXT::default(),
+            custom_border_color: vk::PhysicalDeviceCustomBorderColorFeaturesEXT::default(),
+            extended_dynamic_state3: vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT::default(),
+            vertex_input_dynamic_state:
+                vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT::default(),
+            shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT::default(),
             use_feature_chain: false,
             required_extensions: Vec::new(),
         };
@@ -614,6 +660,13 @@ impl FeatureRequest<'static> {
                 self.conditional_rendering.conditional_rendering = vk::TRUE;
                 true
             }
+            "custom_border_color" | "custom_border_colors" => {
+                if available.custom_border_color.custom_border_colors != vk::TRUE {
+                    return false;
+                }
+                self.custom_border_color.custom_border_colors = vk::TRUE;
+                true
+            }
             // push_descriptor, conservative_rasterization, and global_queue_priority are
             // extension-only — no feature struct.
             // They are handled purely via require_feature_extensions.
@@ -622,6 +675,58 @@ impl FeatureRequest<'static> {
             | "conservative_rasterization"
             | "global_queue_priority" => {
                 // Return true so require_feature_extensions is called.
+                true
+            }
+            "extended_dynamic_state3" => {
+                let any = available
+                    .extended_dynamic_state3
+                    .extended_dynamic_state3_polygon_mode
+                    == vk::TRUE
+                    || available
+                        .extended_dynamic_state3
+                        .extended_dynamic_state3_rasterization_samples
+                        == vk::TRUE
+                    || available
+                        .extended_dynamic_state3
+                        .extended_dynamic_state3_color_blend_enable
+                        == vk::TRUE;
+                if !any {
+                    return false;
+                }
+                self.extended_dynamic_state3
+                    .extended_dynamic_state3_polygon_mode = available
+                    .extended_dynamic_state3
+                    .extended_dynamic_state3_polygon_mode;
+                self.extended_dynamic_state3
+                    .extended_dynamic_state3_rasterization_samples = available
+                    .extended_dynamic_state3
+                    .extended_dynamic_state3_rasterization_samples;
+                self.extended_dynamic_state3
+                    .extended_dynamic_state3_color_blend_enable = available
+                    .extended_dynamic_state3
+                    .extended_dynamic_state3_color_blend_enable;
+                self.extended_dynamic_state3
+                    .extended_dynamic_state3_color_blend_equation = available
+                    .extended_dynamic_state3
+                    .extended_dynamic_state3_color_blend_equation;
+                true
+            }
+            "vertex_input_dynamic_state" => {
+                if available
+                    .vertex_input_dynamic_state
+                    .vertex_input_dynamic_state
+                    != vk::TRUE
+                {
+                    return false;
+                }
+                self.vertex_input_dynamic_state.vertex_input_dynamic_state = vk::TRUE;
+                true
+            }
+            "shader_object" => {
+                if available.shader_object.shader_object != vk::TRUE {
+                    return false;
+                }
+                self.shader_object.shader_object = vk::TRUE;
                 true
             }
             _ => self.enable_descriptor_indexing_field(name, &available.descriptor_indexing),
@@ -747,6 +852,9 @@ impl FeatureRequest<'static> {
             "conditional_rendering" => {
                 self.require_extension(ash::ext::conditional_rendering::NAME, available_extensions)?
             }
+            "custom_border_color" | "custom_border_colors" => {
+                self.require_extension(ash::ext::custom_border_color::NAME, available_extensions)?
+            }
             "push_descriptor" | "push_descriptors" => {
                 self.require_extension(ash::khr::push_descriptor::NAME, available_extensions)?
             }
@@ -756,6 +864,17 @@ impl FeatureRequest<'static> {
             )?,
             "global_queue_priority" => {
                 self.require_extension(ash::khr::global_priority::NAME, available_extensions)?
+            }
+            "extended_dynamic_state3" => self.require_extension(
+                ash::ext::extended_dynamic_state3::NAME,
+                available_extensions,
+            )?,
+            "vertex_input_dynamic_state" => self.require_extension(
+                ash::ext::vertex_input_dynamic_state::NAME,
+                available_extensions,
+            )?,
+            "shader_object" => {
+                self.require_extension(ash::ext::shader_object::NAME, available_extensions)?
             }
             "buffer_device_address" if api_version < vk::API_VERSION_1_2 => {
                 self.require_extension(ash::khr::buffer_device_address::NAME, available_extensions)?
@@ -848,6 +967,34 @@ impl FeatureRequest<'static> {
             push_feature_chain(&mut self.features2, &mut self.conditional_rendering);
             self.use_feature_chain = true;
         }
+        if self.custom_border_color.custom_border_colors == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.custom_border_color);
+            self.use_feature_chain = true;
+        }
+        if self
+            .extended_dynamic_state3
+            .extended_dynamic_state3_polygon_mode
+            == vk::TRUE
+            || self
+                .extended_dynamic_state3
+                .extended_dynamic_state3_rasterization_samples
+                == vk::TRUE
+            || self
+                .extended_dynamic_state3
+                .extended_dynamic_state3_color_blend_enable
+                == vk::TRUE
+        {
+            push_feature_chain(&mut self.features2, &mut self.extended_dynamic_state3);
+            self.use_feature_chain = true;
+        }
+        if self.vertex_input_dynamic_state.vertex_input_dynamic_state == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.vertex_input_dynamic_state);
+            self.use_feature_chain = true;
+        }
+        if self.shader_object.shader_object == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.shader_object);
+            self.use_feature_chain = true;
+        }
     }
 
     fn has_descriptor_indexing_features(&self) -> bool {
@@ -909,10 +1056,15 @@ fn is_known_feature_name(name: &str) -> bool {
                 | "attachment_fragment_shading_rate"
                 | "memory_priority"
                 | "conditional_rendering"
+                | "custom_border_color"
+                | "custom_border_colors"
                 | "push_descriptor"
                 | "push_descriptors"
                 | "conservative_rasterization"
                 | "global_queue_priority"
+                | "extended_dynamic_state3"
+                | "vertex_input_dynamic_state"
+                | "shader_object"
         )
 }
 
