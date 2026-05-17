@@ -174,7 +174,13 @@ impl TypePool {
         }
     }
 
-    fn alloc(&mut self, device: &Device, size: u64, alignment: u64) -> Result<Allocation> {
+    fn alloc(
+        &mut self,
+        device: &Device,
+        size: u64,
+        alignment: u64,
+        priority: Option<f32>,
+    ) -> Result<Allocation> {
         // Try existing blocks first.
         for block in &mut self.blocks {
             if let Some(offset) = block.allocate(size, alignment, self.memory_type)? {
@@ -197,9 +203,16 @@ impl TypePool {
         } else {
             DEVICE_LOCAL_BLOCK_SIZE.max(size)
         };
-        let alloc_info = vk::MemoryAllocateInfo::default()
+        let mut alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(block_capacity)
             .memory_type_index(self.memory_type);
+        // GFX-1e: chain VkMemoryPriorityAllocateInfoEXT when memory priority is available.
+        let mut priority_info;
+        if let Some(p) = priority {
+            priority_info = vk::MemoryPriorityAllocateInfoEXT::default().priority(p);
+            alloc_info = alloc_info.push_next(&mut priority_info);
+        }
+        let alloc_info = alloc_info;
         let memory = unsafe {
             device
                 .allocate_memory(&alloc_info, None)
@@ -307,6 +320,8 @@ pub struct AllocatorStats {
 pub struct GpuAllocator {
     memory_properties: vk::PhysicalDeviceMemoryProperties,
     pools: Vec<TypePool>,
+    /// `VK_EXT_memory_priority` is available; chained into every allocation.
+    pub memory_priority_enabled: bool,
 }
 
 // Safety: GpuAllocator is only accessed through Mutex<ResourceRegistry> in VulkanBackend.
@@ -320,6 +335,7 @@ impl GpuAllocator {
         Self {
             memory_properties,
             pools: Vec::new(),
+            memory_priority_enabled: false,
         }
     }
 
@@ -334,6 +350,15 @@ impl GpuAllocator {
             .property_flags
             .contains(vk::MemoryPropertyFlags::HOST_VISIBLE);
 
+        // GFX-1e: assign memory priority when the extension is available.
+        // Device-local (GPU-only) memory gets 0.7 (scene geometry priority).
+        // Host-visible (staging) memory gets 0.1 so it is evicted first under pressure.
+        let priority = if self.memory_priority_enabled {
+            Some(if host_visible { 0.1 } else { 0.7 })
+        } else {
+            None
+        };
+
         let pool_index = match self.pools.iter().position(|p| p.memory_type == memory_type) {
             Some(index) => index,
             None => {
@@ -342,7 +367,7 @@ impl GpuAllocator {
             }
         };
         let pool = &mut self.pools[pool_index];
-        pool.alloc(device, requirements.size, requirements.alignment)
+        pool.alloc(device, requirements.size, requirements.alignment, priority)
     }
 
     pub fn dealloc(&mut self, device: &Device, alloc: Allocation) -> Result<()> {

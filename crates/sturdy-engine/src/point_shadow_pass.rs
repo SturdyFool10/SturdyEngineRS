@@ -121,12 +121,16 @@ impl PointShadowPass {
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Vertex,
                     requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                 }),
                 fragment: ShaderDesc {
                     source: ShaderSource::Inline(POINT_SHADOW_DEPTH_FRAGMENT.into()),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                 },
                 vertex_kind: MeshVertexKind::V3d,
                 alpha_blend: false,
@@ -249,6 +253,7 @@ fn dp_image_desc(resolution: u32, debug_name: &'static str) -> ImageDesc {
         transient: false,
         clear_value: None,
         debug_name: Some(debug_name),
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
     }
 }
 

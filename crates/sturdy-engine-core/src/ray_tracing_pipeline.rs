@@ -59,6 +59,10 @@ pub struct RayTracingPipelineDesc {
     pub groups: Vec<RtShaderGroupDesc>,
     pub max_recursion_depth: u32,
     pub layout: Option<PipelineLayoutHandle>,
+    /// When `true` and `VK_KHR_pipeline_library` is available, pre-compile hit-group shader
+    /// libraries once per material and link them into the final pipeline at TLAS build time.
+    /// Reduces recompilation cost when only hit shaders change across scene RT pipelines.
+    pub use_pipeline_libraries: bool,
 }
 
 /// Shader group indices to pack into a shader binding table.

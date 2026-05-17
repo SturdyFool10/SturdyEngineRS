@@ -16,6 +16,9 @@ pub struct SurfaceCapabilities {
     pub max_image_count: u32,
     pub current_width: u32,
     pub current_height: u32,
+    /// `true` when `VK_EXT_hdr_metadata` is available and `set_hdr_metadata` will
+    /// call through to the driver. Requires `BackendFeatures::hdr_output`.
+    pub hdr_metadata_supported: bool,
 }
 
 impl Default for SurfaceCapabilities {
@@ -27,6 +30,7 @@ impl Default for SurfaceCapabilities {
             max_image_count: 0,
             current_width: 0,
             current_height: 0,
+            hdr_metadata_supported: false,
         }
     }
 }

@@ -9,18 +9,19 @@ use crate::backend::{Backend, BackendKind, factory};
 use crate::handles::HandleAllocator;
 use crate::shader_object::{ShaderObjectDesc, ShaderObjectHandle};
 use crate::{
-    AccelerationStructureBuildSizes, AccelerationStructureDesc, AccelerationStructureHandle,
-    AdapterInfo, AdapterSelection, AntiLagMode, BackendRawCapabilities, BindGroupDesc,
-    BindGroupHandle, BindingKind, BlasBuildDesc, BufferDesc, BufferHandle, BufferStateKey,
-    BufferUsage, CanonicalGroupLayout, CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error,
-    ExternalBufferDesc, ExternalImageDesc, Format, FormatCapabilities, FrameHandle, GpuCaptureDesc,
-    GpuCaptureTool, GraphicsPipelineDesc, HdrMetadata, ImageDesc, ImageHandle, ImageStateKey,
-    ImageUsage, LatencyMode, NativeHandleCapabilities, PipelineHandle, PipelineLayoutHandle,
-    RayTracingPipelineDesc, ReflexMode, RenderGraph, ResourceBinding, Result, RgState, SamplerDesc,
-    SamplerHandle, ShaderBindingTable, ShaderBindingTableDesc, ShaderBindingTableRegion,
-    ShaderDesc, ShaderHandle, ShaderReflection, ShaderSource, StageMask, SubmissionHandle,
-    SurfaceCapabilities, SurfaceEvent, SurfaceHandle, SurfaceHdrCaps, SurfaceInfo,
-    SurfaceRecreateDesc, SurfaceSize, TlasBuildDesc, VideoSessionDesc, VideoSessionHandle,
+    AccelerationStructureBuildMode, AccelerationStructureBuildSizes, AccelerationStructureDesc,
+    AccelerationStructureHandle, AdapterInfo, AdapterSelection, AntiLagMode,
+    BackendRawCapabilities, BindGroupDesc, BindGroupHandle, BindingKind, BlasBuildDesc, BufferDesc,
+    BufferHandle, BufferStateKey, BufferUsage, CanonicalGroupLayout, CanonicalPipelineLayout, Caps,
+    ComputePipelineDesc, Error, ExternalBufferDesc, ExternalImageDesc, Format, FormatCapabilities,
+    FrameHandle, GpuCaptureDesc, GpuCaptureTool, GraphicsPipelineDesc, HdrMetadata, ImageDesc,
+    ImageHandle, ImageStateKey, ImageUsage, LatencyMode, NativeHandleCapabilities, PipelineHandle,
+    PipelineLayoutHandle, RayTracingPipelineDesc, ReflexMode, RenderGraph, ResourceBinding, Result,
+    RgState, SamplerDesc, SamplerHandle, ShaderBindingTable, ShaderBindingTableDesc,
+    ShaderBindingTableRegion, ShaderDesc, ShaderHandle, ShaderReflection, ShaderSource, StageMask,
+    SubmissionHandle, SurfaceCapabilities, SurfaceEvent, SurfaceHandle, SurfaceHdrCaps,
+    SurfaceInfo, SurfaceRecreateDesc, SurfaceSize, TlasBuildDesc, VideoSessionDesc,
+    VideoSessionHandle,
 };
 
 #[derive(Clone, Debug)]
@@ -339,6 +340,19 @@ impl Device {
             .expect("device mutex poisoned")
             .backend
             .memory_budget()
+    }
+
+    /// Per-heap memory budget from `VK_EXT_memory_budget`.
+    ///
+    /// Returns `None` when the extension is unavailable. More precise than `memory_budget()`
+    /// because the driver reports actual OS-level budget including other processes.
+    pub fn memory_budget_ext(&self) -> Option<crate::MemoryBudgetReport> {
+        //panic allowed, reason = "poisoned device mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .memory_budget_ext()
     }
 
     // ── Bindless descriptor heap (Track 8a) ───────────────────────────────────
@@ -771,6 +785,15 @@ impl Device {
         validate_blas_build_desc(desc)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self.inner.lock().expect("device mutex poisoned");
+        if desc.mode == AccelerationStructureBuildMode::Compact {
+            let src = desc.src.ok_or_else(|| {
+                Error::InvalidInput("BLAS compaction size query requires a source".into())
+            })?;
+            return compact_acceleration_structure_build_sizes(
+                acceleration_structure_desc(&inner, src)?,
+                crate::AccelerationStructureKind::BottomLevel,
+            );
+        }
         validate_as_handle(&inner, desc.dst)?;
         if let Some(src) = desc.src {
             validate_as_handle(&inner, src)?;
@@ -797,6 +820,15 @@ impl Device {
         validate_tlas_build_desc(desc)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self.inner.lock().expect("device mutex poisoned");
+        if desc.mode == AccelerationStructureBuildMode::Compact {
+            let src = desc.src.ok_or_else(|| {
+                Error::InvalidInput("TLAS compaction size query requires a source".into())
+            })?;
+            return compact_acceleration_structure_build_sizes(
+                acceleration_structure_desc(&inner, src)?,
+                crate::AccelerationStructureKind::TopLevel,
+            );
+        }
         validate_as_handle(&inner, desc.dst)?;
         if let Some(src) = desc.src {
             validate_as_handle(&inner, src)?;
@@ -1533,6 +1565,52 @@ impl Device {
             .latency_mode()
     }
 
+    /// Number of shader cores, compute units, or SMs reported by the GPU driver.
+    ///
+    /// AMD: total compute units (`shader_engine_count × arrays_per_engine × CUs_per_array`)
+    /// via `VK_AMD_shader_core_properties`.
+    ///
+    /// NVIDIA: SM count via `VK_NV_shader_sm_builtins`.
+    ///
+    /// Returns `None` when neither vendor extension is available. Use this to
+    /// tune compute workgroup counts and tile sizes to the actual hardware width.
+    pub fn shader_core_count(&self) -> Option<u32> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .caps()
+            .shader_core_count
+    }
+
+    /// Block the calling thread until the driver signals the optimal frame-start time.
+    ///
+    /// Call once per frame on the render thread, before input sampling, when NVIDIA Reflex
+    /// is active. Has no effect (returns `Ok(())`) when Reflex is unavailable.
+    ///
+    /// Requires `BackendFeatures::reflex` and `BackendFeatures::timeline_semaphores`.
+    pub fn latency_sleep(&self, surface: SurfaceHandle) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .latency_sleep(surface)
+    }
+
+    /// Notify AMD Anti-Lag that a new frame has started; call before input sampling.
+    ///
+    /// Has no effect when `BackendFeatures::anti_lag` is false. No feature check needed.
+    pub fn anti_lag_frame_start(&self) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .anti_lag_frame_start()
+    }
+
     /// Set SMPTE ST 2086 / CTA 861.3 HDR mastering display metadata on a
     /// surface.  Has no effect when `BackendFeatures::hdr_output` is false or
     /// the swapchain is not in an HDR color space.
@@ -2014,6 +2092,14 @@ fn align_up_u64(value: u64, alignment: u64) -> Result<u64> {
 }
 
 fn validate_blas_build_desc(desc: &BlasBuildDesc) -> Result<()> {
+    if desc.mode == AccelerationStructureBuildMode::Compact {
+        if desc.src.is_none() {
+            return Err(Error::InvalidInput(
+                "BLAS compaction requires a source acceleration structure".into(),
+            ));
+        }
+        return Ok(());
+    }
     if desc.geometries.is_empty() {
         return Err(Error::InvalidInput(
             "BLAS build requires at least one geometry".into(),
@@ -2051,12 +2137,48 @@ fn validate_blas_build_desc(desc: &BlasBuildDesc) -> Result<()> {
 }
 
 fn validate_tlas_build_desc(desc: &TlasBuildDesc) -> Result<()> {
+    if desc.mode == AccelerationStructureBuildMode::Compact {
+        if desc.src.is_none() {
+            return Err(Error::InvalidInput(
+                "TLAS compaction requires a source acceleration structure".into(),
+            ));
+        }
+        return Ok(());
+    }
     if desc.instance_count == 0 {
         return Err(Error::InvalidInput(
             "TLAS build instance_count must be non-zero".into(),
         ));
     }
     Ok(())
+}
+
+fn acceleration_structure_desc(
+    inner: &DeviceInner,
+    handle: AccelerationStructureHandle,
+) -> Result<AccelerationStructureDesc> {
+    inner
+        .acceleration_structures
+        .get(&handle)
+        .copied()
+        .ok_or(Error::InvalidHandle)
+}
+
+fn compact_acceleration_structure_build_sizes(
+    src_desc: AccelerationStructureDesc,
+    expected_kind: crate::AccelerationStructureKind,
+) -> Result<AccelerationStructureBuildSizes> {
+    if src_desc.kind != expected_kind {
+        return Err(Error::InvalidInput(format!(
+            "compaction source kind {:?} does not match expected {:?}",
+            src_desc.kind, expected_kind
+        )));
+    }
+    Ok(AccelerationStructureBuildSizes {
+        acceleration_structure_size: src_desc.size,
+        build_scratch_size: 0,
+        update_scratch_size: 0,
+    })
 }
 
 fn validate_sample_count(samples: u8, max_supported: u8, label: &str) -> Result<()> {
@@ -2426,6 +2548,89 @@ mod tests {
 
         assert!(matches!(err, Error::Unsupported(_)));
         assert!(format!("{err}").contains("acceleration structures"));
+    }
+
+    #[test]
+    fn blas_compaction_validation_requires_source_but_not_geometry() {
+        let missing_src = validate_blas_build_desc(&BlasBuildDesc {
+            dst: AccelerationStructureHandle(1),
+            src: None,
+            scratch_buffer: None,
+            geometries: Vec::new(),
+            mode: AccelerationStructureBuildMode::Compact,
+        })
+        .unwrap_err();
+        assert!(format!("{missing_src}").contains("requires a source"));
+
+        validate_blas_build_desc(&BlasBuildDesc {
+            dst: AccelerationStructureHandle(1),
+            src: Some(AccelerationStructureHandle(2)),
+            scratch_buffer: None,
+            geometries: Vec::new(),
+            mode: AccelerationStructureBuildMode::Compact,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn tlas_compaction_validation_requires_source_but_not_instances() {
+        let missing_src = validate_tlas_build_desc(&TlasBuildDesc {
+            dst: AccelerationStructureHandle(1),
+            src: None,
+            scratch_buffer: None,
+            instance_buffer: BufferHandle(2),
+            instance_offset: 0,
+            instance_count: 0,
+            mode: AccelerationStructureBuildMode::Compact,
+        })
+        .unwrap_err();
+        assert!(format!("{missing_src}").contains("requires a source"));
+
+        validate_tlas_build_desc(&TlasBuildDesc {
+            dst: AccelerationStructureHandle(1),
+            src: Some(AccelerationStructureHandle(2)),
+            scratch_buffer: None,
+            instance_buffer: BufferHandle(3),
+            instance_offset: 0,
+            instance_count: 0,
+            mode: AccelerationStructureBuildMode::Compact,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn compaction_sizes_use_source_allocation_as_upper_bound() {
+        let sizes = compact_acceleration_structure_build_sizes(
+            AccelerationStructureDesc {
+                kind: crate::AccelerationStructureKind::BottomLevel,
+                size: 4096,
+            },
+            crate::AccelerationStructureKind::BottomLevel,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sizes,
+            AccelerationStructureBuildSizes {
+                acceleration_structure_size: 4096,
+                build_scratch_size: 0,
+                update_scratch_size: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn compaction_sizes_reject_wrong_source_kind() {
+        let err = compact_acceleration_structure_build_sizes(
+            AccelerationStructureDesc {
+                kind: crate::AccelerationStructureKind::TopLevel,
+                size: 4096,
+            },
+            crate::AccelerationStructureKind::BottomLevel,
+        )
+        .unwrap_err();
+
+        assert!(format!("{err}").contains("source kind"));
     }
 
     #[test]

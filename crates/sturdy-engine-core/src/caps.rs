@@ -12,6 +12,12 @@ pub struct Caps {
     pub limits: Limits,
     pub raw_extension_names: Vec<String>,
     pub raw_feature_names: Vec<String>,
+    /// Number of shader cores/CUs/SMs reported by the GPU (AMD or NVIDIA).
+    ///
+    /// AMD: total compute units (`shader_engine_count × arrays_per_engine × CUs_per_array`).
+    /// NVIDIA: SM count from `VK_NV_shader_sm_builtins`.
+    /// `None` when neither extension is available.
+    pub shader_core_count: Option<u32>,
 }
 
 impl Default for Caps {
@@ -27,6 +33,7 @@ impl Default for Caps {
             limits: Default::default(),
             raw_extension_names: Vec::new(),
             raw_feature_names: Vec::new(),
+            shader_core_count: None,
         }
     }
 }

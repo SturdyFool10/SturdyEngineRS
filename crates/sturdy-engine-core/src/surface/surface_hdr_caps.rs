@@ -49,6 +49,7 @@ mod tests {
             max_image_count: 0,
             current_width: 0,
             current_height: 0,
+            hdr_metadata_supported: false,
         };
 
         let hdr = SurfaceHdrCaps::from_surface_capabilities(&caps);

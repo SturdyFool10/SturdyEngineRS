@@ -126,6 +126,8 @@ impl OitPass {
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                 },
                 vertex: None, // uses mesh_vertex_3d.slang
                 vertex_kind: MeshVertexKind::V3d,
@@ -264,6 +266,7 @@ impl OitPass {
             transient: false,
             clear_value: None,
             debug_name: Some("oit_depth"),
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
         };
         let oit_depth = frame.image("oit_depth", depth_desc)?;
 

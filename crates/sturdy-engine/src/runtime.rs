@@ -545,6 +545,13 @@ impl<'a> AppRuntimeFrame<'a> {
                     d.timings.cpu_p99_ms = Some(p99);
                 }
                 if let Some(report) = FrameTimingReport::from_summary(&d.timings) {
+                    if report.is_jittery() {
+                        eprintln!(
+                            "[SturdyEngine] frame jitter: p99={:.1}ms mean={:.1}ms (p99 > 2× mean)",
+                            report.p99_cpu_ms,
+                            report.mean_cpu_ms
+                        );
+                    }
                     crate::set_global_frame_timing(report);
                 }
             });
@@ -1079,6 +1086,8 @@ pub struct RuntimeSettingsSnapshot {
     pub window_maximized: bool,
     pub window_always_on_top: bool,
     pub window_corner_style: WindowCornerStyle,
+    pub shader_hot_reload_policy: String,
+    pub asset_hot_reload_policy: String,
 }
 
 impl Default for RuntimeSettingsSnapshot {
@@ -1111,6 +1120,8 @@ impl Default for RuntimeSettingsSnapshot {
             window_maximized: false,
             window_always_on_top: false,
             window_corner_style: WindowCornerStyle::Default,
+            shader_hot_reload_policy: "Manual".to_string(),
+            asset_hot_reload_policy: "Manual".to_string(),
         }
     }
 }
@@ -1437,6 +1448,14 @@ impl RuntimeShared {
                 window_corner_style_setting_name(settings.window_corner_style).to_string(),
             ),
         );
+        self.sync_engine_value(
+            RuntimeSettingKey::ShaderHotReloadPolicy,
+            RuntimeSettingValue::Text(settings.shader_hot_reload_policy.clone()),
+        );
+        self.sync_engine_value(
+            RuntimeSettingKey::AssetHotReloadPolicy,
+            RuntimeSettingValue::Text(settings.asset_hot_reload_policy.clone()),
+        );
     }
 
     fn sync_engine_capabilities(
@@ -1570,14 +1589,6 @@ impl RuntimeShared {
             RuntimeSettingKey::AdapterSelection,
             "live adapter migration is not implemented yet",
         );
-        self.set_unsupported(
-            RuntimeSettingKey::ShaderHotReloadPolicy,
-            "shader hot reload policy changes are not implemented yet",
-        );
-        self.set_unsupported(
-            RuntimeSettingKey::AssetHotReloadPolicy,
-            "asset hot reload policy changes are not implemented yet",
-        );
     }
 
     fn set_unsupported(&mut self, setting: RuntimeSettingKey, reason: &str) {
@@ -1646,6 +1657,7 @@ impl RuntimeShared {
         }
 
         entry.value = applied_value.clone();
+        sync_runtime_settings_snapshot_value(&mut self.settings, &id, &applied_value);
         self.settings_revision += 1;
         entry.revision = self.settings_revision;
         self.change_log.push(RuntimeSettingChange {
@@ -1717,6 +1729,24 @@ fn clamp_runtime_setting_value(
             }
         }
         (_, value) => (value, None),
+    }
+}
+
+fn sync_runtime_settings_snapshot_value(
+    settings: &mut RuntimeSettingsSnapshot,
+    id: &RuntimeSettingId,
+    value: &RuntimeSettingValue,
+) {
+    match (id, value) {
+        (
+            RuntimeSettingId::Engine(RuntimeSettingKey::ShaderHotReloadPolicy),
+            RuntimeSettingValue::Text(policy),
+        ) => settings.shader_hot_reload_policy = policy.clone(),
+        (
+            RuntimeSettingId::Engine(RuntimeSettingKey::AssetHotReloadPolicy),
+            RuntimeSettingValue::Text(policy),
+        ) => settings.asset_hot_reload_policy = policy.clone(),
+        _ => {}
     }
 }
 
@@ -2089,9 +2119,7 @@ impl RuntimeSettingKey {
             | Self::WindowAlwaysOnTop
             | Self::WindowCornerStyle
             | Self::WindowBackgroundEffect => RuntimeApplyPath::WindowReconfigure,
-            Self::AntiAliasingMode | Self::ShaderHotReloadPolicy | Self::AssetHotReloadPolicy => {
-                RuntimeApplyPath::GraphRebuild
-            }
+            Self::AntiAliasingMode => RuntimeApplyPath::GraphRebuild,
             Self::AntiAliasingDial
             | Self::BloomEnabled
             | Self::BloomOnly
@@ -2099,6 +2127,8 @@ impl RuntimeSettingKey {
             | Self::ToneMappingDial
             | Self::MotionDebugView
             | Self::OverlayVisibility
+            | Self::ShaderHotReloadPolicy
+            | Self::AssetHotReloadPolicy
             | Self::LatencyMode
             | Self::FramePacingMode
             | Self::MaxFramesInFlight
@@ -2300,7 +2330,8 @@ enum RuntimePendingSettingChange {
 }
 
 impl<'a> RuntimeSettingsTransaction<'a> {
-    /// Record a placeholder change request.
+    /// Record that an existing setting should emit an apply notification
+    /// without changing its value.
     pub fn note_change(mut self, setting: RuntimeSettingKey) -> Self {
         self.pending
             .push(RuntimePendingSettingChange::Note(setting.into()));
@@ -2639,16 +2670,16 @@ fn default_setting_entries(
             RuntimeSettingKey::ShaderHotReloadPolicy,
             "Shader Hot Reload Policy",
             RuntimeSettingKey::ShaderHotReloadPolicy.apply_path(),
-            "Manual",
+            settings.shader_hot_reload_policy.clone(),
         )
-        .with_options(text_options(&["Manual"])),
+        .with_options(text_options(&["Disabled", "Manual", "Automatic"])),
         RuntimeSettingDescriptor::new(
             RuntimeSettingKey::AssetHotReloadPolicy,
             "Asset Hot Reload Policy",
             RuntimeSettingKey::AssetHotReloadPolicy.apply_path(),
-            "Manual",
+            settings.asset_hot_reload_policy.clone(),
         )
-        .with_options(text_options(&["Manual"])),
+        .with_options(text_options(&["Disabled", "Manual", "Automatic"])),
     ];
 
     descriptors

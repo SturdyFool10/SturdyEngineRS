@@ -36,13 +36,13 @@ use crate::{Engine, GraphImage, RenderFrame, Result, ShaderProgram, StageMask};
 
 // ── Config types ──────────────────────────────────────────────────────────────
 
-/// Auto-exposure (eye adaptation) configuration.
+/// Reserved auto-exposure (eye adaptation) configuration.
 ///
-/// When enabled, the engine derives scene exposure from a per-frame luminance
-/// histogram and smoothly interpolates toward the target EV each frame.
+/// The public fields match the planned luminance-histogram implementation, but
+/// the runtime pass is not executable until the engine has a reduction/history
+/// resource for scene luminance. `PostProcessPasses::execute` returns
+/// `Error::Unsupported` when this is enabled.
 ///
-/// The compute shader for histogram analysis is not yet implemented; this
-/// config is provided now so code can be written against the final API.
 #[derive(Clone, Debug)]
 pub struct AutoExposureConfig {
     pub enabled: bool,
@@ -155,12 +155,30 @@ impl Default for CaConfig {
 ///
 /// Applies a dirt/grime texture mask over the bloom result to simulate
 /// lens imperfections. Disabled by default.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct LensConfig {
     /// Multiplier for the dirt overlay. Default: 0.0 (no dirt).
     pub dirt_strength: f32,
     /// Enable a simple lens flare simulation. Default: false.
     pub flare_enabled: bool,
+    /// Flare intensity multiplier used when `flare_enabled` is true. Default: 0.25.
+    pub flare_strength: f32,
+}
+
+impl LensConfig {
+    pub fn enabled(&self) -> bool {
+        self.dirt_strength > 0.0 || self.flare_enabled
+    }
+}
+
+impl Default for LensConfig {
+    fn default() -> Self {
+        Self {
+            dirt_strength: 0.0,
+            flare_enabled: false,
+            flare_strength: 0.25,
+        }
+    }
 }
 
 /// Unified post-processing configuration.
@@ -180,7 +198,7 @@ pub struct LensConfig {
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct PostProcessConfig {
-    /// Eye-adaptation auto-exposure (shader not yet implemented; config ready).
+    /// Eye-adaptation auto-exposure (reserved; enabling returns `Unsupported`).
     pub auto_exposure: AutoExposureConfig,
     /// Animated film grain added after tone mapping.
     pub grain: GrainConfig,
@@ -188,7 +206,7 @@ pub struct PostProcessConfig {
     pub vignette: VignetteConfig,
     /// RGB channel separation toward screen edges.
     pub chromatic_aberration: CaConfig,
-    /// Lens dirt / flare overlay (shader not yet implemented; config ready).
+    /// Lens dirt / flare overlay.
     pub lens: LensConfig,
 }
 
@@ -218,6 +236,15 @@ struct CaConstants {
     strength: f32,
     radial_falloff: f32,
     _pad: [f32; 2],
+}
+
+#[push_constants]
+#[derive(Debug, Default)]
+struct LensConstants {
+    dirt_strength: f32,
+    flare_enabled: u32,
+    flare_strength: f32,
+    _pad: f32,
 }
 
 // ── Individual passes ─────────────────────────────────────────────────────────
@@ -338,6 +365,52 @@ pub struct CaPass {
     program: ShaderProgram,
 }
 
+/// Lens dirt and flare post-processing pass.
+///
+/// Adds a procedural dirt mask and simple display-space flare highlights after
+/// tone mapping. Backed by `lens_dirt_flare.slang`.
+pub struct LensPass {
+    program: ShaderProgram,
+}
+
+impl LensPass {
+    pub fn new(engine: &Engine) -> Result<Self> {
+        let program = ShaderProgram::from_inline_fragment(
+            engine,
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/shaders/lens_dirt_flare.slang"
+            )),
+        )?;
+        Ok(Self { program })
+    }
+
+    pub fn execute(
+        &self,
+        input: &GraphImage,
+        frame: &RenderFrame,
+        config: &LensConfig,
+    ) -> Result<GraphImage> {
+        if !config.enabled() {
+            return Ok(input.clone());
+        }
+        input.register_as("lens_input");
+        let output = frame.image_sized_to("lens_output", input.desc().format, input)?;
+        let constants = LensConstants {
+            dirt_strength: config.dirt_strength.max(0.0),
+            flare_enabled: config.flare_enabled as u32,
+            flare_strength: config.flare_strength.max(0.0),
+            _pad: 0.0,
+        };
+        output.execute_shader_with_push_constants(
+            &self.program,
+            StageMask::FRAGMENT,
+            bytemuck::bytes_of(&constants),
+        )?;
+        Ok(output)
+    }
+}
+
 impl CaPass {
     /// Create the pass, compiling the built-in CA shader.
     pub fn new(engine: &Engine) -> Result<Self> {
@@ -395,6 +468,7 @@ pub struct PostProcessPasses {
     pub grain: GrainPass,
     pub vignette: VignettePass,
     pub ca: CaPass,
+    pub lens: LensPass,
 }
 
 impl PostProcessPasses {
@@ -404,11 +478,12 @@ impl PostProcessPasses {
             grain: GrainPass::new(engine)?,
             vignette: VignettePass::new(engine)?,
             ca: CaPass::new(engine)?,
+            lens: LensPass::new(engine)?,
         })
     }
 
     /// Apply the full post-process stack in roadmap order:
-    /// **Grain → Vignette → CA**
+    /// **Lens → Grain → Vignette → CA**
     ///
     /// Each disabled pass is a no-op (no GPU work, O(1) clone).
     /// Returns the final output image ready for presentation.
@@ -419,7 +494,15 @@ impl PostProcessPasses {
         config: &PostProcessConfig,
         time_secs: f32,
     ) -> Result<GraphImage> {
-        let after_grain = self.grain.execute(input, frame, &config.grain, time_secs)?;
+        if config.auto_exposure.enabled {
+            return Err(crate::Error::Unsupported(
+                "auto-exposure requires luminance histogram/reduction support that is not implemented yet",
+            ));
+        }
+        let after_lens = self.lens.execute(input, frame, &config.lens)?;
+        let after_grain = self
+            .grain
+            .execute(&after_lens, frame, &config.grain, time_secs)?;
         let after_vignette = self
             .vignette
             .execute(&after_grain, frame, &config.vignette)?;
@@ -427,5 +510,48 @@ impl PostProcessPasses {
             .ca
             .execute(&after_vignette, frame, &config.chromatic_aberration)?;
         Ok(after_ca)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lens_config_defaults_to_disabled() {
+        let config = LensConfig::default();
+
+        assert!(!config.enabled());
+        assert_eq!(config.dirt_strength, 0.0);
+        assert!(!config.flare_enabled);
+        assert_eq!(config.flare_strength, 0.25);
+    }
+
+    #[test]
+    fn lens_config_enables_for_dirt_or_flare() {
+        assert!(
+            LensConfig {
+                dirt_strength: 0.1,
+                ..Default::default()
+            }
+            .enabled()
+        );
+        assert!(
+            LensConfig {
+                flare_enabled: true,
+                ..Default::default()
+            }
+            .enabled()
+        );
+    }
+
+    #[test]
+    fn auto_exposure_documents_reserved_runtime_behavior() {
+        let config = AutoExposureConfig {
+            enabled: true,
+            ..Default::default()
+        };
+
+        assert!(config.enabled);
     }
 }

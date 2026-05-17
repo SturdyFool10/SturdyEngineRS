@@ -323,6 +323,7 @@ impl Frame {
             transient: false,
             clear_value: None,
             debug_name: Some("uploaded texture"),
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
         })?;
         let allocation = self.upload_arena.upload(&self.engine, data)?;
         let (staging_handle, staging_desc) = {

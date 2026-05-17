@@ -824,6 +824,7 @@ impl Scene {
                 transient: false,
                 clear_value: None,
                 debug_name: None,
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
             },
         )?;
         self.draw_batches(&constants, view_proj, output, Some(&depth), frame, engine)

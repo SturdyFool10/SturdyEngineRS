@@ -120,6 +120,7 @@ impl CpuProceduralTexture2d {
             transient: false,
             clear_value: None,
             debug_name: Some("cpu procedural texture"),
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
         })?;
         let _ = image.set_debug_name(&format!("cpu-procedural-{name}"));
         Ok(Self {

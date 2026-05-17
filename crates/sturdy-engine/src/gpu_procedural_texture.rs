@@ -58,6 +58,7 @@ impl GpuProceduralTexture {
             transient: false,
             clear_value: None,
             debug_name: None,
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
         };
         let image = engine.create_image(desc)?;
         let _ = image.set_debug_name(&format!("gpu-proc-{name}"));

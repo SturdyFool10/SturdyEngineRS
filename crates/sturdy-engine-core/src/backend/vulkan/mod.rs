@@ -73,6 +73,10 @@ pub struct VulkanBackend {
     dynamic_rendering_khr: Option<ash::khr::dynamic_rendering::Device>,
     /// VK_EXT_device_fault commands. Present when device fault extension is available.
     device_fault_ext: Option<ash::ext::device_fault::Device>,
+    /// VK_NV_device_diagnostic_checkpoints — pass markers that survive device loss (debug builds only).
+    diagnostic_checkpoints_nv: Option<ash::nv::device_diagnostic_checkpoints::Device>,
+    /// VK_AMD_buffer_marker — breadcrumb writes into a GPU buffer at each pipeline stage (debug builds only).
+    buffer_marker_amd: Option<ash::amd::buffer_marker::Device>,
     /// VK_KHR_push_descriptor commands. Present when push_descriptors is enabled.
     push_descriptor_khr: Option<ash::khr::push_descriptor::Device>,
     /// VK_EXT_conditional_rendering commands. Present when conditional_rendering is enabled.
@@ -90,6 +94,11 @@ pub struct VulkanBackend {
     reflex_nv: Option<ash::nv::low_latency2::Device>,
     /// Desired Reflex mode; applied per-swapchain during flush when a swapchain is active.
     reflex_mode: std::sync::atomic::AtomicU8,
+    /// Timeline semaphore used by vkLatencySleepNV to signal when to start the frame.
+    /// Present when both `reflex` and `timeline_semaphores` are available.
+    reflex_sleep_semaphore: Option<vk::Semaphore>,
+    /// Monotonically-increasing value signaled into `reflex_sleep_semaphore` each frame.
+    reflex_sleep_value: std::sync::atomic::AtomicU64,
     /// VK_EXT_hdr_metadata commands. Present when hdr_output is available.
     hdr_metadata_ext: Option<ash::ext::hdr_metadata::Device>,
     /// VK_EXT_extended_dynamic_state3 commands. Present when the feature is enabled.
@@ -150,11 +159,31 @@ impl VulkanBackend {
             && caps.features.extended_dynamic_state3_color_blend;
         caps.features.vertex_input_dynamic_state = logical.vertex_input_dynamic_state_enabled;
         caps.features.shader_object = logical.shader_object_enabled && caps.features.shader_object;
+        // Raw video extensions are exposed through `raw_extension_names`, but
+        // runtime video features stay disabled until this backend owns real
+        // VkVideoSessionKHR objects, parameter sets, memory binding, and command
+        // recording. This keeps Device::create_video_session's feature gate
+        // truthful instead of advertising an API that always fails later.
+        caps.features.disable_video_features();
+        // Same policy for DGC: raw extension names remain visible for diagnostics,
+        // but executable support waits for layout/resource ownership and command
+        // recording through VK_EXT_device_generated_commands or the NV variant.
+        caps.features.disable_device_generated_command_features();
+        // VK_NV_optical_flow also requires backend-owned sessions and command
+        // recording before the render graph can execute it.
+        caps.features.disable_optical_flow_features();
+        // VK_AMD_anti_lag is detected in raw extensions, but there is no Vulkan
+        // control path wired yet. Keep runtime features limited to controllable
+        // latency modes.
+        caps.features.disable_anti_lag_features();
         let props = unsafe { instance.get_physical_device_properties(selection.physical_device) };
         let timestamp_period_ns = props.limits.timestamp_period;
         let memory_properties =
             unsafe { instance.get_physical_device_memory_properties(selection.physical_device) };
-        let resource_registry = resources::ResourceRegistry::new(memory_properties);
+        let mut resource_registry = resources::ResourceRegistry::new(memory_properties);
+        resource_registry.image_view_min_lod_enabled = caps.features.image_view_min_lod;
+        resource_registry.image_compression_control_enabled = caps.features.image_compression_control;
+        resource_registry.allocator_mut().memory_priority_enabled = caps.features.memory_priority;
         let commands = commands::FramedCommands::create(
             &logical.device,
             logical.queue_families,
@@ -203,6 +232,29 @@ impl VulkanBackend {
         } else {
             None
         };
+        #[cfg(debug_assertions)]
+        let diagnostic_checkpoints_nv = if caps.features.device_diagnostic_checkpoints_nv {
+            Some(ash::nv::device_diagnostic_checkpoints::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        #[cfg(not(debug_assertions))]
+        let diagnostic_checkpoints_nv: Option<ash::nv::device_diagnostic_checkpoints::Device> =
+            None;
+        #[cfg(debug_assertions)]
+        let buffer_marker_amd = if caps.features.buffer_marker_amd {
+            Some(ash::amd::buffer_marker::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        #[cfg(not(debug_assertions))]
+        let buffer_marker_amd: Option<ash::amd::buffer_marker::Device> = None;
         let push_descriptor_khr = if logical.push_descriptors_enabled {
             Some(ash::khr::push_descriptor::Device::new(
                 &instance,
@@ -255,6 +307,18 @@ impl VulkanBackend {
                 &instance,
                 &logical.device,
             ))
+        } else {
+            None
+        };
+        // Create a timeline semaphore for vkLatencySleepNV when both Reflex and timeline
+        // semaphores are available. The semaphore is signaled by the driver each frame when
+        // it's the optimal time to begin CPU work.
+        let reflex_sleep_semaphore = if caps.features.reflex && caps.features.timeline_semaphores {
+            let mut timeline_info = ash::vk::SemaphoreTypeCreateInfo::default()
+                .semaphore_type(ash::vk::SemaphoreType::TIMELINE)
+                .initial_value(0);
+            let sem_info = ash::vk::SemaphoreCreateInfo::default().push_next(&mut timeline_info);
+            unsafe { logical.device.create_semaphore(&sem_info, None).ok() }
         } else {
             None
         };
@@ -328,6 +392,8 @@ impl VulkanBackend {
             synchronization2_khr,
             dynamic_rendering_khr,
             device_fault_ext,
+            diagnostic_checkpoints_nv,
+            buffer_marker_amd,
             push_descriptor_khr,
             conditional_rendering_ext,
             fragment_shading_rate_khr,
@@ -337,6 +403,8 @@ impl VulkanBackend {
             ray_tracing_sbt_properties,
             reflex_nv,
             reflex_mode: std::sync::atomic::AtomicU8::new(0),
+            reflex_sleep_semaphore,
+            reflex_sleep_value: std::sync::atomic::AtomicU64::new(0),
             hdr_metadata_ext,
             extended_dynamic_state3_ext,
             vertex_input_dynamic_state_ext,
@@ -438,6 +506,27 @@ impl Backend for VulkanBackend {
             host_visible_capacity_bytes: stats.host_visible_capacity_bytes,
             block_count: stats.block_count,
         })
+    }
+
+    fn memory_budget_ext(&self) -> Option<crate::MemoryBudgetReport> {
+        if !self.caps.features.memory_budget {
+            return None;
+        }
+        let mut budget_props = ash::vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+        let mut props2 = ash::vk::PhysicalDeviceMemoryProperties2::default()
+            .push_next(&mut budget_props);
+        unsafe {
+            self.instance
+                .get_physical_device_memory_properties2(self.physical_device, &mut props2);
+        }
+        let heap_count = props2.memory_properties.memory_heap_count as usize;
+        let heaps = (0..heap_count)
+            .map(|i| crate::MemoryHeapBudget {
+                budget: budget_props.heap_budget[i],
+                usage: budget_props.heap_usage[i],
+            })
+            .collect();
+        Some(crate::MemoryBudgetReport { heaps })
     }
 
     fn register_bindless_sampled_image(&self, handle: ImageHandle) -> Option<u32> {
@@ -581,6 +670,21 @@ impl Backend for VulkanBackend {
         let as_ext = self.acceleration_structure_khr.as_ref().ok_or_else(|| {
             Error::Unsupported("VK_KHR_acceleration_structure is not enabled".into())
         })?;
+        if desc.mode == AccelerationStructureBuildMode::Compact {
+            let src = desc.src.ok_or_else(|| {
+                Error::InvalidInput("BLAS compaction size query requires a source".into())
+            })?;
+            let resources = self
+                .resources
+                .read()
+                .expect("vulkan resource registry rwlock poisoned");
+            let (kind, size) = resources.acceleration_structure_metadata(src)?;
+            return compact_acceleration_structure_build_sizes(
+                kind,
+                size,
+                AccelerationStructureKind::BottomLevel,
+            );
+        }
         query_blas_build_sizes(as_ext, desc)
     }
 
@@ -588,6 +692,21 @@ impl Backend for VulkanBackend {
         let as_ext = self.acceleration_structure_khr.as_ref().ok_or_else(|| {
             Error::Unsupported("VK_KHR_acceleration_structure is not enabled".into())
         })?;
+        if desc.mode == AccelerationStructureBuildMode::Compact {
+            let src = desc.src.ok_or_else(|| {
+                Error::InvalidInput("TLAS compaction size query requires a source".into())
+            })?;
+            let resources = self
+                .resources
+                .read()
+                .expect("vulkan resource registry rwlock poisoned");
+            let (kind, size) = resources.acceleration_structure_metadata(src)?;
+            return compact_acceleration_structure_build_sizes(
+                kind,
+                size,
+                AccelerationStructureKind::TopLevel,
+            );
+        }
         query_tlas_build_sizes(as_ext, desc)
     }
 
@@ -931,7 +1050,11 @@ impl Backend for VulkanBackend {
         self.surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
-            .query_surface_capabilities(self.physical_device, handle)
+            .query_surface_capabilities(
+                self.physical_device,
+                handle,
+                self.hdr_metadata_ext.is_some(),
+            )
     }
 
     fn set_image_debug_name(&self, handle: ImageHandle, name: &str) {
@@ -1087,6 +1210,9 @@ impl Backend for VulkanBackend {
             self.ray_tracing_pipeline_khr.as_ref(),
             self.shader_object_ext.as_ref(),
             self.caps.features.ray_tracing_position_fetch,
+            self.diagnostic_checkpoints_nv.as_ref(),
+            self.extended_dynamic_state3_ext.as_ref(),
+            self.vertex_input_dynamic_state_ext.as_ref(),
             wait_sem,
             signal_sem,
         );
@@ -1164,32 +1290,88 @@ impl Backend for VulkanBackend {
     // ── GFX-6b: Latency reduction ─────────────────────────────────────────────
 
     fn latency_mode(&self) -> Option<LatencyMode> {
-        if self.caps.features.reflex {
-            return Some(LatencyMode::Reflex(ReflexMode::Off));
-        }
-        if self.caps.features.anti_lag {
-            return Some(LatencyMode::AntiLag(AntiLagMode::Off));
+        if self.reflex_nv.is_some() {
+            let encoded = self.reflex_mode.load(std::sync::atomic::Ordering::Relaxed);
+            return Some(LatencyMode::Reflex(decode_reflex_mode(encoded)));
         }
         None
     }
 
     fn set_reflex_mode(&self, mode: ReflexMode) -> Result<()> {
-        if self.reflex_nv.is_none() {
-            return Err(Error::Unsupported(
-                "NVIDIA Reflex is not available on this device".into(),
-            ));
+        let reflex = self.reflex_nv.as_ref().ok_or_else(|| {
+            Error::Unsupported("NVIDIA Reflex is not available on this device".into())
+        })?;
+        self.reflex_mode.store(
+            encode_reflex_mode(mode),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        // Apply to every active swapchain immediately so the mode takes effect
+        // on the next acquire/present cycle without a surface recreate.
+        let low_latency_mode = !matches!(mode, ReflexMode::Off);
+        let low_latency_boost = matches!(mode, ReflexMode::OnPlusBoost);
+        let sleep_mode_info = ash::vk::LatencySleepModeInfoNV::default()
+            .low_latency_mode(low_latency_mode)
+            .low_latency_boost(low_latency_boost)
+            .minimum_interval_us(0);
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let surfaces = self
+            .surfaces
+            .lock()
+            .expect("vulkan surface registry mutex poisoned");
+        for swapchain in surfaces.all_swapchain_handles() {
+            unsafe {
+                let _ = reflex.set_latency_sleep_mode(swapchain, Some(&sleep_mode_info));
+            }
         }
-        // Encode mode as a u8: 0=Off, 1=On, 2=OnPlusBoost
-        let encoded: u8 = match mode {
-            ReflexMode::Off => 0,
-            ReflexMode::On => 1,
-            ReflexMode::OnPlusBoost => 2,
+        Ok(())
+    }
+
+    fn set_anti_lag_mode(&self, _mode: AntiLagMode) -> Result<()> {
+        Err(Error::Unsupported(
+            "AMD Anti-Lag control is not implemented for the Vulkan backend".into(),
+        ))
+    }
+
+    fn latency_sleep(&self, surface: SurfaceHandle) -> Result<()> {
+        let (reflex, semaphore) = match (self.reflex_nv.as_ref(), self.reflex_sleep_semaphore) {
+            (Some(r), Some(s)) => (r, s),
+            _ => return Ok(()), // Reflex or timeline semaphore not available; no-op
         };
-        self.reflex_mode
-            .store(encoded, std::sync::atomic::Ordering::Relaxed);
-        // TODO: apply per-swapchain when VkSwapchainKHR handles are accessible from here.
-        // vkSetLatencySleepModeNV requires a swapchain handle; the desired mode is stored
-        // above and should be applied in the present path once surface handles are available.
+        let value = self
+            .reflex_sleep_value
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let swapchain = {
+            //panic allowed, reason = "poisoned mutex is unrecoverable"
+            self.surfaces
+                .lock()
+                .expect("vulkan surface registry mutex poisoned")
+                .swapchain_handle(surface)?
+        };
+        let sleep_info = ash::vk::LatencySleepInfoNV::default()
+            .signal_semaphore(semaphore)
+            .value(value);
+        unsafe {
+            reflex
+                .latency_sleep(swapchain, &sleep_info)
+                .map_err(|e| Error::Backend(format!("vkLatencySleepNV failed: {e:?}")))?;
+        }
+        // Wait for the driver to signal the semaphore (it will fire when it's time to start).
+        let wait_info = ash::vk::SemaphoreWaitInfo::default()
+            .semaphores(std::slice::from_ref(&semaphore))
+            .values(std::slice::from_ref(&value));
+        unsafe {
+            self.device
+                .wait_semaphores(&wait_info, u64::MAX)
+                .map_err(|e| Error::Backend(format!("wait_semaphores for Reflex sleep: {e:?}")))?;
+        }
+        Ok(())
+    }
+
+    fn anti_lag_frame_start(&self) -> Result<()> {
+        // VK_AMD_anti_lag: vkAntiLagUpdateAMD requires the extension loaded into a device
+        // extension object. The extension is detected but the ash Device wrapper doesn't
+        // currently provide a convenience method. This is a placeholder pending ash support.
         Ok(())
     }
 
@@ -1315,12 +1497,6 @@ fn query_blas_build_sizes(
     as_ext: &ash::khr::acceleration_structure::Device,
     desc: &BlasBuildDesc,
 ) -> Result<AccelerationStructureBuildSizes> {
-    if desc.mode == AccelerationStructureBuildMode::Compact {
-        return Err(Error::Unsupported(
-            "BLAS compaction size queries are not implemented yet".into(),
-        ));
-    }
-
     let geometries = desc
         .geometries
         .iter()
@@ -1374,12 +1550,6 @@ fn query_tlas_build_sizes(
     as_ext: &ash::khr::acceleration_structure::Device,
     desc: &TlasBuildDesc,
 ) -> Result<AccelerationStructureBuildSizes> {
-    if desc.mode == AccelerationStructureBuildMode::Compact {
-        return Err(Error::Unsupported(
-            "TLAS compaction size queries are not implemented yet".into(),
-        ));
-    }
-
     let instances =
         vk::AccelerationStructureGeometryInstancesDataKHR::default().array_of_pointers(false);
     let geometry = vk::AccelerationStructureGeometryKHR::default()
@@ -1401,6 +1571,24 @@ fn query_tlas_build_sizes(
         )
     };
     Ok(vk_build_sizes(sizes))
+}
+
+fn compact_acceleration_structure_build_sizes(
+    src_kind: AccelerationStructureKind,
+    src_size: u64,
+    expected_kind: AccelerationStructureKind,
+) -> Result<AccelerationStructureBuildSizes> {
+    if src_kind != expected_kind {
+        return Err(Error::InvalidInput(format!(
+            "compaction source kind {:?} does not match expected {:?}",
+            src_kind, expected_kind
+        )));
+    }
+    Ok(AccelerationStructureBuildSizes {
+        acceleration_structure_size: src_size,
+        build_scratch_size: 0,
+        update_scratch_size: 0,
+    })
 }
 
 fn vk_build_sizes(
@@ -1546,6 +1734,22 @@ fn align_up(value: u64, alignment: u64) -> u64 {
     (value + alignment - 1) & !(alignment - 1)
 }
 
+fn encode_reflex_mode(mode: ReflexMode) -> u8 {
+    match mode {
+        ReflexMode::Off => 0,
+        ReflexMode::On => 1,
+        ReflexMode::OnPlusBoost => 2,
+    }
+}
+
+fn decode_reflex_mode(encoded: u8) -> ReflexMode {
+    match encoded {
+        1 => ReflexMode::On,
+        2 => ReflexMode::OnPlusBoost,
+        _ => ReflexMode::Off,
+    }
+}
+
 /// Collect VK_EXT_device_fault breadcrumbs and append them to an existing
 /// device-lost message. Returns the original message if the call fails.
 fn gather_device_fault_info(
@@ -1667,6 +1871,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reflex_mode_encoding_round_trips_known_modes() {
+        assert_eq!(
+            decode_reflex_mode(encode_reflex_mode(ReflexMode::Off)),
+            ReflexMode::Off
+        );
+        assert_eq!(
+            decode_reflex_mode(encode_reflex_mode(ReflexMode::On)),
+            ReflexMode::On
+        );
+        assert_eq!(
+            decode_reflex_mode(encode_reflex_mode(ReflexMode::OnPlusBoost)),
+            ReflexMode::OnPlusBoost
+        );
+    }
+
+    #[test]
+    fn reflex_mode_decoding_treats_unknown_values_as_off() {
+        assert_eq!(decode_reflex_mode(99), ReflexMode::Off);
+    }
+
+    #[test]
+    fn compaction_build_sizes_use_source_size_without_scratch() {
+        assert_eq!(
+            compact_acceleration_structure_build_sizes(
+                AccelerationStructureKind::BottomLevel,
+                4096,
+                AccelerationStructureKind::BottomLevel,
+            )
+            .unwrap(),
+            AccelerationStructureBuildSizes {
+                acceleration_structure_size: 4096,
+                build_scratch_size: 0,
+                update_scratch_size: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn compaction_build_sizes_reject_wrong_source_kind() {
+        let err = compact_acceleration_structure_build_sizes(
+            AccelerationStructureKind::TopLevel,
+            4096,
+            AccelerationStructureKind::BottomLevel,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidInput(message) if message.contains("source kind")));
+    }
+
+    #[test]
     fn device_fault_report_includes_description_addresses_and_vendor_info() {
         let fault_description = std::ffi::CString::new("fault in test pass").unwrap();
         let fault_info = vk::DeviceFaultInfoEXT::default()
@@ -1733,6 +1987,9 @@ impl Drop for VulkanBackend {
             }
             if let Ok(mut heaps) = self.alias_heaps.lock() {
                 heaps.destroy_all(&self.device);
+            }
+            if let Some(sem) = self.reflex_sleep_semaphore.take() {
+                self.device.destroy_semaphore(sem, None);
             }
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);

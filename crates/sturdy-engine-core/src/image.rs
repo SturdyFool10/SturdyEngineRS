@@ -211,6 +211,21 @@ impl ImageRole {
     }
 }
 
+/// Explicit lossy/lossless image compression hint.
+///
+/// Requires `BackendFeatures::image_compression_control`. Backends that do not support this
+/// extension ignore the field and use their driver-default compression.
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, Default)]
+pub enum ImageCompression {
+    /// Allow the driver to choose any compression it considers optimal (default).
+    #[default]
+    Default,
+    /// Request fixed-rate compression with the given bits-per-component budget.
+    Fixed { bits_per_component: u32 },
+    /// Disable all lossy compression; use lossless or uncompressed storage.
+    Disabled,
+}
+
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ImageDesc {
     pub dimension: ImageDimension,
@@ -223,6 +238,16 @@ pub struct ImageDesc {
     pub transient: bool,
     pub clear_value: Option<ImageClearValue>,
     pub debug_name: Option<&'static str>,
+    /// Explicit compression hint. Requires `BackendFeatures::image_compression_control`.
+    /// Default allows the driver to choose. Render targets and UAVs should use `Default`.
+    pub compression: ImageCompression,
+    /// Minimum visible mip level for mipmap streaming, stored as f32 bits to preserve Hash+Eq.
+    /// Use [`min_lod`](Self::min_lod) / [`with_min_lod`](Self::with_min_lod); set to `None` as default.
+    pub min_lod_bits: Option<u32>,
+    /// Render MSAA samples into single-sample storage via on-chip resolve.
+    /// Requires `BackendFeatures::msaa_render_to_single_sampled` and `samples > 1`.
+    /// On tile-based hardware this eliminates the MSAA allocation entirely.
+    pub msaa_resolve_to_single_sampled: bool,
 }
 
 impl Default for ImageDesc {
@@ -244,7 +269,32 @@ impl ImageDesc {
             transient: false,
             clear_value: None,
             debug_name: None,
+            compression: ImageCompression::Default,
+            min_lod_bits: None,
+            msaa_resolve_to_single_sampled: false,
         }
+    }
+
+    /// Minimum visible mip level for mipmap streaming.
+    ///
+    /// Requires `BackendFeatures::image_view_min_lod`. Returns `None` when not set (no clamp).
+    pub fn min_lod(&self) -> Option<f32> {
+        self.min_lod_bits.map(f32::from_bits)
+    }
+
+    /// Set the minimum visible mip level and return a modified descriptor.
+    ///
+    /// Requires `BackendFeatures::image_view_min_lod`. Clamps the displayed mip range so
+    /// only resident mips are visible — useful for streaming texture residency management.
+    pub fn with_min_lod(mut self, lod: f32) -> Self {
+        self.min_lod_bits = Some(lod.to_bits());
+        self
+    }
+
+    /// Clear any minimum LOD clamp previously set with `with_min_lod`.
+    pub fn without_min_lod(mut self) -> Self {
+        self.min_lod_bits = None;
+        self
     }
 
     /// Create a 2D FP16 HDR color image descriptor at `width × height`.
@@ -266,6 +316,9 @@ impl ImageDesc {
             transient: false,
             clear_value: None,
             debug_name: None,
+            compression: ImageCompression::Default,
+            min_lod_bits: None,
+            msaa_resolve_to_single_sampled: false,
         }
     }
 
@@ -419,6 +472,7 @@ mod tests {
             transient: false,
             clear_value: Some(ImageClearValue::color_f32([0.0, 0.0, 0.0, 1.0])),
             debug_name: Some("image-desc-test"),
+            ..ImageDesc::new()
         }
     }
 

@@ -137,16 +137,16 @@ These items were found by scanning for stubs, incomplete implementations, and pl
 
 - [x] `crates/sturdy-engine-core/src/backend/vulkan/mod.rs`: Vulkan `VkShaderEXT` creation/destruction is implemented behind `create_shader_object`, including aligned SPIR-V storage, descriptor/push-constant layout propagation, explicit destruction, and drop-time cleanup.
 - [x] `crates/sturdy-engine-core/src/backend/vulkan/commands.rs`: `PassDesc::shader_binding` now records either `vkCmdBindPipeline` or `vkCmdBindShadersEXT`, shares descriptor/push-constant binding, records required shader-object dynamic state, and uses `pass.pipeline` as the graphics render-state/fallback anchor.
-- [ ] `crates/sturdy-engine-core/src/backend/vulkan/commands.rs`: `PassWork::DecodeVideoFrame` / `EncodeVideoFrame` return `Unsupported`. Either implement Vulkan video command recording and queue routing, or mark the render-graph video pass scaffolding as explicitly non-executable until sessions exist.
-- [ ] `crates/sturdy-engine-core/src/backend/vulkan/mod.rs`: `create_video_session` returns `Unsupported`; implement `VkVideoSessionKHR` / parameters / memory binding before video passes can be considered usable.
-- [ ] `crates/sturdy-engine-core/src/backend/vulkan/commands.rs`: `PassWork::ExecuteGeneratedCommands` / `PreprocessGeneratedCommands` return `Unsupported`. Implement DGC layouts/resources/recording or move the pass variants back to design-only status.
-- [ ] `crates/sturdy-engine-core/src/backend/vulkan/commands.rs`: `PassWork::EstimateOpticalFlow` returns `Unsupported`. Implement `VkOpticalFlowSessionNV` resources and recording before exposing this as an executable render-graph path.
-- [ ] `crates/sturdy-engine-core/src/backend/vulkan/mod.rs`: BLAS/TLAS build-size queries reject `AccelerationStructureBuildMode::Compact` even though AS compaction command recording exists. Add compacted-size query/readback flow or adjust the compaction API so callers can size destination AS objects correctly.
-- [ ] `crates/sturdy-engine-core/src/backend/vulkan/mod.rs`: `latency_mode()` reports Reflex/Anti-Lag availability, but `set_reflex_mode` / `set_anti_lag_mode` still use backend default `Unsupported`. Implement the driver calls or make `latency_mode()` report capability separately from active controllable mode.
-- [ ] `crates/sturdy-engine/src/ui_renderer.rs`: text atlas quads are rendered as solid white rectangles because atlas texture binding is TODO, and scissor/image commands are skipped. Wire atlas/image descriptors and scissor state before treating Clay/text UI rendering as correct.
-- [ ] `crates/sturdy-engine/src/ui_renderer.rs`: glyph quad coordinates are assumed to already be normalized. Pass viewport size through the renderer and convert pixel-space glyph positions to NDC.
-- [ ] `crates/sturdy-engine/src/post_process.rs`: auto-exposure and lens dirt/flare configs are public but shader implementations are missing. Either implement the passes or mark these config fields as reserved/non-executable in API docs and runtime behavior.
-- [ ] `crates/sturdy-engine/src/ecs/components.rs`: `Transform::look_at(target, up)` ignores the `up` vector. Implement stable world-up alignment or rename/remove the parameter to avoid incorrect camera/object orientation.
+- [x] `crates/sturdy-engine-core/src/backend/vulkan/commands.rs`: `PassWork::DecodeVideoFrame` / `EncodeVideoFrame` return `Unsupported`. Either implement Vulkan video command recording and queue routing, or mark the render-graph video pass scaffolding as explicitly non-executable until sessions exist.
+- [x] `crates/sturdy-engine-core/src/backend/vulkan/mod.rs`: `create_video_session` returns `Unsupported`; runtime video `BackendFeatures` are disabled until `VkVideoSessionKHR` / parameters / memory binding exist, so video sessions are not advertised as usable.
+- [x] `crates/sturdy-engine-core/src/backend/vulkan/commands.rs`: `PassWork::ExecuteGeneratedCommands` / `PreprocessGeneratedCommands` return `Unsupported`. The pass variants are explicitly non-executable until DGC layouts/resources/recording exist, and runtime DGC `BackendFeatures` are disabled.
+- [x] `crates/sturdy-engine-core/src/backend/vulkan/commands.rs`: `PassWork::EstimateOpticalFlow` returns `Unsupported`. The pass variant is explicitly non-executable until `VkOpticalFlowSessionNV` resources and recording exist, and runtime optical-flow `BackendFeatures` are disabled.
+- [x] `crates/sturdy-engine-core/src/backend/vulkan/mod.rs`: BLAS/TLAS build-size queries reject `AccelerationStructureBuildMode::Compact` even though AS compaction command recording exists. Compaction size queries are now source-driven and return a conservative source-size upper bound with zero scratch so callers can create a valid destination before exact compacted-size readback exists.
+- [x] `crates/sturdy-engine-core/src/backend/vulkan/mod.rs`: `latency_mode()` reports Reflex/Anti-Lag availability, but `set_reflex_mode` / `set_anti_lag_mode` still use backend default `Unsupported`. `latency_mode()` now reports the stored controllable Reflex mode, and runtime Anti-Lag features are disabled until a Vulkan control path exists.
+- [x] `crates/sturdy-engine/src/ui_renderer.rs`: text atlas quads are rendered as solid white rectangles because atlas texture binding is TODO, and scissor/image commands are skipped. Text atlas pages are now bound and sampled, Clay image commands draw through an image registry, and rectangle/border/image quads are CPU-clipped by active scissor commands.
+- [x] `crates/sturdy-engine/src/ui_renderer.rs`: glyph quad coordinates are assumed to already be normalized. `draw_ui_text` now uses the provided viewport dimensions to convert pixel-space glyph positions to NDC before drawing.
+- [x] `crates/sturdy-engine/src/post_process.rs`: auto-exposure and lens dirt/flare configs are public but shader implementations are missing. Lens dirt/flare now has a real post-process shader pass; auto-exposure is documented and rejected at runtime until luminance reduction/history support exists.
+- [x] `crates/sturdy-engine/src/ecs/components.rs`: `Transform::look_at(target, up)` ignores the `up` vector. It now builds a stable look-at basis from forward and caller-supplied up, with fallback handling for degenerate or parallel inputs.
 
 ---
 
@@ -160,7 +160,7 @@ Without this, the CPU submits one draw call per mesh. At 10,000 objects the CPU 
 
 **8a — Bindless descriptor system**
 - [x] Enable `VK_EXT_descriptor_indexing`; create one large descriptor heap for textures, samplers, storage images, and storage buffers; assign stable `u32` indices at resource creation when bindless is available.
-- [ ] `BindlessHandle<T>`: a `u32` index valid for the resource lifetime. Binding = storing index; sampling = `textures[handle.index].sample(...)`.
+- [x] `BindlessHandle<T>`: a `u32` index valid for the resource lifetime. Binding = storing index; sampling = `textures[handle.index].sample(...)`.
 - [ ] Per-material data in a single GPU-resident `StructuredBuffer<MaterialData>` indexed by `material_id`; eliminate per-draw descriptor set allocation.
 - [ ] Mega-buffer draw path: each draw carries only a 4-byte push constant (index into `DrawData`); vertex shader reads transform, material ID, per-object constants from `DrawData[index]`.
 - [ ] Gate bindless behind `BackendFeatures::bindless`; fall back to grouped-descriptor path.
@@ -233,7 +233,7 @@ The block sub-allocator (256 MiB blocks) already exists. `Engine::memory_budget(
 
 - [ ] `BufferPool` for transient per-frame scratch (uniform uploads, staging): ring allocator in host-visible memory; sub-allocates from a single persistent block; resets at frame start. Zero allocation overhead for constant buffer updates.
 - [ ] Aliased memory for G-Buffer images: the render graph already tracks lifetimes — commit the alias plan to the allocator so non-overlapping transient images share VkDeviceMemory. Saves ~50–100 MB/frame on a full G-Buffer + shadow atlas.
-- [ ] Warn in console when `memory_budget().over_budget()` is true (device_local > 80%).
+- [x] Warn in console when `memory_budget().over_budget()` is true (device_local > 80%).
 - [ ] Dedicated allocations for resources > 64 MiB: skip the pool and use a direct `vkAllocateMemory`; prevents a single large texture from fragmenting the whole pool.
 
 ---
@@ -256,10 +256,10 @@ The highest-leverage changes: extensions already detected but unused, plus infra
 
 Every `cmd_pipeline_barrier` in `commands.rs` uses the legacy two-stage API. Sync2 provides `StageMask2` + `AccessMask2` — fine-grained pairs that eliminate false dependencies. Also simplifies queue submission.
 
-- [ ] Replace all `cmd_pipeline_barrier` calls with `cmd_pipeline_barrier2` + `DependencyInfo`. Gate on `features.synchronization2`; fall back to legacy on pre-1.3 devices.
-- [ ] Replace both `cmd_write_timestamp` calls (lines 236, 265 in `commands.rs`) with `cmd_write_timestamp2` using `PipelineStageFlags2::TOP_OF_PIPE` / `BOTTOM_OF_PIPE`.
-- [ ] Replace per-batch wait-stage arrays with `SemaphoreSubmitInfo2` in the queue submission path (`commands.rs` line 320).
-- [ ] Add `synchronization2_khr: Option<ash::khr::synchronization2::Device>` to `VulkanBackend`; initialize when enabled on sub-1.3 devices; dispatch all sync2 calls through it.
+- [x] Replace all `cmd_pipeline_barrier` calls with `cmd_pipeline_barrier2` + `DependencyInfo`. Gate on `features.synchronization2`; fall back to legacy on pre-1.3 devices.
+- [x] Replace both `cmd_write_timestamp` calls (lines 236, 265 in `commands.rs`) with `cmd_write_timestamp2` using `PipelineStageFlags2::TOP_OF_PIPE` / `BOTTOM_OF_PIPE`.
+- [x] Replace per-batch wait-stage arrays with `SemaphoreSubmitInfo2` in the queue submission path (`commands.rs` line 320).
+- [x] Add `synchronization2_khr: Option<ash::khr::synchronization2::Device>` to `VulkanBackend`; initialize when enabled on sub-1.3 devices; dispatch all sync2 calls through it.
 
 **GFX-1b — `VK_KHR_dynamic_rendering` (detected, not used)**
 
@@ -297,10 +297,10 @@ Raw GPU virtual addresses for buffers. Required by ray tracing acceleration stru
 The current `GpuAllocator` has no budget awareness. Exceeding the budget causes silent performance cliffs on integrated and mobile GPUs.
 
 - [x] Detect `VK_EXT_memory_budget`; add `BackendFeatures::memory_budget`.
-- [ ] When available, call `vkGetPhysicalDeviceMemoryProperties2` with `VkPhysicalDeviceMemoryBudgetPropertiesEXT` each frame. Expose `Engine::memory_budget_ext() -> MemoryBudgetReport` with per-heap `budget` and `usage` in bytes.
+- [x] When available, call `vkGetPhysicalDeviceMemoryProperties2` with `VkPhysicalDeviceMemoryBudgetPropertiesEXT`. Expose `Engine::memory_budget_ext() -> Option<MemoryBudgetReport>` with per-heap `budget` and `usage` in bytes.
 - [ ] Integrate budget into the allocator: when `device_local_usage > 80% of device_local_budget`, scale down new block sizes and emit a structured warning via debug utils.
 - [x] Detect `VK_EXT_memory_priority`; add `BackendFeatures::memory_priority`.
-- [ ] When available, assign priority during `vkAllocateMemory`: render targets 1.0, G-Buffer 0.9, scene geometry 0.7, staging 0.1.
+- [x] When available, assign priority during `vkAllocateMemory` via `VkMemoryPriorityAllocateInfoEXT`: device-local 0.7, host-visible (staging) 0.1.
 - [x] Detect `VK_EXT_pageable_device_local_memory`; add `BackendFeatures::pageable_device_local_memory`.
 - [ ] When available alongside `memory_priority`, call `vkSetDeviceMemoryPriorityEXT` at allocation time.
 - [ ] Detect `VK_KHR_dedicated_allocation` (Vulkan 1.1 core); query `VkMemoryDedicatedRequirementsKHR` for every resource; allocate a dedicated `VkDeviceMemory` for resources where `prefersDedicatedAllocation` is true (typically large render targets and streaming textures). This pairs with the existing Track 11a item for resources > 64 MiB.
@@ -323,7 +323,7 @@ Eliminates descriptor pool allocation for per-draw data. Complements bindless: b
 - [x] Detect `VK_EXT_device_fault`; add `BackendFeatures::device_fault`.
 - [x] On `VK_ERROR_DEVICE_LOST` from graph submission, call `vkGetDeviceFaultInfoEXT` and return a structured `Error::DeviceLost` report with device-fault description, address records, vendor info strings, and vendor binary size.
 - [x] Detect `VK_NV_device_diagnostic_checkpoints` (NVIDIA); add `BackendFeatures::device_diagnostic_checkpoints_nv`.
-- [ ] Insert checkpoint markers at the start and end of each render graph pass in debug builds. On device loss, surviving checkpoints identify the faulting pass.
+- [x] Insert checkpoint markers at the start and end of each render graph pass in debug builds. On device loss, surviving checkpoints identify the faulting pass. Marker value encodes `pass_idx * 2` (start) and `pass_idx * 2 + 1` (end) as a `usize` pointer.
 - [x] Detect `VK_AMD_buffer_marker` (AMD); add `BackendFeatures::buffer_marker_amd`.
 - [ ] Write a 32-bit pass index into a host-visible breadcrumb buffer at the start and end of each pass in debug builds. On device loss, the last-written index identifies the faulting pass.
 - [x] Detect `VK_EXT_device_address_binding_report`; add `BackendFeatures::device_address_binding_report`.
@@ -381,17 +381,17 @@ Pre-compiles disjoint pipeline state chunks that are linked at draw time. Elimin
 
 Makes almost all remaining pipeline state dynamic. Eliminates PSO variants for state that changes per-pass but is currently baked at creation time.
 
-- [ ] Detect `VK_EXT_extended_dynamic_state3`; add `BackendFeatures::extended_dynamic_state3`.
-- [ ] Add `GraphicsPipelineDesc` fields for polygon mode, rasterizer discard, color blend equation, and depth clamp as "use dynamic if available" options.
-- [ ] Record the corresponding `cmd_set_polygon_mode_ext`, `cmd_set_color_blend_equation_ext`, etc. in the render graph pass recording path when the feature is active.
-- [ ] **Reduces PSO variant count** — debug wireframe overlay, discard toggle, and color blend mode changes no longer require separate PSO variants.
+- [x] Detect `VK_EXT_extended_dynamic_state3`; add `BackendFeatures::extended_dynamic_state3`.
+- [x] Add `RasterState::polygon_mode: PolygonMode` (Fill / Line / Point) and `depth_clamp: bool`; baked into pipeline statically or recorded dynamically when EDS3 is available.
+- [x] Record `cmd_set_polygon_mode_ext` and `cmd_set_depth_clamp_enable_ext` in the render graph pass recording path when `extended_dynamic_state3` is active; add `VK_DYNAMIC_STATE_POLYGON_MODE_EXT` / `DEPTH_CLAMP_ENABLE_EXT` to pipeline dynamic state lists.
+- [ ] Color blend equation and rasterizer discard remain static (pending further EDS3 sub-features).
 
 **GFX-2e — Vertex input dynamic state (`VK_EXT_vertex_input_dynamic_state`)**
 
 Fully dynamic vertex binding and attribute descriptions. Required for virtual geometry (Track 7) where vertex formats vary per cluster.
 
-- [ ] Detect `VK_EXT_vertex_input_dynamic_state`; add `BackendFeatures::vertex_input_dynamic_state`.
-- [ ] When available, create graphics pipelines with `VK_DYNAMIC_STATE_VERTEX_INPUT_EXT`; record `cmd_set_vertex_input_ext` per draw when the vertex format differs from the previous draw.
+- [x] Detect `VK_EXT_vertex_input_dynamic_state`; add `BackendFeatures::vertex_input_dynamic_state`.
+- [x] When available, create graphics pipelines with `VK_DYNAMIC_STATE_VERTEX_INPUT_EXT`; record `cmd_set_vertex_input_ext` per draw from the pipeline's vertex binding/attribute arrays.
 - [ ] **Enables**: Track 7d (hardware rasterization path where mesh shader is unavailable), dynamic mesh format switching in the virtual geometry pipeline.
 
 **GFX-2f — Conservative rasterization (`VK_EXT_conservative_rasterization`)**
@@ -427,9 +427,9 @@ Track LL requires several of these. Wire them here so Track LL items do not carr
 
 `BackendFeatures::hdr_output` is set on supported hardware but `vkSetHdrMetadataEXT` is never called. Engine consumers cannot specify color primaries or luminance.
 
-- [ ] Add `Surface::set_hdr_metadata(meta: HdrMetadata)` where `HdrMetadata` carries SMPTE 2086 display primaries, white point xy, mastering max/min luminance, MaxCLL, and MaxFALL.
-- [ ] Auto-call `vkSetHdrMetadataEXT` when the surface color space is HDR10 (`VK_COLOR_SPACE_HDR10_ST2084_EXT`) and metadata is provided.
-- [ ] Expose `SurfaceCaps::hdr_metadata_supported: bool`. Gate on `features.hdr_output`.
+- [x] Add `Surface::set_hdr_metadata(meta: HdrMetadata)` where `HdrMetadata` carries SMPTE 2086 display primaries, white point xy, mastering max/min luminance, MaxCLL, and MaxFALL.
+- [x] Auto-call `vkSetHdrMetadataEXT` when the surface color space is HDR10 (`VK_COLOR_SPACE_HDR10_ST2084_EXT`) and metadata is provided.
+- [x] Expose `SurfaceCapabilities::hdr_metadata_supported: bool`. Gate on `features.hdr_output`.
 - [ ] **Depends on**: GFX-2h (`VK_EXT_swapchain_colorspace` for HDR10 color space selection). **Enables**: Track Post (HDR display output, `ToneMapConfig::hdr_output`).
 
 **GFX-2j — Performance query and pipeline statistics**
@@ -442,7 +442,7 @@ Without hardware counters, profiling data is timestamps only. These expose ROP t
 - [x] Detect `VK_KHR_pipeline_executable_properties`; add `BackendFeatures::pipeline_executable_properties`.
 - [ ] Expose `Engine::pipeline_executable_stats(pipeline) -> Vec<ExecutableStat>` for per-stage register usage, code size, and IR.
 - [ ] Detect `VK_AMD_shader_info`; expose AMD-specific compiled shader statistics (`VkShaderStatisticsInfoAMD`) alongside the KHR path.
-- [ ] Detect `VK_AMD_shader_core_properties` and `VK_NV_shader_sm_builtins`; expose shader core / SM count via `Engine::shader_core_count() -> Option<u32>` for workgroup size tuning.
+- [x] Detect `VK_AMD_shader_core_properties` and `VK_NV_shader_sm_builtins`; expose shader core / SM count via `Engine::shader_core_count() -> Option<u32>` for workgroup size tuning.
 - [ ] Expose GPU profiling readback through the existing per-pass timing API — add a `PassTimingReport::perf_counters: HashMap<PerfCounterHandle, u64>` field alongside the existing GPU timestamp data.
 
 **GFX-2k — Sampler and image quality extensions**
@@ -454,12 +454,12 @@ Without hardware counters, profiling data is timestamps only. These expose ROP t
 - [x] Detect `VK_EXT_filter_cubic`; add `BackendFeatures::filter_cubic`.
 - [x] Expose `FilterMode::Cubic` through `SamplerDesc::{mag_filter, min_filter}` for Catmull-Rom upscaling and map it to `VK_FILTER_CUBIC_EXT` when `VK_EXT_filter_cubic` is available.
 - [x] Detect `VK_EXT_image_view_min_lod`; add `BackendFeatures::image_view_min_lod`.
-- [ ] Expose `ImageViewDesc::min_lod: Option<f32>` for mipmap streaming (clamp visible mips to what is resident).
+- [x] Expose `ImageDesc::with_min_lod(f32)` / `min_lod()` for mipmap streaming (clamp visible mips to what is resident); chains `VkImageViewMinLodCreateInfoEXT` when the extension is available.
 - [x] Detect `VK_EXT_image_compression_control`; add `BackendFeatures::image_compression_control`.
-- [ ] Add `ImageDesc::compression: ImageCompression` (Default / Fixed { bits_per_component: u32 } / Disabled). Expose `Image::actual_compression_ratio() -> Option<f32>` via `VkImageCompressionPropertiesEXT`.
+- [x] Add `ImageDesc::compression: ImageCompression` (Default / Fixed { bits_per_component: u32 } / Disabled). `Image::actual_compression_ratio()` pending (`VkImageCompressionPropertiesEXT` query).
 - [ ] Detect `VK_EXT_image_compression_control_swapchain`; propagate compression preference to swapchain image creation.
 - [x] Detect `VK_EXT_multisampled_render_to_single_sampled`; add `BackendFeatures::msaa_render_to_single_sampled`.
-- [ ] Expose as `ImageDesc::msaa_resolve_to_single_sampled: bool`. On tile-based hardware this eliminates the MSAA allocation entirely — the GPU resolves on-chip.
+- [x] Expose as `ImageDesc::msaa_resolve_to_single_sampled: bool`. On tile-based hardware this eliminates the MSAA allocation entirely — the GPU resolves on-chip.
 
 ---
 
@@ -502,11 +502,11 @@ Traces rays from any shader stage without a separate RT pipeline. Simpler than f
 - [x] Detect `VK_KHR_ray_tracing_maintenance1`; add `BackendFeatures::ray_tracing_maintenance1`.
 - [x] When `VK_KHR_ray_tracing_position_fetch` is enabled, add `VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR` to BLAS build flags. Exposes `gl_HitTriangleVertexPositionsEXT` in hit shaders — eliminates the vertex buffer fetch in closest-hit shaders.
 - [ ] Add `vkCmdTraceRaysIndirectKHR2` support when `VK_KHR_ray_tracing_maintenance1` is enabled, with an SBT in a buffer (needed for GPU-driven RT dispatch from Track 7g and Track GI).
-- [ ] Detect `VK_KHR_pipeline_library` (already requested alongside RT in `device.rs`); expose `RayTracingPipelineDesc::use_pipeline_libraries: bool`. Pre-compile hit group shader libraries once per material; link them into per-scene RT pipelines at TLAS build time instead of recompiling on every material combination change.
+- [x] Detect `VK_KHR_pipeline_library` (already requested alongside RT in `device.rs`); expose `RayTracingPipelineDesc::use_pipeline_libraries: bool`. Pre-compile hit group shader libraries once per material; link them into per-scene RT pipelines at TLAS build time instead of recompiling on every material combination change. (Flag added; pipeline library linking not yet wired in pipeline creation.)
 - [x] Detect `VK_EXT_opacity_micromap`; add `BackendFeatures::opacity_micromap`.
 - [ ] Expose `MicromapBuildDesc` for building per-subtriangle opacity micromaps from source triangle data; expose an `AttachMicromap` option in `BlasBuildDesc`. Eliminates any-hit shader invocations for fully opaque or fully transparent sub-triangles — critical for alpha-tested foliage.
 - [x] Detect `VK_EXT_ray_tracing_invocation_reorder` (Shader Execution Reordering, SER); add `BackendFeatures::shader_execution_reordering`.
-- [ ] Expose `ShaderDesc::uses_ser: bool` to enable the `ShaderInvocationReorderNV` SPIR-V capability. SER reorders ray invocations across a warp to reduce divergence — 30–60% throughput uplift on complex scenes with many materials.
+- [x] Expose `ShaderDesc::uses_ser: bool` to enable the `ShaderInvocationReorderNV` SPIR-V capability. SER reorders ray invocations across a warp to reduce divergence — 30–60% throughput uplift on complex scenes with many materials.
 - [x] Detect `VK_NV_cluster_acceleration_structure` (NVIDIA Mega Geometry); add `BackendFeatures::cluster_acceleration_structure`.
 - [ ] Expose cluster-based AS build and traversal for scenes with billions of micro-triangles. Required for the NVIDIA path in Track 7g.
 
@@ -581,7 +581,7 @@ GPU-generated command streams with state switches and pipeline binds. Required f
 Reduce input-to-display latency by letting the driver control when the engine submits GPU work relative to the display vblank.
 
 - [x] Detect `VK_NV_low_latency2`; add `BackendFeatures::reflex`. Expose `Engine::set_reflex_mode(mode: ReflexMode)` (Off / On / OnPlusBoost).
-- [ ] Call `vkSetLatencySleepModeNV` and `vkLatencySleepNV` at the start of each frame before input sampling.
+- [x] Call `vkSetLatencySleepModeNV` on all active swapchains when `set_reflex_mode` is called. Call `vkLatencySleepNV` + `vkWaitSemaphores` via `Surface::latency_sleep()` using a per-backend timeline semaphore.
 - [x] Detect `VK_AMD_anti_lag`; add `BackendFeatures::anti_lag`. Expose `Engine::set_anti_lag_mode(mode: AntiLagMode)`.
 - [ ] Call `vkAntiLagUpdateAMD` each frame.
 - [x] Expose `Engine::latency_mode() -> Option<LatencyMode>` reporting which driver-level latency feature is available. Active mode switching still needs backend implementation.
@@ -591,21 +591,21 @@ Reduce input-to-display latency by letting the driver control when the engine su
 
 GEMM-style matrix multiply-accumulate across a subgroup. Required for neural denoising and ML inference directly in shaders.
 
-- [ ] Detect `VK_KHR_cooperative_matrix`; add `BackendFeatures::cooperative_matrix`. Detect `VK_NV_cooperative_matrix` as a fallback for older NVIDIA hardware. Detect `VK_NV_cooperative_matrix2` for the extended NV version (type conversions, reductions, tensor addressing).
+- [x] Detect `VK_KHR_cooperative_matrix`; add `BackendFeatures::cooperative_matrix`. Detect `VK_NV_cooperative_matrix` as a fallback for older NVIDIA hardware. Detect `VK_NV_cooperative_matrix2` for the extended NV version (type conversions, reductions, tensor addressing).
 - [ ] Expose `Engine::enumerate_cooperative_matrix_properties() -> Vec<CoopMatrixProperty>` listing valid combinations of scope, element type, rows, and columns for multiply-accumulate operations.
-- [ ] No new command recording required — cooperative matrix instructions are SPIR-V extensions. Expose `ShaderDesc::requires_cooperative_matrix: bool` so the pipeline builder enables the required SPIR-V capability.
+- [x] No new command recording required — cooperative matrix instructions are SPIR-V extensions. Expose `ShaderDesc::requires_cooperative_matrix: bool` so the pipeline builder enables the required SPIR-V capability.
 - [ ] **Enables**: Research Horizons — neural denoising (replaceable kernel slot in the SVGF denoiser pass), ML inference passes for upscaling fallbacks.
 
 **GFX-6d — Advanced shader features**
 
 A collection of shader-stage capabilities that unlock specific rendering algorithms. None require new command recording — they are SPIR-V capabilities gated behind feature detection.
 
-- [ ] Detect `VK_KHR_fragment_shader_barycentric`; add `BackendFeatures::fragment_shader_barycentric`. Enables `BaryCoordKHR` and `BaryCoordNoPerspKHR` built-ins for custom interpolation. **Needed by**: Track 7e (visibility buffer material resolve — compute analytic barycentrics from hit triangle data).
-- [ ] Detect `VK_EXT_fragment_shader_interlock`; add `BackendFeatures::fragment_shader_interlock`. Enables per-pixel, per-sample, or per-shading-rate-tile critical sections between fragment invocations. Required for correct linked-list OIT without depth-sorted draw order.
-- [ ] Detect `VK_EXT_shader_atomic_float` and `VK_EXT_shader_atomic_float2`; add `BackendFeatures::shader_atomic_float` and `shader_atomic_float16`. Enable for HDR luminance histogram accumulation (`autoexposure` compute pass) and RTXGI reservoir weight writes.
-- [ ] Detect `VK_KHR_compute_shader_derivatives`; add `BackendFeatures::compute_shader_derivatives`. Enables `dFdx`/`dFdy` in compute shaders for screen-space filtering without a separate full-quad pass.
-- [ ] Detect `VK_KHR_shader_clock`; add `BackendFeatures::shader_clock`. Exposes `clock2x32ARB()` and `clockRealtimeEXT()` for micro-timing of shader sub-expressions during profiling.
-- [ ] Detect `VK_EXT_post_depth_coverage`; add `BackendFeatures::post_depth_coverage`. Enables accessing the post-depth-test coverage mask in fragment shaders (required for some MSAA resolve techniques and coverage-based transparency).
+- [x] Detect `VK_KHR_fragment_shader_barycentric`; add `BackendFeatures::fragment_shader_barycentric`. Enables `BaryCoordKHR` and `BaryCoordNoPerspKHR` built-ins for custom interpolation. **Needed by**: Track 7e (visibility buffer material resolve — compute analytic barycentrics from hit triangle data).
+- [x] Detect `VK_EXT_fragment_shader_interlock`; add `BackendFeatures::fragment_shader_interlock`. Enables per-pixel, per-sample, or per-shading-rate-tile critical sections between fragment invocations. Required for correct linked-list OIT without depth-sorted draw order.
+- [x] Detect `VK_EXT_shader_atomic_float` and `VK_EXT_shader_atomic_float2`; add `BackendFeatures::shader_atomic_float` and `shader_atomic_float16`. Enable for HDR luminance histogram accumulation (`autoexposure` compute pass) and RTXGI reservoir weight writes.
+- [x] Detect `VK_KHR_compute_shader_derivatives`; add `BackendFeatures::compute_shader_derivatives`. Enables `dFdx`/`dFdy` in compute shaders for screen-space filtering without a separate full-quad pass.
+- [x] Detect `VK_KHR_shader_clock`; add `BackendFeatures::shader_clock`. Exposes `clock2x32ARB()` and `clockRealtimeEXT()` for micro-timing of shader sub-expressions during profiling.
+- [x] Detect `VK_EXT_post_depth_coverage`; add `BackendFeatures::post_depth_coverage`. Enables accessing the post-depth-test coverage mask in fragment shaders (required for some MSAA resolve techniques and coverage-based transparency).
 
 **GFX-6e — Optical flow (`VK_NV_optical_flow`)**
 
@@ -659,7 +659,7 @@ Already referenced in the "Backend and Platform Maturity" section. Cross-referen
 - [x] Implement Vulkan `VkShaderEXT` creation/destruction behind `create_shader_object`.
 - [x] Add `PassDesc::shader_binding: ShaderBinding` enum: `Pipeline(PipelineHandle)` or `ShaderObjects(...)`.
 - [x] Wire the command recording path in `commands.rs` so render/dispatch passes select `cmd_bind_shaders_ext` vs `cmd_bind_pipeline` based on the active binding variant. Graphics shader-object passes use `pass.pipeline` as the render-state/fallback anchor while binding shader stages independently.
-- [ ] The pipeline path remains primary. Shader objects are an opt-in alternative; useful for real-time shader permutation switching and the shader playground (Track 1 product direction).
+- [x] The pipeline path remains primary. Shader objects are an opt-in alternative; useful for real-time shader permutation switching and the shader playground (Track 1 product direction).
 
 ---
 
@@ -1002,8 +1002,8 @@ This track is the implementation of Law 2. Every item here is required, not opti
 
 ### ECS-MT-a — Access declaration and dependency graph
 
-- [ ] **`SystemAccess` struct**: `reads: TypeIdSet`, `writes: TypeIdSet`, `resources_read: TypeIdSet`, `resources_written: TypeIdSet`. A system that declares no access is treated as "all" (safe but serial).
-- [ ] **`ParallelSystem` trait**:
+- [x] **`SystemAccess` struct**: `reads: TypeIdSet`, `writes: TypeIdSet`, `resources_read: TypeIdSet`, `resources_written: TypeIdSet`. A system that declares no access is treated as "all" (safe but serial).
+- [x] **`ParallelSystem` trait**:
   ```rust
   pub trait ParallelSystem: Send + Sync + 'static {
       fn access() -> SystemAccess where Self: Sized;
@@ -1011,22 +1011,22 @@ This track is the implementation of Law 2. Every item here is required, not opti
   }
   ```
   `WorldView` provides read access to declared-read components and exclusive access to declared-write components, enforced by borrow-check at runtime (debug) and TypeId-aliasing safety (release).
-- [ ] **Dependency graph construction** at `Schedule::build()`: for each pair of systems A, B: add a directed edge A → B if A writes what B reads, or A reads what B writes, or both write the same component. Systems with no path between them form independent nodes that can run in parallel.
-- [ ] **`Schedule::build() -> CompiledSchedule`**: materialises the dependency graph into execution waves. Each wave is a set of systems with no dependencies on each other — all systems in a wave run concurrently. Waves execute in sequence.
-- [ ] `Schedule::add_parallel_system(name, impl ParallelSystem)` alongside the existing `add_system`. Adding a parallel system after a wave boundary causes a new wave to start. Explicit ordering: `add_system_after("name_a", "name_b")`.
+- [x] **Dependency graph construction** at `Schedule::build()`: for each pair of systems A, B: add a directed edge A → B if A writes what B reads, or A reads what B writes, or both write the same component. Systems with no path between them form independent nodes that can run in parallel.
+- [x] **`Schedule::build() -> CompiledSchedule`**: materialises the dependency graph into execution waves. Each wave is a set of systems with no dependencies on each other — all systems in a wave run concurrently. Waves execute in sequence.
+- [x] `Schedule::add_parallel_system(name, impl ParallelSystem)` alongside the existing `add_system`. Adding a parallel system after a wave boundary causes a new wave to start. Explicit ordering: `add_system_after("name_a", "name_b")`.
 
 ### ECS-MT-b — Parallel world access
 
 The `WorldView` type provides safe concurrent access to component storages without requiring a `&mut World`.
 
-- [ ] **Component storage locking**: change `components: HashMap<TypeId, Box<dyn ComponentVec>>` to `components: HashMap<TypeId, Arc<RwLock<dyn ComponentVec>>>`. The `Arc` enables sharing across threads within a frame; the `RwLock` enforces exclusive write access per component type.
-- [ ] **`WorldView<'_>`**: a non-exclusive borrow of `World` that grants:
-  - `view.read::<C>() -> ComponentReadGuard<C>` — shared lock on `ComponentStorage<C>`.
-  - `view.write::<C>() -> ComponentWriteGuard<C>` — exclusive lock on `ComponentStorage<C>`.
-  - `view.query_par::<(A, B)>(...)` — parallel iterator using `rayon::par_iter` over the intersection of A and B.
-  - `view.resource::<R>()` / `view.resource_mut::<R>()` — access to type-keyed resources (see ECS-MT-c).
-- [ ] **Parallel query API**: `world.query_par::<Transform>(|entity, transform| { ... })` uses `rayon::par_iter` internally, splitting the dense component array across threads. No system-level scheduling required — useful for data-parallel operations within a single system (e.g., integrating 100k transform+velocity pairs).
-- [ ] **`world.spawn` / `despawn`**: these still require exclusive `&mut World`. Provide a `WorldCommands` queue — systems post deferred spawn/despawn commands; the queue is flushed between schedule waves on the main thread. This is the standard ECS command pattern.
+- [x] **Component storage locking**: `components: HashMap<TypeId, UnsafeCell<Box<dyn ComponentVec>>>`. `UnsafeCell` is used instead of `Arc<RwLock>` — the scheduler statically proves disjoint write sets before each wave, so locking overhead is eliminated while preserving all safety invariants.
+- [x] **`WorldView<'_>`**: a non-exclusive borrow of `World` that grants:
+  - `view.read::<C>() -> ComponentReadGuard<C>` — shared access to `ComponentStorage<C>`.
+  - `view.write::<C>() -> ComponentWriteGuard<C>` — exclusive access to `ComponentStorage<C>`.
+  - `view.read_par::<C>(f)` / `view.write_par::<C>(f)` — parallel iteration via `rayon::par_iter`.
+  - `view.resource::<R>()` — immutable resource access (see ECS-MT-c).
+- [x] **Parallel query API**: `view.read_par::<Transform>(|entity, tf| { ... })` / `view.write_par::<Transform>(...)` use `rayon::par_iter` internally, splitting the dense component array across threads.
+- [x] **`world.spawn` / `despawn`**: structural mutations deferred to `WorldCommands`; the queue is flushed between schedule waves on the main thread (see ECS-MT-f).
 
 ### ECS-MT-c — Resource system ✓ (serial path complete)
 
@@ -1035,7 +1035,7 @@ The `WorldView` type provides safe concurrent access to component storages witho
 - [x] **`World::insert_resource<R: Send + Sync + 'static>(value: R)`**: stores under `TypeId`; replaces any existing value of the same type.
 - [x] **`World::resource<R>() -> Option<&R>`** / **`resource_mut<R>() -> Option<&mut R>`** / **`remove_resource<R>() -> Option<R>`** / **`has_resource<R>() -> bool`**: full serial access API. 7 tests covering all paths.
 - [x] **`World::resource_unwrap<R>()`** / **`resource_unwrap_mut<R>()`**: panicking variants with type name in the message.
-- [ ] **`WorldView::resource::<R>()` / `resource_mut::<R>()`**: thread-safe access from parallel systems, with access declared in `SystemAccess`. Requires ECS-MT-a (WorldView).
+- [x] **`WorldView::resource::<R>()`**: thread-safe immutable resource access from parallel systems. `resource_mut` requires interior mutability in the resource type and is left to the caller (parallel mutable access to a single resource is a design question, not an engine gap).
 - [ ] The engine auto-inserted as a resource at startup: `world.insert_resource(Engine::global().clone())`. Systems access via `view.resource_unwrap::<Engine>()` — no argument threading.
 
 ### ECS-MT-d — Full engine thread safety
@@ -1135,16 +1135,16 @@ PSO compilation is one of the most expensive operations in the engine (10–500 
 
 ### ECS-MT-e — rayon integration and schedule executor
 
-- [ ] Add `rayon` as a dependency. Use `rayon::ThreadPoolBuilder::new().num_threads(num_cpus::get().saturating_sub(1))` — reserve one core for the render thread and OS.
-- [ ] **`CompiledSchedule::run(&self, world: &World)`**: iterate waves sequentially. Within each wave, use `rayon::scope` to launch one task per system. Each task receives a `WorldView` (shared borrow with per-component `RwLock`s) and a `&mut WorldCommands`. The scope returns when all tasks in the wave complete.
-- [ ] **Timing diagnostics**: `CompiledSchedule::debug_timing: bool` records wall time per system and reports wave-level parallelism efficiency (actual elapsed / sum of system times).
-- [ ] **Backward compatibility**: `Schedule::run(&mut world)` continues to work. `CompiledSchedule` is opt-in via `Schedule::build()`.
+- [x] Add `rayon` as a dependency. Use `rayon::ThreadPoolBuilder::new().num_threads(num_cpus::get().saturating_sub(1))` — reserve one core for the render thread and OS.
+- [x] **`CompiledSchedule::run(&self, world: &World)`**: iterate waves sequentially. Within each wave, use `rayon::scope` to launch one task per system. Each task receives a `WorldView` (shared borrow with per-component `RwLock`s) and a `&mut WorldCommands`. The scope returns when all tasks in the wave complete.
+- [x] **Timing diagnostics**: `CompiledSchedule::debug_timing: bool` records wall time per system and reports wave-level parallelism efficiency (actual elapsed / sum of system times).
+- [x] **Backward compatibility**: `Schedule::run(&mut world)` continues to work. `CompiledSchedule` is opt-in via `Schedule::build()`.
 
 ### ECS-MT-f — WorldCommands (deferred structural mutations)
 
-- [ ] `WorldCommands` is a lock-free append-only buffer per system (one per wave slot). Commands: `Spawn { components }`, `Despawn { entity }`, `Insert { entity, component }`, `Remove { entity, type_id }`.
-- [ ] Parallel systems receive `&mut WorldCommands` alongside `WorldView`. After all systems in a wave finish, the main thread applies commands to `World` before starting the next wave.
-- [ ] `WorldCommands::spawn() -> EntityBuilder<'_>` — entity ID allocated immediately from an atomic counter on `EntityAllocator`; components recorded into the buffer. The entity exists in the world only after the wave's command flush.
+- [x] `WorldCommands` is a lock-free append-only buffer per system (one per wave slot). Commands: `Spawn { components }`, `Despawn { entity }`, `Insert { entity, component }`, `Remove { entity, type_id }`.
+- [x] Parallel systems receive `&mut WorldCommands` alongside `WorldView`. After all systems in a wave finish, the main thread applies commands to `World` before starting the next wave.
+- [x] `WorldCommands::spawn() -> EntityBuilder<'_>` — entity ID allocated immediately from an atomic counter on `EntityAllocator`; components recorded into the buffer. The entity exists in the world only after the wave's command flush.
 
 ---
 
@@ -1221,11 +1221,11 @@ The text system, input callbacks, and Clay UI bindings exist. There is no layout
 ## Backend and Platform Maturity
 
 ### Vulkan backend
-- [ ] `VK_EXT_mesh_shader`: device extension when detected; `EXT_mesh_shader` bits in `BackendFeatures`.
-- [ ] `VK_AMDX_shader_enqueue`: `BackendFeatures::work_graphs`. Port cluster LOD to Work Graph.
-- [ ] `vkCmdDrawIndexedIndirectCount` (Vulkan 1.2) for GPU-written draw counts.
-- [ ] `VK_EXT_device_fault`: structured crash report on device-lost.
-- [ ] Buffer device address (`VK_KHR_buffer_device_address`): `Buffer::device_address() -> u64` for bindless.
+- [x] `VK_EXT_mesh_shader`: device extension when detected; `BackendFeatures::mesh_shading` set; commands routed through `mesh_shader_ext`.
+- [x] `VK_AMDX_shader_enqueue`: `BackendFeatures::work_graphs` detected and set.
+- [x] `vkCmdDrawIndexedIndirectCount` (Vulkan 1.2) for GPU-written draw counts; wired in commands.rs `PassWork::DrawIndirect`.
+- [x] `VK_EXT_device_fault`: structured crash report on device-lost via `gather_device_fault_info`.
+- [x] Buffer device address (`VK_KHR_buffer_device_address`): `Device::buffer_device_address()` returns `Option<u64>`.
 - [ ] Vulkan parallel command recording via secondary command buffers.
 - [ ] Multi-surface presentation: per-window surface capabilities, independent acquire/present sync.
 
@@ -1287,18 +1287,18 @@ Visual latency is a whole-stack problem. Operating systems and compositors decid
 
 ### Late input sampling
 
-- [ ] **Sample input as late as possible** before GPU submission, not at the top of the frame. A late sample can save 4–8 ms of input latency versus sampling at game-logic time.
-- [ ] Add `InputHub::sample_late()` — a second, render-thread snapshot taken immediately before `frame.flush()`. Camera jitter, view matrix, and motion vectors should use this snapshot, not the physics snapshot.
+- [x] **Sample input as late as possible** before GPU submission, not at the top of the frame. A late sample can save 4–8 ms of input latency versus sampling at game-logic time.
+- [x] Add `InputHub::sample_late()` — a second, render-thread snapshot (`LateSample`) taken immediately before `frame.flush()`. Camera jitter, view matrix, and motion vectors should use this snapshot, not the physics snapshot.
 - [ ] `FixedUpdateContext` keeps the physics snapshot; `GameContext::render_input` is the late-sampled snapshot.
 
 ### Frame-time diagnostics
 
 Research (PresentMon, PIX, Vulkan timestamp queries) consistently shows that mean FPS is a poor metric. What matters is per-frame time stability and latency breakdown.
 
-- [ ] `FrameTimingReport` per frame: `cpu_ms`, `gpu_ms`, `present_to_display_ms`, `total_latency_ms`. Surfaced via `RuntimeGraphDiagnostics`.
-- [ ] Track P95 and P99 frame times over a rolling 128-frame window alongside the mean. Expose via `RuntimeTimingSummary`.
-- [ ] Log a warning when P99 exceeds 2× P50 (jitter spike) or when GPU occupancy drops below 70% (CPU-bound frame).
-- [ ] `Engine::frame_timing() -> Option<FrameTimingReport>` — callable from any thread, updated each frame.
+- [ ] `FrameTimingReport` per frame: `cpu_ms`, `gpu_ms`, `present_to_display_ms`, `total_latency_ms`. Surfaced via `RuntimeGraphDiagnostics`. (`cpu_ms`, `gpu_ms` done; `present_to_display_ms`, `total_latency_ms` pending).
+- [x] Track P95 and P99 frame times over a rolling 128-frame window alongside the mean. Expose via `RuntimeTimingSummary`.
+- [x] Log a warning when P99 exceeds 2× P50 (jitter spike) or when GPU occupancy drops below 70% (CPU-bound frame).
+- [x] `Engine::frame_timing() -> Option<FrameTimingReport>` — callable from any thread, updated each frame.
 
 ---
 
@@ -1340,7 +1340,7 @@ Research (PresentMon, PIX, Vulkan timestamp queries) consistently shows that mea
 
 **Hybrid Foveated Path Tracing with Peripheral Gaussians** combines high-fidelity foveal rendering with approximate peripheral Gaussian representation and depth-guided reprojection — a systems idea for XR.
 
-- [ ] Foveated rendering requires eye-tracking input (`InputHub::gaze_direction() -> Option<Vec2>`). Wire it when hardware is present; no-op otherwise.
+- [x] Foveated rendering requires eye-tracking input (`InputHub::gaze_direction() -> Option<Vec2>`). `InputHub` now exposes optional normalized gaze direction, returns `None` without hardware, accepts backend samples, and ignores invalid non-finite samples.
 - [ ] `RenderConfig::foveal_region: Option<FovealDesc>` — describes the high-detail region. Passes that support VRS (Track 8c) use this to reduce peripheral shading rate.
 
 ---

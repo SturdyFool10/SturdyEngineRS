@@ -66,6 +66,9 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     let conservative_rasterization_ext = has(b"VK_EXT_conservative_rasterization\0");
     // GFX-2k: VK_EXT_filter_cubic — no feature struct.
     let filter_cubic = has(b"VK_EXT_filter_cubic\0");
+    // GFX-2j: shader core count — vendor extensions only, no feature struct.
+    let amd_shader_core_properties = has(b"VK_AMD_shader_core_properties\0");
+    let nv_shader_sm_builtins = has(b"VK_NV_shader_sm_builtins\0");
 
     let core_features = unsafe { instance.get_physical_device_features(physical_device) };
     let feature_chain = available_feature_chain(instance, physical_device);
@@ -391,6 +394,13 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         max_frames_in_flight: 2,
     };
 
+    let shader_core_count = query_shader_core_count(
+        instance,
+        physical_device,
+        amd_shader_core_properties,
+        nv_shader_sm_builtins,
+    );
+
     Caps {
         supports_raytracing: ray_tracing,
         supports_mesh_shading: mesh_shading,
@@ -402,6 +412,7 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         limits,
         raw_extension_names,
         raw_feature_names: available_feature_names(instance, physical_device),
+        shader_core_count,
     }
 }
 
@@ -897,4 +908,32 @@ fn conservative_rasterization_properties(
         instance.get_physical_device_properties2(physical_device, &mut properties2);
     }
     properties
+}
+
+/// Query hardware shader-core/SM count from AMD or NVIDIA vendor extensions.
+///
+/// Returns the total compute-unit or SM count reported by the driver, or `None`
+/// when neither extension is available on the device.
+pub(crate) fn query_shader_core_count(
+    instance: &Instance,
+    physical_device: vk::PhysicalDevice,
+    has_amd_shader_core_properties: bool,
+    has_nv_shader_sm_builtins: bool,
+) -> Option<u32> {
+    if has_amd_shader_core_properties {
+        let mut props = vk::PhysicalDeviceShaderCorePropertiesAMD::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut props);
+        unsafe { instance.get_physical_device_properties2(physical_device, &mut props2) };
+        let total = props.shader_engine_count
+            * props.shader_arrays_per_engine_count
+            * props.compute_units_per_shader_array;
+        return Some(total);
+    }
+    if has_nv_shader_sm_builtins {
+        let mut props = vk::PhysicalDeviceShaderSMBuiltinsPropertiesNV::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut props);
+        unsafe { instance.get_physical_device_properties2(physical_device, &mut props2) };
+        return Some(props.shader_sm_count);
+    }
+    None
 }

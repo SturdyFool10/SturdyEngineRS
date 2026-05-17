@@ -84,6 +84,9 @@ impl ImageTilingPlan {
                 transient,
                 clear_value: None,
                 debug_name: debug_name_prefix,
+                compression: Default::default(),
+                min_lod_bits: None,
+                msaa_resolve_to_single_sampled: false,
             })
             .collect()
     }

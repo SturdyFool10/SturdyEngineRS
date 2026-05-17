@@ -232,6 +232,7 @@ impl TextOverlay {
             transient: false,
             clear_value: None,
             debug_name: Some("text overlay atlas"),
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
         })?;
         let _ = image.set_debug_name("text-overlay-atlas");
         Ok(image)
@@ -255,6 +256,8 @@ fn text_program(engine: &Engine, fragment: &str) -> Result<MeshProgram> {
                 entry_point: "main".to_string(),
                 stage: ShaderStage::Fragment,
                 requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
             },
             vertex: None,
             vertex_kind: MeshVertexKind::V2d,

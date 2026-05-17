@@ -168,6 +168,7 @@ pub use input::{
     ActionAxisDirection, ActionBinding, ActionBindingRegistry, ActionMap, BindingChange,
     GamepadAxis, GamepadAxisInput, GamepadButton, GamepadButtonInput, GamepadId, InputHub,
     KeyInput, KeyInputState, KeyModifier, KeyModifiers, KeyToken, Keybind, KeybindCapture,
+    LateSample,
 };
 pub use light_bvh::{BVH_EMPTY, GpuBvhNode, LEAF_FLAG, LightBvhBuilder};
 pub use mesh::{Mesh, SkinnedVertex3d, Vertex2d, Vertex3d};
@@ -233,8 +234,8 @@ pub use graph_report::{
 };
 pub use pipeline_layout::PipelineLayoutBuilder;
 pub use post_process::{
-    AutoExposureConfig, CaConfig, CaPass, GrainConfig, GrainPass, LensConfig, PostProcessConfig,
-    PostProcessPasses, VignetteConfig, VignettePass,
+    AutoExposureConfig, CaConfig, CaPass, GrainConfig, GrainPass, LensConfig, LensPass,
+    PostProcessConfig, PostProcessPasses, VignetteConfig, VignettePass,
 };
 pub use shader_program::{ShaderName, ShaderProgram, ShaderProgramDesc, SlangEntryPoints};
 #[cfg(not(target_arch = "wasm32"))]
@@ -250,16 +251,16 @@ pub use sturdy_engine_core::{
     DrawDesc, DrawIndirectCountDesc, DrawIndirectDesc, DrawMeshShaderDesc,
     DrawMeshShaderIndirectDesc, Error, ErrorCategory, Extent3d, ExternalBufferDesc,
     ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode, Format,
-    FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GpuMemoryBudget,
-    GraphicsPipelineDesc, ImageBuilder, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse,
+    FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GpuMemoryBudget, MemoryBudgetReport, MemoryHeapBudget,
+    GraphicsPipelineDesc, ImageBuilder, ImageCompression, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse,
     IndexBufferBinding, IndexFormat, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
     NativeHandleCapability, NativeHandleKind, NativeHandleOwnership, PassDesc, PassWork,
-    PrimitiveTopology, PushConstants, QueueType, RasterState, ResolveImageDesc, ResourceBinding,
+    PolygonMode, PrimitiveTopology, PushConstants, QueueType, RasterState, ResolveImageDesc, ResourceBinding,
     Result, RgState, SamplerDesc, ShaderDesc, ShaderParameterKind, ShaderParameterReflection,
     ShaderResourceAccess, ShaderSource, ShaderStage, ShaderTarget, ShadingRate, SlangCompileDesc,
     StageMask, SubresourceRange, SurfaceCapabilities, SurfaceColorSpace, SurfaceEvent,
     SurfaceFormatInfo, SurfaceHdrCaps, SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode,
-    SurfaceRecreateDesc, UpdateRate, VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout,
+    SurfaceRecreateDesc, HdrMetadata, UpdateRate, VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout,
     VertexFormat, VertexInputRate, VertexInputReflection, VulkanExternalBuffer,
     VulkanExternalImage, VulkanRawCapabilities, compile_slang, compile_slang_to_file,
     compile_slang_to_spirv, native_handle_capabilities_for_backend, spirv_words_from_bytes,
@@ -573,12 +574,16 @@ impl Engine {
                         entry_point: vertex,
                         stage: ShaderStage::Vertex,
                         requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                     }),
                     fragment: ShaderDesc {
                         source,
                         entry_point: fragment,
                         stage: ShaderStage::Fragment,
                         requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                     },
                 })
             }
@@ -590,6 +595,8 @@ impl Engine {
                         entry_point: fragment,
                         stage: ShaderStage::Fragment,
                         requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                     },
                 })
             }
@@ -601,6 +608,8 @@ impl Engine {
                         entry_point: compute,
                         stage: ShaderStage::Compute,
                         requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                     },
                 })
             }
@@ -1368,6 +1377,22 @@ impl Surface {
 
     pub fn capabilities(&self) -> Result<SurfaceCapabilities> {
         self.device.query_surface_capabilities(self.handle)
+    }
+
+    /// Set SMPTE ST 2086 / CTA 861.3 HDR mastering display metadata on this surface.
+    ///
+    /// Has no effect when `SurfaceCapabilities::hdr_metadata_supported` is `false` or
+    /// the swapchain is not in an HDR10 color space. Silently ignored rather than
+    /// returning an error to simplify call sites that run on mixed display setups.
+    pub fn set_hdr_metadata(&self, metadata: HdrMetadata) -> Result<()> {
+        self.device.set_surface_hdr_metadata(self.handle, metadata)
+    }
+
+    /// Block until the NVIDIA Reflex driver signals the optimal frame-start time.
+    ///
+    /// Call once per frame before input sampling. No-op when Reflex is unavailable.
+    pub fn latency_sleep(&self) -> Result<()> {
+        self.device.latency_sleep(self.handle)
     }
 
     pub fn acquire_image(&self) -> Result<SurfaceImage> {

@@ -327,6 +327,11 @@ pub enum AccelerationStructureBuildMode {
     /// Incremental update of an existing structure.
     Update,
     /// Compact an existing structure into a smaller allocation.
+    ///
+    /// Build-size queries for compaction use `src` only and return a conservative
+    /// upper bound equal to the source allocation size. Querying the exact
+    /// compacted size requires GPU readback after a real build and is not exposed
+    /// by the synchronous size-query API.
     Compact,
 }
 
@@ -349,7 +354,11 @@ pub struct BlasGeometryDesc {
 /// Describes a bottom-level acceleration structure build.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlasBuildDesc {
+    /// Destination acceleration structure for build/update/execute-time compact.
+    /// Ignored by `Device::blas_build_sizes` when `mode` is `Compact`, because
+    /// callers usually need the compact destination size before creating it.
     pub dst: AccelerationStructureHandle,
+    /// Source acceleration structure for update/compact operations.
     pub src: Option<AccelerationStructureHandle>,
     /// Optional caller-provided scratch buffer. When `None`, backends may allocate
     /// transient scratch for the submitted frame.
@@ -361,7 +370,11 @@ pub struct BlasBuildDesc {
 /// Describes a top-level acceleration structure build.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct TlasBuildDesc {
+    /// Destination acceleration structure for build/update/execute-time compact.
+    /// Ignored by `Device::tlas_build_sizes` when `mode` is `Compact`, because
+    /// callers usually need the compact destination size before creating it.
     pub dst: AccelerationStructureHandle,
+    /// Source acceleration structure for update/compact operations.
     pub src: Option<AccelerationStructureHandle>,
     /// Optional caller-provided scratch buffer. When `None`, backends may allocate
     /// transient scratch for the submitted frame.
@@ -450,14 +463,41 @@ pub enum PassWork {
     /// Dispatch rays using a ray-tracing pipeline and a shader binding table.
     TraceRays(TraceRaysDesc),
     /// Decode a compressed video frame into an output image.
+    ///
+    /// Video graph passes are design-only scaffolding until `VideoSessionHandle`
+    /// maps to a real backend video session. `RenderGraph::add_pass` rejects this
+    /// work with `Error::Unsupported` so callers cannot accidentally compile a
+    /// graph that will fail during command recording.
     DecodeVideoFrame(DecodeFrameDesc),
     /// Encode an input image into a compressed video bitstream.
+    ///
+    /// Video graph passes are design-only scaffolding until `VideoSessionHandle`
+    /// maps to a real backend video session. `RenderGraph::add_pass` rejects this
+    /// work with `Error::Unsupported` so callers cannot accidentally compile a
+    /// graph that will fail during command recording.
     EncodeVideoFrame(EncodeFrameDesc),
     /// Execute GPU-generated commands from a pre-processed buffer.
+    ///
+    /// Device-generated command passes are design-only scaffolding until the
+    /// backend owns command layouts, preprocess buffers, and recording through
+    /// the selected DGC extension. `RenderGraph::add_pass` rejects this work
+    /// with `Error::Unsupported` so callers cannot compile a graph that will
+    /// fail during command recording.
     ExecuteGeneratedCommands(DgcExecuteDesc),
     /// Preprocess an indirect command buffer for GPU execution.
+    ///
+    /// Device-generated command passes are design-only scaffolding until the
+    /// backend owns command layouts, preprocess buffers, and recording through
+    /// the selected DGC extension. `RenderGraph::add_pass` rejects this work
+    /// with `Error::Unsupported` so callers cannot compile a graph that will
+    /// fail during command recording.
     PreprocessGeneratedCommands(DgcPreprocessDesc),
     /// Estimate optical flow motion vectors between two frames.
+    ///
+    /// Optical-flow graph passes are design-only scaffolding until the backend
+    /// owns `VkOpticalFlowSessionNV` resources and command recording.
+    /// `RenderGraph::add_pass` rejects this work with `Error::Unsupported` so
+    /// callers cannot compile a graph that will fail during command recording.
     EstimateOpticalFlow(OpticalFlowEstimateDesc),
 }
 
@@ -742,6 +782,27 @@ impl RenderGraph {
                     "shader object binding requires at least one shader object".into(),
                 ));
             }
+        }
+        if matches!(
+            pass.work,
+            PassWork::DecodeVideoFrame(_) | PassWork::EncodeVideoFrame(_)
+        ) {
+            return Err(Error::Unsupported(
+                "render graph video passes are not executable until backend video sessions are implemented",
+            ));
+        }
+        if matches!(
+            pass.work,
+            PassWork::ExecuteGeneratedCommands(_) | PassWork::PreprocessGeneratedCommands(_)
+        ) {
+            return Err(Error::Unsupported(
+                "render graph device-generated command passes are not executable until backend DGC resources and recording are implemented",
+            ));
+        }
+        if matches!(pass.work, PassWork::EstimateOpticalFlow(_)) {
+            return Err(Error::Unsupported(
+                "render graph optical-flow passes are not executable until backend optical-flow sessions and recording are implemented",
+            ));
         }
         let has_pipeline_binding = pass.pipeline.is_some()
             || matches!(pass.shader_binding, Some(ShaderBinding::Pipeline(_)));
@@ -1500,7 +1561,10 @@ fn mip_extent(base: u32, mip_level: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BufferUsage, Extent3d, Format, ImageDimension, ImageUsage};
+    use crate::{
+        BufferUsage, Extent3d, Format, ImageDimension, ImageUsage, IndirectCommandLayoutHandle,
+        OpticalFlowSessionHandle, VideoSessionHandle,
+    };
 
     fn image_desc_defaults() -> ImageDesc {
         ImageDesc {
@@ -1514,6 +1578,7 @@ mod tests {
             transient: false,
             clear_value: None,
             debug_name: None,
+            compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
         }
     }
 
@@ -1567,6 +1632,7 @@ mod tests {
                 | ImageUsage::COPY_DST,
             transient: true,
             debug_name: Some("transient test image"),
+            compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
             ..image_desc_defaults()
         }
     }
@@ -1591,6 +1657,126 @@ mod tests {
             first_use: u32::MAX,
             last_use: 0,
         });
+    }
+
+    fn pass_with_work(work: PassWork) -> PassDesc {
+        PassDesc {
+            name: "test-pass".into(),
+            queue: QueueType::Graphics,
+            shader: None,
+            pipeline: None,
+            bind_groups: Vec::new(),
+            push_constants: None,
+            pipeline_shading_rate: None,
+            work,
+            reads: Vec::new(),
+            writes: Vec::new(),
+            buffer_reads: Vec::new(),
+            buffer_writes: Vec::new(),
+            clear_colors: Vec::new(),
+            clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
+            shader_binding: None,
+        }
+    }
+
+    #[test]
+    fn video_decode_pass_is_explicitly_non_executable() {
+        let mut graph = RenderGraph::new();
+        let err = graph
+            .add_pass(pass_with_work(PassWork::DecodeVideoFrame(
+                DecodeFrameDesc {
+                    session: VideoSessionHandle(1),
+                    bitstream_buffer: BufferHandle(2),
+                    bitstream_offset: 0,
+                    bitstream_size: 128,
+                    output_image: ImageHandle(3),
+                    output_layer: 0,
+                },
+            )))
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Unsupported(message) if message.contains("video passes")));
+    }
+
+    #[test]
+    fn video_encode_pass_is_explicitly_non_executable() {
+        let mut graph = RenderGraph::new();
+        let err = graph
+            .add_pass(pass_with_work(PassWork::EncodeVideoFrame(
+                EncodeFrameDesc {
+                    session: VideoSessionHandle(1),
+                    input_image: ImageHandle(2),
+                    output_buffer: BufferHandle(3),
+                    output_offset: 0,
+                    quantization_map: None,
+                },
+            )))
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Unsupported(message) if message.contains("video passes")));
+    }
+
+    #[test]
+    fn generated_command_execute_pass_is_explicitly_non_executable() {
+        let mut graph = RenderGraph::new();
+        let err = graph
+            .add_pass(pass_with_work(PassWork::ExecuteGeneratedCommands(
+                DgcExecuteDesc {
+                    layout: IndirectCommandLayoutHandle(1),
+                    commands_buffer: BufferHandle(2),
+                    commands_offset: 0,
+                    max_command_count: 1,
+                    state_pipeline: None,
+                },
+            )))
+            .unwrap_err();
+
+        assert!(
+            matches!(err, Error::Unsupported(message) if message.contains("device-generated command passes"))
+        );
+    }
+
+    #[test]
+    fn generated_command_preprocess_pass_is_explicitly_non_executable() {
+        let mut graph = RenderGraph::new();
+        let err = graph
+            .add_pass(pass_with_work(PassWork::PreprocessGeneratedCommands(
+                DgcPreprocessDesc {
+                    layout: IndirectCommandLayoutHandle(1),
+                    input_buffer: BufferHandle(2),
+                    input_offset: 0,
+                    output_buffer: BufferHandle(3),
+                    output_offset: 0,
+                    max_command_count: 1,
+                },
+            )))
+            .unwrap_err();
+
+        assert!(
+            matches!(err, Error::Unsupported(message) if message.contains("device-generated command passes"))
+        );
+    }
+
+    #[test]
+    fn optical_flow_estimate_pass_is_explicitly_non_executable() {
+        let mut graph = RenderGraph::new();
+        let err = graph
+            .add_pass(pass_with_work(PassWork::EstimateOpticalFlow(
+                OpticalFlowEstimateDesc {
+                    session: OpticalFlowSessionHandle(1),
+                    input_current: ImageHandle(2),
+                    input_previous: ImageHandle(3),
+                    output_motion_vectors: ImageHandle(4),
+                    input_hint: None,
+                },
+            )))
+            .unwrap_err();
+
+        assert!(
+            matches!(err, Error::Unsupported(message) if message.contains("optical-flow passes"))
+        );
     }
 
     #[test]

@@ -114,6 +114,45 @@ mod tests {
     #[derive(Debug, Clone, PartialEq)]
     struct Spd(f32);
 
+    fn assert_vec3_near(actual: glam::Vec3, expected: glam::Vec3) {
+        assert!(
+            actual.abs_diff_eq(expected, 1e-5),
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn transform_look_at_aligns_forward_and_world_up() {
+        let mut transform = Transform::from_position(glam::Vec3::ZERO);
+        transform.look_at(glam::Vec3::new(0.0, 0.0, -1.0), glam::Vec3::Y);
+
+        assert_vec3_near(transform.forward(), glam::Vec3::NEG_Z);
+        assert_vec3_near(transform.up(), glam::Vec3::Y);
+        assert_vec3_near(transform.right(), glam::Vec3::X);
+    }
+
+    #[test]
+    fn transform_look_at_honors_roll_from_up_vector() {
+        let mut transform = Transform::from_position(glam::Vec3::ZERO);
+        transform.look_at(glam::Vec3::new(0.0, 0.0, -1.0), glam::Vec3::X);
+
+        assert_vec3_near(transform.forward(), glam::Vec3::NEG_Z);
+        assert_vec3_near(transform.up(), glam::Vec3::X);
+        assert_vec3_near(transform.right(), glam::Vec3::NEG_Y);
+    }
+
+    #[test]
+    fn transform_look_at_handles_parallel_up_vector() {
+        let mut transform = Transform::from_position(glam::Vec3::ZERO);
+        transform.look_at(glam::Vec3::Y, glam::Vec3::Y);
+
+        assert_vec3_near(transform.forward(), glam::Vec3::Y);
+        assert!(transform.up().is_finite());
+        assert!(transform.right().is_finite());
+        assert!(transform.up().dot(transform.forward()).abs() < 1e-5);
+        assert!(transform.right().dot(transform.forward()).abs() < 1e-5);
+    }
+
     #[test]
     fn spawn_and_despawn() {
         let mut world = World::new();

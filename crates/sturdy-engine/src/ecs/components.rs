@@ -84,11 +84,24 @@ impl Transform {
 
     /// Look toward `target` from the current position. `up` is the world-up vector.
     pub fn look_at(&mut self, target: Vec3, up: Vec3) {
-        let forward = (target - self.position).normalize();
-        if forward.length_squared() > 1e-6 {
-            self.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, forward);
-            let _ = up; // TODO: handle world-up alignment properly
+        let to_target = target - self.position;
+        if to_target.length_squared() <= 1e-12 {
+            return;
         }
+        let forward = to_target.normalize();
+        let mut up = if up.length_squared() > 1e-12 {
+            up.normalize()
+        } else {
+            Vec3::Y
+        };
+        if forward.cross(up).length_squared() <= 1e-10 {
+            up = fallback_up(forward);
+        }
+
+        let right = forward.cross(up).normalize();
+        let corrected_up = right.cross(forward).normalize();
+        self.rotation =
+            Quat::from_mat3(&glam::Mat3::from_cols(right, corrected_up, -forward)).normalize();
     }
 
     /// Return the forward direction in world space (−Z by convention).
@@ -104,6 +117,14 @@ impl Transform {
     /// Return the up direction in world space (+Y by convention).
     pub fn up(&self) -> Vec3 {
         self.rotation * Vec3::Y
+    }
+}
+
+fn fallback_up(forward: Vec3) -> Vec3 {
+    if forward.dot(Vec3::Y).abs() < 0.99 {
+        Vec3::Y
+    } else {
+        Vec3::Z
     }
 }
 

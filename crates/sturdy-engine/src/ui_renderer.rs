@@ -9,10 +9,10 @@
 //
 //   Rectangle  — filled, optionally rounded; colour from UiColor::Rgba8
 //   Border     — border-only rect (fill transparent)
-//   ScissorStart / ScissorEnd — stored; scissor submission is TODO
-//   Text       — skipped here; text is rendered separately via the textui
-//                atlas returned in UiFrameOutput::text_scenes
-//   Image      — skipped; image binding requires a texture registry (TODO)
+//   ScissorStart / ScissorEnd — CPU-clips generated quads to the active clip
+//   Text       — rendered separately via draw_ui_text using the textui atlas
+//                returned in UiFrameOutput::text_scenes
+//   Image      — sampled from the renderer image registry by image_key
 //
 // ## Usage
 //
@@ -27,7 +27,7 @@
 // ```
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use clay_ui::{GpuWorkQueue, RenderCommandKind, RenderData};
 
@@ -37,6 +37,20 @@ use crate::{
 };
 
 const UI_SHAPE_FRAGMENT: &str = include_str!("../shaders/debug_overlay_ui_shape_fragment.slang");
+const UI_IMAGE_FRAGMENT: &str = r#"
+Texture2D<float4> ui_image;
+SamplerState ui_image_sampler;
+
+struct FSInput {
+    float4 position : SV_POSITION;
+    float2 uv : TEXCOORD0;
+    float4 color : COLOR0;
+};
+
+float4 main(FSInput input) : SV_TARGET {
+    return ui_image.SampleLevel(ui_image_sampler, input.uv, 0.0) * input.color;
+}
+"#;
 
 // ── Push-constant layout (must match debug_overlay_ui_shape_fragment.slang) ──
 
@@ -58,10 +72,12 @@ struct UiShapeConstants {
 /// `build_frame` output and issues the necessary mesh draws.
 pub struct UiRenderer {
     program: MeshProgram,
+    image_program: MeshProgram,
+    images: RwLock<HashMap<String, Arc<Image>>>,
 }
 
 impl UiRenderer {
-    /// Create a `UiRenderer`, compiling the built-in UI shape shader.
+    /// Create a `UiRenderer`, compiling the built-in UI shape and image shaders.
     pub fn new(engine: &Engine) -> Result<Self> {
         let program = MeshProgram::new(
             engine,
@@ -71,6 +87,8 @@ impl UiRenderer {
                     entry_point: "main".to_string(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                 },
                 vertex: None,
                 vertex_kind: MeshVertexKind::V2d,
@@ -78,7 +96,44 @@ impl UiRenderer {
                 uses_depth: false,
             },
         )?;
-        Ok(Self { program })
+        let image_program = MeshProgram::new(
+            engine,
+            MeshProgramDesc {
+                fragment: ShaderDesc {
+                    source: ShaderSource::Inline(UI_IMAGE_FRAGMENT.to_string()),
+                    entry_point: "main".to_string(),
+                    stage: ShaderStage::Fragment,
+                    requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
+                },
+                vertex: None,
+                vertex_kind: MeshVertexKind::V2d,
+                alpha_blend: true,
+                uses_depth: false,
+            },
+        )?;
+        Ok(Self {
+            program,
+            image_program,
+            images: RwLock::new(HashMap::new()),
+        })
+    }
+
+    /// Register an image for Clay `Image` commands with the matching `image_key`.
+    pub fn set_image(&self, image_key: impl Into<String>, image: Arc<Image>) {
+        self.images
+            .write()
+            .expect("ui image registry rwlock poisoned")
+            .insert(image_key.into(), image);
+    }
+
+    /// Remove a registered Clay image by key.
+    pub fn remove_image(&self, image_key: &str) -> Option<Arc<Image>> {
+        self.images
+            .write()
+            .expect("ui image registry rwlock poisoned")
+            .remove(image_key)
     }
 
     /// Draw all supported commands from `queue` into `target`.
@@ -86,34 +141,37 @@ impl UiRenderer {
     /// `width` and `height` are the logical pixel dimensions of the render
     /// target — used to convert pixel-space rects to NDC coordinates.
     ///
-    /// Text commands are skipped (handled separately via `UiFrameOutput::text_scenes`).
-    /// Image commands are skipped (need an image registry — future work).
+    /// Text commands are handled separately via `draw_ui_text` and
+    /// `UiFrameOutput::text_scenes`; image commands use this renderer's image
+    /// registry.
     pub fn draw_queue(
         &self,
-        _frame: &RenderFrame,
+        frame: &RenderFrame,
         target: &GraphImage,
         queue: &GpuWorkQueue,
         width: u32,
         height: u32,
     ) -> Result<()> {
         let engine = &self.program.engine;
+        let mut clip_stack = vec![ClipRect::viewport(width, height)];
         for command in &queue.commands {
+            let active_clip = *clip_stack
+                .last()
+                .expect("ui clip stack always has viewport root");
             match command.kind {
                 RenderCommandKind::Rectangle => {
                     if let RenderData::Rectangle(data) = &command.data {
+                        let Some(rect) = active_clip.clip_rect(command.rect) else {
+                            continue;
+                        };
                         let fill = ui_color_to_linear(&data.color);
                         let radius = data.corner_radius.x;
                         let constants = UiShapeConstants {
-                            size_radius_border: [
-                                command.rect.size.width,
-                                command.rect.size.height,
-                                radius,
-                                0.0,
-                            ],
+                            size_radius_border: [rect.size.width, rect.size.height, radius, 0.0],
                             fill_color: fill,
                             border_color: [0.0; 4],
                         };
-                        let mesh = rect_mesh(engine, width, height, &command.rect)?;
+                        let mesh = rect_mesh(engine, width, height, &rect)?;
                         target.draw_mesh_with_push_constants(
                             &mesh,
                             &self.program,
@@ -125,20 +183,23 @@ impl UiRenderer {
 
                 RenderCommandKind::Border => {
                     if let RenderData::Border(data) = &command.data {
+                        let Some(rect) = active_clip.clip_rect(command.rect) else {
+                            continue;
+                        };
                         let border_color = ui_color_to_linear(&data.color);
                         let border_width = data.width.top;
                         let radius = data.corner_radius.x;
                         let constants = UiShapeConstants {
                             size_radius_border: [
-                                command.rect.size.width,
-                                command.rect.size.height,
+                                rect.size.width,
+                                rect.size.height,
                                 radius,
                                 border_width,
                             ],
                             fill_color: [0.0; 4],
                             border_color,
                         };
-                        let mesh = rect_mesh(engine, width, height, &command.rect)?;
+                        let mesh = rect_mesh(engine, width, height, &rect)?;
                         target.draw_mesh_with_push_constants(
                             &mesh,
                             &self.program,
@@ -148,15 +209,57 @@ impl UiRenderer {
                     }
                 }
 
+                RenderCommandKind::Image => {
+                    if let RenderData::Image(data) = &command.data {
+                        let image = {
+                            let images = self
+                                .images
+                                .read()
+                                .expect("ui image registry rwlock poisoned");
+                            images.get(&data.image_key).cloned()
+                        };
+                        let Some(image) = image else {
+                            continue;
+                        };
+                        let natural = clay_ui::Size::new(
+                            image.desc().extent.width as f32,
+                            image.desc().extent.height as f32,
+                        );
+                        let image_rect =
+                            data.options
+                                .fit
+                                .fitted_rect(command.rect, natural, data.options.align);
+                        let Some(clipped) = active_clip.clip_rect(image_rect) else {
+                            continue;
+                        };
+                        let uv = clipped_uv(image_rect, clipped);
+                        let tint = ui_color_to_linear(&data.tint);
+                        let mesh = rect_mesh_with_uv(engine, width, height, &clipped, uv, tint)?;
+                        frame.bind_image("ui_image", image.as_ref());
+                        target.draw_mesh(&mesh, &self.image_program)?;
+                    }
+                }
+
+                RenderCommandKind::ScissorStart => {
+                    if let RenderData::Clip(data) = &command.data {
+                        clip_stack.push(active_clip.intersect_axes(
+                            command.rect,
+                            data.horizontal,
+                            data.vertical,
+                        ));
+                    } else {
+                        clip_stack.push(active_clip);
+                    }
+                }
+
+                RenderCommandKind::ScissorEnd => {
+                    if clip_stack.len() > 1 {
+                        clip_stack.pop();
+                    }
+                }
+
                 // Text handled via UiFrameOutput::text_scenes (textui atlas).
-                // Image needs an image registry — future work.
-                // Scissor, Custom, None: no GPU action here.
-                RenderCommandKind::Text
-                | RenderCommandKind::Image
-                | RenderCommandKind::ScissorStart
-                | RenderCommandKind::ScissorEnd
-                | RenderCommandKind::Custom
-                | RenderCommandKind::None => {}
+                RenderCommandKind::Text | RenderCommandKind::Custom | RenderCommandKind::None => {}
             }
         }
         Ok(())
@@ -199,22 +302,82 @@ fn rect_mesh(engine: &Engine, width: u32, height: u32, rect: &clay_ui::Rect) -> 
     batch.build(engine)
 }
 
+fn rect_mesh_with_uv(
+    engine: &Engine,
+    width: u32,
+    height: u32,
+    rect: &clay_ui::Rect,
+    uv_rect: [f32; 4],
+    color: [f32; 4],
+) -> Result<Mesh> {
+    let (pos, size) = pixel_rect_to_ndc(
+        rect.origin.x,
+        rect.origin.y,
+        rect.right(),
+        rect.bottom(),
+        width,
+        height,
+    );
+    let mut batch = QuadBatch::new();
+    batch.push(pos, size, uv_rect, color);
+    batch.build(engine)
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct ClipRect {
+    min_x: f32,
+    min_y: f32,
+    max_x: f32,
+    max_y: f32,
+}
+
+impl ClipRect {
+    fn viewport(width: u32, height: u32) -> Self {
+        Self {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: width as f32,
+            max_y: height as f32,
+        }
+    }
+
+    fn intersect_axes(self, rect: clay_ui::Rect, horizontal: bool, vertical: bool) -> Self {
+        let mut next = self;
+        if horizontal {
+            next.min_x = next.min_x.max(rect.origin.x);
+            next.max_x = next.max_x.min(rect.right());
+        }
+        if vertical {
+            next.min_y = next.min_y.max(rect.origin.y);
+            next.max_y = next.max_y.min(rect.bottom());
+        }
+        next
+    }
+
+    fn clip_rect(self, rect: clay_ui::Rect) -> Option<clay_ui::Rect> {
+        let min_x = rect.origin.x.max(self.min_x);
+        let min_y = rect.origin.y.max(self.min_y);
+        let max_x = rect.right().min(self.max_x);
+        let max_y = rect.bottom().min(self.max_y);
+        (max_x > min_x && max_y > min_y)
+            .then(|| clay_ui::Rect::new(min_x, min_y, max_x - min_x, max_y - min_y))
+    }
+}
+
+fn clipped_uv(original: clay_ui::Rect, clipped: clay_ui::Rect) -> [f32; 4] {
+    let inv_w = 1.0 / original.size.width.max(1.0);
+    let inv_h = 1.0 / original.size.height.max(1.0);
+    let u0 = (clipped.origin.x - original.origin.x) * inv_w;
+    let v0 = (clipped.origin.y - original.origin.y) * inv_h;
+    let u1 = (clipped.right() - original.origin.x) * inv_w;
+    let v1 = (clipped.bottom() - original.origin.y) * inv_h;
+    [u0, v0, u1, v1]
+}
+
 // ── Text rendering ────────────────────────────────────────────────────────────
 
 /// Text atlas shader — alpha mask path (same as text_overlay_alpha_fragment.slang).
 const TEXT_ATLAS_FRAGMENT: &str = include_str!("../shaders/text_overlay_alpha_fragment.slang");
-
-/// Per-glyph push constants for the text atlas shader.
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct TextGlyphConstants {
-    /// Screen-space positions of the quad corners (xy pairs for 4 vertices).
-    positions: [[f32; 2]; 4],
-    /// UV coordinates into the atlas page.
-    uvs: [[f32; 2]; 4],
-    /// RGBA tint colour in [0, 1].
-    tint: [f32; 4],
-}
 
 /// Draw all text scenes from a [`clay_ui::UiFrameOutput`] into `target`.
 ///
@@ -226,12 +389,12 @@ struct TextGlyphConstants {
 /// The atlas image cache is caller-managed. Pass a `HashMap<u64, Image>` that
 /// persists across frames to avoid redundant GPU uploads.
 pub fn draw_ui_text(
-    _frame: &RenderFrame,
+    frame: &RenderFrame,
     engine: &Engine,
     output: &clay_ui::UiFrameOutput,
-    _target: &GraphImage,
-    _width: u32,
-    _height: u32,
+    target: &GraphImage,
+    width: u32,
+    height: u32,
 ) -> Result<()> {
     // Thread-local cache of compiled text programs. Lazily created.
     // For simplicity, use a static Mutex so we don't need to thread the program
@@ -250,6 +413,8 @@ pub fn draw_ui_text(
                     entry_point: "main".to_string(),
                     stage: crate::ShaderStage::Fragment,
                     requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                 },
                 vertex: None,
                 vertex_kind: MeshVertexKind::V2d,
@@ -260,7 +425,7 @@ pub fn draw_ui_text(
         *TEXT_PROGRAM.lock().expect("text program mutex poisoned") = Some(prog);
     }
     let program_guard = TEXT_PROGRAM.lock().expect("text program mutex poisoned");
-    let _program = match program_guard.as_ref() {
+    let program = match program_guard.as_ref() {
         Some(p) => p,
         None => return Ok(()),
     };
@@ -299,15 +464,15 @@ pub fn draw_ui_text(
             // Draw each glyph quad.
             for quad in &scene.quads {
                 let page = scene.atlas_pages.get(quad.atlas_page_index);
-                let _atlas_img = if let Some(p) = page {
+                let atlas_img = if let Some(p) = page {
                     cache.get(&p.content_hash)
                 } else {
                     None
                 };
-                // TODO: bind atlas_img as a texture and draw the quad.
-                // The alpha shader needs texture sampling; for now emit a solid
-                // white quad at the correct position (makes text appear as white
-                // rectangles — visible placeholder until texture binding is wired).
+                let Some(atlas_img) = atlas_img else {
+                    continue;
+                };
+
                 let tint = quad.tint_rgba;
                 let tint_f = [
                     tint[0] as f32 / 255.0,
@@ -315,35 +480,20 @@ pub fn draw_ui_text(
                     tint[2] as f32 / 255.0,
                     tint[3] as f32 / 255.0,
                 ];
-                // Build a quad mesh from the four corner positions.
-                let mut batch = QuadBatch::new();
-                let p = &quad.positions;
-                let min_x = p[0][0].min(p[1][0]).min(p[2][0]).min(p[3][0]);
-                let min_y = p[0][1].min(p[1][1]).min(p[2][1]).min(p[3][1]);
-                let max_x = p[0][0].max(p[1][0]).max(p[2][0]).max(p[3][0]);
-                let max_y = p[0][1].max(p[1][1]).max(p[2][1]).max(p[3][1]);
+
+                let ([min_x, min_y], [max_x, max_y]) = quad_bounds(&quad.positions);
                 if (max_x - min_x) < 0.5 || (max_y - min_y) < 0.5 {
                     continue; // skip degenerate quads
                 }
-                // These positions are already in screen/pixel space — convert to NDC.
-                // We don't have width/height here; caller must provide them.
-                // For now, assume positions are already normalized (TODO: fix).
-                batch.push(
-                    [min_x, min_y],
-                    [max_x - min_x, max_y - min_y],
-                    [0.0, 0.0, 1.0, 1.0],
-                    tint_f,
-                );
+
+                let ([u0, v0], [u1, v1]) = quad_bounds(&quad.uvs);
+                let (pos, size) = pixel_rect_to_ndc(min_x, min_y, max_x, max_y, width, height);
+                let mut batch = QuadBatch::new();
+                batch.push(pos, size, [u0, v0, u1, v1], tint_f);
                 let mesh = batch.build(engine)?;
-                // Use solid color instead of textured until atlas binding is wired.
-                // (draw_mesh_with_push_constants renders using the fragment shader's push constants)
-                let constants = UiShapeConstants {
-                    size_radius_border: [max_x - min_x, max_y - min_y, 0.0, 0.0],
-                    fill_color: tint_f,
-                    border_color: [0.0; 4],
-                };
-                // Re-use the shape renderer for now (shows solid rects where text should be).
-                let _ = (&mesh, &constants);
+
+                frame.bind_image("text_atlas", atlas_img);
+                target.draw_mesh(&mesh, program)?;
             }
         }
         Ok(())
@@ -360,4 +510,81 @@ pub fn draw_ui_text(
 fn ui_color_to_linear(color: &clay_ui::UiColor) -> [f32; 4] {
     let c = &color.color;
     [c.r as f32, c.g as f32, c.b as f32, c.a as f32]
+}
+
+fn quad_bounds(points: &[[f32; 2]; 4]) -> ([f32; 2], [f32; 2]) {
+    let mut min_x = points[0][0];
+    let mut min_y = points[0][1];
+    let mut max_x = points[0][0];
+    let mut max_y = points[0][1];
+    for point in points.iter().skip(1) {
+        min_x = min_x.min(point[0]);
+        min_y = min_y.min(point[1]);
+        max_x = max_x.max(point[0]);
+        max_y = max_y.max(point[1]);
+    }
+    ([min_x, min_y], [max_x, max_y])
+}
+
+fn pixel_rect_to_ndc(
+    min_x: f32,
+    min_y: f32,
+    max_x: f32,
+    max_y: f32,
+    width: u32,
+    height: u32,
+) -> ([f32; 2], [f32; 2]) {
+    let w = width.max(1) as f32;
+    let h = height.max(1) as f32;
+    let ndc_x = min_x / w * 2.0 - 1.0;
+    let ndc_y = 1.0 - max_y / h * 2.0;
+    let ndc_w = (max_x - min_x) / w * 2.0;
+    let ndc_h = (max_y - min_y) / h * 2.0;
+    ([ndc_x, ndc_y], [ndc_w, ndc_h])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pixel_rect_to_ndc_uses_viewport_dimensions() {
+        let (pos, size) = pixel_rect_to_ndc(100.0, 50.0, 300.0, 250.0, 800, 600);
+
+        assert_eq!(pos, [-0.75, 1.0 - 250.0 / 600.0 * 2.0]);
+        assert_eq!(size, [0.5, 200.0 / 600.0 * 2.0]);
+    }
+
+    #[test]
+    fn quad_bounds_handles_unordered_points() {
+        let (min, max) = quad_bounds(&[[4.0, 1.0], [2.0, 9.0], [7.0, 3.0], [5.0, -1.0]]);
+
+        assert_eq!(min, [2.0, -1.0]);
+        assert_eq!(max, [7.0, 9.0]);
+    }
+
+    #[test]
+    fn clip_rect_intersects_enabled_axes_only() {
+        let clip = ClipRect::viewport(100, 100);
+        let horizontal_only =
+            clip.intersect_axes(clay_ui::Rect::new(25.0, 30.0, 50.0, 10.0), true, false);
+
+        assert_eq!(
+            horizontal_only,
+            ClipRect {
+                min_x: 25.0,
+                min_y: 0.0,
+                max_x: 75.0,
+                max_y: 100.0,
+            }
+        );
+    }
+
+    #[test]
+    fn clipped_uv_preserves_sample_region_after_scissor() {
+        let original = clay_ui::Rect::new(100.0, 50.0, 200.0, 100.0);
+        let clipped = clay_ui::Rect::new(150.0, 75.0, 100.0, 50.0);
+
+        assert_eq!(clipped_uv(original, clipped), [0.25, 0.25, 0.75, 0.75]);
+    }
 }

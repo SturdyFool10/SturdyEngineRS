@@ -1,3 +1,8 @@
+/// Backend features exposed to engine callers.
+///
+/// These flags describe executable engine support, not just raw driver
+/// extension presence. Backends should leave a feature disabled until the engine
+/// can create the required objects and record the corresponding work safely.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct BackendFeatures {
     pub ray_tracing: bool,
@@ -217,6 +222,33 @@ pub struct BackendFeatures {
     pub pipeline_creation_cache_control: bool,
 }
 
+impl BackendFeatures {
+    pub(crate) fn disable_device_generated_command_features(&mut self) {
+        self.device_generated_commands = false;
+        self.device_generated_commands_nv = false;
+    }
+
+    pub(crate) fn disable_optical_flow_features(&mut self) {
+        self.optical_flow_nv = false;
+    }
+
+    pub(crate) fn disable_anti_lag_features(&mut self) {
+        self.anti_lag = false;
+    }
+
+    pub(crate) fn disable_video_features(&mut self) {
+        self.video_queue = false;
+        self.video_decode_h264 = false;
+        self.video_decode_h265 = false;
+        self.video_decode_av1 = false;
+        self.video_decode_vp9 = false;
+        self.video_encode_h264 = false;
+        self.video_encode_h265 = false;
+        self.video_encode_av1 = false;
+        self.video_encode_quantization_map = false;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,6 +402,34 @@ mod tests {
     }
 
     #[test]
+    fn disabling_video_features_clears_codec_and_queue_flags() {
+        let mut features = BackendFeatures {
+            video_queue: true,
+            video_decode_h264: true,
+            video_decode_h265: true,
+            video_decode_av1: true,
+            video_decode_vp9: true,
+            video_encode_h264: true,
+            video_encode_h265: true,
+            video_encode_av1: true,
+            video_encode_quantization_map: true,
+            ..BackendFeatures::default()
+        };
+
+        features.disable_video_features();
+
+        assert!(!features.video_queue);
+        assert!(!features.video_decode_h264);
+        assert!(!features.video_decode_h265);
+        assert!(!features.video_decode_av1);
+        assert!(!features.video_decode_vp9);
+        assert!(!features.video_encode_h264);
+        assert!(!features.video_encode_h265);
+        assert!(!features.video_encode_av1);
+        assert!(!features.video_encode_quantization_map);
+    }
+
+    #[test]
     fn gpu_draw_compaction_requires_multi_draw_and_indirect_count() {
         let features = BackendFeatures {
             multi_draw_indirect: true,
@@ -378,6 +438,44 @@ mod tests {
         };
 
         assert!(features.supports_gpu_draw_compaction());
+    }
+
+    #[test]
+    fn disabling_device_generated_command_features_clears_extension_flags() {
+        let mut features = BackendFeatures {
+            device_generated_commands: true,
+            device_generated_commands_nv: true,
+            ..BackendFeatures::default()
+        };
+
+        features.disable_device_generated_command_features();
+
+        assert!(!features.device_generated_commands);
+        assert!(!features.device_generated_commands_nv);
+    }
+
+    #[test]
+    fn disabling_optical_flow_features_clears_extension_flags() {
+        let mut features = BackendFeatures {
+            optical_flow_nv: true,
+            ..BackendFeatures::default()
+        };
+
+        features.disable_optical_flow_features();
+
+        assert!(!features.optical_flow_nv);
+    }
+
+    #[test]
+    fn disabling_anti_lag_features_clears_extension_flags() {
+        let mut features = BackendFeatures {
+            anti_lag: true,
+            ..BackendFeatures::default()
+        };
+
+        features.disable_anti_lag_features();
+
+        assert!(!features.anti_lag);
     }
 
     #[test]

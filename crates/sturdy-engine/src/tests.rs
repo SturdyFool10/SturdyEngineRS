@@ -48,6 +48,7 @@ fn create_sampled_image_sampler_bind_group(engine: &Engine) -> Result<BindGroup>
         transient: false,
         clear_value: None,
         debug_name: None,
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
     })?;
     let sampler = engine.create_sampler(SamplerDesc::default())?;
     let layout = engine
@@ -376,6 +377,7 @@ fn hiz_pass_records_depth_pyramid_contract() {
                 transient: false,
                 clear_value: None,
                 debug_name: Some("gbuffer_depth"),
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
             },
         )
         .unwrap();
@@ -432,6 +434,7 @@ fn hiz_history_ping_pongs_previous_pyramid() {
                 transient: false,
                 clear_value: None,
                 debug_name: Some("history_depth"),
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
             },
         )
         .unwrap();
@@ -476,6 +479,7 @@ fn hiz_history_resets_when_level_descriptor_changes() {
         transient: false,
         clear_value: None,
         debug_name: None,
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
     };
     let depth_a = frame.image("history_depth_a", depth_desc(16, 8)).unwrap();
     pass.execute_history_named(&frame, "resize_hiz", &depth_a, &mut history)
@@ -520,6 +524,7 @@ fn hiz_pyramid_registers_levels_for_later_shader_binding() {
                 transient: false,
                 clear_value: None,
                 debug_name: None,
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
             },
         )
         .unwrap();
@@ -1008,6 +1013,8 @@ fn graphics_shader_reflection_populates_vertex_inputs_for_vertex_shader() {
             entry_point: "vs_main".into(),
             stage: ShaderStage::Vertex,
             requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
         })
         .unwrap();
     let reflection = engine.graphics_shader_reflection(&vertex, None).unwrap();
@@ -1131,6 +1138,12 @@ fn anti_aliasing_pass_constructs_builtin_shader() {
 fn ao_pass_constructs_builtin_shaders() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     AoPass::new(&engine).unwrap();
+}
+
+#[test]
+fn post_process_passes_construct_builtin_shaders() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    PostProcessPasses::new(&engine).unwrap();
 }
 
 #[test]
@@ -1368,6 +1381,14 @@ fn runtime_setting_keys_report_expected_apply_paths() {
         RuntimeApplyPath::Immediate
     );
     assert_eq!(
+        RuntimeSettingKey::ShaderHotReloadPolicy.apply_path(),
+        RuntimeApplyPath::Immediate
+    );
+    assert_eq!(
+        RuntimeSettingKey::AssetHotReloadPolicy.apply_path(),
+        RuntimeApplyPath::Immediate
+    );
+    assert_eq!(
         RuntimeApplyPath::SurfaceRecreate.as_str(),
         "surface_recreate"
     );
@@ -1522,12 +1543,28 @@ fn runtime_controller_reports_setting_support_and_menu_metadata() {
     let render_threading_entry = controller
         .setting_entry(RuntimeSettingKey::RenderThreadingMode)
         .unwrap();
+    let shader_hot_reload_entry = controller
+        .setting_entry(RuntimeSettingKey::ShaderHotReloadPolicy)
+        .unwrap();
+    let asset_hot_reload_entry = controller
+        .setting_entry(RuntimeSettingKey::AssetHotReloadPolicy)
+        .unwrap();
 
     assert_eq!(present_policy_entry.descriptor.options.len(), 5);
     assert_eq!(latency_entry.descriptor.options.len(), 4);
     assert_eq!(render_threading_entry.descriptor.options.len(), 5);
+    assert_eq!(shader_hot_reload_entry.descriptor.options.len(), 3);
+    assert_eq!(asset_hot_reload_entry.descriptor.options.len(), 3);
     assert_eq!(
         controller.setting_support(RuntimeSettingKey::OverlayVisibility),
+        Some(RuntimeSettingSupport::supported())
+    );
+    assert_eq!(
+        controller.setting_support(RuntimeSettingKey::ShaderHotReloadPolicy),
+        Some(RuntimeSettingSupport::supported())
+    );
+    assert_eq!(
+        controller.setting_support(RuntimeSettingKey::AssetHotReloadPolicy),
         Some(RuntimeSettingSupport::supported())
     );
 }
@@ -1550,6 +1587,49 @@ fn runtime_controller_rejects_unsupported_engine_setting_changes() {
             if setting == &RuntimeSettingId::from(RuntimeSettingKey::BackendSelection)
                 && reason.contains("not implemented")
     ));
+}
+
+#[test]
+fn runtime_controller_applies_hot_reload_policy_settings() {
+    let mut controller = RuntimeController::default();
+
+    let report = controller
+        .transact()
+        .set_engine_value(RuntimeSettingKey::ShaderHotReloadPolicy, "Automatic")
+        .set_engine_value(RuntimeSettingKey::AssetHotReloadPolicy, "Disabled")
+        .apply()
+        .unwrap();
+
+    assert_eq!(
+        report.changes,
+        vec![
+            RuntimeChangeResult::Exact {
+                setting: RuntimeSettingId::from(RuntimeSettingKey::ShaderHotReloadPolicy),
+                path: RuntimeApplyPath::Immediate,
+            },
+            RuntimeChangeResult::Exact {
+                setting: RuntimeSettingId::from(RuntimeSettingKey::AssetHotReloadPolicy),
+                path: RuntimeApplyPath::Immediate,
+            },
+        ]
+    );
+    assert_eq!(
+        controller.setting_value(RuntimeSettingKey::ShaderHotReloadPolicy),
+        Some(RuntimeSettingValue::Text("Automatic".to_string()))
+    );
+    assert_eq!(
+        controller.setting_value(RuntimeSettingKey::AssetHotReloadPolicy),
+        Some(RuntimeSettingValue::Text("Disabled".to_string()))
+    );
+    assert_eq!(
+        controller.settings().shader_hot_reload_policy,
+        "Automatic".to_string()
+    );
+    assert_eq!(
+        controller.settings().asset_hot_reload_policy,
+        "Disabled".to_string()
+    );
+    assert!(controller.diagnostics().user_diagnostics.is_empty());
 }
 
 #[test]
@@ -1949,6 +2029,7 @@ fn small_image_desc() -> ImageDesc {
         transient: false,
         clear_value: None,
         debug_name: None,
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
     }
 }
 

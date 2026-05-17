@@ -120,9 +120,15 @@ impl CommandContext {
         rt_khr: Option<&ash::khr::ray_tracing_pipeline::Device>,
         shader_object_ext: Option<&ash::ext::shader_object::Device>,
         ray_tracing_position_fetch: bool,
+        diagnostic_checkpoints_nv: Option<&ash::nv::device_diagnostic_checkpoints::Device>,
+        extended_dynamic_state3: Option<&ash::ext::extended_dynamic_state3::Device>,
+        vertex_input_dynamic_state: Option<&ash::ext::vertex_input_dynamic_state::Device>,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
     ) -> Result<SubmissionHandle> {
+        // Suppress unused warning when debug_assertions are disabled.
+        #[cfg(not(debug_assertions))]
+        let _ = &diagnostic_checkpoints_nv;
         // Wait for the previous frame before reusing pools / fence.
         if self.frame_submitted {
             unsafe {
@@ -259,6 +265,16 @@ impl CommandContext {
                         sync2,
                     )?;
                     if let Some(pass) = graph.passes.get(pass_idx) {
+                        // NV diagnostic checkpoint: encode pass-start as pass_idx * 2.
+                        #[cfg(debug_assertions)]
+                        if let Some(cp) = diagnostic_checkpoints_nv {
+                            unsafe {
+                                cp.cmd_set_checkpoint_nv(
+                                    cmd,
+                                    (pass_idx * 2) as usize as *const _,
+                                );
+                            }
+                        }
                         // Write start timestamp before the pass.
                         let slot = ts_query_idx;
                         if slot < MAX_TIMESTAMP_PASSES {
@@ -304,6 +320,8 @@ impl CommandContext {
                             rt_khr,
                             shader_object_ext,
                             ray_tracing_position_fetch,
+                            extended_dynamic_state3,
+                            vertex_input_dynamic_state,
                         )?;
                         if !pass.name.is_empty() {
                             debug.end_region(cmd);
@@ -332,6 +350,16 @@ impl CommandContext {
                             }
                             self.pending_pass_names.push(pass.name.clone());
                             ts_query_idx += 1;
+                        }
+                        // NV diagnostic checkpoint: encode pass-end as pass_idx * 2 + 1.
+                        #[cfg(debug_assertions)]
+                        if let Some(cp) = diagnostic_checkpoints_nv {
+                            unsafe {
+                                cp.cmd_set_checkpoint_nv(
+                                    cmd,
+                                    (pass_idx * 2 + 1) as usize as *const _,
+                                );
+                            }
                         }
                     }
                 }
@@ -532,6 +560,8 @@ impl CommandContext {
         rt_khr: Option<&ash::khr::ray_tracing_pipeline::Device>,
         shader_object_ext: Option<&ash::ext::shader_object::Device>,
         ray_tracing_position_fetch: bool,
+        extended_dynamic_state3: Option<&ash::ext::extended_dynamic_state3::Device>,
+        vertex_input_dynamic_state: Option<&ash::ext::vertex_input_dynamic_state::Device>,
     ) -> Result<()> {
         if let Some(predicate) = pass.predicate {
             let conditional_rendering = conditional_rendering.ok_or_else(|| {
@@ -569,6 +599,41 @@ impl CommandContext {
             push_descriptor,
             shader_object_ext,
         )?;
+
+        // GFX-2d: Extended dynamic state 3 — record polygon mode and depth clamp when the
+        // pipeline was created with these as dynamic states.
+        if let (Some(eds3), Some(binding)) = (extended_dynamic_state3, bound_binding.as_ref()) {
+            if binding.bind_point == vk::PipelineBindPoint::GRAPHICS
+                && !binding.uses_shader_objects
+            {
+                if let Some(state) = &binding.graphics_state {
+                    unsafe {
+                        eds3.cmd_set_polygon_mode(command_buffer, state.polygon_mode);
+                        eds3.cmd_set_depth_clamp_enable(command_buffer, state.depth_clamp);
+                    }
+                }
+            }
+        }
+
+        // GFX-2e: Vertex input dynamic state — record vertex format when it differs per-draw.
+        if let (Some(vids), Some(binding)) = (vertex_input_dynamic_state, bound_binding.as_ref()) {
+            if binding.bind_point == vk::PipelineBindPoint::GRAPHICS
+                && !binding.uses_shader_objects
+            {
+                if let Some(state) = &binding.graphics_state {
+                    if !state.vertex_bindings.is_empty() || !state.vertex_attributes.is_empty() {
+                        unsafe {
+                            vids.cmd_set_vertex_input(
+                                command_buffer,
+                                &state.vertex_bindings,
+                                &state.vertex_attributes,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(rate) = pass.pipeline_shading_rate {
             let fragment_shading_rate = fragment_shading_rate.ok_or_else(|| {
                 Error::Unsupported(
@@ -1463,12 +1528,9 @@ impl CommandContext {
                             AccelerationStructureBuildMode::Update => {
                                 vk::BuildAccelerationStructureModeKHR::UPDATE
                             }
-                            AccelerationStructureBuildMode::Compact => {
-                                return Err(Error::Unsupported(
-                                    "BLAS compaction command recording is not implemented yet"
-                                        .into(),
-                                ));
-                            }
+                            AccelerationStructureBuildMode::Compact => unreachable!(
+                                "compact BLAS builds are handled by cmd_copy_acceleration_structure"
+                            ),
                         })
                         .src_acceleration_structure(
                             src_as.unwrap_or(vk::AccelerationStructureKHR::null()),
@@ -1550,12 +1612,9 @@ impl CommandContext {
                             AccelerationStructureBuildMode::Update => {
                                 vk::BuildAccelerationStructureModeKHR::UPDATE
                             }
-                            AccelerationStructureBuildMode::Compact => {
-                                return Err(Error::Unsupported(
-                                    "TLAS compaction command recording is not implemented yet"
-                                        .into(),
-                                ));
-                            }
+                            AccelerationStructureBuildMode::Compact => unreachable!(
+                                "compact TLAS builds are handled by cmd_copy_acceleration_structure"
+                            ),
                         })
                         .src_acceleration_structure(
                             src_as.unwrap_or(vk::AccelerationStructureKHR::null()),
@@ -2660,7 +2719,8 @@ fn record_shader_object_graphics_state(
         shader_object_ext.cmd_set_front_face(command_buffer, state.front_face);
         shader_object_ext.cmd_set_rasterizer_discard_enable(command_buffer, false);
         shader_object_ext.cmd_set_depth_bias_enable(command_buffer, false);
-        shader_object_ext.cmd_set_polygon_mode(command_buffer, vk::PolygonMode::FILL);
+        shader_object_ext.cmd_set_polygon_mode(command_buffer, state.polygon_mode);
+        shader_object_ext.cmd_set_depth_clamp_enable(command_buffer, state.depth_clamp);
         shader_object_ext
             .cmd_set_rasterization_samples(command_buffer, state.rasterization_samples);
         shader_object_ext.cmd_set_sample_mask(
@@ -2965,6 +3025,9 @@ impl FramedCommands {
         rt_khr: Option<&ash::khr::ray_tracing_pipeline::Device>,
         shader_object_ext: Option<&ash::ext::shader_object::Device>,
         ray_tracing_position_fetch: bool,
+        diagnostic_checkpoints_nv: Option<&ash::nv::device_diagnostic_checkpoints::Device>,
+        extended_dynamic_state3: Option<&ash::ext::extended_dynamic_state3::Device>,
+        vertex_input_dynamic_state: Option<&ash::ext::vertex_input_dynamic_state::Device>,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
     ) -> Result<SubmissionHandle> {
@@ -2990,6 +3053,9 @@ impl FramedCommands {
             rt_khr,
             shader_object_ext,
             ray_tracing_position_fetch,
+            diagnostic_checkpoints_nv,
+            extended_dynamic_state3,
+            vertex_input_dynamic_state,
             wait_semaphore,
             signal_semaphore,
         )?;

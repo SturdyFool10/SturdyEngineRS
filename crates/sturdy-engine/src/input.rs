@@ -21,6 +21,28 @@ pub use keyboard::{KeyInput, KeyInputState, KeyModifiers};
 #[cfg(feature = "app-shell")]
 pub(crate) use winit_bridge::key_modifiers_from_winit;
 
+/// A point-in-time input snapshot sampled as late as possible before GPU submission.
+///
+/// Obtained from [`InputHub::sample_late`]. Use the fields of this snapshot
+/// for camera orientation, view matrix construction, and motion vectors so that
+/// rendering reflects the most recent input rather than the game-logic snapshot.
+#[derive(Clone, Debug, Default)]
+pub struct LateSample {
+    /// Raw device-event mouse delta accumulated since the last `update()`.
+    ///
+    /// Sourced from `DeviceEvent::MouseMotion` — reliable even when the cursor
+    /// is grabbed or hidden. Prefer this over `mouse_delta` for first-person cameras.
+    pub raw_mouse_delta: glam::Vec2,
+    /// Cursor-position–derived mouse delta accumulated since the last `update()`.
+    ///
+    /// Zero when the cursor is locked; use `raw_mouse_delta` in that case.
+    pub mouse_delta: glam::Vec2,
+    /// Current cursor position in top-left/Y-down logical pixels.
+    pub cursor: glam::Vec2,
+    /// Latest eye-tracking gaze direction, or `None` if unavailable.
+    pub gaze_direction: Option<glam::Vec2>,
+}
+
 fn clay_modifiers(modifiers: KeyModifiers) -> clay_ui::ModifierKeys {
     clay_ui::ModifierKeys {
         ctrl: modifiers.ctrl,
@@ -81,6 +103,8 @@ pub struct InputHub {
     /// Raw device-event delta (reliable even when cursor is grabbed/hidden).
     raw_mouse_delta: glam::Vec2,
     pending_raw_mouse_delta: glam::Vec2,
+    /// Latest eye-tracking gaze direction in normalized display coordinates.
+    gaze_direction: Option<glam::Vec2>,
     held_keys: HashSet<KeyToken>,
     key_just_pressed: HashSet<KeyToken>,
     key_just_released: HashSet<KeyToken>,
@@ -126,6 +150,7 @@ impl InputHub {
             pending_mouse_delta: glam::Vec2::ZERO,
             raw_mouse_delta: glam::Vec2::ZERO,
             pending_raw_mouse_delta: glam::Vec2::ZERO,
+            gaze_direction: None,
             held_keys: HashSet::new(),
             key_just_pressed: HashSet::new(),
             key_just_released: HashSet::new(),
@@ -222,6 +247,22 @@ impl InputHub {
     /// correct source for first-person look input. Read via [`raw_mouse_delta`](Self::raw_mouse_delta).
     pub fn on_raw_mouse_motion(&mut self, delta: glam::Vec2) {
         self.pending_raw_mouse_delta += delta;
+    }
+
+    /// Call from an eye-tracking backend when a gaze sample is available.
+    ///
+    /// The direction is expected in normalized display coordinates where
+    /// `(-1, -1)` is the lower-left visible extent, `(0, 0)` is straight ahead,
+    /// and `(1, 1)` is the upper-right visible extent. Passing `None` clears the
+    /// current sample when hardware is absent, tracking is lost, or permission is
+    /// revoked. Non-finite vectors are ignored so a bad device sample cannot
+    /// poison foveated-rendering state.
+    pub fn on_gaze_direction(&mut self, direction: Option<glam::Vec2>) {
+        match direction {
+            Some(direction) if direction.is_finite() => self.gaze_direction = Some(direction),
+            Some(_) => {}
+            None => self.gaze_direction = None,
+        }
     }
 
     /// Call from `EngineApp::pointer_scroll`.
@@ -425,6 +466,25 @@ impl InputHub {
         hit
     }
 
+    /// Take a late input snapshot immediately before GPU submission.
+    ///
+    /// Returns the raw mouse delta and cursor position accumulated since the
+    /// last [`update`](Self::update) call. Use this snapshot for camera
+    /// orientation, view matrix construction, and motion vector generation to
+    /// minimise input-to-display latency — the snapshot captures motion events
+    /// that arrived after the game-logic tick without consuming them.
+    ///
+    /// The committed per-frame state (from `update`) is unchanged; calling this
+    /// method is side-effect-free.
+    pub fn sample_late(&self) -> LateSample {
+        LateSample {
+            raw_mouse_delta: self.pending_raw_mouse_delta,
+            mouse_delta: self.pending_mouse_delta,
+            cursor: self.cursor.to_vec2(),
+            gaze_direction: self.gaze_direction,
+        }
+    }
+
     fn publish_polling_frame(&mut self) {
         self.mouse_delta = self.pending_mouse_delta;
         self.pending_mouse_delta = glam::Vec2::ZERO;
@@ -486,6 +546,15 @@ impl InputHub {
     /// Returns `Vec2::ZERO` when no raw motion events were received this frame.
     pub fn raw_mouse_delta(&self) -> glam::Vec2 {
         self.raw_mouse_delta
+    }
+
+    /// Latest eye-tracking gaze direction, if hardware has provided one.
+    ///
+    /// Returns `None` on machines without eye tracking, before the first sample,
+    /// after tracking is lost, or after [`on_gaze_direction`](Self::on_gaze_direction)
+    /// is called with `None`.
+    pub fn gaze_direction(&self) -> Option<glam::Vec2> {
+        self.gaze_direction
     }
 
     /// Request that the cursor be grabbed and hidden for first-person mouse look.
@@ -970,6 +1039,30 @@ mod tests {
         hub.update(&clay_ui::LayoutTree::default());
         assert!(!hub.is_mouse_button_pressed(0));
         assert!(hub.is_mouse_button_just_released(0));
+    }
+
+    #[test]
+    fn input_hub_reports_optional_gaze_direction() {
+        let mut hub = InputHub::new();
+        assert_eq!(hub.gaze_direction(), None);
+
+        hub.on_gaze_direction(Some(glam::Vec2::new(0.25, -0.5)));
+        assert_eq!(hub.gaze_direction(), Some(glam::Vec2::new(0.25, -0.5)));
+
+        hub.update(&clay_ui::LayoutTree::default());
+        assert_eq!(hub.gaze_direction(), Some(glam::Vec2::new(0.25, -0.5)));
+
+        hub.on_gaze_direction(None);
+        assert_eq!(hub.gaze_direction(), None);
+    }
+
+    #[test]
+    fn input_hub_ignores_non_finite_gaze_direction() {
+        let mut hub = InputHub::new();
+        hub.on_gaze_direction(Some(glam::Vec2::new(0.0, 0.0)));
+        hub.on_gaze_direction(Some(glam::Vec2::new(f32::NAN, 0.25)));
+
+        assert_eq!(hub.gaze_direction(), Some(glam::Vec2::new(0.0, 0.0)));
     }
 
     #[test]

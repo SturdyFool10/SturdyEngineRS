@@ -256,6 +256,7 @@ fn prefilter_specular_cpu(
         transient: false,
         clear_value: None,
         debug_name: Some("env_specular"),
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
     })?;
 
     // Upload: one copy command per layer using a shared staging buffer.

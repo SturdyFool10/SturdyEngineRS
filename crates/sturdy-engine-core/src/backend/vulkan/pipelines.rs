@@ -5,8 +5,8 @@ use ash::{Device, vk};
 
 use crate::{
     ComputePipelineDesc, ConservativeRasterMode, CullMode, Error, FrontFace, GraphicsPipelineDesc,
-    PipelineHandle, PrimitiveTopology, RayTracingPipelineDesc, Result, RtShaderGroupKind,
-    VertexFormat, VertexInputRate,
+    PipelineHandle, PolygonMode, PrimitiveTopology, RayTracingPipelineDesc, Result,
+    RtShaderGroupKind, VertexFormat, VertexInputRate,
 };
 
 use super::descriptors::DescriptorRegistry;
@@ -196,6 +196,10 @@ pub struct VulkanGraphicsPipelineState {
     pub color_blend_enables: Vec<vk::Bool32>,
     pub color_blend_equations: Vec<vk::ColorBlendEquationEXT>,
     pub color_write_masks: Vec<vk::ColorComponentFlags>,
+    /// Polygon fill mode, recorded dynamically when extended_dynamic_state3 is available.
+    pub polygon_mode: vk::PolygonMode,
+    /// Depth clamp, recorded dynamically when extended_dynamic_state3 is available.
+    pub depth_clamp: bool,
 }
 
 impl PipelineRegistry {
@@ -525,9 +529,10 @@ impl PipelineRegistry {
                 conservative_rasterization.conservative_rasterization_mode(mode);
         }
         let mut rasterization = vk::PipelineRasterizationStateCreateInfo::default()
-            .polygon_mode(vk::PolygonMode::FILL)
+            .polygon_mode(vk_polygon_mode(desc.raster.polygon_mode))
             .cull_mode(vk_cull_mode(desc.raster.cull_mode))
             .front_face(vk_front_face(desc.raster.front_face))
+            .depth_clamp_enable(desc.raster.depth_clamp)
             .line_width(1.0);
         if let Some(_mode) = conservative_mode {
             rasterization = rasterization.push_next(&mut conservative_rasterization);
@@ -559,6 +564,15 @@ impl PipelineRegistry {
         let mut dynamic_states = vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         if self.vrs_pipeline_enabled {
             dynamic_states.push(vk::DynamicState::FRAGMENT_SHADING_RATE_KHR);
+        }
+        if self.extended_dynamic_state3_enabled {
+            // Polygon mode and depth clamp are set dynamically per-pass when EDS3 is available.
+            dynamic_states.push(vk::DynamicState::POLYGON_MODE_EXT);
+            dynamic_states.push(vk::DynamicState::DEPTH_CLAMP_ENABLE_EXT);
+        }
+        if self.vertex_input_dynamic_state_enabled {
+            // Vertex input layout is set dynamically per-draw.
+            dynamic_states.push(vk::DynamicState::VERTEX_INPUT_EXT);
         }
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
@@ -854,6 +868,8 @@ fn shader_object_graphics_state(
         color_blend_enables,
         color_blend_equations,
         color_write_masks,
+        polygon_mode: vk_polygon_mode(desc.raster.polygon_mode),
+        depth_clamp: desc.raster.depth_clamp,
     })
 }
 
@@ -894,6 +910,14 @@ fn vk_vertex_format(format: VertexFormat) -> Result<vk::Format> {
         VertexFormat::Float32x2 => Ok(vk::Format::R32G32_SFLOAT),
         VertexFormat::Float32x3 => Ok(vk::Format::R32G32B32_SFLOAT),
         VertexFormat::Float32x4 => Ok(vk::Format::R32G32B32A32_SFLOAT),
+    }
+}
+
+fn vk_polygon_mode(mode: PolygonMode) -> vk::PolygonMode {
+    match mode {
+        PolygonMode::Fill => vk::PolygonMode::FILL,
+        PolygonMode::Line => vk::PolygonMode::LINE,
+        PolygonMode::Point => vk::PolygonMode::POINT,
     }
 }
 

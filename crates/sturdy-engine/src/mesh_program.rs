@@ -93,6 +93,8 @@ impl MeshProgram {
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                 },
                 vertex: None,
                 vertex_kind: MeshVertexKind::V2d,
@@ -112,6 +114,8 @@ impl MeshProgram {
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                 },
                 vertex: None,
                 vertex_kind: MeshVertexKind::V2d,
@@ -136,6 +140,8 @@ impl MeshProgram {
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                 },
                 vertex: None,
                 vertex_kind: MeshVertexKind::V3d,
@@ -165,6 +171,8 @@ impl MeshProgram {
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                 },
                 vertex: None,
                 vertex_kind: MeshVertexKind::V3d,
@@ -191,12 +199,16 @@ impl MeshProgram {
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                 },
                 vertex: vertex_path.map(|p| ShaderDesc {
                     source: ShaderSource::File(p.into()),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Vertex,
                     requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                 }),
                 vertex_kind: MeshVertexKind::V3d,
                 alpha_blend: false,
@@ -224,6 +236,8 @@ impl MeshProgram {
             entry_point: "main".to_owned(),
             stage: ShaderStage::Vertex,
             requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
         });
         let vertex = engine.create_shader(vertex_desc)?;
         let fragment = engine.create_shader(desc.fragment)?;
@@ -280,6 +294,8 @@ impl MeshProgram {
             entry_point: "main".to_owned(),
             stage: ShaderStage::Fragment,
             requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
         })?;
         let reflection = self
             .engine
@@ -317,6 +333,8 @@ impl MeshProgram {
             entry_point: "main".to_owned(),
             stage: ShaderStage::Vertex,
             requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
         })?;
         let reflection = self
             .engine
@@ -388,7 +406,7 @@ impl MeshProgram {
                 },
                 samples: key.1,
                 topology: PrimitiveTopology::TriangleList,
-                raster: RasterState {
+                raster: RasterState { polygon_mode: Default::default(), depth_clamp: false,
                     cull_mode: CullMode::None,
                     front_face: FrontFace::CounterClockwise,
                 },
@@ -456,7 +474,7 @@ impl MeshProgram {
                 },
                 samples: key.1,
                 topology: PrimitiveTopology::TriangleList,
-                raster: RasterState {
+                raster: RasterState { polygon_mode: Default::default(), depth_clamp: false,
                     cull_mode: CullMode::None,
                     front_face: FrontFace::CounterClockwise,
                 },

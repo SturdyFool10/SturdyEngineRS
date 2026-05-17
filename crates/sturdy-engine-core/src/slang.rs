@@ -902,6 +902,8 @@ pub fn compile_and_reflect(
             entry_point: desc.entry_point.clone(),
             stage: desc.stage,
             requires_ray_query: desc.requires_ray_query,
+            requires_cooperative_matrix: desc.requires_cooperative_matrix,
+            uses_ser: desc.uses_ser,
         };
 
         Ok((
@@ -1218,6 +1220,8 @@ mod tests {
             entry_point: "main".into(),
             stage: ShaderStage::Compute,
             requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
         };
         let reflection = reflect_pipeline_layout(&desc).expect("reflection should succeed");
         assert!(
@@ -1273,6 +1277,8 @@ mod tests {
             entry_point: "ps_main".into(),
             stage: ShaderStage::Fragment,
             requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
         };
         let reflection = reflect_pipeline_layout(&desc).expect("reflection should succeed");
         let group = reflection
@@ -1297,6 +1303,8 @@ mod tests {
             entry_point: "vs_main".into(),
             stage: ShaderStage::Vertex,
             requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
         };
         let reflection = reflect_pipeline_layout(&desc).expect("reflection should succeed");
         assert!(
@@ -1313,6 +1321,8 @@ mod tests {
             entry_point: "vs_main".into(),
             stage: ShaderStage::Vertex,
             requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
         };
         let reflection = reflect_pipeline_layout(&desc).expect("reflection should succeed");
         assert_eq!(reflection.layout.push_constants_bytes, 32);
@@ -1339,6 +1349,8 @@ mod tests {
             entry_point: "ps_main".into(),
             stage: ShaderStage::Fragment,
             requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
         };
         let reflection = reflect_pipeline_layout(&desc).expect("reflection should succeed");
         let group = reflection
@@ -1388,6 +1400,8 @@ mod tests {
                 entry_point: "main".into(),
                 stage: ShaderStage::Fragment,
                 requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
             };
 
             let (_, reflection) =
@@ -1426,6 +1440,8 @@ mod tests {
                 entry_point: "main".into(),
                 stage: ShaderStage::Compute,
                 requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
             };
             let reflection =
                 reflect_pipeline_layout(&desc).expect("should not error for SPIRV source");
@@ -1440,6 +1456,8 @@ mod tests {
                 entry_point: "main".into(),
                 stage: ShaderStage::Compute,
                 requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
             };
 
             let (_compiled, reflection) =
@@ -1461,6 +1479,8 @@ mod tests {
                 entry_point: "vs_main".into(),
                 stage: ShaderStage::Vertex,
                 requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
             };
 
             let (_compiled, reflection) =
@@ -1479,6 +1499,8 @@ mod tests {
             entry_point: "vs_main".into(),
             stage: ShaderStage::Vertex,
             requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
         };
         let (_compiled, reflection) =
             compile_and_reflect(&desc, ShaderTarget::Spirv).expect("vertex shader compiles");
@@ -1503,6 +1525,8 @@ mod tests {
             entry_point: "vs_main".into(),
             stage: ShaderStage::Vertex,
             requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
         };
         let (_compiled, reflection) =
             compile_and_reflect(&desc, ShaderTarget::Spirv).expect("vertex shader compiles");

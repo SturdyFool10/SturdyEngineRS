@@ -272,6 +272,8 @@ impl SurfaceRegistry {
                 transient: false,
                 clear_value: None,
                 debug_name: Some("surface image"),
+            compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+                ..ImageDesc::new()
             },
         })
     }
@@ -282,6 +284,12 @@ impl SurfaceRegistry {
             .get(&handle)
             .map(|s| s.swapchain.swapchain)
             .ok_or(crate::Error::InvalidHandle)
+    }
+
+    /// Iterate over all active swapchain handles. Used to propagate per-swapchain state
+    /// (e.g., Reflex sleep mode) to every surface without knowing their handles.
+    pub fn all_swapchain_handles(&self) -> impl Iterator<Item = vk::SwapchainKHR> + '_ {
+        self.surfaces.values().map(|s| s.swapchain.swapchain)
     }
 
     /// Returns `(image_available, render_finished)` semaphores for the acquired image.
@@ -348,6 +356,7 @@ impl SurfaceRegistry {
         &self,
         physical_device: vk::PhysicalDevice,
         handle: SurfaceHandle,
+        hdr_metadata_supported: bool,
     ) -> Result<SurfaceCapabilities> {
         let surface = self.surfaces.get(&handle).ok_or(Error::InvalidHandle)?;
         let loader = &surface.surface_loader;
@@ -404,6 +413,7 @@ impl SurfaceRegistry {
             max_image_count: caps.max_image_count,
             current_width: caps.current_extent.width,
             current_height: caps.current_extent.height,
+            hdr_metadata_supported,
         })
     }
 

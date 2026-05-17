@@ -1057,6 +1057,7 @@ impl RenderFrame {
             transient: false,
             clear_value: None,
             debug_name: Some("resolve-target"),
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
         };
         self.image(name, desc)
     }
@@ -1270,6 +1271,7 @@ impl RenderFrame {
             transient: false,
             clear_value: None,
             debug_name: None,
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
         };
         let name = name.into();
         let key = GraphImageCacheKey::new(name.clone(), desc, inner.swapchain_slot);
@@ -1319,6 +1321,7 @@ impl RenderFrame {
             transient: false,
             clear_value: None,
             debug_name: None,
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
         };
         let name = name.into();
         let key = GraphImageCacheKey::new(name.clone(), desc, slot);
@@ -3589,6 +3592,7 @@ mod tests {
             transient: false,
             clear_value: None,
             debug_name: None,
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
         };
 
         assert!(validate_subresource(desc, SubresourceRange::new(3, 1, 1, 1)).is_ok());

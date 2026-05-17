@@ -59,3 +59,31 @@ impl GpuMemoryBudget {
         format!("VRAM {used:.0} / {cap:.0} MiB ({pct} %){flag}")
     }
 }
+
+/// Per-heap memory budget and usage reported by `VK_EXT_memory_budget`.
+///
+/// More precise than `GpuMemoryBudget` — the driver reports actual OS-level budget and
+/// usage per heap, including allocations made by other processes sharing the same GPU.
+#[derive(Clone, Debug, Default)]
+pub struct MemoryHeapBudget {
+    /// Driver-reported budget for this heap in bytes. Staying below this avoids eviction.
+    pub budget: u64,
+    /// Driver-reported current usage for this heap in bytes (includes all processes).
+    pub usage: u64,
+}
+
+/// Full memory budget report from `VK_EXT_memory_budget`, one entry per Vulkan memory heap.
+///
+/// Obtain via [`Device::memory_budget_ext`]. Returns `None` when the extension is unavailable.
+#[derive(Clone, Debug, Default)]
+pub struct MemoryBudgetReport {
+    /// Per-heap entries; index matches `VkPhysicalDeviceMemoryProperties::memoryHeaps`.
+    pub heaps: Vec<MemoryHeapBudget>,
+}
+
+impl MemoryBudgetReport {
+    /// Returns `true` when any device-local heap has usage > 80 % of its budget.
+    pub fn any_over_budget(&self) -> bool {
+        self.heaps.iter().any(|h| h.budget > 0 && h.usage > h.budget * 4 / 5)
+    }
+}

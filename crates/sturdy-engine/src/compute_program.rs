@@ -22,6 +22,8 @@ impl ComputeProgram {
             entry_point: "main".to_owned(),
             stage: ShaderStage::Compute,
             requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
         })?;
         let reflection = engine.shader_reflection(&shader)?;
         let pipeline_layout = engine.create_reflected_compute_pipeline_layout(&shader)?;
@@ -63,6 +65,8 @@ impl ComputeProgram {
             entry_point: "main".to_owned(),
             stage: ShaderStage::Compute,
             requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
         })?;
         let reflection = self.engine.shader_reflection(&shader)?;
         let pipeline_layout = self

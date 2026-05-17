@@ -67,6 +67,7 @@ pub use handles::{
     VideoSessionHandle,
 };
 pub use image::{
+    ImageCompression,
     Extent3d, Format, FormatCapabilities, ImageBuilder, ImageClearValue, ImageDesc, ImageDimension,
     ImageRole, ImageUsage,
 };
@@ -75,7 +76,7 @@ pub use indirect_commands::{
 };
 pub use latency::{AntiLagMode, LatencyMode, ReflexMode};
 pub use limits::Limits;
-pub use memory_budget::GpuMemoryBudget;
+pub use memory_budget::{GpuMemoryBudget, MemoryBudgetReport, MemoryHeapBudget};
 pub use native_handles::{
     NativeHandleCapabilities, NativeHandleCapability, NativeHandleKind, NativeHandleOwnership,
     native_handle_capabilities_for_backend,
@@ -83,6 +84,7 @@ pub use native_handles::{
 pub use optical_flow::{OpticalFlowEstimateDesc, OpticalFlowSessionDesc};
 pub use pipeline::{
     BlendMode, ColorTargetDesc, ComputePipelineDesc, ConservativeRasterMode, CullMode, FrontFace,
+    PolygonMode,
     GraphicsPipelineDesc, PrimitiveTopology, RasterState, VertexAttributeDesc, VertexBufferLayout,
     VertexFormat, VertexInputRate,
 };

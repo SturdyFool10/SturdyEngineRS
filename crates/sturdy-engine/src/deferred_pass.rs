@@ -142,6 +142,8 @@ impl DeferredPass {
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                 },
                 vertex: None,
                 vertex_kind: MeshVertexKind::V3d,
@@ -157,6 +159,8 @@ impl DeferredPass {
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                 },
                 vertex: None,
                 vertex_kind: MeshVertexKind::V3d,
@@ -188,6 +192,7 @@ impl DeferredPass {
             transient: false,
             clear_value: None,
             debug_name: Some("black_env"),
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
         })?;
 
         let zero_sh9 = engine.create_buffer(crate::BufferDesc {
@@ -240,6 +245,7 @@ impl DeferredPass {
             transient: false,
             clear_value: None,
             debug_name: Some("black_spot_depth"),
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
         })?;
 
         let e_avg_buf = compute_e_avg_lut(engine)?;
@@ -435,6 +441,7 @@ impl DeferredPass {
             transient: false,
             clear_value: None,
             debug_name: Some(name),
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
         };
         // Depth is both a depth-stencil attachment AND sampled by the lighting pass
         // for world position reconstruction.
@@ -453,6 +460,7 @@ impl DeferredPass {
             transient: false,
             clear_value: None,
             debug_name: Some("gbuffer_depth"),
+                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
         };
 
         let g0 = frame.image(
@@ -512,6 +520,8 @@ impl DeferredPass {
                             entry_point: "main".to_owned(),
                             stage: ShaderStage::Fragment,
                             requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
                         },
                         vertex: None,
                         vertex_kind: MeshVertexKind::V3d,

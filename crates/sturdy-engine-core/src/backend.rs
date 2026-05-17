@@ -107,6 +107,14 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// Per-heap memory budget from `VK_EXT_memory_budget`, updated each frame.
+    ///
+    /// Returns `None` when the extension is unavailable. More precise than `memory_budget()`
+    /// because the driver reports actual OS-level budget including other processes.
+    fn memory_budget_ext(&self) -> Option<crate::MemoryBudgetReport> {
+        None
+    }
+
     // ── Bindless descriptor heap (Track 8a) ───────────────────────────────────
 
     /// Register a sampled (read-only) image in the bindless heap.
@@ -407,6 +415,23 @@ pub trait Backend: Send + Sync {
 
     fn latency_mode(&self) -> Option<LatencyMode> {
         None
+    }
+
+    /// Block the calling thread until the driver signals it is the optimal time to begin
+    /// this frame's CPU work. Must be called once per frame, on the render thread, before
+    /// input sampling. Returns `Ok(())` on backends that do not support latency sleep
+    /// (no-op) so callers need no feature check.
+    ///
+    /// Requires `BackendFeatures::reflex` and `BackendFeatures::timeline_semaphores`.
+    fn latency_sleep(&self, _surface: SurfaceHandle) -> Result<()> {
+        Ok(())
+    }
+
+    /// Notify AMD Anti-Lag of frame start; must be called each frame before input sampling.
+    ///
+    /// No-op on backends without `BackendFeatures::anti_lag`. Callers need no feature check.
+    fn anti_lag_frame_start(&self) -> Result<()> {
+        Ok(())
     }
 
     fn set_surface_hdr_metadata(

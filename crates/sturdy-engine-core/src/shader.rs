@@ -46,6 +46,15 @@ pub struct ShaderDesc {
     ///
     /// Requires `BackendFeatures::ray_query` on the selected backend.
     pub requires_ray_query: bool,
+    /// Shader uses cooperative matrix multiply-accumulate instructions (`VK_KHR_cooperative_matrix`).
+    ///
+    /// Requires `BackendFeatures::cooperative_matrix` or one of the NV fallback flags.
+    pub requires_cooperative_matrix: bool,
+    /// Shader uses Shader Execution Reordering (`VK_EXT_ray_tracing_invocation_reorder`, SER).
+    ///
+    /// Enables the `ShaderInvocationReorderNV` SPIR-V capability. Only valid in hit/callable
+    /// shader stages of a ray-tracing pipeline. Requires `BackendFeatures::shader_execution_reordering`.
+    pub uses_ser: bool,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -112,6 +121,19 @@ pub struct ShaderModule {
     pub desc: ShaderDesc,
     pub reflection: ShaderReflection,
     pub artifacts: Vec<CompiledShaderArtifact>,
+}
+
+impl Default for ShaderDesc {
+    fn default() -> Self {
+        Self {
+            source: ShaderSource::Inline(String::new()),
+            entry_point: String::new(),
+            stage: ShaderStage::Compute,
+            requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
+        }
+    }
 }
 
 impl ShaderDesc {

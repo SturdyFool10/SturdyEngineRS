@@ -5,10 +5,10 @@ use vk::Handle;
 
 use crate::shader_object::ShaderObjectHandle;
 use crate::{
-    AccelerationStructureHandle, AddressMode, BorderColor, BufferDesc, BufferHandle, BufferUsage,
-    CompareOp, Error, FilterMode, Format, ImageDesc, ImageHandle, ImageUsage, MipmapMode,
-    PipelineLayoutHandle, Result, SamplerDesc, SamplerHandle, SamplerReductionMode,
-    SubresourceRange, VulkanExternalBuffer, VulkanExternalImage,
+    AccelerationStructureHandle, AccelerationStructureKind, AddressMode, BorderColor, BufferDesc,
+    BufferHandle, BufferUsage, CompareOp, Error, FilterMode, Format, ImageDesc, ImageHandle,
+    ImageUsage, MipmapMode, PipelineLayoutHandle, Result, SamplerDesc, SamplerHandle,
+    SamplerReductionMode, SubresourceRange, VulkanExternalBuffer, VulkanExternalImage,
 };
 
 use super::allocator::{Allocation, AllocatorStats, GpuAllocator};
@@ -17,6 +17,8 @@ pub struct VulkanAccelerationStructure {
     pub acceleration_structure: vk::AccelerationStructureKHR,
     pub buffer: vk::Buffer,
     pub allocation: Allocation,
+    pub size: u64,
+    pub kind: AccelerationStructureKind,
 }
 
 pub struct VulkanScratchBuffer {
@@ -33,6 +35,10 @@ pub struct ResourceRegistry {
     acceleration_structures: HashMap<AccelerationStructureHandle, VulkanAccelerationStructure>,
     /// VK_EXT_shader_object handles, keyed by engine handle.
     shader_objects: HashMap<ShaderObjectHandle, VulkanShaderObject>,
+    /// VK_EXT_image_view_min_lod available; enables min_lod clamping on image views.
+    pub image_view_min_lod_enabled: bool,
+    /// VK_EXT_image_compression_control available; enables explicit compression hints.
+    pub image_compression_control_enabled: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -72,6 +78,8 @@ impl ResourceRegistry {
             samplers: HashMap::new(),
             acceleration_structures: HashMap::new(),
             shader_objects: HashMap::new(),
+            image_view_min_lod_enabled: false,
+            image_compression_control_enabled: false,
         }
     }
 
@@ -134,7 +142,7 @@ impl ResourceRegistry {
                 )));
             }
         }
-        let view_info = vk::ImageViewCreateInfo::default()
+        let mut view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk_image_view_type(desc))
             .format(vk_format(desc.format)?)
@@ -145,6 +153,14 @@ impl ResourceRegistry {
                 base_array_layer: 0,
                 layer_count: desc.layers as u32,
             });
+        // GFX-2k: min_lod clamping for mipmap streaming.
+        let mut min_lod_info = vk::ImageViewMinLodCreateInfoEXT::default();
+        if self.image_view_min_lod_enabled {
+            if let Some(lod) = desc.min_lod() {
+                min_lod_info = min_lod_info.min_lod(lod);
+                view_info = view_info.push_next(&mut min_lod_info);
+            }
+        }
         let view = unsafe {
             match device.create_image_view(&view_info, None) {
                 Ok(view) => view,
@@ -280,6 +296,11 @@ impl ResourceRegistry {
     /// Expose the allocator so the flush path can query memory types.
     pub fn allocator(&self) -> &super::allocator::GpuAllocator {
         &self.allocator
+    }
+
+    /// Expose the allocator mutably for configuration at startup.
+    pub fn allocator_mut(&mut self) -> &mut super::allocator::GpuAllocator {
+        &mut self.allocator
     }
 
     pub fn destroy_image(&mut self, device: &Device, handle: ImageHandle) -> Result<()> {
@@ -832,6 +853,17 @@ impl ResourceRegistry {
             .ok_or(Error::InvalidHandle)
     }
 
+    /// Return the logical kind and allocation size recorded at creation time.
+    pub fn acceleration_structure_metadata(
+        &self,
+        handle: AccelerationStructureHandle,
+    ) -> Result<(AccelerationStructureKind, u64)> {
+        self.acceleration_structures
+            .get(&handle)
+            .map(|as_| (as_.kind, as_.size))
+            .ok_or(Error::InvalidHandle)
+    }
+
     /// Create and register a new acceleration structure buffer + VkAccelerationStructureKHR.
     pub fn create_acceleration_structure(
         &mut self,
@@ -896,6 +928,8 @@ impl ResourceRegistry {
                 acceleration_structure,
                 buffer,
                 allocation,
+                size,
+                kind: acceleration_structure_kind(ty),
             },
         );
         Ok(())
@@ -935,6 +969,13 @@ impl ResourceRegistry {
             .acceleration_structure(entry.acceleration_structure);
         let addr = unsafe { as_ext.get_acceleration_structure_device_address(&info) };
         Ok(addr)
+    }
+}
+
+fn acceleration_structure_kind(ty: vk::AccelerationStructureTypeKHR) -> AccelerationStructureKind {
+    match ty {
+        vk::AccelerationStructureTypeKHR::TOP_LEVEL => AccelerationStructureKind::TopLevel,
+        _ => AccelerationStructureKind::BottomLevel,
     }
 }
 

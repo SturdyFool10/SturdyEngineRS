@@ -57,10 +57,32 @@ pub enum FrontFace {
     Clockwise,
 }
 
+/// Polygon fill mode for rasterization.
+///
+/// `Line` and `Point` modes can be set dynamically when `BackendFeatures::extended_dynamic_state3`
+/// is available; otherwise they require pipeline recreation.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum PolygonMode {
+    /// Fill polygons — standard solid rendering.
+    #[default]
+    Fill,
+    /// Wireframe rendering.
+    Line,
+    /// Point cloud rendering.
+    Point,
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct RasterState {
     pub cull_mode: CullMode,
     pub front_face: FrontFace,
+    /// Polygon fill mode. Default is `Fill`. Can be set dynamically when
+    /// `BackendFeatures::extended_dynamic_state3_polygon_mode` is available.
+    pub polygon_mode: PolygonMode,
+    /// Clamp depth values to [0, 1] instead of discarding out-of-range fragments.
+    /// Useful for shadow volume rendering and other techniques. Requires
+    /// `BackendFeatures::extended_dynamic_state3` when set dynamically.
+    pub depth_clamp: bool,
 }
 
 impl Default for RasterState {
@@ -68,6 +90,8 @@ impl Default for RasterState {
         Self {
             cull_mode: CullMode::Back,
             front_face: FrontFace::CounterClockwise,
+            polygon_mode: PolygonMode::Fill,
+            depth_clamp: false,
         }
     }
 }
