@@ -534,10 +534,16 @@ impl<'a> AppRuntimeFrame<'a> {
             } else {
                 Some(gpu_total)
             };
+            let present_to_display_ms: Option<f32> = None;
+            let total_latency_ms = gpu_ms
+                .zip(present_to_display_ms)
+                .map(|(gpu_ms, present_ms)| cpu_ms + gpu_ms + present_ms);
             self.runtime.controller.update_diagnostics(|d| {
                 d.timings.available = true;
                 d.timings.cpu_frame_time_ms = Some(cpu_ms);
                 d.timings.gpu_frame_time_ms = gpu_ms;
+                d.timings.present_to_display_ms = present_to_display_ms;
+                d.timings.total_latency_ms = total_latency_ms;
                 d.timings.pass_timings = pass_timings;
                 if let Some((mean, p95, p99)) = percentiles {
                     d.timings.cpu_mean_ms = Some(mean);
@@ -548,8 +554,7 @@ impl<'a> AppRuntimeFrame<'a> {
                     if report.is_jittery() {
                         eprintln!(
                             "[SturdyEngine] frame jitter: p99={:.1}ms mean={:.1}ms (p99 > 2× mean)",
-                            report.p99_cpu_ms,
-                            report.mean_cpu_ms
+                            report.p99_cpu_ms, report.mean_cpu_ms
                         );
                     }
                     crate::set_global_frame_timing(report);
@@ -1226,6 +1231,11 @@ pub struct RuntimeGraphDiagnostics {
 pub struct FrameTimingReport {
     pub cpu_ms: f32,
     pub gpu_ms: Option<f32>,
+    /// Time from present submission to scan-out/display, when the backend can report it.
+    pub present_to_display_ms: Option<f32>,
+    /// End-to-end latency estimate from frame CPU start through display, when all measured
+    /// components are available.
+    pub total_latency_ms: Option<f32>,
     pub mean_cpu_ms: f32,
     pub p95_cpu_ms: f32,
     pub p99_cpu_ms: f32,
@@ -1241,6 +1251,8 @@ impl FrameTimingReport {
         Some(Self {
             cpu_ms,
             gpu_ms: s.gpu_frame_time_ms,
+            present_to_display_ms: s.present_to_display_ms,
+            total_latency_ms: s.total_latency_ms,
             mean_cpu_ms: mean,
             p95_cpu_ms: p95,
             p99_cpu_ms: p99,
@@ -1296,6 +1308,8 @@ pub struct RuntimeTimingSummary {
     pub available: bool,
     pub cpu_frame_time_ms: Option<f32>,
     pub gpu_frame_time_ms: Option<f32>,
+    pub present_to_display_ms: Option<f32>,
+    pub total_latency_ms: Option<f32>,
     pub pass_timings: Vec<RuntimePassTiming>,
     pub cpu_mean_ms: Option<f32>,
     pub cpu_p95_ms: Option<f32>,
@@ -2879,4 +2893,51 @@ fn surface_is_hdr(color_space: SurfaceColorSpace) -> bool {
             | SurfaceColorSpace::Hdr10St2084
             | SurfaceColorSpace::Hdr10Hlg
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_timing_report_carries_latency_fields_when_available() {
+        let summary = RuntimeTimingSummary {
+            available: true,
+            cpu_frame_time_ms: Some(4.0),
+            gpu_frame_time_ms: Some(6.0),
+            present_to_display_ms: Some(8.0),
+            total_latency_ms: Some(18.0),
+            pass_timings: Vec::new(),
+            cpu_mean_ms: Some(5.0),
+            cpu_p95_ms: Some(7.0),
+            cpu_p99_ms: Some(9.0),
+        };
+
+        let report = FrameTimingReport::from_summary(&summary).unwrap();
+
+        assert_eq!(report.cpu_ms, 4.0);
+        assert_eq!(report.gpu_ms, Some(6.0));
+        assert_eq!(report.present_to_display_ms, Some(8.0));
+        assert_eq!(report.total_latency_ms, Some(18.0));
+    }
+
+    #[test]
+    fn frame_timing_report_leaves_total_latency_absent_without_present_timing() {
+        let summary = RuntimeTimingSummary {
+            available: true,
+            cpu_frame_time_ms: Some(4.0),
+            gpu_frame_time_ms: Some(6.0),
+            present_to_display_ms: None,
+            total_latency_ms: None,
+            pass_timings: Vec::new(),
+            cpu_mean_ms: Some(5.0),
+            cpu_p95_ms: Some(7.0),
+            cpu_p99_ms: Some(9.0),
+        };
+
+        let report = FrameTimingReport::from_summary(&summary).unwrap();
+
+        assert_eq!(report.present_to_display_ms, None);
+        assert_eq!(report.total_latency_ms, None);
+    }
 }

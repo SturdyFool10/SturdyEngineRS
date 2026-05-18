@@ -348,7 +348,9 @@ impl CsmPass {
             transient: false,
             clear_value: None,
             debug_name: Some("shadow_atlas"),
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+            compression: Default::default(),
+            min_lod_bits: None,
+            msaa_resolve_to_single_sampled: false,
         };
         let shadow_atlas = frame.image("shadow_atlas", atlas_desc)?;
 
@@ -568,16 +570,16 @@ fn build_depth_program(engine: &Engine) -> Result<MeshProgram> {
                 entry_point: "main".to_owned(),
                 stage: ShaderStage::Fragment,
                 requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                requires_cooperative_matrix: false,
+                uses_ser: false,
             },
             vertex: Some(ShaderDesc {
                 source: ShaderSource::File(engine_shader("shadow_depth.slang")),
                 entry_point: "main".to_owned(),
                 stage: ShaderStage::Vertex,
                 requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                requires_cooperative_matrix: false,
+                uses_ser: false,
             }),
             vertex_kind: MeshVertexKind::V3d,
             alpha_blend: false,
@@ -602,7 +604,9 @@ fn shadow_image_desc(resolution: u32, debug_name: &'static str) -> ImageDesc {
         transient: false,
         clear_value: None,
         debug_name: Some(debug_name),
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+        compression: Default::default(),
+        min_lod_bits: None,
+        msaa_resolve_to_single_sampled: false,
     }
 }
 
@@ -730,16 +734,16 @@ fn build_masked_depth_program(engine: &Engine) -> Result<MeshProgram> {
                 entry_point: "main".to_owned(),
                 stage: ShaderStage::Fragment,
                 requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                requires_cooperative_matrix: false,
+                uses_ser: false,
             },
             vertex: Some(ShaderDesc {
                 source: ShaderSource::File(engine_shader("shadow_depth.slang")),
                 entry_point: "main".to_owned(),
                 stage: ShaderStage::Vertex,
                 requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                requires_cooperative_matrix: false,
+                uses_ser: false,
             }),
             vertex_kind: MeshVertexKind::V3d,
             alpha_blend: false,

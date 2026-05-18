@@ -73,6 +73,7 @@ impl UiGraphPassBuilder {
                     push_descriptor_set: None,
                     predicate: None,
                     shader_binding: None,
+                    shading_rate_image: None,
                 })
             })
             .collect()

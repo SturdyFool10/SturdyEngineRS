@@ -251,19 +251,21 @@ pub use sturdy_engine_core::{
     DrawDesc, DrawIndirectCountDesc, DrawIndirectDesc, DrawMeshShaderDesc,
     DrawMeshShaderIndirectDesc, Error, ErrorCategory, Extent3d, ExternalBufferDesc,
     ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode, Format,
-    FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GpuMemoryBudget, MemoryBudgetReport, MemoryHeapBudget,
-    GraphicsPipelineDesc, ImageBuilder, ImageCompression, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse,
-    IndexBufferBinding, IndexFormat, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
+    FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GpuMemoryBudget,
+    GraphicsPipelineDesc, HdrMetadata, ImageBuilder, ImageCompression, ImageDesc, ImageDimension,
+    ImageRole, ImageUsage, ImageUse, IndexBufferBinding, IndexFormat, MemoryBudgetReport,
+    MemoryHeapBudget, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
     NativeHandleCapability, NativeHandleKind, NativeHandleOwnership, PassDesc, PassWork,
-    PolygonMode, PrimitiveTopology, PushConstants, QueueType, RasterState, ResolveImageDesc, ResourceBinding,
-    Result, RgState, SamplerDesc, ShaderDesc, ShaderParameterKind, ShaderParameterReflection,
-    ShaderResourceAccess, ShaderSource, ShaderStage, ShaderTarget, ShadingRate, SlangCompileDesc,
-    StageMask, SubresourceRange, SurfaceCapabilities, SurfaceColorSpace, SurfaceEvent,
-    SurfaceFormatInfo, SurfaceHdrCaps, SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode,
-    SurfaceRecreateDesc, HdrMetadata, UpdateRate, VertexAttributeDesc, VertexBufferBinding, VertexBufferLayout,
-    VertexFormat, VertexInputRate, VertexInputReflection, VulkanExternalBuffer,
-    VulkanExternalImage, VulkanRawCapabilities, compile_slang, compile_slang_to_file,
-    compile_slang_to_spirv, native_handle_capabilities_for_backend, spirv_words_from_bytes,
+    PolygonMode, PrimitiveTopology, PushConstants, QueueType, RasterState, ResolveImageDesc,
+    ResourceBinding, Result, RgState, SamplerDesc, ShaderDesc, ShaderParameterKind,
+    ShaderParameterReflection, ShaderResourceAccess, ShaderSource, ShaderStage, ShaderTarget,
+    ShadingRate, SlangCompileDesc, StageMask, SubresourceRange, SurfaceCapabilities,
+    SurfaceColorSpace, SurfaceEvent, SurfaceFormatInfo, SurfaceHdrCaps, SurfaceHdrPreference,
+    SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc, UpdateRate, VertexAttributeDesc,
+    VertexBufferBinding, VertexBufferLayout, VertexFormat, VertexInputRate, VertexInputReflection,
+    VulkanExternalBuffer, VulkanExternalImage, VulkanRawCapabilities, compile_slang,
+    compile_slang_to_file, compile_slang_to_spirv, native_handle_capabilities_for_backend,
+    spirv_words_from_bytes,
 };
 pub use sturdy_engine_core::{
     AccelerationStructureHandle, DeviceDesc, DeviceFeature, ImageHandle, SamplerHandle,
@@ -574,16 +576,16 @@ impl Engine {
                         entry_point: vertex,
                         stage: ShaderStage::Vertex,
                         requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                        requires_cooperative_matrix: false,
+                        uses_ser: false,
                     }),
                     fragment: ShaderDesc {
                         source,
                         entry_point: fragment,
                         stage: ShaderStage::Fragment,
                         requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                        requires_cooperative_matrix: false,
+                        uses_ser: false,
                     },
                 })
             }
@@ -595,8 +597,8 @@ impl Engine {
                         entry_point: fragment,
                         stage: ShaderStage::Fragment,
                         requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                        requires_cooperative_matrix: false,
+                        uses_ser: false,
                     },
                 })
             }
@@ -608,8 +610,8 @@ impl Engine {
                         entry_point: compute,
                         stage: ShaderStage::Compute,
                         requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                        requires_cooperative_matrix: false,
+                        uses_ser: false,
                     },
                 })
             }
@@ -1785,6 +1787,7 @@ impl<'f> DrawPassBuilder<'f> {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
+                    shading_rate_image: None,
         })
     }
 }
@@ -1950,6 +1953,7 @@ impl<'f> ComputePassBuilder<'f> {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
+                    shading_rate_image: None,
         })
     }
 }
@@ -2025,6 +2029,7 @@ impl Frame {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
+                    shading_rate_image: None,
         })
     }
 
@@ -2047,6 +2052,7 @@ impl Frame {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
+                    shading_rate_image: None,
         })
     }
 
@@ -2119,6 +2125,7 @@ impl Frame {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
+                    shading_rate_image: None,
         })
     }
 

@@ -348,7 +348,9 @@ mod tests {
             transient: false,
             clear_value: None,
             debug_name: None,
-            compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+            compression: Default::default(),
+            min_lod_bits: None,
+            msaa_resolve_to_single_sampled: false,
         }
     }
 

@@ -252,7 +252,9 @@ impl AoPass {
             transient: false,
             clear_value: None,
             debug_name: Some(name),
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+            compression: Default::default(),
+            min_lod_bits: None,
+            msaa_resolve_to_single_sampled: false,
         };
 
         let ao_raw = frame.image("gtao_raw", ao_desc("gtao_raw"))?;

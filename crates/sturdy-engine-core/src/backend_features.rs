@@ -220,6 +220,18 @@ pub struct BackendFeatures {
     pub graphics_pipeline_library: bool,
     /// VK_EXT_pipeline_creation_cache_control — non-blocking PSO compilation.
     pub pipeline_creation_cache_control: bool,
+
+    // ── GFX-2j: AMD shader info ───────────────────────────────────────────────
+    /// VK_AMD_shader_info — compiled shader statistics (VGPR/SGPR usage, code size).
+    pub shader_info_amd: bool,
+
+    // ── GFX-2k: Image compression swapchain ──────────────────────────────────
+    /// VK_EXT_image_compression_control_swapchain — apply compression hint to swapchain images.
+    pub image_compression_control_swapchain: bool,
+
+    // ── GFX-5: External memory exports ───────────────────────────────────────
+    /// VK_KHR_external_memory_fd is available and buffer/image export is supported.
+    pub external_memory_fd_export: bool,
 }
 
 impl BackendFeatures {

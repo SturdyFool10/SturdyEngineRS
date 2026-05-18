@@ -84,6 +84,8 @@ pub struct MemoryBudgetReport {
 impl MemoryBudgetReport {
     /// Returns `true` when any device-local heap has usage > 80 % of its budget.
     pub fn any_over_budget(&self) -> bool {
-        self.heaps.iter().any(|h| h.budget > 0 && h.usage > h.budget * 4 / 5)
+        self.heaps
+            .iter()
+            .any(|h| h.budget > 0 && h.usage > h.budget * 4 / 5)
     }
 }

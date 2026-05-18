@@ -1304,6 +1304,7 @@ impl Testbed {
                 transient: false,
                 clear_value: None,
                 debug_name: Some("testbed motion vector"),
+                ..ImageDesc::new()
             },
         )
     }

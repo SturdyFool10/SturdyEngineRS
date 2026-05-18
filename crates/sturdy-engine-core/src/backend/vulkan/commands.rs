@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ash::ext::mesh_shader;
 use ash::{Device, vk};
 
@@ -6,9 +8,9 @@ mod batch_pool;
 
 use crate::{
     AccelerationStructureBuildMode, BufferBarrier, CompiledGraph, Error, Extent3d, Format,
-    ImageBarrier, IndexFormat, PassDesc, PassWork, PipelineHandle, PushConstants,
-    PushDescriptorBinding, Result, RgState, ShaderBinding, ShaderBindingTableRegion, ShadingRate,
-    SubmissionHandle, SubresourceRange, VertexFormat,
+    ImageBarrier, IndexFormat, OpticalFlowEstimateDesc, OpticalFlowSessionHandle, PassDesc,
+    PassWork, PipelineHandle, PushConstants, PushDescriptorBinding, Result, RgState, ShaderBinding,
+    ShaderBindingTableRegion, ShadingRate, SubmissionHandle, SubresourceRange, VertexFormat,
 };
 
 use super::bindless::BindlessVkInfo;
@@ -34,6 +36,21 @@ struct ActiveShaderBinding {
     graphics_state: Option<VulkanGraphicsPipelineState>,
 }
 
+/// AMD buffer marker breadcrumb buffer: holds `MAX_TIMESTAMP_PASSES * 2` u32 values, one
+/// per pass-start and one per pass-end. On device loss, the last written index identifies
+/// the faulting pass. Present only in debug builds when VK_AMD_buffer_marker is available.
+#[cfg(debug_assertions)]
+struct BreadcrumbBuffer {
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    ptr: *mut u32,
+}
+
+#[cfg(debug_assertions)]
+unsafe impl Send for BreadcrumbBuffer {}
+#[cfg(debug_assertions)]
+unsafe impl Sync for BreadcrumbBuffer {}
+
 pub struct CommandContext {
     /// One pool per batch slot; grows to match the largest batch count seen.
     batch_pools: Vec<BatchPool>,
@@ -54,6 +71,18 @@ pub struct CommandContext {
     /// Empty until the second `submit_graph` call (first readback).
     pub pass_timings: Vec<(String, f32)>,
     acceleration_structure_scratch: Vec<VulkanScratchBuffer>,
+    /// AMD buffer marker breadcrumb buffer (debug builds only).
+    #[cfg(debug_assertions)]
+    breadcrumb: Option<BreadcrumbBuffer>,
+    /// AMD buffer marker device for writing to the breadcrumb buffer (debug builds only).
+    #[cfg(debug_assertions)]
+    buffer_marker_amd: Option<ash::amd::buffer_marker::Device>,
+    /// GFX-1c: Timeline semaphore for inter-batch chain synchronization.
+    ///
+    /// When available, replaces per-frame binary chain semaphore creation/destruction.
+    /// Value incremented each frame by `batch_count - 1` to synchronize N-batch submissions.
+    chain_timeline: Option<vk::Semaphore>,
+    chain_value: u64,
 }
 
 impl CommandContext {
@@ -61,6 +90,11 @@ impl CommandContext {
         device: &Device,
         queue_families: QueueFamilyMap,
         timestamp_period_ns: f32,
+        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+        buffer_marker_amd: Option<&ash::amd::buffer_marker::Device>,
+        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
+        memory_properties: vk::PhysicalDeviceMemoryProperties,
+        use_timeline_chains: bool,
     ) -> Result<Self> {
         let fence_info = vk::FenceCreateInfo::default();
         let frame_fence = unsafe {
@@ -79,8 +113,61 @@ impl CommandContext {
                 .map_err(|e| Error::Backend(format!("vkCreateQueryPool failed: {e:?}")))?
         };
 
+        // GFX-1c: timeline semaphore for inter-batch chain synchronization.
+        let chain_timeline = if use_timeline_chains {
+            let mut tl_info = vk::SemaphoreTypeCreateInfo::default()
+                .semaphore_type(vk::SemaphoreType::TIMELINE)
+                .initial_value(0);
+            let sem_info = vk::SemaphoreCreateInfo::default().push_next(&mut tl_info);
+            unsafe { device.create_semaphore(&sem_info, None).ok() }
+        } else {
+            None
+        };
+
         // Pre-allocate one batch pool so there is always at least one cmd buf.
         let initial_pool = BatchPool::create(device, queue_families.graphics)?;
+
+        // AMD breadcrumb buffer: host-visible, host-coherent, transfer-dst.
+        #[cfg(debug_assertions)]
+        let breadcrumb = {
+            if buffer_marker_amd.is_some() {
+                let buf_size = (MAX_TIMESTAMP_PASSES * 2 * 4) as u64;
+                let buf_info = vk::BufferCreateInfo::default()
+                    .size(buf_size)
+                    .usage(vk::BufferUsageFlags::TRANSFER_DST)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE);
+                let maybe: Option<BreadcrumbBuffer> = unsafe {
+                    device.create_buffer(&buf_info, None).ok().and_then(|buf| {
+                        let req = device.get_buffer_memory_requirements(buf);
+                        // Find HOST_VISIBLE | HOST_COHERENT memory type.
+                        let mut mem_type = None;
+                        for i in 0..memory_properties.memory_type_count {
+                            if (req.memory_type_bits & (1 << i)) != 0 {
+                                let flags = memory_properties.memory_types[i as usize].property_flags;
+                                if flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT) {
+                                    mem_type = Some(i);
+                                    break;
+                                }
+                            }
+                        }
+                        let mt = mem_type?;
+                        let alloc_info = vk::MemoryAllocateInfo::default()
+                            .allocation_size(req.size)
+                            .memory_type_index(mt);
+                        let memory = device.allocate_memory(&alloc_info, None).ok()?;
+                        device.bind_buffer_memory(buf, memory, 0).ok()?;
+                        let ptr = device.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                            .ok()? as *mut u32;
+                        // Initialize to sentinel (0xFFFF_FFFF = no pass written).
+                        ptr.write_bytes(0xFF, (buf_size / 4) as usize);
+                        Some(BreadcrumbBuffer { buffer: buf, memory, ptr })
+                    })
+                };
+                maybe
+            } else {
+                None
+            }
+        };
 
         Ok(Self {
             batch_pools: vec![initial_pool],
@@ -94,6 +181,12 @@ impl CommandContext {
             pending_pass_count: 0,
             pass_timings: Vec::new(),
             acceleration_structure_scratch: Vec::new(),
+            #[cfg(debug_assertions)]
+            breadcrumb,
+            #[cfg(debug_assertions)]
+            buffer_marker_amd: buffer_marker_amd.cloned(),
+            chain_timeline,
+            chain_value: 0,
         })
     }
 
@@ -123,6 +216,11 @@ impl CommandContext {
         diagnostic_checkpoints_nv: Option<&ash::nv::device_diagnostic_checkpoints::Device>,
         extended_dynamic_state3: Option<&ash::ext::extended_dynamic_state3::Device>,
         vertex_input_dynamic_state: Option<&ash::ext::vertex_input_dynamic_state::Device>,
+        ray_tracing_maintenance1: Option<&ash::khr::ray_tracing_maintenance1::Device>,
+        optical_flow_nv: Option<&ash::nv::optical_flow::Device>,
+        optical_flow_sessions: Option<&HashMap<OpticalFlowSessionHandle, vk::OpticalFlowSessionNV>>,
+        dgc_nv: Option<&ash::nv::device_generated_commands::Device>,
+        indirect_command_layouts: Option<&HashMap<crate::IndirectCommandLayoutHandle, vk::IndirectCommandsLayoutNV>>,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
     ) -> Result<SubmissionHandle> {
@@ -265,13 +363,25 @@ impl CommandContext {
                         sync2,
                     )?;
                     if let Some(pass) = graph.passes.get(pass_idx) {
-                        // NV diagnostic checkpoint: encode pass-start as pass_idx * 2.
+                        // GFX-1g breadcrumbs at pass start: NV checkpoint + AMD buffer marker.
                         #[cfg(debug_assertions)]
                         if let Some(cp) = diagnostic_checkpoints_nv {
                             unsafe {
-                                cp.cmd_set_checkpoint_nv(
+                                cp.cmd_set_checkpoint_nv(cmd, (pass_idx * 2) as usize as *const _);
+                            }
+                        }
+                        #[cfg(debug_assertions)]
+                        if let (Some(bm), Some(bc)) = (
+                            self.buffer_marker_amd.as_ref(),
+                            self.breadcrumb.as_ref(),
+                        ) {
+                            unsafe {
+                                bm.cmd_write_buffer_marker(
                                     cmd,
-                                    (pass_idx * 2) as usize as *const _,
+                                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                                    bc.buffer,
+                                    (pass_idx as u64) * 2 * 4,
+                                    (pass_idx * 2) as u32,
                                 );
                             }
                         }
@@ -322,6 +432,11 @@ impl CommandContext {
                             ray_tracing_position_fetch,
                             extended_dynamic_state3,
                             vertex_input_dynamic_state,
+                            ray_tracing_maintenance1,
+                            optical_flow_nv,
+                            optical_flow_sessions,
+                            dgc_nv,
+                            indirect_command_layouts,
                         )?;
                         if !pass.name.is_empty() {
                             debug.end_region(cmd);
@@ -351,13 +466,28 @@ impl CommandContext {
                             self.pending_pass_names.push(pass.name.clone());
                             ts_query_idx += 1;
                         }
-                        // NV diagnostic checkpoint: encode pass-end as pass_idx * 2 + 1.
+                        // GFX-1g breadcrumbs at pass end: NV checkpoint + AMD buffer marker.
                         #[cfg(debug_assertions)]
                         if let Some(cp) = diagnostic_checkpoints_nv {
                             unsafe {
                                 cp.cmd_set_checkpoint_nv(
                                     cmd,
                                     (pass_idx * 2 + 1) as usize as *const _,
+                                );
+                            }
+                        }
+                        #[cfg(debug_assertions)]
+                        if let (Some(bm), Some(bc)) = (
+                            self.buffer_marker_amd.as_ref(),
+                            self.breadcrumb.as_ref(),
+                        ) {
+                            unsafe {
+                                bm.cmd_write_buffer_marker(
+                                    cmd,
+                                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                                    bc.buffer,
+                                    (pass_idx as u64) * 2 * 4 + 4,
+                                    (pass_idx * 2 + 1) as u32,
                                 );
                             }
                         }
@@ -369,15 +499,20 @@ impl CommandContext {
         self.pending_pass_count = ts_query_idx;
 
         let batch_count = graph.batches.len().max(1);
+        // GFX-1c: use timeline semaphore for inter-batch chains when available,
+        // otherwise fall back to binary semaphores (created and destroyed each frame).
         let mut chain_semaphores = Vec::new();
-        for _ in 1..batch_count {
-            let info = vk::SemaphoreCreateInfo::default();
-            let semaphore = unsafe {
-                device
-                    .create_semaphore(&info, None)
-                    .map_err(|e| Error::Backend(format!("vkCreateSemaphore failed: {e:?}")))?
-            };
-            chain_semaphores.push(semaphore);
+        let use_timeline = self.chain_timeline.is_some();
+        if !use_timeline {
+            for _ in 1..batch_count {
+                let info = vk::SemaphoreCreateInfo::default();
+                let semaphore = unsafe {
+                    device
+                        .create_semaphore(&info, None)
+                        .map_err(|e| Error::Backend(format!("vkCreateSemaphore failed: {e:?}")))?
+                };
+                chain_semaphores.push(semaphore);
+            }
         }
 
         for batch_index in 0..batch_count {
@@ -389,13 +524,13 @@ impl CommandContext {
             let mut wait_sems = Vec::new();
             if batch_index == 0 {
                 wait_sems.extend(wait_semaphore);
-            } else {
+            } else if !use_timeline {
                 wait_sems.push(chain_semaphores[batch_index - 1]);
             }
             let mut signal_sems = Vec::new();
-            if batch_index + 1 < batch_count {
+            if batch_index + 1 < batch_count && !use_timeline {
                 signal_sems.push(chain_semaphores[batch_index]);
-            } else {
+            } else if batch_index + 1 == batch_count {
                 signal_sems.extend(signal_semaphore);
             }
             let fence = if batch_index + 1 == batch_count {
@@ -414,22 +549,44 @@ impl CommandContext {
                 } else {
                     vk::PipelineStageFlags2::TOP_OF_PIPE
                 };
-                let wait_sem_infos = wait_sems
+                let mut wait_sem_infos: Vec<vk::SemaphoreSubmitInfo<'_>> = wait_sems
                     .iter()
                     .map(|&sem| {
                         vk::SemaphoreSubmitInfo::default()
                             .semaphore(sem)
                             .stage_mask(wait_stage2)
                     })
-                    .collect::<Vec<_>>();
-                let signal_sem_infos = signal_sems
+                    .collect();
+                // GFX-1c: add timeline chain wait for non-first batches.
+                if use_timeline && batch_index > 0 {
+                    if let Some(tl) = self.chain_timeline {
+                        wait_sem_infos.push(
+                            vk::SemaphoreSubmitInfo::default()
+                                .semaphore(tl)
+                                .value(self.chain_value + batch_index as u64)
+                                .stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE),
+                        );
+                    }
+                }
+                let mut signal_sem_infos: Vec<vk::SemaphoreSubmitInfo<'_>> = signal_sems
                     .iter()
                     .map(|&sem| {
                         vk::SemaphoreSubmitInfo::default()
                             .semaphore(sem)
                             .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
                     })
-                    .collect::<Vec<_>>();
+                    .collect();
+                // GFX-1c: add timeline chain signal for non-last batches.
+                if use_timeline && batch_index + 1 < batch_count {
+                    if let Some(tl) = self.chain_timeline {
+                        signal_sem_infos.push(
+                            vk::SemaphoreSubmitInfo::default()
+                                .semaphore(tl)
+                                .value(self.chain_value + batch_index as u64 + 1)
+                                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+                        );
+                    }
+                }
                 let submit2_info = vk::SubmitInfo2::default()
                     .command_buffer_infos(&cmd_buf_infos)
                     .wait_semaphore_infos(&wait_sem_infos)
@@ -481,6 +638,10 @@ impl CommandContext {
             }
         }
         self.pending_semaphores.extend(chain_semaphores);
+        // GFX-1c: advance timeline chain value for next frame's wait.
+        if use_timeline && batch_count > 1 {
+            self.chain_value += (batch_count - 1) as u64;
+        }
         self.submission_count += 1;
         self.frame_submitted = true;
         Ok(SubmissionHandle(self.submission_count))
@@ -562,6 +723,11 @@ impl CommandContext {
         ray_tracing_position_fetch: bool,
         extended_dynamic_state3: Option<&ash::ext::extended_dynamic_state3::Device>,
         vertex_input_dynamic_state: Option<&ash::ext::vertex_input_dynamic_state::Device>,
+        ray_tracing_maintenance1: Option<&ash::khr::ray_tracing_maintenance1::Device>,
+        optical_flow_nv: Option<&ash::nv::optical_flow::Device>,
+        optical_flow_sessions: Option<&HashMap<OpticalFlowSessionHandle, vk::OpticalFlowSessionNV>>,
+        dgc_nv: Option<&ash::nv::device_generated_commands::Device>,
+        indirect_command_layouts: Option<&HashMap<crate::IndirectCommandLayoutHandle, vk::IndirectCommandsLayoutNV>>,
     ) -> Result<()> {
         if let Some(predicate) = pass.predicate {
             let conditional_rendering = conditional_rendering.ok_or_else(|| {
@@ -603,8 +769,7 @@ impl CommandContext {
         // GFX-2d: Extended dynamic state 3 — record polygon mode and depth clamp when the
         // pipeline was created with these as dynamic states.
         if let (Some(eds3), Some(binding)) = (extended_dynamic_state3, bound_binding.as_ref()) {
-            if binding.bind_point == vk::PipelineBindPoint::GRAPHICS
-                && !binding.uses_shader_objects
+            if binding.bind_point == vk::PipelineBindPoint::GRAPHICS && !binding.uses_shader_objects
             {
                 if let Some(state) = &binding.graphics_state {
                     unsafe {
@@ -615,10 +780,24 @@ impl CommandContext {
             }
         }
 
+        // GFX-2d: Record rasterizer discard enable — core Vulkan 1.3 / VK_EXT_extended_dynamic_state.
+        // RASTERIZER_DISCARD_ENABLE is always in the pipeline dynamic state list.
+        if let Some(binding) = bound_binding.as_ref() {
+            if binding.bind_point == vk::PipelineBindPoint::GRAPHICS && !binding.uses_shader_objects {
+                if let Some(state) = &binding.graphics_state {
+                    unsafe {
+                        device.cmd_set_rasterizer_discard_enable(
+                            command_buffer,
+                            state.rasterizer_discard,
+                        );
+                    }
+                }
+            }
+        }
+
         // GFX-2e: Vertex input dynamic state — record vertex format when it differs per-draw.
         if let (Some(vids), Some(binding)) = (vertex_input_dynamic_state, bound_binding.as_ref()) {
-            if binding.bind_point == vk::PipelineBindPoint::GRAPHICS
-                && !binding.uses_shader_objects
+            if binding.bind_point == vk::PipelineBindPoint::GRAPHICS && !binding.uses_shader_objects
             {
                 if let Some(state) = &binding.graphics_state {
                     if !state.vertex_bindings.is_empty() || !state.vertex_attributes.is_empty() {
@@ -710,6 +889,7 @@ impl CommandContext {
                     draw.viewport,
                     dynamic_rendering,
                     shader_object_draw_ext,
+                    fragment_shading_rate,
                     || unsafe {
                         if let Some((binding, buffer, offset)) = vertex_buffer {
                             let buffers = [buffer];
@@ -855,6 +1035,7 @@ impl CommandContext {
                     None, // DrawIndirect has no per-tile viewport yet
                     dynamic_rendering,
                     shader_object_draw_ext,
+                    fragment_shading_rate,
                     || unsafe {
                         if let Some((binding, vb, offset)) = vertex_buffer {
                             device.cmd_bind_vertex_buffers(
@@ -927,6 +1108,7 @@ impl CommandContext {
                     None,
                     dynamic_rendering,
                     shader_object_draw_ext,
+                    fragment_shading_rate,
                     || unsafe {
                         if let Some((binding, vb, offset)) = vertex_buffer {
                             device.cmd_bind_vertex_buffers(
@@ -990,6 +1172,7 @@ impl CommandContext {
                     None,
                     dynamic_rendering,
                     shader_object_draw_ext,
+                    fragment_shading_rate,
                     || unsafe {
                         mesh_shader_ext.cmd_draw_mesh_tasks(
                             command_buffer,
@@ -1039,6 +1222,7 @@ impl CommandContext {
                     None,
                     dynamic_rendering,
                     shader_object_draw_ext,
+                    fragment_shading_rate,
                     || unsafe {
                         mesh_shader_ext.cmd_draw_mesh_tasks_indirect(
                             command_buffer,
@@ -1688,17 +1872,32 @@ impl CommandContext {
                     .map(region)
                     .transpose()?
                     .unwrap_or_default();
-                unsafe {
-                    rt_ext.cmd_trace_rays(
-                        command_buffer,
-                        &raygen,
-                        &miss,
-                        &hit,
-                        &call,
-                        trace.width,
-                        trace.height,
-                        trace.depth,
-                    );
+                // GFX-3c: vkCmdTraceRaysIndirectKHR2 when ray_tracing_maintenance1 is available
+                // and an indirect buffer is provided. All SBT regions and dimensions come from GPU.
+                if let (Some((indirect_buf, indirect_offset)), Some(rt_m1)) =
+                    (trace.indirect, ray_tracing_maintenance1)
+                {
+                    let indirect_addr = resources.buffer_device_address_at(
+                        device,
+                        indirect_buf,
+                        indirect_offset,
+                    )?;
+                    unsafe {
+                        rt_m1.cmd_trace_rays_indirect2(command_buffer, indirect_addr);
+                    }
+                } else {
+                    unsafe {
+                        rt_ext.cmd_trace_rays(
+                            command_buffer,
+                            &raygen,
+                            &miss,
+                            &hit,
+                            &call,
+                            trace.width,
+                            trace.height,
+                            trace.depth,
+                        );
+                    }
                 }
             }
 
@@ -1708,16 +1907,84 @@ impl CommandContext {
                 ));
             }
 
-            PassWork::ExecuteGeneratedCommands(_) | PassWork::PreprocessGeneratedCommands(_) => {
-                return Err(Error::Unsupported(
-                    "Vulkan device-generated commands recording is not yet implemented".into(),
-                ));
+            PassWork::ExecuteGeneratedCommands(ref exec) => {
+                let dgc = dgc_nv.ok_or_else(|| {
+                    Error::Unsupported(
+                        "ExecuteGeneratedCommands requires VK_NV_device_generated_commands".into(),
+                    )
+                })?;
+                let layouts = indirect_command_layouts.ok_or_else(|| {
+                    Error::Unsupported("no indirect command layout registry available".into())
+                })?;
+                let layout = *layouts
+                    .get(&exec.layout)
+                    .ok_or(Error::InvalidHandle)?;
+                let pipeline = exec
+                    .state_pipeline
+                    .map(|h| pipelines.pipeline(h).map(|p| p.pipeline))
+                    .transpose()?
+                    .unwrap_or(vk::Pipeline::null());
+                let cmd_buf = resources.buffer(exec.commands_buffer)?;
+                let stream = ash::vk::IndirectCommandsStreamNV::default()
+                    .buffer(cmd_buf)
+                    .offset(exec.commands_offset);
+                let gen_info = ash::vk::GeneratedCommandsInfoNV::default()
+                    .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                    .pipeline(pipeline)
+                    .indirect_commands_layout(layout)
+                    .streams(std::slice::from_ref(&stream))
+                    .sequences_count(exec.max_command_count)
+                    .preprocess_buffer(vk::Buffer::null())
+                    .preprocess_offset(0)
+                    .preprocess_size(0);
+                unsafe {
+                    (dgc.fp().cmd_execute_generated_commands_nv)(
+                        command_buffer,
+                        vk::FALSE, // not preprocessed
+                        &gen_info,
+                    );
+                }
             }
 
-            PassWork::EstimateOpticalFlow(_) => {
-                return Err(Error::Unsupported(
-                    "Vulkan optical flow command recording is not yet implemented".into(),
-                ));
+            PassWork::PreprocessGeneratedCommands(ref prep) => {
+                let dgc = dgc_nv.ok_or_else(|| {
+                    Error::Unsupported(
+                        "PreprocessGeneratedCommands requires VK_NV_device_generated_commands".into(),
+                    )
+                })?;
+                let layouts = indirect_command_layouts.ok_or_else(|| {
+                    Error::Unsupported("no indirect command layout registry available".into())
+                })?;
+                let layout = *layouts.get(&prep.layout).ok_or(Error::InvalidHandle)?;
+                let in_buf = resources.buffer(prep.input_buffer)?;
+                let out_buf = resources.buffer(prep.output_buffer)?;
+                let stream = ash::vk::IndirectCommandsStreamNV::default()
+                    .buffer(in_buf)
+                    .offset(prep.input_offset);
+                let out_size: u64 = (prep.max_command_count as u64) * 64; // conservative estimate
+                let gen_info = ash::vk::GeneratedCommandsInfoNV::default()
+                    .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+                    .pipeline(vk::Pipeline::null())
+                    .indirect_commands_layout(layout)
+                    .streams(std::slice::from_ref(&stream))
+                    .sequences_count(prep.max_command_count)
+                    .preprocess_buffer(out_buf)
+                    .preprocess_offset(prep.output_offset)
+                    .preprocess_size(out_size);
+                unsafe {
+                    (dgc.fp().cmd_preprocess_generated_commands_nv)(command_buffer, &gen_info);
+                }
+            }
+
+            PassWork::EstimateOpticalFlow(desc) => {
+                record_optical_flow_estimate(
+                    device,
+                    command_buffer,
+                    desc,
+                    resources,
+                    optical_flow_nv,
+                    optical_flow_sessions,
+                )?;
             }
         }
         if let Some(conditional_rendering) =
@@ -1741,6 +2008,7 @@ impl CommandContext {
         viewport_override: Option<[u32; 4]>,
         dynamic_rendering: Option<&ash::khr::dynamic_rendering::Device>,
         shader_object_ext: Option<&ash::ext::shader_object::Device>,
+        fragment_shading_rate: Option<&ash::khr::fragment_shading_rate::Device>,
         record_draw: impl FnOnce(),
     ) -> Result<()> {
         let color_uses = pass
@@ -1865,6 +2133,20 @@ impl CommandContext {
                     .color_attachments(&color_attachments);
                 if let Some(ref dai) = depth_attachment_info {
                     rendering_info = rendering_info.depth_attachment(dai);
+                }
+                // GFX-2a: attachment-tier VRS image.
+                let mut vrs_attachment_info;
+                if let (Some(vrs_handle), Some(fsr)) = (pass.shading_rate_image, fragment_shading_rate) {
+                    if let Ok(vrs_view) = resources.image_view(vrs_handle) {
+                        vrs_attachment_info =
+                            vk::RenderingFragmentShadingRateAttachmentInfoKHR::default()
+                                .image_view(vrs_view)
+                                .image_layout(vk::ImageLayout::FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR)
+                                .shading_rate_attachment_texel_size(vk::Extent2D { width: 16, height: 16 });
+                        let _ = fsr; // extension loaded, chain into rendering info
+                        rendering_info =
+                            rendering_info.push_next(&mut vrs_attachment_info);
+                    }
                 }
 
                 unsafe {
@@ -2122,6 +2404,7 @@ fn access_mask(state: RgState) -> vk::AccessFlags {
         RgState::IndirectRead => vk::AccessFlags::INDIRECT_COMMAND_READ,
         RgState::AccelerationStructureBuild => vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR,
         RgState::AccelerationStructureRead => vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR,
+        RgState::ShadingRateAttachment => vk::AccessFlags::FRAGMENT_SHADING_RATE_ATTACHMENT_READ_KHR,
     }
 }
 
@@ -2165,6 +2448,9 @@ fn stage_mask(state: RgState) -> vk::PipelineStageFlags {
             vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR
                 | vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR
         }
+        RgState::ShadingRateAttachment => {
+            vk::PipelineStageFlags::FRAGMENT_SHADING_RATE_ATTACHMENT_KHR
+        }
     }
 }
 
@@ -2195,6 +2481,9 @@ fn stage_mask2(state: RgState) -> vk::PipelineStageFlags2 {
             vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR
                 | vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR
         }
+        RgState::ShadingRateAttachment => {
+            vk::PipelineStageFlags2::FRAGMENT_SHADING_RATE_ATTACHMENT_KHR
+        }
     }
 }
 
@@ -2216,6 +2505,7 @@ fn access_mask2(state: RgState) -> vk::AccessFlags2 {
         RgState::IndirectRead => vk::AccessFlags2::INDIRECT_COMMAND_READ,
         RgState::AccelerationStructureBuild => vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR,
         RgState::AccelerationStructureRead => vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR,
+        RgState::ShadingRateAttachment => vk::AccessFlags2::FRAGMENT_SHADING_RATE_ATTACHMENT_READ_KHR,
     }
 }
 
@@ -2717,7 +3007,7 @@ fn record_shader_object_graphics_state(
         shader_object_ext.cmd_set_primitive_restart_enable(command_buffer, false);
         shader_object_ext.cmd_set_cull_mode(command_buffer, state.cull_mode);
         shader_object_ext.cmd_set_front_face(command_buffer, state.front_face);
-        shader_object_ext.cmd_set_rasterizer_discard_enable(command_buffer, false);
+        shader_object_ext.cmd_set_rasterizer_discard_enable(command_buffer, state.rasterizer_discard);
         shader_object_ext.cmd_set_depth_bias_enable(command_buffer, false);
         shader_object_ext.cmd_set_polygon_mode(command_buffer, state.polygon_mode);
         shader_object_ext.cmd_set_depth_clamp_enable(command_buffer, state.depth_clamp);
@@ -2908,6 +3198,9 @@ fn image_layout(state: RgState) -> vk::ImageLayout {
         RgState::AccelerationStructureBuild | RgState::AccelerationStructureRead => {
             vk::ImageLayout::GENERAL
         }
+        RgState::ShadingRateAttachment => {
+            vk::ImageLayout::FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR
+        }
     }
 }
 
@@ -2960,6 +3253,83 @@ fn mip_extent(extent: Extent3d, base_mip: u16) -> Extent3d {
     }
 }
 
+fn record_optical_flow_estimate(
+    device: &Device,
+    command_buffer: vk::CommandBuffer,
+    desc: OpticalFlowEstimateDesc,
+    resources: &ResourceRegistry,
+    optical_flow: Option<&ash::nv::optical_flow::Device>,
+    sessions: Option<&HashMap<OpticalFlowSessionHandle, vk::OpticalFlowSessionNV>>,
+) -> Result<()> {
+    let optical_flow = optical_flow
+        .ok_or_else(|| Error::Unsupported("VK_NV_optical_flow is not enabled".into()))?;
+    let session = sessions
+        .and_then(|sessions| sessions.get(&desc.session).copied())
+        .ok_or(Error::InvalidHandle)?;
+    bind_optical_flow_image(
+        device,
+        optical_flow,
+        session,
+        vk::OpticalFlowSessionBindingPointNV::INPUT,
+        resources.image_view(desc.input_current)?,
+    )?;
+    bind_optical_flow_image(
+        device,
+        optical_flow,
+        session,
+        vk::OpticalFlowSessionBindingPointNV::REFERENCE,
+        resources.image_view(desc.input_previous)?,
+    )?;
+    bind_optical_flow_image(
+        device,
+        optical_flow,
+        session,
+        vk::OpticalFlowSessionBindingPointNV::FLOW_VECTOR,
+        resources.image_view(desc.output_motion_vectors)?,
+    )?;
+    if let Some(hint) = desc.input_hint {
+        bind_optical_flow_image(
+            device,
+            optical_flow,
+            session,
+            vk::OpticalFlowSessionBindingPointNV::HINT,
+            resources.image_view(hint)?,
+        )?;
+    }
+    let flags = if desc.input_hint.is_some() {
+        vk::OpticalFlowExecuteFlagsNV::empty()
+    } else {
+        vk::OpticalFlowExecuteFlagsNV::DISABLE_TEMPORAL_HINTS
+    };
+    let execute_info = vk::OpticalFlowExecuteInfoNV::default().flags(flags);
+    unsafe {
+        (optical_flow.fp().cmd_optical_flow_execute_nv)(command_buffer, session, &execute_info);
+    }
+    Ok(())
+}
+
+fn bind_optical_flow_image(
+    device: &Device,
+    optical_flow: &ash::nv::optical_flow::Device,
+    session: vk::OpticalFlowSessionNV,
+    binding_point: vk::OpticalFlowSessionBindingPointNV,
+    view: vk::ImageView,
+) -> Result<()> {
+    unsafe {
+        (optical_flow.fp().bind_optical_flow_session_image_nv)(
+            device.handle(),
+            session,
+            binding_point,
+            view,
+            vk::ImageLayout::GENERAL,
+        )
+        .result()
+        .map_err(|error| {
+            Error::Backend(format!("vkBindOpticalFlowSessionImageNV failed: {error:?}"))
+        })
+    }
+}
+
 // ── Multi-frame command context ───────────────────────────────────────────────
 
 /// Number of independent frame slots.  Each slot has its own command pools and
@@ -2984,6 +3354,9 @@ impl FramedCommands {
         device: &Device,
         queue_families: QueueFamilyMap,
         timestamp_period_ns: f32,
+        buffer_marker_amd: Option<&ash::amd::buffer_marker::Device>,
+        memory_properties: vk::PhysicalDeviceMemoryProperties,
+        use_timeline_chains: bool,
     ) -> Result<Self> {
         let mut contexts = Vec::with_capacity(FRAMES_IN_FLIGHT);
         for _ in 0..FRAMES_IN_FLIGHT {
@@ -2991,6 +3364,9 @@ impl FramedCommands {
                 device,
                 queue_families,
                 timestamp_period_ns,
+                buffer_marker_amd,
+                memory_properties,
+                use_timeline_chains,
             )?);
         }
         Ok(Self {
@@ -3028,6 +3404,11 @@ impl FramedCommands {
         diagnostic_checkpoints_nv: Option<&ash::nv::device_diagnostic_checkpoints::Device>,
         extended_dynamic_state3: Option<&ash::ext::extended_dynamic_state3::Device>,
         vertex_input_dynamic_state: Option<&ash::ext::vertex_input_dynamic_state::Device>,
+        ray_tracing_maintenance1: Option<&ash::khr::ray_tracing_maintenance1::Device>,
+        optical_flow_nv: Option<&ash::nv::optical_flow::Device>,
+        optical_flow_sessions: Option<&HashMap<OpticalFlowSessionHandle, vk::OpticalFlowSessionNV>>,
+        dgc_nv: Option<&ash::nv::device_generated_commands::Device>,
+        indirect_command_layouts: Option<&HashMap<crate::IndirectCommandLayoutHandle, vk::IndirectCommandsLayoutNV>>,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
     ) -> Result<SubmissionHandle> {
@@ -3056,6 +3437,11 @@ impl FramedCommands {
             diagnostic_checkpoints_nv,
             extended_dynamic_state3,
             vertex_input_dynamic_state,
+            ray_tracing_maintenance1,
+            optical_flow_nv,
+            optical_flow_sessions,
+            dgc_nv,
+            indirect_command_layouts,
             wait_semaphore,
             signal_semaphore,
         )?;

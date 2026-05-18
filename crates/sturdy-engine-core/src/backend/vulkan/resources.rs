@@ -6,8 +6,8 @@ use vk::Handle;
 use crate::shader_object::ShaderObjectHandle;
 use crate::{
     AccelerationStructureHandle, AccelerationStructureKind, AddressMode, BorderColor, BufferDesc,
-    BufferHandle, BufferUsage, CompareOp, Error, FilterMode, Format, ImageDesc, ImageHandle,
-    ImageUsage, MipmapMode, PipelineLayoutHandle, Result, SamplerDesc, SamplerHandle,
+    BufferHandle, BufferUsage, CompareOp, Error, FilterMode, Format, ImageCompression, ImageDesc,
+    ImageHandle, ImageUsage, MipmapMode, PipelineLayoutHandle, Result, SamplerDesc, SamplerHandle,
     SamplerReductionMode, SubresourceRange, VulkanExternalBuffer, VulkanExternalImage,
 };
 
@@ -39,6 +39,13 @@ pub struct ResourceRegistry {
     pub image_view_min_lod_enabled: bool,
     /// VK_EXT_image_compression_control available; enables explicit compression hints.
     pub image_compression_control_enabled: bool,
+    /// VK_NV_optical_flow available; enables optical-flow image usage pNext metadata.
+    pub optical_flow_enabled: bool,
+    /// VK_EXT_pageable_device_local_memory extension device for dynamic priority setting.
+    pub pageable_memory_ext: Option<ash::ext::pageable_device_local_memory::Device>,
+    /// VK_KHR_dedicated_allocation (Vulkan 1.1 core) — use dedicated VkDeviceMemory
+    /// for resources where `prefersDedicatedAllocation` is true or size > 64 MiB.
+    pub dedicated_allocation_enabled: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -80,6 +87,9 @@ impl ResourceRegistry {
             shader_objects: HashMap::new(),
             image_view_min_lod_enabled: false,
             image_compression_control_enabled: false,
+            optical_flow_enabled: false,
+            pageable_memory_ext: None,
+            dedicated_allocation_enabled: false,
         }
     }
 
@@ -93,7 +103,7 @@ impl ResourceRegistry {
         handle: ImageHandle,
         desc: ImageDesc,
     ) -> Result<()> {
-        let info = vk::ImageCreateInfo::default()
+        let mut info = vk::ImageCreateInfo::default()
             .image_type(image_type(desc))
             .format(vk_format(desc.format)?)
             .extent(vk::Extent3D {
@@ -108,14 +118,84 @@ impl ResourceRegistry {
             .usage(vk_image_usage(desc.usage))
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
+        let mut fixed_rate_flags = vk_image_compression_fixed_rate_flags(desc.compression)?;
+        let mut compression_control = vk_image_compression_control(
+            desc.compression,
+            self.image_compression_control_enabled,
+            &mut fixed_rate_flags,
+        );
+        if let Some(control) = compression_control.as_mut() {
+            info = info.push_next(control);
+        }
+        let optical_flow_usage = vk_optical_flow_image_usage(desc.usage)?;
+        let mut optical_flow_info =
+            vk_optical_flow_image_info(optical_flow_usage, self.optical_flow_enabled, desc.usage)?;
+        if let Some(info_ext) = optical_flow_info.as_mut() {
+            info = info.push_next(info_ext);
+        }
 
         let image = unsafe {
             device
                 .create_image(&info, None)
                 .map_err(|error| Error::Backend(format!("vkCreateImage failed: {error:?}")))?
         };
-        let requirements = unsafe { device.get_image_memory_requirements(image) };
-        let allocation =
+
+        // GFX-1e: query dedicated allocation requirements (Vulkan 1.1 core).
+        let (requirements, prefers_dedicated) = if self.dedicated_allocation_enabled {
+            let mut dedicated_req = vk::MemoryDedicatedRequirementsKHR::default();
+            let (mem_reqs, pref, req);
+            {
+                let mut req2 = vk::MemoryRequirements2::default().push_next(&mut dedicated_req);
+                let info2 = vk::ImageMemoryRequirementsInfo2::default().image(image);
+                unsafe { device.get_image_memory_requirements2(&info2, &mut req2) };
+                mem_reqs = req2.memory_requirements;
+            }
+            pref = dedicated_req.prefers_dedicated_allocation == vk::TRUE;
+            req = dedicated_req.requires_dedicated_allocation == vk::TRUE;
+            let dedicated = pref || req || mem_reqs.size > 64 * 1024 * 1024;
+            (mem_reqs, dedicated)
+        } else {
+            (unsafe { device.get_image_memory_requirements(image) }, false)
+        };
+
+        let allocation = if prefers_dedicated {
+            // Allocate a dedicated VkDeviceMemory for this image (skip the sub-allocator pool).
+            let memory_type = self
+                .allocator
+                .find_memory_type(requirements.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                .unwrap_or(0);
+            let mut dedicated_info = vk::MemoryDedicatedAllocateInfoKHR::default().image(image);
+            let mut alloc_info = vk::MemoryAllocateInfo::default()
+                .allocation_size(requirements.size)
+                .memory_type_index(memory_type)
+                .push_next(&mut dedicated_info);
+            // GFX-1e: chain priority for pageable memory if available.
+            let mut priority_info;
+            if self.allocator.memory_priority_enabled {
+                priority_info = vk::MemoryPriorityAllocateInfoEXT::default().priority(0.9);
+                alloc_info = alloc_info.push_next(&mut priority_info);
+            }
+            let memory = unsafe {
+                device.allocate_memory(&alloc_info, None).map_err(|e| {
+                    device.destroy_image(image, None);
+                    Error::Backend(format!("dedicated vkAllocateMemory failed: {e:?}"))
+                })?
+            };
+            unsafe {
+                if let Err(e) = device.bind_image_memory(image, memory, 0) {
+                    device.free_memory(memory, None);
+                    device.destroy_image(image, None);
+                    return Err(Error::Backend(format!(
+                        "dedicated vkBindImageMemory failed: {e:?}"
+                    )));
+                }
+            }
+            // GFX-1e: set pageable memory priority after binding.
+            if let Some(ref pm) = self.pageable_memory_ext {
+                unsafe { (pm.fp().set_device_memory_priority_ext)(device.handle(), memory, 0.9) };
+            }
+            super::allocator::Allocation::dedicated(memory, requirements.size, memory_type)
+        } else {
             match self
                 .allocator
                 .alloc(device, requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)
@@ -125,21 +205,25 @@ impl ResourceRegistry {
                     unsafe { device.destroy_image(image, None) };
                     return Err(error);
                 }
-            };
-        unsafe {
-            if let Err(error) =
-                device.bind_image_memory(image, allocation.memory, allocation.offset)
-            {
-                let cleanup = self.allocator.dealloc(device, allocation);
-                device.destroy_image(image, None);
-                if let Err(cleanup_error) = cleanup {
+            }
+        };
+        // Non-dedicated path: bind memory from the sub-allocator pool.
+        if !prefers_dedicated {
+            unsafe {
+                if let Err(error) =
+                    device.bind_image_memory(image, allocation.memory, allocation.offset)
+                {
+                    let cleanup = self.allocator.dealloc(device, allocation);
+                    device.destroy_image(image, None);
+                    if let Err(cleanup_error) = cleanup {
+                        return Err(Error::Backend(format!(
+                            "vkBindImageMemory failed: {error:?}; additionally failed to release allocation: {cleanup_error}"
+                        )));
+                    }
                     return Err(Error::Backend(format!(
-                        "vkBindImageMemory failed: {error:?}; additionally failed to release allocation: {cleanup_error}"
+                        "vkBindImageMemory failed: {error:?}"
                     )));
                 }
-                return Err(Error::Backend(format!(
-                    "vkBindImageMemory failed: {error:?}"
-                )));
             }
         }
         let mut view_info = vk::ImageViewCreateInfo::default()
@@ -203,7 +287,7 @@ impl ResourceRegistry {
         handle: ImageHandle,
         desc: ImageDesc,
     ) -> Result<()> {
-        let info = vk::ImageCreateInfo::default()
+        let mut info = vk::ImageCreateInfo::default()
             .flags(vk::ImageCreateFlags::ALIAS)
             .image_type(image_type(desc))
             .format(vk_format(desc.format)?)
@@ -219,6 +303,21 @@ impl ResourceRegistry {
             .usage(vk_image_usage(desc.usage))
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
+        let mut fixed_rate_flags = vk_image_compression_fixed_rate_flags(desc.compression)?;
+        let mut compression_control = vk_image_compression_control(
+            desc.compression,
+            self.image_compression_control_enabled,
+            &mut fixed_rate_flags,
+        );
+        if let Some(control) = compression_control.as_mut() {
+            info = info.push_next(control);
+        }
+        let optical_flow_usage = vk_optical_flow_image_usage(desc.usage)?;
+        let mut optical_flow_info =
+            vk_optical_flow_image_info(optical_flow_usage, self.optical_flow_enabled, desc.usage)?;
+        if let Some(info_ext) = optical_flow_info.as_mut() {
+            info = info.push_next(info_ext);
+        }
 
         let image = unsafe {
             device
@@ -1053,6 +1152,82 @@ fn image_type(desc: ImageDesc) -> vk::ImageType {
     }
 }
 
+fn vk_image_compression_control<'a>(
+    compression: ImageCompression,
+    enabled: bool,
+    fixed_rate_flags: &'a mut [vk::ImageCompressionFixedRateFlagsEXT; 1],
+) -> Option<vk::ImageCompressionControlEXT<'a>> {
+    if !enabled {
+        return None;
+    }
+    match compression {
+        ImageCompression::Default => None,
+        ImageCompression::Fixed { .. } => Some(
+            vk::ImageCompressionControlEXT::default()
+                .flags(vk::ImageCompressionFlagsEXT::FIXED_RATE_EXPLICIT)
+                .fixed_rate_flags(fixed_rate_flags),
+        ),
+        ImageCompression::Disabled => Some(
+            vk::ImageCompressionControlEXT::default().flags(vk::ImageCompressionFlagsEXT::DISABLED),
+        ),
+    }
+}
+
+fn vk_image_compression_fixed_rate_flags(
+    compression: ImageCompression,
+) -> Result<[vk::ImageCompressionFixedRateFlagsEXT; 1]> {
+    let ImageCompression::Fixed { bits_per_component } = compression else {
+        return Ok([vk::ImageCompressionFixedRateFlagsEXT::NONE]);
+    };
+    if !(1..=24).contains(&bits_per_component) {
+        return Err(Error::InvalidInput(format!(
+            "fixed image compression bits_per_component must be in 1..=24, got {bits_per_component}"
+        )));
+    }
+    Ok([vk::ImageCompressionFixedRateFlagsEXT::from_raw(
+        1u32 << (bits_per_component - 1),
+    )])
+}
+
+fn vk_optical_flow_image_usage(usage: ImageUsage) -> Result<vk::OpticalFlowUsageFlagsNV> {
+    let mut flags = vk::OpticalFlowUsageFlagsNV::empty();
+    if usage.contains(ImageUsage::OPTICAL_FLOW_INPUT) {
+        flags |= vk::OpticalFlowUsageFlagsNV::INPUT;
+    }
+    if usage.contains(ImageUsage::OPTICAL_FLOW_OUTPUT) {
+        flags |= vk::OpticalFlowUsageFlagsNV::OUTPUT;
+    }
+    if usage.contains(ImageUsage::OPTICAL_FLOW_HINT) {
+        flags |= vk::OpticalFlowUsageFlagsNV::HINT;
+    }
+    Ok(flags)
+}
+
+fn vk_optical_flow_image_info(
+    optical_flow_usage: vk::OpticalFlowUsageFlagsNV,
+    enabled: bool,
+    image_usage: ImageUsage,
+) -> Result<Option<vk::OpticalFlowImageFormatInfoNV<'static>>> {
+    if optical_flow_usage.is_empty() {
+        return Ok(None);
+    }
+    if !enabled {
+        return Err(Error::Unsupported(
+            "optical-flow image usage requires VK_NV_optical_flow".into(),
+        ));
+    }
+    if image_usage.contains(ImageUsage::OPTICAL_FLOW_INPUT)
+        && image_usage.contains(ImageUsage::OPTICAL_FLOW_OUTPUT)
+    {
+        return Err(Error::InvalidInput(
+            "optical-flow input and output usage must use separate images".into(),
+        ));
+    }
+    Ok(Some(
+        vk::OpticalFlowImageFormatInfoNV::default().usage(optical_flow_usage),
+    ))
+}
+
 fn vk_image_view_type(desc: ImageDesc) -> vk::ImageViewType {
     match desc.dimension {
         crate::ImageDimension::D1 if desc.layers > 1 => vk::ImageViewType::TYPE_1D_ARRAY,
@@ -1249,5 +1424,126 @@ fn vk_sampler_reduction_mode(mode: SamplerReductionMode) -> vk::SamplerReduction
         SamplerReductionMode::WeightedAverage => vk::SamplerReductionMode::WEIGHTED_AVERAGE,
         SamplerReductionMode::Min => vk::SamplerReductionMode::MIN,
         SamplerReductionMode::Max => vk::SamplerReductionMode::MAX,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_compression_fixed_rate_maps_bits_to_vk_flags() {
+        assert_eq!(
+            vk_image_compression_fixed_rate_flags(ImageCompression::Fixed {
+                bits_per_component: 1,
+            })
+            .unwrap()[0]
+                .as_raw(),
+            vk::ImageCompressionFixedRateFlagsEXT::TYPE_1BPC.as_raw()
+        );
+        assert_eq!(
+            vk_image_compression_fixed_rate_flags(ImageCompression::Fixed {
+                bits_per_component: 8,
+            })
+            .unwrap()[0]
+                .as_raw(),
+            vk::ImageCompressionFixedRateFlagsEXT::TYPE_8BPC.as_raw()
+        );
+        assert_eq!(
+            vk_image_compression_fixed_rate_flags(ImageCompression::Fixed {
+                bits_per_component: 24,
+            })
+            .unwrap()[0]
+                .as_raw(),
+            vk::ImageCompressionFixedRateFlagsEXT::TYPE_24BPC.as_raw()
+        );
+    }
+
+    #[test]
+    fn image_compression_fixed_rate_rejects_invalid_bit_counts() {
+        assert!(matches!(
+            vk_image_compression_fixed_rate_flags(ImageCompression::Fixed {
+                bits_per_component: 0,
+            }),
+            Err(Error::InvalidInput(_))
+        ));
+        assert!(matches!(
+            vk_image_compression_fixed_rate_flags(ImageCompression::Fixed {
+                bits_per_component: 25,
+            }),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn image_compression_control_is_only_chained_when_enabled_and_explicit() {
+        let mut fixed_rate = [vk::ImageCompressionFixedRateFlagsEXT::TYPE_8BPC];
+        assert!(
+            vk_image_compression_control(
+                ImageCompression::Fixed {
+                    bits_per_component: 8,
+                },
+                false,
+                &mut fixed_rate,
+            )
+            .is_none()
+        );
+        assert!(
+            vk_image_compression_control(ImageCompression::Default, true, &mut fixed_rate)
+                .is_none()
+        );
+
+        let fixed = vk_image_compression_control(
+            ImageCompression::Fixed {
+                bits_per_component: 8,
+            },
+            true,
+            &mut fixed_rate,
+        )
+        .unwrap();
+        assert_eq!(
+            fixed.flags.as_raw(),
+            vk::ImageCompressionFlagsEXT::FIXED_RATE_EXPLICIT.as_raw()
+        );
+        assert_eq!(fixed.compression_control_plane_count, 1);
+
+        let mut unused = [vk::ImageCompressionFixedRateFlagsEXT::NONE];
+        let disabled =
+            vk_image_compression_control(ImageCompression::Disabled, true, &mut unused).unwrap();
+        assert_eq!(
+            disabled.flags.as_raw(),
+            vk::ImageCompressionFlagsEXT::DISABLED.as_raw()
+        );
+        assert_eq!(disabled.compression_control_plane_count, 0);
+    }
+
+    #[test]
+    fn optical_flow_image_info_requires_feature_when_usage_requested() {
+        let usage = ImageUsage::OPTICAL_FLOW_INPUT | ImageUsage::SAMPLED;
+        let flags = vk_optical_flow_image_usage(usage).unwrap();
+
+        assert!(matches!(
+            vk_optical_flow_image_info(flags, false, usage),
+            Err(Error::Unsupported(_))
+        ));
+
+        let info = vk_optical_flow_image_info(flags, true, usage)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            info.usage.as_raw(),
+            vk::OpticalFlowUsageFlagsNV::INPUT.as_raw()
+        );
+    }
+
+    #[test]
+    fn optical_flow_image_info_rejects_input_output_overlap() {
+        let usage = ImageUsage::OPTICAL_FLOW_INPUT | ImageUsage::OPTICAL_FLOW_OUTPUT;
+        let flags = vk_optical_flow_image_usage(usage).unwrap();
+
+        assert!(matches!(
+            vk_optical_flow_image_info(flags, true, usage),
+            Err(Error::InvalidInput(_))
+        ));
     }
 }

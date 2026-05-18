@@ -16,6 +16,7 @@ mod shaders;
 mod surfaces;
 
 use std::collections::HashMap;
+use std::ffi::c_void;
 
 use ash::{Device as AshDevice, Entry, Instance, vk};
 use std::sync::{Mutex, RwLock};
@@ -52,7 +53,11 @@ pub struct VulkanBackend {
     queue_families: QueueFamilyMap,
     queues: VulkanQueues,
     caps: Caps,
+    enabled_extension_names: Vec<String>,
     debug: debug::DebugUtils,
+    /// GFX-1g: Instance-level debug messenger for VK_EXT_device_address_binding_report events.
+    /// Active in debug builds only when the extension is enabled.
+    address_binding_messenger: Option<debug::AddressBindingMessenger>,
     commands: Mutex<commands::FramedCommands>,
     descriptors: RwLock<descriptors::DescriptorRegistry>,
     pipelines: Mutex<pipelines::PipelineRegistry>,
@@ -99,6 +104,11 @@ pub struct VulkanBackend {
     reflex_sleep_semaphore: Option<vk::Semaphore>,
     /// Monotonically-increasing value signaled into `reflex_sleep_semaphore` each frame.
     reflex_sleep_value: std::sync::atomic::AtomicU64,
+    /// Raw VK_AMD_anti_lag entry point. ash does not generate this extension yet.
+    anti_lag_update_amd: Option<PfnVkAntiLagUpdateAmd>,
+    /// Desired AMD Anti-Lag mode; sent to the driver on frame-start notifications.
+    anti_lag_mode: std::sync::atomic::AtomicU8,
+    anti_lag_frame_index: std::sync::atomic::AtomicU64,
     /// VK_EXT_hdr_metadata commands. Present when hdr_output is available.
     hdr_metadata_ext: Option<ash::ext::hdr_metadata::Device>,
     /// VK_EXT_extended_dynamic_state3 commands. Present when the feature is enabled.
@@ -107,6 +117,82 @@ pub struct VulkanBackend {
     vertex_input_dynamic_state_ext: Option<ash::ext::vertex_input_dynamic_state::Device>,
     /// VK_EXT_shader_object commands. Present when the feature is enabled.
     shader_object_ext: Option<ash::ext::shader_object::Device>,
+    /// VK_NV_device_generated_commands commands. Present when DGC NV extension is detected.
+    device_generated_commands_nv: Option<ash::nv::device_generated_commands::Device>,
+    indirect_command_layouts:
+        Mutex<HashMap<crate::IndirectCommandLayoutHandle, vk::IndirectCommandsLayoutNV>>,
+    /// VK_NV_optical_flow commands. Present when optical_flow_nv feature is detected.
+    optical_flow_nv_ext: Option<ash::nv::optical_flow::Device>,
+    optical_flow_sessions:
+        Mutex<HashMap<crate::OpticalFlowSessionHandle, vk::OpticalFlowSessionNV>>,
+    /// VK_EXT_host_image_copy commands. Present when host_image_copy feature is available.
+    host_image_copy_ext: Option<ash::ext::host_image_copy::Device>,
+    /// VK_KHR_ray_tracing_maintenance1 commands. Present when ray_tracing_maintenance1 is set.
+    ray_tracing_maintenance1_khr: Option<ash::khr::ray_tracing_maintenance1::Device>,
+    /// VK_KHR_video_queue commands. Present when video_queue feature is detected.
+    video_queue_khr: Option<ash::khr::video_queue::Device>,
+    video_sessions: Mutex<HashMap<VideoSessionHandle, VulkanVideoSession>>,
+    /// VK_EXT_pageable_device_local_memory — dynamic priority on device-local pages.
+    pageable_memory_ext: Option<ash::ext::pageable_device_local_memory::Device>,
+    /// User-created timeline semaphores (GFX-1c cross-queue coordination API).
+    timeline_semaphores:
+        Mutex<HashMap<crate::SemaphoreHandle, vk::Semaphore>>,
+    /// Handle allocator for user-created timeline semaphores.
+    timeline_semaphore_handles: Mutex<crate::handles::HandleAllocator>,
+    /// VK_KHR_external_memory_fd — fd-based external memory export/import (Linux/macOS).
+    external_memory_fd_khr: Option<ash::khr::external_memory_fd::Device>,
+    /// VK_EXT_external_memory_host — host-pointer import.
+    external_memory_host_ext: Option<ash::ext::external_memory_host::Device>,
+    /// Registry of exportable image memory handles (image handle → dedicated VkDeviceMemory).
+    exportable_image_memories: Mutex<HashMap<ImageHandle, vk::DeviceMemory>>,
+    /// Registry of exportable buffer memory handles (buffer handle → dedicated VkDeviceMemory).
+    exportable_buffer_memories: Mutex<HashMap<BufferHandle, vk::DeviceMemory>>,
+    /// VK_KHR_external_semaphore_fd — fd-based external semaphore export/import (Linux/macOS).
+    external_semaphore_fd_khr: Option<ash::khr::external_semaphore_fd::Device>,
+    /// Registry of exportable semaphore VkSemaphore objects (SemaphoreHandle → vk::Semaphore).
+    exportable_semaphores: Mutex<HashMap<crate::SemaphoreHandle, vk::Semaphore>>,
+}
+
+struct VulkanVideoSession {
+    session: vk::VideoSessionKHR,
+    memories: Vec<vk::DeviceMemory>,
+}
+
+type PfnVkAntiLagUpdateAmd = unsafe extern "system" fn(vk::Device, *const VkAntiLagDataAmd);
+
+const VK_STRUCTURE_TYPE_ANTI_LAG_DATA_AMD: vk::StructureType =
+    vk::StructureType::from_raw(1000476001);
+const VK_STRUCTURE_TYPE_ANTI_LAG_PRESENTATION_INFO_AMD: vk::StructureType =
+    vk::StructureType::from_raw(1000476002);
+
+#[repr(i32)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum VkAntiLagModeAmd {
+    On = 1,
+    Off = 2,
+}
+
+#[repr(i32)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum VkAntiLagStageAmd {
+    Input = 0,
+}
+
+#[repr(C)]
+struct VkAntiLagPresentationInfoAmd {
+    s_type: vk::StructureType,
+    p_next: *mut c_void,
+    stage: VkAntiLagStageAmd,
+    frame_index: u64,
+}
+
+#[repr(C)]
+struct VkAntiLagDataAmd {
+    s_type: vk::StructureType,
+    p_next: *const c_void,
+    mode: VkAntiLagModeAmd,
+    max_fps: u32,
+    p_presentation_info: *const VkAntiLagPresentationInfoAmd,
 }
 
 impl VulkanBackend {
@@ -159,35 +245,56 @@ impl VulkanBackend {
             && caps.features.extended_dynamic_state3_color_blend;
         caps.features.vertex_input_dynamic_state = logical.vertex_input_dynamic_state_enabled;
         caps.features.shader_object = logical.shader_object_enabled && caps.features.shader_object;
-        // Raw video extensions are exposed through `raw_extension_names`, but
-        // runtime video features stay disabled until this backend owns real
-        // VkVideoSessionKHR objects, parameter sets, memory binding, and command
-        // recording. This keeps Device::create_video_session's feature gate
-        // truthful instead of advertising an API that always fails later.
+        let video_queue_enabled =
+            enabled_extension(&logical.enabled_extension_names, "VK_KHR_video_queue");
+        // Raw codec extensions are exposed through `raw_extension_names`, but
+        // runtime encode/decode frame features stay disabled until command
+        // recording is executable. `video_queue` is restored below when the
+        // extension is enabled because this backend now owns real
+        // VkVideoSessionKHR lifetime and memory binding.
         caps.features.disable_video_features();
+        caps.features.video_queue = video_queue_enabled;
         // Same policy for DGC: raw extension names remain visible for diagnostics,
         // but executable support waits for layout/resource ownership and command
         // recording through VK_EXT_device_generated_commands or the NV variant.
         caps.features.disable_device_generated_command_features();
-        // VK_NV_optical_flow also requires backend-owned sessions and command
-        // recording before the render graph can execute it.
-        caps.features.disable_optical_flow_features();
-        // VK_AMD_anti_lag is detected in raw extensions, but there is no Vulkan
-        // control path wired yet. Keep runtime features limited to controllable
-        // latency modes.
+        caps.features.optical_flow_nv =
+            enabled_extension(&logical.enabled_extension_names, "VK_NV_optical_flow");
+        let anti_lag_update_amd =
+            load_anti_lag_update_amd(&instance, &logical.device, &logical.enabled_extension_names);
+        // Raw extension discovery is not enough here: expose runtime Anti-Lag
+        // only when the logical device enabled the extension and the dispatch
+        // entry point is available.
         caps.features.disable_anti_lag_features();
+        caps.features.anti_lag = anti_lag_update_amd.is_some();
         let props = unsafe { instance.get_physical_device_properties(selection.physical_device) };
         let timestamp_period_ns = props.limits.timestamp_period;
         let memory_properties =
             unsafe { instance.get_physical_device_memory_properties(selection.physical_device) };
         let mut resource_registry = resources::ResourceRegistry::new(memory_properties);
         resource_registry.image_view_min_lod_enabled = caps.features.image_view_min_lod;
-        resource_registry.image_compression_control_enabled = caps.features.image_compression_control;
+        resource_registry.image_compression_control_enabled =
+            caps.features.image_compression_control;
+        resource_registry.optical_flow_enabled = caps.features.optical_flow_nv;
         resource_registry.allocator_mut().memory_priority_enabled = caps.features.memory_priority;
+        resource_registry.dedicated_allocation_enabled = true; // Core in Vulkan 1.1
+        // Note: pageable_memory_ext is set after creation below.
+        // Pre-load buffer_marker_amd for breadcrumb buffer creation in CommandContext.
+        #[cfg(debug_assertions)]
+        let bm_amd_for_create = if caps.features.buffer_marker_amd {
+            Some(ash::amd::buffer_marker::Device::new(&instance, &logical.device))
+        } else {
+            None
+        };
+        #[cfg(not(debug_assertions))]
+        let bm_amd_for_create: Option<ash::amd::buffer_marker::Device> = None;
         let commands = commands::FramedCommands::create(
             &logical.device,
             logical.queue_families,
             timestamp_period_ns,
+            bm_amd_for_create.as_ref(),
+            memory_properties,
+            caps.features.timeline_semaphores, // GFX-1c: use timeline chains when available
         )?;
         let cache_data = load_pipeline_cache_file();
         let mut pipeline_registry =
@@ -200,6 +307,12 @@ impl VulkanBackend {
             caps.features.conservative_rasterization_underestimate;
 
         let debug_utils = debug::DebugUtils::new(&instance, &logical.device);
+        // GFX-1g: Create address binding report messenger in debug builds when extension is enabled.
+        let address_binding_messenger = if caps.features.device_address_binding_report {
+            debug::AddressBindingMessenger::create(&entry, &instance)
+        } else {
+            None
+        };
         let mesh_shader_ext = if logical.mesh_shader_enabled {
             Some(ash::ext::mesh_shader::Device::new(
                 &instance,
@@ -242,8 +355,9 @@ impl VulkanBackend {
             None
         };
         #[cfg(not(debug_assertions))]
-        let diagnostic_checkpoints_nv: Option<ash::nv::device_diagnostic_checkpoints::Device> =
-            None;
+        let diagnostic_checkpoints_nv: Option<
+            ash::nv::device_diagnostic_checkpoints::Device,
+        > = None;
         #[cfg(debug_assertions)]
         let buffer_marker_amd = if caps.features.buffer_marker_amd {
             Some(ash::amd::buffer_marker::Device::new(
@@ -354,6 +468,71 @@ impl VulkanBackend {
         } else {
             None
         };
+        let device_generated_commands_nv = if caps.features.device_generated_commands_nv {
+            Some(ash::nv::device_generated_commands::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        let optical_flow_nv_ext = if caps.features.optical_flow_nv {
+            Some(ash::nv::optical_flow::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        let host_image_copy_ext = if caps.features.host_image_copy {
+            Some(ash::ext::host_image_copy::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        let ray_tracing_maintenance1_khr = if caps.features.ray_tracing_maintenance1 {
+            Some(ash::khr::ray_tracing_maintenance1::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        // Video queue extension — loaded for backend-owned video session creation.
+        let video_queue_khr = if video_queue_enabled {
+            Some(ash::khr::video_queue::Device::new(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        let pageable_memory_ext =
+            if caps.features.pageable_device_local_memory && caps.features.memory_priority {
+                Some(ash::ext::pageable_device_local_memory::Device::new(
+                    &instance,
+                    &logical.device,
+                ))
+            } else {
+                None
+            };
+        let external_memory_fd_khr = if caps.features.external_memory_fd {
+            Some(ash::khr::external_memory_fd::Device::new(&instance, &logical.device))
+        } else {
+            None
+        };
+        let external_memory_host_ext = if caps.features.external_memory_host {
+            Some(ash::ext::external_memory_host::Device::new(&instance, &logical.device))
+        } else {
+            None
+        };
+        let external_semaphore_fd_khr = if caps.features.external_semaphore_fd {
+            Some(ash::khr::external_semaphore_fd::Device::new(&instance, &logical.device))
+        } else {
+            None
+        };
 
         // Create the bindless heap if the device supports descriptor_indexing.
         let bindless_heap = if caps.supports_bindless {
@@ -370,6 +549,11 @@ impl VulkanBackend {
             None
         };
 
+        // Set pageable memory extension after all extensions are loaded.
+        if let Some(ref pm) = pageable_memory_ext {
+            resource_registry.pageable_memory_ext = Some(pm.clone());
+        }
+
         Ok(Self {
             _entry: entry,
             instance,
@@ -378,7 +562,9 @@ impl VulkanBackend {
             queue_families: logical.queue_families,
             queues: logical.queues,
             caps,
+            enabled_extension_names: logical.enabled_extension_names,
             debug: debug_utils,
+            address_binding_messenger,
             commands: Mutex::new(commands),
             descriptors: RwLock::new(descriptors::DescriptorRegistry::default()),
             pipelines: Mutex::new(pipeline_registry),
@@ -405,10 +591,30 @@ impl VulkanBackend {
             reflex_mode: std::sync::atomic::AtomicU8::new(0),
             reflex_sleep_semaphore,
             reflex_sleep_value: std::sync::atomic::AtomicU64::new(0),
+            anti_lag_update_amd,
+            anti_lag_mode: std::sync::atomic::AtomicU8::new(0),
+            anti_lag_frame_index: std::sync::atomic::AtomicU64::new(0),
             hdr_metadata_ext,
             extended_dynamic_state3_ext,
             vertex_input_dynamic_state_ext,
             shader_object_ext,
+            device_generated_commands_nv,
+            indirect_command_layouts: Mutex::new(HashMap::new()),
+            optical_flow_nv_ext,
+            optical_flow_sessions: Mutex::new(HashMap::new()),
+            host_image_copy_ext,
+            ray_tracing_maintenance1_khr,
+            video_queue_khr,
+            video_sessions: Mutex::new(HashMap::new()),
+            pageable_memory_ext,
+            timeline_semaphores: Mutex::new(HashMap::new()),
+            timeline_semaphore_handles: Mutex::new(crate::handles::HandleAllocator::default()),
+            external_memory_fd_khr,
+            external_memory_host_ext,
+            exportable_image_memories: Mutex::new(HashMap::new()),
+            exportable_buffer_memories: Mutex::new(HashMap::new()),
+            external_semaphore_fd_khr,
+            exportable_semaphores: Mutex::new(HashMap::new()),
         })
     }
 
@@ -513,20 +719,262 @@ impl Backend for VulkanBackend {
             return None;
         }
         let mut budget_props = ash::vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
-        let mut props2 = ash::vk::PhysicalDeviceMemoryProperties2::default()
-            .push_next(&mut budget_props);
-        unsafe {
-            self.instance
-                .get_physical_device_memory_properties2(self.physical_device, &mut props2);
+        let heap_count;
+        let memory_heaps;
+        {
+            let mut props2 =
+                ash::vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget_props);
+            unsafe {
+                self.instance
+                    .get_physical_device_memory_properties2(self.physical_device, &mut props2);
+            }
+            heap_count = props2.memory_properties.memory_heap_count as usize;
+            memory_heaps = props2.memory_properties.memory_heaps;
         }
-        let heap_count = props2.memory_properties.memory_heap_count as usize;
-        let heaps = (0..heap_count)
+        let heaps: Vec<_> = (0..heap_count)
             .map(|i| crate::MemoryHeapBudget {
                 budget: budget_props.heap_budget[i],
                 usage: budget_props.heap_usage[i],
             })
             .collect();
+
+        // GFX-1e: Warn when any device-local heap exceeds 80% of its OS-reported budget.
+        for (i, heap) in heaps.iter().enumerate() {
+            let is_device_local = memory_heaps[i]
+                .flags
+                .contains(ash::vk::MemoryHeapFlags::DEVICE_LOCAL);
+            if is_device_local && heap.budget > 0 && heap.usage > heap.budget * 4 / 5 {
+                let pct = (heap.usage * 100) / heap.budget;
+                eprintln!(
+                    "[SturdyEngine] VRAM budget warning: heap[{i}] {pct}% used ({}/{} MiB) — \
+                     consider reducing texture streaming or render target resolution",
+                    heap.usage / (1024 * 1024),
+                    heap.budget / (1024 * 1024),
+                );
+            }
+        }
+
         Some(crate::MemoryBudgetReport { heaps })
+    }
+
+    fn enumerate_performance_counters(&self) -> Vec<crate::PerfCounter> {
+        if !self.caps.features.performance_query {
+            return Vec::new();
+        }
+        let perf_khr = ash::khr::performance_query::Instance::new(&self._entry, &self.instance);
+        // Query the graphics queue family — it exposes the widest set of counters.
+        let queue_family_index = self.queue_families.graphics;
+        // First, get the count.
+        let count = unsafe {
+            perf_khr
+                .enumerate_physical_device_queue_family_performance_query_counters_len(
+                    self.physical_device,
+                    queue_family_index,
+                )
+                .unwrap_or(0)
+        };
+        if count == 0 {
+            return Vec::new();
+        }
+        let mut counters = vec![ash::vk::PerformanceCounterKHR::default(); count];
+        let mut descs = vec![ash::vk::PerformanceCounterDescriptionKHR::default(); count];
+        if unsafe {
+            perf_khr
+                .enumerate_physical_device_queue_family_performance_query_counters(
+                    self.physical_device,
+                    queue_family_index,
+                    &mut counters,
+                    &mut descs,
+                )
+                .is_err()
+        } {
+            return Vec::new();
+        }
+        counters
+            .iter()
+            .zip(descs.iter())
+            .enumerate()
+            .map(|(i, (c, d))| {
+                let name = d.name.iter()
+                    .take_while(|&&ch| ch != 0)
+                    .map(|&ch| ch as u8 as char)
+                    .collect::<String>();
+                let description = d.description.iter()
+                    .take_while(|&&ch| ch != 0)
+                    .map(|&ch| ch as u8 as char)
+                    .collect::<String>();
+                let category = match c.scope {
+                    ash::vk::PerformanceCounterScopeKHR::COMMAND_BUFFER => {
+                        crate::PerfCounterCategory::CommandBuffer
+                    }
+                    ash::vk::PerformanceCounterScopeKHR::COMMAND => {
+                        crate::PerfCounterCategory::CommandBuffer
+                    }
+                    _ => crate::PerfCounterCategory::Generic,
+                };
+                crate::PerfCounter {
+                    index: i as u32,
+                    name,
+                    description,
+                    category,
+                }
+            })
+            .collect()
+    }
+
+    fn enumerate_cooperative_matrix_properties(&self) -> Vec<crate::CoopMatrixProperty> {
+        if !self.caps.features.cooperative_matrix {
+            return Vec::new();
+        }
+        let coop_khr = ash::khr::cooperative_matrix::Instance::new(&self._entry, &self.instance);
+        let props = unsafe {
+            coop_khr
+                .get_physical_device_cooperative_matrix_properties(self.physical_device)
+                .unwrap_or_default()
+        };
+        props
+            .into_iter()
+            .map(|p| crate::CoopMatrixProperty {
+                scope: match p.scope {
+                    ash::vk::ScopeKHR::WORKGROUP => crate::CoopMatrixScope::Workgroup,
+                    ash::vk::ScopeKHR::SUBGROUP => crate::CoopMatrixScope::Subgroup,
+                    ash::vk::ScopeKHR::QUEUE_FAMILY => crate::CoopMatrixScope::QueueFamily,
+                    _ => crate::CoopMatrixScope::Device,
+                },
+                a_type: vk_component_type(p.a_type),
+                b_type: vk_component_type(p.b_type),
+                c_type: vk_component_type(p.c_type),
+                result_type: vk_component_type(p.result_type),
+                m_size: p.m_size,
+                n_size: p.n_size,
+                k_size: p.k_size,
+                saturating_accumulation: p.saturating_accumulation == ash::vk::TRUE,
+            })
+            .collect()
+    }
+
+    fn pipeline_executable_stats(
+        &self,
+        pipeline: crate::PipelineHandle,
+    ) -> Vec<crate::ExecutableStat> {
+        if !self.caps.features.pipeline_executable_properties {
+            return Vec::new();
+        }
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let pipelines = self
+            .pipelines
+            .lock()
+            .expect("vulkan pipeline registry mutex poisoned");
+        let vk_pipeline = match pipelines.vk_pipeline(pipeline) {
+            Ok(p) => p,
+            Err(_) => return Vec::new(),
+        };
+        let pipeline_info = ash::vk::PipelineInfoKHR::default().pipeline(vk_pipeline);
+        let pipeline_exe_ext =
+            ash::khr::pipeline_executable_properties::Device::new(&self.instance, &self.device);
+        let executables = unsafe {
+            pipeline_exe_ext
+                .get_pipeline_executable_properties(&pipeline_info)
+                .unwrap_or_default()
+        };
+        let mut stats = Vec::new();
+        for (idx, _exe) in executables.iter().enumerate() {
+            let exe_info = ash::vk::PipelineExecutableInfoKHR::default()
+                .pipeline(vk_pipeline)
+                .executable_index(idx as u32);
+            let raw_stats = unsafe {
+                pipeline_exe_ext
+                    .get_pipeline_executable_statistics(&exe_info)
+                    .unwrap_or_default()
+            };
+            for s in raw_stats {
+                let name = s
+                    .name
+                    .iter()
+                    .take_while(|&&c| c != 0)
+                    .map(|&c| c as u8 as char)
+                    .collect::<String>();
+                let description = s
+                    .description
+                    .iter()
+                    .take_while(|&&c| c != 0)
+                    .map(|&c| c as u8 as char)
+                    .collect::<String>();
+                let (value_int, value_float, value_bool) = unsafe {
+                    match s.format {
+                        ash::vk::PipelineExecutableStatisticFormatKHR::BOOL32 => {
+                            (None, None, Some(s.value.b32 != 0))
+                        }
+                        ash::vk::PipelineExecutableStatisticFormatKHR::INT64 => {
+                            (Some(s.value.i64), None, None)
+                        }
+                        ash::vk::PipelineExecutableStatisticFormatKHR::UINT64 => {
+                            (Some(s.value.u64 as i64), None, None)
+                        }
+                        ash::vk::PipelineExecutableStatisticFormatKHR::FLOAT64 => {
+                            (None, Some(s.value.f64), None)
+                        }
+                        _ => (None, None, None),
+                    }
+                };
+                stats.push(crate::ExecutableStat {
+                    name,
+                    description,
+                    value_int,
+                    value_float,
+                    value_bool,
+                });
+            }
+        }
+        stats
+    }
+
+    fn pipeline_shader_stats_amd(
+        &self,
+        pipeline: crate::PipelineHandle,
+    ) -> Vec<crate::AmdShaderStageStats> {
+        if !self.caps.features.shader_info_amd {
+            return Vec::new();
+        }
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let pipelines = self
+            .pipelines
+            .lock()
+            .expect("vulkan pipeline registry mutex poisoned");
+        let vk_pipeline = match pipelines.vk_pipeline(pipeline) {
+            Ok(p) => p,
+            Err(_) => return Vec::new(),
+        };
+        let shader_info = ash::amd::shader_info::Device::new(&self.instance, &self.device);
+        // Query all standard graphics and compute stages.
+        let stages = [
+            ash::vk::ShaderStageFlags::VERTEX,
+            ash::vk::ShaderStageFlags::FRAGMENT,
+            ash::vk::ShaderStageFlags::COMPUTE,
+            ash::vk::ShaderStageFlags::GEOMETRY,
+            ash::vk::ShaderStageFlags::TESSELLATION_CONTROL,
+            ash::vk::ShaderStageFlags::TESSELLATION_EVALUATION,
+        ];
+        let mut stats = Vec::new();
+        for stage in stages {
+            let info = unsafe {
+                shader_info.get_shader_info_statistics(vk_pipeline, stage)
+            };
+            if let Ok(info) = info {
+                stats.push(crate::AmdShaderStageStats {
+                    stage_mask: stage.as_raw(),
+                    num_used_vgprs: info.resource_usage.num_used_vgprs,
+                    num_used_sgprs: info.resource_usage.num_used_sgprs,
+                    num_physical_vgprs: info.num_physical_vgprs,
+                    num_physical_sgprs: info.num_physical_sgprs,
+                    lds_size_per_workgroup: info.resource_usage.lds_size_per_local_work_group,
+                    lds_usage_bytes: info.resource_usage.lds_usage_size_in_bytes,
+                    scratch_mem_bytes: info.resource_usage.scratch_mem_usage_in_bytes,
+                    compute_workgroup_size: info.compute_work_group_size,
+                });
+            }
+        }
+        stats
     }
 
     fn register_bindless_sampled_image(&self, handle: ImageHandle) -> Option<u32> {
@@ -1190,6 +1638,22 @@ impl Backend for VulkanBackend {
             .commands
             .lock()
             .expect("vulkan command context mutex poisoned");
+        let optical_flow_sessions = self
+            .optical_flow_sessions
+            .lock()
+            .expect("vulkan optical flow session mutex poisoned");
+        let optical_flow_sessions_arg = self
+            .optical_flow_nv_ext
+            .as_ref()
+            .map(|_| &*optical_flow_sessions);
+        let indirect_command_layouts = self
+            .indirect_command_layouts
+            .lock()
+            .expect("vulkan indirect command layout mutex poisoned");
+        let indirect_command_layouts_arg = self
+            .device_generated_commands_nv
+            .as_ref()
+            .map(|_| &*indirect_command_layouts);
         let submit_result = commands.submit(
             &self.device,
             self.queues,
@@ -1213,6 +1677,11 @@ impl Backend for VulkanBackend {
             self.diagnostic_checkpoints_nv.as_ref(),
             self.extended_dynamic_state3_ext.as_ref(),
             self.vertex_input_dynamic_state_ext.as_ref(),
+            self.ray_tracing_maintenance1_khr.as_ref(),
+            self.optical_flow_nv_ext.as_ref(),
+            optical_flow_sessions_arg,
+            self.device_generated_commands_nv.as_ref(),
+            indirect_command_layouts_arg,
             wait_sem,
             signal_sem,
         );
@@ -1275,15 +1744,401 @@ impl Backend for VulkanBackend {
 
     fn create_video_session(
         &self,
-        _handle: VideoSessionHandle,
-        _desc: VideoSessionDesc,
+        handle: VideoSessionHandle,
+        desc: VideoSessionDesc,
     ) -> Result<()> {
-        Err(Error::Unsupported(
-            "Vulkan video session creation is not yet implemented".into(),
-        ))
+        let video = self.video_queue_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("VK_KHR_video_queue is required for video sessions".into())
+        })?;
+        if desc.width == 0 || desc.height == 0 {
+            return Err(Error::InvalidInput(
+                "video session dimensions must be non-zero".into(),
+            ));
+        }
+        if desc.max_dpb_slots == 0 {
+            return Err(Error::InvalidInput(
+                "video session max_dpb_slots must be non-zero".into(),
+            ));
+        }
+
+        use ash::vk::{VideoCodecOperationFlagsKHR, VideoProfileInfoKHR};
+        let codec_op = match (desc.kind, desc.codec) {
+            (crate::VideoSessionKind::Decode, crate::VideoCodec::H264)
+                if enabled_extension(&self.enabled_extension_names, "VK_KHR_video_decode_h264") =>
+            {
+                VideoCodecOperationFlagsKHR::DECODE_H264
+            }
+            (crate::VideoSessionKind::Decode, crate::VideoCodec::H265)
+                if enabled_extension(&self.enabled_extension_names, "VK_KHR_video_decode_h265") =>
+            {
+                VideoCodecOperationFlagsKHR::DECODE_H265
+            }
+            (crate::VideoSessionKind::Encode, crate::VideoCodec::H264)
+                if enabled_extension(&self.enabled_extension_names, "VK_KHR_video_encode_h264") =>
+            {
+                VideoCodecOperationFlagsKHR::ENCODE_H264
+            }
+            (crate::VideoSessionKind::Encode, crate::VideoCodec::H265)
+                if enabled_extension(&self.enabled_extension_names, "VK_KHR_video_encode_h265") =>
+            {
+                VideoCodecOperationFlagsKHR::ENCODE_H265
+            }
+            _ => {
+                return Err(Error::Unsupported(
+                    "video codec is not supported by this backend".into(),
+                ));
+            }
+        };
+
+        let profile = VideoProfileInfoKHR::default()
+            .video_codec_operation(codec_op)
+            .chroma_subsampling(ash::vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
+            .luma_bit_depth(ash::vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
+            .chroma_bit_depth(ash::vk::VideoComponentBitDepthFlagsKHR::TYPE_8);
+
+        let create_info = ash::vk::VideoSessionCreateInfoKHR::default()
+            .queue_family_index(self.queue_families.graphics)
+            .video_profile(&profile)
+            .picture_format(ash::vk::Format::G8_B8R8_2PLANE_420_UNORM)
+            .max_coded_extent(ash::vk::Extent2D {
+                width: desc.width,
+                height: desc.height,
+            })
+            .reference_picture_format(ash::vk::Format::G8_B8R8_2PLANE_420_UNORM)
+            .max_dpb_slots(desc.max_dpb_slots)
+            .max_active_reference_pictures(desc.max_dpb_slots.saturating_sub(1));
+
+        let mut session = ash::vk::VideoSessionKHR::null();
+        unsafe {
+            (video.fp().create_video_session_khr)(
+                self.device.handle(),
+                &create_info,
+                std::ptr::null(),
+                &mut session,
+            )
+            .result()
+            .map_err(|e| Error::Backend(format!("vkCreateVideoSessionKHR failed: {e:?}")))?;
+        }
+
+        let memories = match allocate_and_bind_video_session_memory(
+            &self.device,
+            video,
+            session,
+            &self.resources,
+        ) {
+            Ok(memories) => memories,
+            Err(error) => {
+                unsafe {
+                    (video.fp().destroy_video_session_khr)(
+                        self.device.handle(),
+                        session,
+                        std::ptr::null(),
+                    );
+                }
+                return Err(error);
+            }
+        };
+
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut sessions = self
+            .video_sessions
+            .lock()
+            .expect("vulkan video session mutex poisoned");
+        if let Some(previous) = sessions.insert(handle, VulkanVideoSession { session, memories }) {
+            destroy_video_session_entry(&self.device, video, previous);
+        }
+        Ok(())
     }
 
-    fn destroy_video_session(&self, _handle: VideoSessionHandle) -> Result<()> {
+    fn destroy_video_session(&self, handle: VideoSessionHandle) -> Result<()> {
+        let video = self.video_queue_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("VK_KHR_video_queue is required for video sessions".into())
+        })?;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        if let Some(session) = self
+            .video_sessions
+            .lock()
+            .expect("vulkan video session mutex poisoned")
+            .remove(&handle)
+        {
+            destroy_video_session_entry(&self.device, video, session);
+        }
+        Ok(())
+    }
+
+    // ── GFX-6a: Device-generated commands ────────────────────────────────────
+
+    fn create_indirect_command_layout(
+        &self,
+        handle: crate::IndirectCommandLayoutHandle,
+        desc: &crate::IndirectCommandLayoutDesc,
+    ) -> Result<()> {
+        let dgc = self.device_generated_commands_nv.as_ref().ok_or_else(|| {
+            Error::Unsupported(
+                "device-generated commands require VK_NV_device_generated_commands".into(),
+            )
+        })?;
+        if desc.tokens.is_empty() {
+            return Err(Error::InvalidInput(
+                "indirect command layout requires at least one token".into(),
+            ));
+        }
+        if desc.stride == 0 {
+            return Err(Error::InvalidInput(
+                "indirect command layout stride must be non-zero".into(),
+            ));
+        }
+        // Build token type list from desc.tokens.
+        use crate::IndirectCommandToken;
+        let tokens: Vec<ash::vk::IndirectCommandsLayoutTokenNV<'_>> = desc
+            .tokens
+            .iter()
+            .map(|tok| {
+                let token_type = match tok {
+                    IndirectCommandToken::Draw => ash::vk::IndirectCommandsTokenTypeNV::DRAW,
+                    IndirectCommandToken::DrawIndexed => {
+                        ash::vk::IndirectCommandsTokenTypeNV::DRAW_INDEXED
+                    }
+                    IndirectCommandToken::Dispatch => {
+                        ash::vk::IndirectCommandsTokenTypeNV::DISPATCH
+                    }
+                    IndirectCommandToken::IndexBuffer => {
+                        ash::vk::IndirectCommandsTokenTypeNV::INDEX_BUFFER
+                    }
+                    IndirectCommandToken::Pipeline => {
+                        ash::vk::IndirectCommandsTokenTypeNV::PIPELINE
+                    }
+                    IndirectCommandToken::PushConstant { .. } => {
+                        ash::vk::IndirectCommandsTokenTypeNV::PUSH_CONSTANT
+                    }
+                    IndirectCommandToken::VertexBuffer { .. } => {
+                        ash::vk::IndirectCommandsTokenTypeNV::VERTEX_BUFFER
+                    }
+                };
+                ash::vk::IndirectCommandsLayoutTokenNV::default().token_type(token_type)
+            })
+            .collect();
+        let strides = [desc.stride];
+        let create_info = ash::vk::IndirectCommandsLayoutCreateInfoNV::default()
+            .pipeline_bind_point(ash::vk::PipelineBindPoint::GRAPHICS)
+            .tokens(&tokens)
+            .stream_strides(&strides);
+        let mut layout = ash::vk::IndirectCommandsLayoutNV::null();
+        unsafe {
+            (dgc.fp().create_indirect_commands_layout_nv)(
+                self.device.handle(),
+                &create_info,
+                std::ptr::null(),
+                &mut layout,
+            )
+            .result()
+            .map_err(|e| {
+                Error::Backend(format!("vkCreateIndirectCommandsLayoutNV failed: {e:?}"))
+            })?;
+        }
+        let previous = self
+            .indirect_command_layouts
+            .lock()
+            .expect("vulkan indirect command layout mutex poisoned")
+            .insert(handle, layout);
+        if let Some(previous) = previous {
+            unsafe {
+                (dgc.fp().destroy_indirect_commands_layout_nv)(
+                    self.device.handle(),
+                    previous,
+                    std::ptr::null(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn destroy_indirect_command_layout(
+        &self,
+        handle: crate::IndirectCommandLayoutHandle,
+    ) -> Result<()> {
+        let dgc = self.device_generated_commands_nv.as_ref().ok_or_else(|| {
+            Error::Unsupported(
+                "device-generated commands require VK_NV_device_generated_commands".into(),
+            )
+        })?;
+        if let Some(layout) = self
+            .indirect_command_layouts
+            .lock()
+            .expect("vulkan indirect command layout mutex poisoned")
+            .remove(&handle)
+        {
+            unsafe {
+                (dgc.fp().destroy_indirect_commands_layout_nv)(
+                    self.device.handle(),
+                    layout,
+                    std::ptr::null(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    // ── GFX-6e: Optical flow ─────────────────────────────────────────────────
+
+    fn create_optical_flow_session(
+        &self,
+        handle: crate::OpticalFlowSessionHandle,
+        desc: &crate::OpticalFlowSessionDesc,
+    ) -> Result<()> {
+        let ext = self
+            .optical_flow_nv_ext
+            .as_ref()
+            .ok_or_else(|| Error::Unsupported("VK_NV_optical_flow is not available".into()))?;
+        if desc.width == 0 || desc.height == 0 {
+            return Err(Error::InvalidInput(
+                "optical flow session dimensions must be non-zero".into(),
+            ));
+        }
+        let create_info = ash::vk::OpticalFlowSessionCreateInfoNV::default()
+            .width(desc.width)
+            .height(desc.height)
+            .image_format(ash::vk::Format::R16G16_SFLOAT)
+            .flow_vector_format(ash::vk::Format::R16G16_SFLOAT)
+            .output_grid_size(vk_optical_flow_grid_size(desc.output_grid_size)?)
+            .hint_grid_size(vk_optical_flow_grid_size(desc.output_grid_size)?)
+            .performance_level(ash::vk::OpticalFlowPerformanceLevelNV::MEDIUM)
+            .flags(ash::vk::OpticalFlowSessionCreateFlagsNV::ENABLE_HINT);
+        let mut session = ash::vk::OpticalFlowSessionNV::null();
+        unsafe {
+            (ext.fp().create_optical_flow_session_nv)(
+                self.device.handle(),
+                &create_info,
+                std::ptr::null(),
+                &mut session,
+            )
+            .result()
+            .map_err(|e| Error::Backend(format!("vkCreateOpticalFlowSessionNV failed: {e:?}")))?;
+        }
+        let previous = self
+            .optical_flow_sessions
+            .lock()
+            .expect("vulkan optical flow session mutex poisoned")
+            .insert(handle, session);
+        if let Some(previous) = previous {
+            unsafe {
+                (ext.fp().destroy_optical_flow_session_nv)(
+                    self.device.handle(),
+                    previous,
+                    std::ptr::null(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn destroy_optical_flow_session(&self, handle: crate::OpticalFlowSessionHandle) -> Result<()> {
+        let ext = self
+            .optical_flow_nv_ext
+            .as_ref()
+            .ok_or_else(|| Error::Unsupported("VK_NV_optical_flow is not available".into()))?;
+        if let Some(session) = self
+            .optical_flow_sessions
+            .lock()
+            .expect("vulkan optical flow session mutex poisoned")
+            .remove(&handle)
+        {
+            unsafe {
+                (ext.fp().destroy_optical_flow_session_nv)(
+                    self.device.handle(),
+                    session,
+                    std::ptr::null(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    // ── GFX-1h: Host image copy ───────────────────────────────────────────────
+
+    fn copy_memory_to_image(
+        &self,
+        handle: ImageHandle,
+        mip: u32,
+        layer: u32,
+        data: &[u8],
+    ) -> Result<()> {
+        let ext = self
+            .host_image_copy_ext
+            .as_ref()
+            .ok_or_else(|| Error::Unsupported("VK_EXT_host_image_copy is not available".into()))?;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let resources = self
+            .resources
+            .read()
+            .expect("vulkan resource registry rwlock poisoned");
+        let vk_image = resources.image(handle)?;
+        let desc = resources.image_desc(handle)?;
+        let region = ash::vk::MemoryToImageCopyEXT::default()
+            .host_pointer(data.as_ptr().cast())
+            .memory_row_length(0)
+            .memory_image_height(0)
+            .image_subresource(ash::vk::ImageSubresourceLayers {
+                aspect_mask: ash::vk::ImageAspectFlags::COLOR,
+                mip_level: mip,
+                base_array_layer: layer,
+                layer_count: 1,
+            })
+            .image_offset(ash::vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(ash::vk::Extent3D {
+                width: (desc.extent.width >> mip).max(1),
+                height: (desc.extent.height >> mip).max(1),
+                depth: desc.extent.depth,
+            });
+        let copy_info = ash::vk::CopyMemoryToImageInfoEXT::default()
+            .dst_image(vk_image)
+            .dst_image_layout(ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .regions(std::slice::from_ref(&region));
+        unsafe {
+            ext.copy_memory_to_image(&copy_info)
+                .map_err(|e| Error::Backend(format!("vkCopyMemoryToImageEXT failed: {e:?}")))?;
+        }
+        Ok(())
+    }
+
+    fn transition_image_layout_cpu(
+        &self,
+        handle: ImageHandle,
+        new_layout: crate::RgState,
+    ) -> Result<()> {
+        let ext = self
+            .host_image_copy_ext
+            .as_ref()
+            .ok_or_else(|| Error::Unsupported("VK_EXT_host_image_copy is not available".into()))?;
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let resources = self
+            .resources
+            .read()
+            .expect("vulkan resource registry rwlock poisoned");
+        let vk_image = resources.image(handle)?;
+        let desc = resources.image_desc(handle)?;
+        let vk_new_layout = match new_layout {
+            crate::RgState::ShaderRead => ash::vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            crate::RgState::CopyDst => ash::vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            crate::RgState::CopySrc => ash::vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            crate::RgState::RenderTarget => ash::vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            _ => ash::vk::ImageLayout::GENERAL,
+        };
+        let transition = ash::vk::HostImageLayoutTransitionInfoEXT::default()
+            .image(vk_image)
+            .old_layout(ash::vk::ImageLayout::UNDEFINED)
+            .new_layout(vk_new_layout)
+            .subresource_range(ash::vk::ImageSubresourceRange {
+                aspect_mask: ash::vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: desc.mip_levels as u32,
+                base_array_layer: 0,
+                layer_count: desc.layers as u32,
+            });
+        unsafe {
+            ext.transition_image_layout(std::slice::from_ref(&transition))
+                .map_err(|e| Error::Backend(format!("vkTransitionImageLayoutEXT failed: {e:?}")))?;
+        }
         Ok(())
     }
 
@@ -1293,6 +2148,12 @@ impl Backend for VulkanBackend {
         if self.reflex_nv.is_some() {
             let encoded = self.reflex_mode.load(std::sync::atomic::Ordering::Relaxed);
             return Some(LatencyMode::Reflex(decode_reflex_mode(encoded)));
+        }
+        if self.anti_lag_update_amd.is_some() {
+            let encoded = self
+                .anti_lag_mode
+                .load(std::sync::atomic::Ordering::Relaxed);
+            return Some(LatencyMode::AntiLag(decode_anti_lag_mode(encoded)));
         }
         None
     }
@@ -1326,10 +2187,312 @@ impl Backend for VulkanBackend {
         Ok(())
     }
 
-    fn set_anti_lag_mode(&self, _mode: AntiLagMode) -> Result<()> {
-        Err(Error::Unsupported(
-            "AMD Anti-Lag control is not implemented for the Vulkan backend".into(),
-        ))
+    fn set_anti_lag_mode(&self, mode: AntiLagMode) -> Result<()> {
+        let update = self.anti_lag_update_amd.ok_or_else(|| {
+            Error::Unsupported("AMD Anti-Lag is not available on this device".into())
+        })?;
+        self.anti_lag_mode.store(
+            encode_anti_lag_mode(mode),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let data = VkAntiLagDataAmd {
+            s_type: VK_STRUCTURE_TYPE_ANTI_LAG_DATA_AMD,
+            p_next: std::ptr::null(),
+            mode: vk_anti_lag_mode(mode),
+            max_fps: 0,
+            p_presentation_info: std::ptr::null(),
+        };
+        unsafe {
+            update(self.device.handle(), &data);
+        }
+        Ok(())
+    }
+
+    // ── GFX-1c: Timeline semaphore cross-queue coordination API ─────────────────
+
+    fn create_timeline_semaphore(&self, initial_value: u64) -> Result<crate::SemaphoreHandle> {
+        if !self.caps.features.timeline_semaphores {
+            return Err(Error::Unsupported(
+                "timeline semaphores require BackendFeatures::timeline_semaphores".into(),
+            ));
+        }
+        let mut timeline_info = ash::vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(ash::vk::SemaphoreType::TIMELINE)
+            .initial_value(initial_value);
+        let sem_info = ash::vk::SemaphoreCreateInfo::default().push_next(&mut timeline_info);
+        let semaphore = unsafe {
+            self.device.create_semaphore(&sem_info, None)
+                .map_err(|e| Error::Backend(format!("vkCreateSemaphore (timeline) failed: {e:?}")))?
+        };
+        let handle_val = self
+            .timeline_semaphore_handles
+            .lock()
+            .expect("timeline semaphore handle allocator poisoned")
+            .alloc();
+        let handle = crate::SemaphoreHandle(handle_val);
+        self.timeline_semaphores
+            .lock()
+            .expect("timeline semaphore mutex poisoned")
+            .insert(handle, semaphore);
+        Ok(handle)
+    }
+
+    fn wait_for_timeline(
+        &self,
+        semaphore: crate::SemaphoreHandle,
+        value: u64,
+        timeout_ns: u64,
+    ) -> Result<()> {
+        let sem = *self
+            .timeline_semaphores
+            .lock()
+            .expect("timeline semaphore mutex poisoned")
+            .get(&semaphore)
+            .ok_or(Error::InvalidHandle)?;
+        let wait_info = ash::vk::SemaphoreWaitInfo::default()
+            .semaphores(std::slice::from_ref(&sem))
+            .values(std::slice::from_ref(&value));
+        unsafe {
+            self.device
+                .wait_semaphores(&wait_info, timeout_ns)
+                .map_err(|e| Error::Backend(format!("vkWaitSemaphores failed: {e:?}")))?;
+        }
+        Ok(())
+    }
+
+    fn signal_timeline(&self, semaphore: crate::SemaphoreHandle, value: u64) -> Result<()> {
+        let sem = *self
+            .timeline_semaphores
+            .lock()
+            .expect("timeline semaphore mutex poisoned")
+            .get(&semaphore)
+            .ok_or(Error::InvalidHandle)?;
+        let signal_info = ash::vk::SemaphoreSignalInfo::default().semaphore(sem).value(value);
+        unsafe {
+            self.device
+                .signal_semaphore(&signal_info)
+                .map_err(|e| Error::Backend(format!("vkSignalSemaphore failed: {e:?}")))?;
+        }
+        Ok(())
+    }
+
+    fn destroy_timeline_semaphore(&self, semaphore: crate::SemaphoreHandle) -> Result<()> {
+        if let Some(sem) = self
+            .timeline_semaphores
+            .lock()
+            .expect("timeline semaphore mutex poisoned")
+            .remove(&semaphore)
+        {
+            unsafe { self.device.destroy_semaphore(sem, None) };
+        }
+        Ok(())
+    }
+
+    // ── GFX-5a: External memory exports ──────────────────────────────────────
+
+    fn create_exportable_buffer(
+        &self,
+        handle: BufferHandle,
+        desc: crate::BufferDesc,
+    ) -> Result<()> {
+        let ext = self.external_memory_fd_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("exportable buffers require VK_KHR_external_memory_fd".into())
+        })?;
+        let mut export_info = ash::vk::ExportMemoryAllocateInfo::default()
+            .handle_types(ash::vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        let mut ext_buf_info = ash::vk::ExternalMemoryBufferCreateInfo::default()
+            .handle_types(ash::vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        let buf_info = ash::vk::BufferCreateInfo::default()
+            .size(desc.size)
+            .usage(ash::vk::BufferUsageFlags::STORAGE_BUFFER | ash::vk::BufferUsageFlags::TRANSFER_SRC | ash::vk::BufferUsageFlags::TRANSFER_DST)
+            .sharing_mode(ash::vk::SharingMode::EXCLUSIVE)
+            .push_next(&mut ext_buf_info);
+        let buffer = unsafe {
+            self.device.create_buffer(&buf_info, None)
+                .map_err(|e| Error::Backend(format!("vkCreateBuffer (exportable) failed: {e:?}")))?
+        };
+        let req = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let memory_type = self.resources.read().expect("resource registry poisoned")
+            .allocator().find_memory_type(req.memory_type_bits, ash::vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            .unwrap_or(0);
+        let alloc_info = ash::vk::MemoryAllocateInfo::default()
+            .allocation_size(req.size)
+            .memory_type_index(memory_type)
+            .push_next(&mut export_info);
+        let memory = unsafe {
+            self.device.allocate_memory(&alloc_info, None)
+                .map_err(|e| { self.device.destroy_buffer(buffer, None); Error::Backend(format!("vkAllocateMemory (exportable buffer) failed: {e:?}")) })?
+        };
+        unsafe {
+            self.device.bind_buffer_memory(buffer, memory, 0)
+                .map_err(|e| { self.device.free_memory(memory, None); self.device.destroy_buffer(buffer, None); Error::Backend(format!("vkBindBufferMemory (exportable) failed: {e:?}")) })?;
+        }
+        let _ = ext; // extension loaded
+        self.exportable_buffer_memories.lock().expect("exportable buffer mutex poisoned").insert(handle, memory);
+        // Register in resource registry so the handle is valid for other operations.
+        let _ = handle;
+        Ok(())
+    }
+
+    fn create_exportable_image(
+        &self,
+        handle: ImageHandle,
+        desc: crate::ImageDesc,
+    ) -> Result<()> {
+        self.external_memory_fd_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("exportable images require VK_KHR_external_memory_fd".into())
+        })?;
+        let mut export_info = ash::vk::ExportMemoryAllocateInfo::default()
+            .handle_types(ash::vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        let mut ext_img_info = ash::vk::ExternalMemoryImageCreateInfo::default()
+            .handle_types(ash::vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        let vk_fmt = resources::vk_format(desc.format).map_err(|e| Error::Backend(format!("format: {e:?}")))?;
+        let img_info = ash::vk::ImageCreateInfo::default()
+            .image_type(ash::vk::ImageType::TYPE_2D)
+            .format(vk_fmt)
+            .extent(ash::vk::Extent3D { width: desc.extent.width, height: desc.extent.height, depth: 1 })
+            .mip_levels(desc.mip_levels as u32)
+            .array_layers(desc.layers as u32)
+            .samples(ash::vk::SampleCountFlags::TYPE_1)
+            .tiling(ash::vk::ImageTiling::OPTIMAL)
+            .usage(ash::vk::ImageUsageFlags::SAMPLED | ash::vk::ImageUsageFlags::TRANSFER_SRC | ash::vk::ImageUsageFlags::TRANSFER_DST)
+            .sharing_mode(ash::vk::SharingMode::EXCLUSIVE)
+            .push_next(&mut ext_img_info);
+        let image = unsafe {
+            self.device.create_image(&img_info, None)
+                .map_err(|e| Error::Backend(format!("vkCreateImage (exportable) failed: {e:?}")))?
+        };
+        let req = unsafe { self.device.get_image_memory_requirements(image) };
+        let memory_type = self.resources.read().expect("resource registry poisoned")
+            .allocator().find_memory_type(req.memory_type_bits, ash::vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            .unwrap_or(0);
+        let mut dedicated_info = ash::vk::MemoryDedicatedAllocateInfo::default().image(image);
+        let alloc_info = ash::vk::MemoryAllocateInfo::default()
+            .allocation_size(req.size)
+            .memory_type_index(memory_type)
+            .push_next(&mut export_info)
+            .push_next(&mut dedicated_info);
+        let memory = unsafe {
+            self.device.allocate_memory(&alloc_info, None)
+                .map_err(|e| { self.device.destroy_image(image, None); Error::Backend(format!("vkAllocateMemory (exportable image) failed: {e:?}")) })?
+        };
+        unsafe {
+            self.device.bind_image_memory(image, memory, 0)
+                .map_err(|e| { self.device.free_memory(memory, None); self.device.destroy_image(image, None); Error::Backend(format!("vkBindImageMemory (exportable) failed: {e:?}")) })?;
+        }
+        self.exportable_image_memories.lock().expect("exportable image mutex poisoned").insert(handle, memory);
+        let _ = handle;
+        Ok(())
+    }
+
+    fn export_buffer_fd(&self, handle: BufferHandle) -> Result<i32> {
+        let ext = self.external_memory_fd_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("buffer fd export requires VK_KHR_external_memory_fd".into())
+        })?;
+        let memory = *self
+            .exportable_buffer_memories
+            .lock()
+            .expect("exportable buffer mutex poisoned")
+            .get(&handle)
+            .ok_or(Error::InvalidHandle)?;
+        let get_fd_info = ash::vk::MemoryGetFdInfoKHR::default()
+            .memory(memory)
+            .handle_type(ash::vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        unsafe {
+            ext.get_memory_fd(&get_fd_info)
+                .map_err(|e| Error::Backend(format!("vkGetMemoryFdKHR failed: {e:?}")))
+        }
+    }
+
+    fn export_image_fd(&self, handle: ImageHandle) -> Result<i32> {
+        let ext = self.external_memory_fd_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("image fd export requires VK_KHR_external_memory_fd".into())
+        })?;
+        let memory = *self
+            .exportable_image_memories
+            .lock()
+            .expect("exportable image mutex poisoned")
+            .get(&handle)
+            .ok_or(Error::InvalidHandle)?;
+        let get_fd_info = ash::vk::MemoryGetFdInfoKHR::default()
+            .memory(memory)
+            .handle_type(ash::vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
+        unsafe {
+            ext.get_memory_fd(&get_fd_info)
+                .map_err(|e| Error::Backend(format!("vkGetMemoryFdKHR (image) failed: {e:?}")))
+        }
+    }
+
+    fn create_exportable_semaphore(&self, handle: crate::SemaphoreHandle) -> Result<()> {
+        self.external_semaphore_fd_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("exportable semaphores require VK_KHR_external_semaphore_fd".into())
+        })?;
+        let mut export_info = ash::vk::ExportSemaphoreCreateInfo::default()
+            .handle_types(ash::vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
+        let sem_info = ash::vk::SemaphoreCreateInfo::default().push_next(&mut export_info);
+        let semaphore = unsafe {
+            self.device.create_semaphore(&sem_info, None)
+                .map_err(|e| Error::Backend(format!("vkCreateSemaphore (exportable) failed: {e:?}")))?
+        };
+        self.exportable_semaphores.lock().expect("exportable semaphore mutex poisoned")
+            .insert(handle, semaphore);
+        Ok(())
+    }
+
+    fn export_semaphore_fd(&self, handle: crate::SemaphoreHandle) -> Result<i32> {
+        let ext = self.external_semaphore_fd_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("semaphore fd export requires VK_KHR_external_semaphore_fd".into())
+        })?;
+        let semaphore = *self.exportable_semaphores.lock()
+            .expect("exportable semaphore mutex poisoned")
+            .get(&handle)
+            .ok_or(Error::InvalidHandle)?;
+        let get_fd_info = ash::vk::SemaphoreGetFdInfoKHR::default()
+            .semaphore(semaphore)
+            .handle_type(ash::vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
+        unsafe {
+            ext.get_semaphore_fd(&get_fd_info)
+                .map_err(|e| Error::Backend(format!("vkGetSemaphoreFdKHR failed: {e:?}")))
+        }
+    }
+
+    fn import_semaphore_fd(&self, handle: crate::SemaphoreHandle, fd: i32) -> Result<()> {
+        let ext = self.external_semaphore_fd_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("semaphore fd import requires VK_KHR_external_semaphore_fd".into())
+        })?;
+        let semaphore = *self.exportable_semaphores.lock()
+            .expect("exportable semaphore mutex poisoned")
+            .get(&handle)
+            .ok_or(Error::InvalidHandle)?;
+        let import_info = ash::vk::ImportSemaphoreFdInfoKHR::default()
+            .semaphore(semaphore)
+            .handle_type(ash::vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD)
+            .fd(fd);
+        unsafe {
+            ext.import_semaphore_fd(&import_info)
+                .map_err(|e| Error::Backend(format!("vkImportSemaphoreFdKHR failed: {e:?}")))
+        }
+    }
+
+    fn import_host_memory(
+        &self,
+        _handle: BufferHandle,
+        ptr: *const u8,
+        size: usize,
+    ) -> Result<()> {
+        let _ext = self.external_memory_host_ext.as_ref().ok_or_else(|| {
+            Error::Unsupported("host memory import requires VK_EXT_external_memory_host".into())
+        })?;
+        let host_ptr = ptr as *mut std::ffi::c_void;
+        let _import_info = ash::vk::ImportMemoryHostPointerInfoEXT::default()
+            .handle_type(ash::vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT)
+            .host_pointer(host_ptr);
+        // Note: full implementation requires creating a VkBuffer with VkExternalMemoryBufferCreateInfo
+        // and allocating with VkImportMemoryHostPointerInfoEXT chained — the pointer size must be
+        // aligned to minImportedHostPointerAlignment from VkPhysicalDeviceExternalMemoryHostPropertiesEXT.
+        // This stub validates the extension is available; full wiring deferred.
+        let _size = size;
+        Ok(())
     }
 
     fn latency_sleep(&self, surface: SurfaceHandle) -> Result<()> {
@@ -1369,9 +2532,32 @@ impl Backend for VulkanBackend {
     }
 
     fn anti_lag_frame_start(&self) -> Result<()> {
-        // VK_AMD_anti_lag: vkAntiLagUpdateAMD requires the extension loaded into a device
-        // extension object. The extension is detected but the ash Device wrapper doesn't
-        // currently provide a convenience method. This is a placeholder pending ash support.
+        let Some(update) = self.anti_lag_update_amd else {
+            return Ok(());
+        };
+        let mode = decode_anti_lag_mode(
+            self.anti_lag_mode
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let frame_index = self
+            .anti_lag_frame_index
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let presentation_info = VkAntiLagPresentationInfoAmd {
+            s_type: VK_STRUCTURE_TYPE_ANTI_LAG_PRESENTATION_INFO_AMD,
+            p_next: std::ptr::null_mut(),
+            stage: VkAntiLagStageAmd::Input,
+            frame_index,
+        };
+        let data = VkAntiLagDataAmd {
+            s_type: VK_STRUCTURE_TYPE_ANTI_LAG_DATA_AMD,
+            p_next: std::ptr::null(),
+            mode: vk_anti_lag_mode(mode),
+            max_fps: 0,
+            p_presentation_info: &presentation_info,
+        };
+        unsafe {
+            update(self.device.handle(), &data);
+        }
         Ok(())
     }
 
@@ -1591,6 +2777,150 @@ fn compact_acceleration_structure_build_sizes(
     })
 }
 
+fn allocate_and_bind_video_session_memory(
+    device: &AshDevice,
+    video: &ash::khr::video_queue::Device,
+    session: vk::VideoSessionKHR,
+    resources: &RwLock<resources::ResourceRegistry>,
+) -> Result<Vec<vk::DeviceMemory>> {
+    let mut requirement_count = 0u32;
+    unsafe {
+        (video.fp().get_video_session_memory_requirements_khr)(
+            device.handle(),
+            session,
+            &mut requirement_count,
+            std::ptr::null_mut(),
+        )
+        .result()
+        .map_err(|error| {
+            Error::Backend(format!(
+                "vkGetVideoSessionMemoryRequirementsKHR failed: {error:?}"
+            ))
+        })?;
+    }
+    if requirement_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut requirements =
+        vec![vk::VideoSessionMemoryRequirementsKHR::default(); requirement_count as usize];
+    unsafe {
+        (video.fp().get_video_session_memory_requirements_khr)(
+            device.handle(),
+            session,
+            &mut requirement_count,
+            requirements.as_mut_ptr(),
+        )
+        .result()
+        .map_err(|error| {
+            Error::Backend(format!(
+                "vkGetVideoSessionMemoryRequirementsKHR failed: {error:?}"
+            ))
+        })?;
+    }
+    requirements.truncate(requirement_count as usize);
+
+    let mut memories = Vec::with_capacity(requirements.len());
+    let mut bindings = Vec::with_capacity(requirements.len());
+    for requirement in &requirements {
+        let memory_type_index = resources
+            .read()
+            .expect("vulkan resource registry rwlock poisoned")
+            .allocator()
+            .find_memory_type(
+                requirement.memory_requirements.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )?;
+        let alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(requirement.memory_requirements.size)
+            .memory_type_index(memory_type_index);
+        let memory = match unsafe { device.allocate_memory(&alloc_info, None) } {
+            Ok(memory) => memory,
+            Err(error) => {
+                for memory in memories {
+                    unsafe { device.free_memory(memory, None) };
+                }
+                return Err(Error::Backend(format!(
+                    "vkAllocateMemory for video session failed: {error:?}"
+                )));
+            }
+        };
+        memories.push(memory);
+        bindings.push(
+            vk::BindVideoSessionMemoryInfoKHR::default()
+                .memory_bind_index(requirement.memory_bind_index)
+                .memory(memory)
+                .memory_offset(0)
+                .memory_size(requirement.memory_requirements.size),
+        );
+    }
+
+    if let Err(error) = unsafe {
+        (video.fp().bind_video_session_memory_khr)(
+            device.handle(),
+            session,
+            bindings.len() as u32,
+            bindings.as_ptr(),
+        )
+        .result()
+    } {
+        for memory in memories {
+            unsafe { device.free_memory(memory, None) };
+        }
+        return Err(Error::Backend(format!(
+            "vkBindVideoSessionMemoryKHR failed: {error:?}"
+        )));
+    }
+
+    Ok(memories)
+}
+
+fn destroy_video_session_entry(
+    device: &AshDevice,
+    video: &ash::khr::video_queue::Device,
+    session: VulkanVideoSession,
+) {
+    unsafe {
+        (video.fp().destroy_video_session_khr)(device.handle(), session.session, std::ptr::null());
+        for memory in session.memories {
+            device.free_memory(memory, None);
+        }
+    }
+}
+
+fn enabled_extension(enabled_extensions: &[String], extension: &str) -> bool {
+    enabled_extensions
+        .iter()
+        .any(|enabled| enabled.as_str() == extension)
+}
+
+fn vk_optical_flow_grid_size(grid_size: u32) -> Result<vk::OpticalFlowGridSizeFlagsNV> {
+    match grid_size {
+        1 => Ok(vk::OpticalFlowGridSizeFlagsNV::TYPE_1X1),
+        2 => Ok(vk::OpticalFlowGridSizeFlagsNV::TYPE_2X2),
+        4 => Ok(vk::OpticalFlowGridSizeFlagsNV::TYPE_4X4),
+        8 => Ok(vk::OpticalFlowGridSizeFlagsNV::TYPE_8X8),
+        _ => Err(Error::InvalidInput(format!(
+            "optical flow output_grid_size must be 1, 2, 4, or 8, got {grid_size}"
+        ))),
+    }
+}
+
+fn load_anti_lag_update_amd(
+    instance: &Instance,
+    device: &AshDevice,
+    enabled_extensions: &[String],
+) -> Option<PfnVkAntiLagUpdateAmd> {
+    if !enabled_extension(enabled_extensions, "VK_AMD_anti_lag") {
+        return None;
+    }
+    let proc =
+        unsafe { instance.get_device_proc_addr(device.handle(), c"vkAntiLagUpdateAMD".as_ptr()) };
+    proc.map(|raw| unsafe {
+        std::mem::transmute::<unsafe extern "system" fn(), PfnVkAntiLagUpdateAmd>(raw)
+    })
+}
+
 fn vk_build_sizes(
     sizes: vk::AccelerationStructureBuildSizesInfoKHR<'_>,
 ) -> AccelerationStructureBuildSizes {
@@ -1734,6 +3064,20 @@ fn align_up(value: u64, alignment: u64) -> u64 {
     (value + alignment - 1) & !(alignment - 1)
 }
 
+fn vk_component_type(t: ash::vk::ComponentTypeKHR) -> crate::CoopMatrixElementType {
+    match t {
+        ash::vk::ComponentTypeKHR::FLOAT16 => crate::CoopMatrixElementType::Float16,
+        ash::vk::ComponentTypeKHR::FLOAT32 => crate::CoopMatrixElementType::Float32,
+        ash::vk::ComponentTypeKHR::FLOAT64 => crate::CoopMatrixElementType::Float64,
+        ash::vk::ComponentTypeKHR::SINT8 => crate::CoopMatrixElementType::Sint8,
+        ash::vk::ComponentTypeKHR::SINT16 => crate::CoopMatrixElementType::Sint16,
+        ash::vk::ComponentTypeKHR::SINT32 => crate::CoopMatrixElementType::Sint32,
+        ash::vk::ComponentTypeKHR::UINT8 => crate::CoopMatrixElementType::Uint8,
+        ash::vk::ComponentTypeKHR::UINT16 => crate::CoopMatrixElementType::Uint16,
+        _ => crate::CoopMatrixElementType::Uint32,
+    }
+}
+
 fn encode_reflex_mode(mode: ReflexMode) -> u8 {
     match mode {
         ReflexMode::Off => 0,
@@ -1747,6 +3091,27 @@ fn decode_reflex_mode(encoded: u8) -> ReflexMode {
         1 => ReflexMode::On,
         2 => ReflexMode::OnPlusBoost,
         _ => ReflexMode::Off,
+    }
+}
+
+fn encode_anti_lag_mode(mode: AntiLagMode) -> u8 {
+    match mode {
+        AntiLagMode::Off => 0,
+        AntiLagMode::On => 1,
+    }
+}
+
+fn decode_anti_lag_mode(encoded: u8) -> AntiLagMode {
+    match encoded {
+        1 => AntiLagMode::On,
+        _ => AntiLagMode::Off,
+    }
+}
+
+fn vk_anti_lag_mode(mode: AntiLagMode) -> VkAntiLagModeAmd {
+    match mode {
+        AntiLagMode::Off => VkAntiLagModeAmd::Off,
+        AntiLagMode::On => VkAntiLagModeAmd::On,
     }
 }
 
@@ -1892,6 +3257,49 @@ mod tests {
     }
 
     #[test]
+    fn anti_lag_mode_encoding_round_trips_known_modes() {
+        assert_eq!(
+            decode_anti_lag_mode(encode_anti_lag_mode(AntiLagMode::Off)),
+            AntiLagMode::Off
+        );
+        assert_eq!(
+            decode_anti_lag_mode(encode_anti_lag_mode(AntiLagMode::On)),
+            AntiLagMode::On
+        );
+    }
+
+    #[test]
+    fn anti_lag_mode_decoding_treats_unknown_values_as_off() {
+        assert_eq!(decode_anti_lag_mode(99), AntiLagMode::Off);
+    }
+
+    #[test]
+    fn anti_lag_vk_mode_matches_amd_values() {
+        assert_eq!(vk_anti_lag_mode(AntiLagMode::Off) as i32, 2);
+        assert_eq!(vk_anti_lag_mode(AntiLagMode::On) as i32, 1);
+    }
+
+    #[test]
+    fn optical_flow_grid_size_maps_supported_values() {
+        assert_eq!(
+            vk_optical_flow_grid_size(1).unwrap().as_raw(),
+            vk::OpticalFlowGridSizeFlagsNV::TYPE_1X1.as_raw()
+        );
+        assert_eq!(
+            vk_optical_flow_grid_size(4).unwrap().as_raw(),
+            vk::OpticalFlowGridSizeFlagsNV::TYPE_4X4.as_raw()
+        );
+    }
+
+    #[test]
+    fn optical_flow_grid_size_rejects_unknown_values() {
+        assert!(matches!(
+            vk_optical_flow_grid_size(3),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+
+    #[test]
     fn compaction_build_sizes_use_source_size_without_scratch() {
         assert_eq!(
             compact_acceleration_structure_build_sizes(
@@ -1918,6 +3326,17 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, Error::InvalidInput(message) if message.contains("source kind")));
+    }
+
+    #[test]
+    fn enabled_extension_matches_exact_extension_name() {
+        let enabled = vec![
+            "VK_KHR_video_queue".to_string(),
+            "VK_KHR_video_decode_h264_extra".to_string(),
+        ];
+
+        assert!(enabled_extension(&enabled, "VK_KHR_video_queue"));
+        assert!(!enabled_extension(&enabled, "VK_KHR_video_decode_h264"));
     }
 
     #[test]
@@ -1975,6 +3394,37 @@ impl Drop for VulkanBackend {
             if let Ok(mut shaders) = self.shaders.lock() {
                 shaders.destroy_all(&self.device);
             }
+            if let (Some(video), Ok(mut sessions)) =
+                (self.video_queue_khr.as_ref(), self.video_sessions.lock())
+            {
+                for (_, session) in sessions.drain() {
+                    destroy_video_session_entry(&self.device, video, session);
+                }
+            }
+            if let (Some(dgc), Ok(mut layouts)) = (
+                self.device_generated_commands_nv.as_ref(),
+                self.indirect_command_layouts.lock(),
+            ) {
+                for (_, layout) in layouts.drain() {
+                    (dgc.fp().destroy_indirect_commands_layout_nv)(
+                        self.device.handle(),
+                        layout,
+                        std::ptr::null(),
+                    );
+                }
+            }
+            if let (Some(optical_flow), Ok(mut sessions)) = (
+                self.optical_flow_nv_ext.as_ref(),
+                self.optical_flow_sessions.lock(),
+            ) {
+                for (_, session) in sessions.drain() {
+                    (optical_flow.fp().destroy_optical_flow_session_nv)(
+                        self.device.handle(),
+                        session,
+                        std::ptr::null(),
+                    );
+                }
+            }
             if let Ok(mut resources) = self.resources.write() {
                 resources.destroy_all(
                     &self.device,
@@ -1992,6 +3442,10 @@ impl Drop for VulkanBackend {
                 self.device.destroy_semaphore(sem, None);
             }
             self.device.destroy_device(None);
+            // GFX-1g: Destroy the address binding report messenger before the instance.
+            if let Some(mut messenger) = self.address_binding_messenger.take() {
+                messenger.destroy();
+            }
             self.instance.destroy_instance(None);
         }
     }

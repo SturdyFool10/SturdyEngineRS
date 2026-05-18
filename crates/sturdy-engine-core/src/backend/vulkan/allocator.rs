@@ -8,6 +8,9 @@ use crate::{Error, Result};
 const DEVICE_LOCAL_BLOCK_SIZE: u64 = 256 * 1024 * 1024; // 256 MiB
 const HOST_VISIBLE_BLOCK_SIZE: u64 = 64 * 1024 * 1024; // 64 MiB
 
+/// Sentinel block ID indicating a dedicated `VkDeviceMemory` allocation (not sub-allocated).
+const DEDICATED_BLOCK_ID: u64 = u64::MAX;
+
 pub struct Allocation {
     pub memory: vk::DeviceMemory,
     pub offset: u64,
@@ -15,6 +18,27 @@ pub struct Allocation {
     pub mapped_ptr: Option<*mut u8>,
     memory_type: u32,
     block_id: u64,
+}
+
+impl Allocation {
+    /// Create a sentinel allocation for a resource with its own dedicated `VkDeviceMemory`.
+    ///
+    /// The memory is already bound — the allocator just tracks it for dealloc.
+    pub fn dedicated(memory: vk::DeviceMemory, size: u64, memory_type: u32) -> Self {
+        Self {
+            memory,
+            offset: 0,
+            size,
+            mapped_ptr: None,
+            memory_type,
+            block_id: DEDICATED_BLOCK_ID,
+        }
+    }
+
+    /// Returns `true` when this allocation owns its own dedicated `VkDeviceMemory`.
+    pub fn is_dedicated(&self) -> bool {
+        self.block_id == DEDICATED_BLOCK_ID
+    }
 }
 
 unsafe impl Send for Allocation {}
@@ -371,6 +395,11 @@ impl GpuAllocator {
     }
 
     pub fn dealloc(&mut self, device: &Device, alloc: Allocation) -> Result<()> {
+        // GFX-1e: dedicated allocations own their own VkDeviceMemory — free it directly.
+        if alloc.is_dedicated() {
+            unsafe { device.free_memory(alloc.memory, None) };
+            return Ok(());
+        }
         let Some(pool) = self
             .pools
             .iter_mut()

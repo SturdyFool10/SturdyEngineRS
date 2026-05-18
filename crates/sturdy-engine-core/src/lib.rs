@@ -52,7 +52,7 @@ pub use binding::{
     CanonicalGroupLayout, CanonicalPipelineLayout, ResourceBinding, StageMask, UpdateRate,
 };
 pub use buffer::{BufferDesc, BufferUsage};
-pub use caps::Caps;
+pub use caps::{AmdShaderStageStats, Caps, CoopMatrixElementType, CoopMatrixProperty, CoopMatrixScope, ExecutableStat, PerfCounter, PerfCounterCategory};
 pub use device::{Device, DeviceDesc, DeviceFeature, Frame, enumerate_adapters};
 pub use error::{Error, ErrorCategory, Result};
 pub use external_resource::{
@@ -64,12 +64,11 @@ pub use handles::{
     AccelerationStructureHandle, BindGroupHandle, BufferHandle, DeviceHandle, FrameHandle,
     ImageHandle, IndirectCommandLayoutHandle, OpticalFlowSessionHandle, PassHandle, PipelineHandle,
     PipelineLayoutHandle, SamplerHandle, ShaderHandle, SubmissionHandle, SurfaceHandle,
-    VideoSessionHandle,
+    VideoSessionHandle, SemaphoreHandle,
 };
 pub use image::{
-    ImageCompression,
-    Extent3d, Format, FormatCapabilities, ImageBuilder, ImageClearValue, ImageDesc, ImageDimension,
-    ImageRole, ImageUsage,
+    Extent3d, Format, FormatCapabilities, ImageBuilder, ImageClearValue, ImageCompression,
+    ImageDesc, ImageDimension, ImageRole, ImageUsage,
 };
 pub use indirect_commands::{
     DgcExecuteDesc, DgcPreprocessDesc, IndirectCommandLayoutDesc, IndirectCommandToken,
@@ -84,9 +83,8 @@ pub use native_handles::{
 pub use optical_flow::{OpticalFlowEstimateDesc, OpticalFlowSessionDesc};
 pub use pipeline::{
     BlendMode, ColorTargetDesc, ComputePipelineDesc, ConservativeRasterMode, CullMode, FrontFace,
-    PolygonMode,
-    GraphicsPipelineDesc, PrimitiveTopology, RasterState, VertexAttributeDesc, VertexBufferLayout,
-    VertexFormat, VertexInputRate,
+    GraphicsPipelineDesc, PolygonMode, PrimitiveTopology, RasterState, VertexAttributeDesc,
+    VertexBufferLayout, VertexFormat, VertexInputRate,
 };
 pub use push_constants::PushConstants;
 pub use raw_capabilities::{

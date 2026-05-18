@@ -120,7 +120,9 @@ impl AntiAliasingPass {
             transient: false,
             clear_value: None,
             debug_name: Some("anti-aliasing-output"),
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+            compression: Default::default(),
+            min_lod_bits: None,
+            msaa_resolve_to_single_sampled: false,
         };
         frame.image("anti_aliasing_output", desc)
     }
@@ -147,7 +149,9 @@ impl AntiAliasingPass {
             transient: false,
             clear_value: None,
             debug_name: Some("anti-aliasing-history"),
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+            compression: Default::default(),
+            min_lod_bits: None,
+            msaa_resolve_to_single_sampled: false,
         };
         frame.image(format!("anti_aliasing_history_{index}"), desc)
     }

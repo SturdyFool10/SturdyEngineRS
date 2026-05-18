@@ -74,3 +74,8 @@ impl HandleAllocator {
         handle
     }
 }
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct SemaphoreHandle(pub u64);
+

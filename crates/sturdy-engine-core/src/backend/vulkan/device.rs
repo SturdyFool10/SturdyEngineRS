@@ -5,6 +5,33 @@ use ash::{Device as AshDevice, Instance, vk};
 
 use crate::{AdapterSelection, Error, Result};
 
+// GFX-1g: Device memory report callback — logs allocations in debug builds.
+unsafe extern "system" fn device_memory_report_callback(
+    _data: *const vk::DeviceMemoryReportCallbackDataEXT<'_>,
+    _user_data: *mut c_void,
+) {
+    #[cfg(debug_assertions)]
+    {
+        if let Some(data) = unsafe { _data.as_ref() } {
+            let type_str = match data.ty {
+                vk::DeviceMemoryReportEventTypeEXT::ALLOCATE => "alloc",
+                vk::DeviceMemoryReportEventTypeEXT::FREE => "free",
+                vk::DeviceMemoryReportEventTypeEXT::IMPORT => "import",
+                vk::DeviceMemoryReportEventTypeEXT::UNIMPORT => "unimport",
+                vk::DeviceMemoryReportEventTypeEXT::ALLOCATION_FAILED => "alloc-failed",
+                _ => "unknown",
+            };
+            let bytes = data.size;
+            if bytes > 0 {
+                eprintln!(
+                    "[device-memory-report] {type_str} type={} size={}B obj={:#x}",
+                    data.memory_type, bytes, data.memory_object_id
+                );
+            }
+        }
+    }
+}
+
 use super::adapter;
 use super::caps;
 use super::config::VulkanBackendConfig;
@@ -19,6 +46,7 @@ pub struct LogicalDevice {
     pub device: AshDevice,
     pub queue_families: QueueFamilyMap,
     pub queues: VulkanQueues,
+    pub enabled_extension_names: Vec<String>,
     pub mesh_shader_enabled: bool,
     pub synchronization2_enabled: bool,
     pub dynamic_rendering_enabled: bool,
@@ -170,6 +198,29 @@ pub fn create_logical_device(
         config,
         &feature_request.required_extensions,
     )?;
+    // GFX-1g: In debug builds, automatically enable diagnostic extensions when available.
+    // These are telemetry-only and do not affect rendering correctness.
+    #[cfg(debug_assertions)]
+    let extension_request = {
+        let mut er = extension_request;
+        let available_exts =
+            caps::available_device_extension_names(instance, selection.physical_device)
+                .into_iter()
+                .collect::<HashSet<_>>();
+        for ext_name in [
+            "VK_EXT_device_memory_report",
+            "VK_EXT_device_address_binding_report",
+        ] {
+            if available_exts.contains(ext_name) {
+                let c_name =
+                    CString::new(ext_name).expect("static extension name has no nul bytes");
+                if !er.names.iter().any(|n| n == &c_name) {
+                    er.names.push(c_name);
+                }
+            }
+        }
+        er
+    };
     let device_extension_ptrs = extension_request
         .names
         .iter()
@@ -199,7 +250,32 @@ pub fn create_logical_device(
     let device_info_base = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_info)
         .enabled_extension_names(&device_extension_ptrs);
-    let device_info = feature_request.apply_to(device_info_base);
+    let mut device_info = feature_request.apply_to(device_info_base);
+
+    // GFX-1g: Chain device memory report callback when the extension is available.
+    let mut memory_report_info;
+    let has_memory_report = extension_request
+        .names
+        .iter()
+        .any(|n| n.to_bytes() == b"VK_EXT_device_memory_report");
+    if has_memory_report {
+        memory_report_info = vk::DeviceDeviceMemoryReportCreateInfoEXT::default()
+            .pfn_user_callback(Some(device_memory_report_callback))
+            .user_data(std::ptr::null_mut());
+        device_info = device_info.push_next(&mut memory_report_info);
+    }
+    // GFX-1g: Enable address binding report feature when extension is available.
+    let mut address_binding_report_features;
+    let has_address_binding_report = extension_request
+        .names
+        .iter()
+        .any(|n| n.to_bytes() == b"VK_EXT_device_address_binding_report");
+    if has_address_binding_report {
+        address_binding_report_features =
+            vk::PhysicalDeviceAddressBindingReportFeaturesEXT::default()
+                .report_address_binding(true);
+        device_info = device_info.push_next(&mut address_binding_report_features);
+    }
 
     let device = unsafe {
         instance
@@ -218,6 +294,11 @@ pub fn create_logical_device(
         device,
         queue_families: selection.queue_families,
         queues,
+        enabled_extension_names: extension_request
+            .names
+            .iter()
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect(),
         mesh_shader_enabled,
         synchronization2_enabled,
         dynamic_rendering_enabled,
@@ -351,6 +432,7 @@ struct FeatureRequest<'a> {
     extended_dynamic_state3: vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT<'a>,
     vertex_input_dynamic_state: vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT<'a>,
     shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT<'a>,
+    optical_flow: vk::PhysicalDeviceOpticalFlowFeaturesNV<'a>,
     use_feature_chain: bool,
     required_extensions: Vec<&'static CStr>,
 }
@@ -396,6 +478,7 @@ impl FeatureRequest<'static> {
             vertex_input_dynamic_state:
                 vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT::default(),
             shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT::default(),
+            optical_flow: vk::PhysicalDeviceOpticalFlowFeaturesNV::default(),
             use_feature_chain: false,
             required_extensions: Vec::new(),
         };
@@ -729,6 +812,13 @@ impl FeatureRequest<'static> {
                 self.shader_object.shader_object = vk::TRUE;
                 true
             }
+            "optical_flow" | "optical_flow_nv" => {
+                if available.optical_flow.optical_flow != vk::TRUE {
+                    return false;
+                }
+                self.optical_flow.optical_flow = vk::TRUE;
+                true
+            }
             _ => self.enable_descriptor_indexing_field(name, &available.descriptor_indexing),
         }
     }
@@ -876,6 +966,9 @@ impl FeatureRequest<'static> {
             "shader_object" => {
                 self.require_extension(ash::ext::shader_object::NAME, available_extensions)?
             }
+            "optical_flow" | "optical_flow_nv" => {
+                self.require_extension(ash::nv::optical_flow::NAME, available_extensions)?
+            }
             "buffer_device_address" if api_version < vk::API_VERSION_1_2 => {
                 self.require_extension(ash::khr::buffer_device_address::NAME, available_extensions)?
             }
@@ -995,6 +1088,10 @@ impl FeatureRequest<'static> {
             push_feature_chain(&mut self.features2, &mut self.shader_object);
             self.use_feature_chain = true;
         }
+        if self.optical_flow.optical_flow == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.optical_flow);
+            self.use_feature_chain = true;
+        }
     }
 
     fn has_descriptor_indexing_features(&self) -> bool {
@@ -1065,6 +1162,8 @@ fn is_known_feature_name(name: &str) -> bool {
                 | "extended_dynamic_state3"
                 | "vertex_input_dynamic_state"
                 | "shader_object"
+                | "optical_flow"
+                | "optical_flow_nv"
         )
 }
 

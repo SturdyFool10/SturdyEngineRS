@@ -48,7 +48,9 @@ fn create_sampled_image_sampler_bind_group(engine: &Engine) -> Result<BindGroup>
         transient: false,
         clear_value: None,
         debug_name: None,
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+        compression: Default::default(),
+        min_lod_bits: None,
+        msaa_resolve_to_single_sampled: false,
     })?;
     let sampler = engine.create_sampler(SamplerDesc::default())?;
     let layout = engine
@@ -377,7 +379,9 @@ fn hiz_pass_records_depth_pyramid_contract() {
                 transient: false,
                 clear_value: None,
                 debug_name: Some("gbuffer_depth"),
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+                compression: Default::default(),
+                min_lod_bits: None,
+                msaa_resolve_to_single_sampled: false,
             },
         )
         .unwrap();
@@ -434,7 +438,9 @@ fn hiz_history_ping_pongs_previous_pyramid() {
                 transient: false,
                 clear_value: None,
                 debug_name: Some("history_depth"),
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+                compression: Default::default(),
+                min_lod_bits: None,
+                msaa_resolve_to_single_sampled: false,
             },
         )
         .unwrap();
@@ -479,7 +485,9 @@ fn hiz_history_resets_when_level_descriptor_changes() {
         transient: false,
         clear_value: None,
         debug_name: None,
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+        compression: Default::default(),
+        min_lod_bits: None,
+        msaa_resolve_to_single_sampled: false,
     };
     let depth_a = frame.image("history_depth_a", depth_desc(16, 8)).unwrap();
     pass.execute_history_named(&frame, "resize_hiz", &depth_a, &mut history)
@@ -524,7 +532,9 @@ fn hiz_pyramid_registers_levels_for_later_shader_binding() {
                 transient: false,
                 clear_value: None,
                 debug_name: None,
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+                compression: Default::default(),
+                min_lod_bits: None,
+                msaa_resolve_to_single_sampled: false,
             },
         )
         .unwrap();
@@ -2029,7 +2039,9 @@ fn small_image_desc() -> ImageDesc {
         transient: false,
         clear_value: None,
         debug_name: None,
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+        compression: Default::default(),
+        min_lod_bits: None,
+        msaa_resolve_to_single_sampled: false,
     }
 }
 

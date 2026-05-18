@@ -635,6 +635,7 @@ impl RenderFrame {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                    shading_rate_image: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -1057,7 +1058,9 @@ impl RenderFrame {
             transient: false,
             clear_value: None,
             debug_name: Some("resolve-target"),
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+            compression: Default::default(),
+            min_lod_bits: None,
+            msaa_resolve_to_single_sampled: false,
         };
         self.image(name, desc)
     }
@@ -1148,6 +1151,7 @@ impl RenderFrame {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                    shading_rate_image: None,
             },
             deferred: None,
         });
@@ -1210,6 +1214,7 @@ impl RenderFrame {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                    shading_rate_image: None,
             },
             deferred: None,
         });
@@ -1271,7 +1276,9 @@ impl RenderFrame {
             transient: false,
             clear_value: None,
             debug_name: None,
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+            compression: Default::default(),
+            min_lod_bits: None,
+            msaa_resolve_to_single_sampled: false,
         };
         let name = name.into();
         let key = GraphImageCacheKey::new(name.clone(), desc, inner.swapchain_slot);
@@ -1321,7 +1328,9 @@ impl RenderFrame {
             transient: false,
             clear_value: None,
             debug_name: None,
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+            compression: Default::default(),
+            min_lod_bits: None,
+            msaa_resolve_to_single_sampled: false,
         };
         let name = name.into();
         let key = GraphImageCacheKey::new(name.clone(), desc, slot);
@@ -2041,6 +2050,7 @@ impl GraphImage {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                    shading_rate_image: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2244,6 +2254,7 @@ impl GraphImage {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                    shading_rate_image: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2446,6 +2457,7 @@ impl GraphImage {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                    shading_rate_image: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2622,6 +2634,7 @@ impl GraphImage {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                    shading_rate_image: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2758,6 +2771,7 @@ impl GraphImage {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                    shading_rate_image: None,
             },
             deferred: None,
         });
@@ -2949,6 +2963,7 @@ fn record_fullscreen_shader_pass(
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
+                    shading_rate_image: None,
         },
         deferred: Some(DeferredPassResolve {
             layout_handle: shader.pipeline_layout.handle(),
@@ -3038,6 +3053,7 @@ fn record_compute_shader_pass(
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
+                    shading_rate_image: None,
         },
         deferred: Some(DeferredPassResolve {
             layout_handle: program.pipeline_layout.handle(),
@@ -3446,6 +3462,7 @@ mod tests {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
+                    shading_rate_image: None,
         }
     }
 
@@ -3472,6 +3489,7 @@ mod tests {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
+                    shading_rate_image: None,
         }
     }
 
@@ -3592,7 +3610,9 @@ mod tests {
             transient: false,
             clear_value: None,
             debug_name: None,
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+            compression: Default::default(),
+            min_lod_bits: None,
+            msaa_resolve_to_single_sampled: false,
         };
 
         assert!(validate_subresource(desc, SubresourceRange::new(3, 1, 1, 1)).is_ok());

@@ -1400,8 +1400,8 @@ mod tests {
                 entry_point: "main".into(),
                 stage: ShaderStage::Fragment,
                 requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                requires_cooperative_matrix: false,
+                uses_ser: false,
             };
 
             let (_, reflection) =
@@ -1440,8 +1440,8 @@ mod tests {
                 entry_point: "main".into(),
                 stage: ShaderStage::Compute,
                 requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                requires_cooperative_matrix: false,
+                uses_ser: false,
             };
             let reflection =
                 reflect_pipeline_layout(&desc).expect("should not error for SPIRV source");
@@ -1456,8 +1456,8 @@ mod tests {
                 entry_point: "main".into(),
                 stage: ShaderStage::Compute,
                 requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                requires_cooperative_matrix: false,
+                uses_ser: false,
             };
 
             let (_compiled, reflection) =
@@ -1479,8 +1479,8 @@ mod tests {
                 entry_point: "vs_main".into(),
                 stage: ShaderStage::Vertex,
                 requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                requires_cooperative_matrix: false,
+                uses_ser: false,
             };
 
             let (_compiled, reflection) =

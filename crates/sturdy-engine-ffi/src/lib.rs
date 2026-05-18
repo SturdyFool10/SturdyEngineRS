@@ -410,6 +410,7 @@ pub extern "C" fn gfx_create_image(
             transient: false,
             clear_value: None,
             debug_name: None,
+            ..ImageDesc::new()
         })?;
         let ffi_image = registry.alloc();
         registry.images.insert(
@@ -545,6 +546,8 @@ pub extern "C" fn gfx_create_shader(
             entry_point,
             stage: ffi_shader_stage(desc.stage)?,
             requires_ray_query: desc.requires_ray_query != 0,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
         })?;
         let ffi_shader = registry.alloc();
         registry.shaders.insert(
@@ -718,6 +721,7 @@ pub extern "C" fn gfx_frame_add_pass(
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
         })
     })

@@ -116,6 +116,7 @@ impl SurfaceRegistry {
                 desc.preferred_present_mode.as_ref(),
                 vk::SwapchainKHR::null(),
                 use_timeline,
+                None,
             )
         })() {
             Ok(swapchain) => swapchain,
@@ -175,6 +176,7 @@ impl SurfaceRegistry {
             preferred_present_mode,
             old_swapchain,
             surface.use_timeline,
+            None,
         )?;
         destroy_swapchain(device, &surface.swapchain_loader, &mut surface.swapchain);
         surface.swapchain = new_swapchain;
@@ -223,6 +225,7 @@ impl SurfaceRegistry {
             preferred_present_mode,
             old_swapchain,
             surface.use_timeline,
+            None,
         )?;
         destroy_swapchain(device, &surface.swapchain_loader, &mut surface.swapchain);
         surface.swapchain = new_swapchain;
@@ -272,7 +275,9 @@ impl SurfaceRegistry {
                 transient: false,
                 clear_value: None,
                 debug_name: Some("surface image"),
-            compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+                compression: Default::default(),
+                min_lod_bits: None,
+                msaa_resolve_to_single_sampled: false,
                 ..ImageDesc::new()
             },
         })
@@ -465,6 +470,9 @@ fn create_swapchain(
     preferred_present_mode: Option<&SurfacePresentMode>,
     old_swapchain: vk::SwapchainKHR,
     use_timeline: bool,
+    // When `Some`, chains `VkImageCompressionControlEXT` into the swapchain create info.
+    // Requires `VK_EXT_image_compression_control_swapchain`.
+    compression_control: Option<&mut vk::ImageCompressionControlEXT<'_>>,
 ) -> Result<VulkanSwapchain> {
     let capabilities = unsafe {
         surface_loader
@@ -499,7 +507,7 @@ fn create_swapchain(
     let extent = choose_extent(&capabilities, size);
     let image_count = choose_image_count(&capabilities);
     let composite_alpha = choose_composite_alpha(&capabilities, transparent);
-    let create_info = vk::SwapchainCreateInfoKHR::default()
+    let mut create_info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface)
         .min_image_count(image_count)
         .image_format(format.format)
@@ -513,6 +521,10 @@ fn create_swapchain(
         .present_mode(present_mode)
         .clipped(true)
         .old_swapchain(old_swapchain);
+    // GFX-2k: Chain compression control when VK_EXT_image_compression_control_swapchain is active.
+    if let Some(ctrl) = compression_control {
+        create_info = create_info.push_next(ctrl);
+    }
     let swapchain = unsafe {
         swapchain_loader
             .create_swapchain(&create_info, None)

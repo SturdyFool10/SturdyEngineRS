@@ -147,7 +147,9 @@ pub fn render_to_rgba8_with_engine(
         transient: false,
         clear_value: None,
         debug_name: Some("headless_output"),
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+        compression: Default::default(),
+        min_lod_bits: None,
+        msaa_resolve_to_single_sampled: false,
     })?;
 
     let capture = ScreenshotCapture::new(engine, width, height, Format::Rgba8Unorm)?;

@@ -105,6 +105,12 @@ impl ImageUsage {
     pub const PRESENT: Self = Self(1 << 4);
     pub const COPY_SRC: Self = Self(1 << 5);
     pub const COPY_DST: Self = Self(1 << 6);
+    /// Image can be bound as the current or reference frame for `VK_NV_optical_flow`.
+    pub const OPTICAL_FLOW_INPUT: Self = Self(1 << 7);
+    /// Image can receive motion vectors from `VK_NV_optical_flow`.
+    pub const OPTICAL_FLOW_OUTPUT: Self = Self(1 << 8);
+    /// Image can provide external motion-vector hints to `VK_NV_optical_flow`.
+    pub const OPTICAL_FLOW_HINT: Self = Self(1 << 9);
 
     pub const fn empty() -> Self {
         Self(0)

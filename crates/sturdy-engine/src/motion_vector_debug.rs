@@ -45,7 +45,9 @@ impl MotionVectorDebugPass {
                 transient: false,
                 clear_value: None,
                 debug_name: Some("motion_vector_debug"),
-                compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+                compression: Default::default(),
+                min_lod_bits: None,
+                msaa_resolve_to_single_sampled: false,
             },
         )?;
         target.execute_shader_auto(&self.program)?;

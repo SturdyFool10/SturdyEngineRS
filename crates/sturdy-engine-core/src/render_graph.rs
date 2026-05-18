@@ -49,6 +49,11 @@ pub enum RgState {
     AccelerationStructureBuild,
     /// Acceleration structure available for shader reads (e.g. traceRayEXT).
     AccelerationStructureRead,
+    /// Image used as an attachment-tier fragment shading rate image.
+    ///
+    /// Required barrier state before `PassDesc::shading_rate_image` is consumed.
+    /// Requires `BackendFeatures::vrs_attachment`.
+    ShadingRateAttachment,
 }
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
@@ -365,6 +370,52 @@ pub struct BlasBuildDesc {
     pub scratch_buffer: Option<BufferHandle>,
     pub geometries: Vec<BlasGeometryDesc>,
     pub mode: AccelerationStructureBuildMode,
+    /// Opacity micromap to attach to each geometry triangle for hardware any-hit elimination.
+    /// Requires `BackendFeatures::opacity_micromap`. When `Some`, each geometry's triangles
+    /// reference sub-triangle opacity data in the micromap, eliminating any-hit shader
+    /// invocations for fully opaque or fully transparent sub-triangles.
+    pub opacity_micromap: Option<MicromapAttachDesc>,
+}
+
+/// Descriptor for building a per-triangle opacity micromap.
+///
+/// Micromaps assign per-sub-triangle opacity classifications (opaque/transparent/unknown)
+/// for alpha-tested geometry. When attached to a BLAS, the RT hardware skips any-hit shaders
+/// for fully classified triangles — critical for foliage with dense alpha testing.
+///
+/// Requires `BackendFeatures::opacity_micromap`.
+#[derive(Clone, Debug)]
+pub struct MicromapBuildDesc {
+    /// Buffer containing the micromap index/usage data in `VkMicromapUsageEXT` format.
+    pub data_buffer: BufferHandle,
+    /// Byte offset into `data_buffer` for the micromap data.
+    pub data_offset: u64,
+    /// Total size of micromap data in bytes.
+    pub data_size: u64,
+    /// Format of the per-sub-triangle opacity data.
+    pub format: MicromapFormat,
+    /// Sub-division level (0–3); determines per-triangle sub-triangle count.
+    pub subdivision_level: u32,
+}
+
+/// Sub-triangle opacity classification format for opacity micromaps.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MicromapFormat {
+    /// 2-state: each sub-triangle is fully opaque or fully transparent (1 bit/sub-triangle).
+    Unorm2State,
+    /// 4-state: opaque / transparent / unknown-opaque / unknown-transparent (2 bits/sub-triangle).
+    Unorm4State,
+}
+
+/// Attach an existing opacity micromap to a BLAS geometry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MicromapAttachDesc {
+    /// Buffer containing the built micromap data.
+    pub micromap_buffer: BufferHandle,
+    /// Buffer containing the index/triangle mapping for attaching the micromap.
+    pub index_buffer: Option<BufferHandle>,
+    /// Byte offset for index data.
+    pub index_offset: u64,
 }
 
 /// Describes a top-level acceleration structure build.
@@ -411,6 +462,11 @@ pub struct TraceRaysDesc {
     pub width: u32,
     pub height: u32,
     pub depth: u32,
+    /// When `Some`, use `vkCmdTraceRaysIndirectKHR2` — dispatch dimensions and SBT regions
+    /// are read from this GPU buffer at the given byte offset.
+    /// Requires `BackendFeatures::ray_tracing_maintenance1`.
+    /// The buffer must contain a `VkTraceRaysIndirectCommand2KHR` structure.
+    pub indirect: Option<(BufferHandle, u64)>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -464,17 +520,19 @@ pub enum PassWork {
     TraceRays(TraceRaysDesc),
     /// Decode a compressed video frame into an output image.
     ///
-    /// Video graph passes are design-only scaffolding until `VideoSessionHandle`
-    /// maps to a real backend video session. `RenderGraph::add_pass` rejects this
-    /// work with `Error::Unsupported` so callers cannot accidentally compile a
-    /// graph that will fail during command recording.
+    /// Video graph passes are design-only scaffolding until backend video
+    /// parameters, DPB image management, and command recording are wired.
+    /// `RenderGraph::add_pass` rejects this work with `Error::Unsupported` so
+    /// callers cannot accidentally compile a graph that will fail during command
+    /// recording.
     DecodeVideoFrame(DecodeFrameDesc),
     /// Encode an input image into a compressed video bitstream.
     ///
-    /// Video graph passes are design-only scaffolding until `VideoSessionHandle`
-    /// maps to a real backend video session. `RenderGraph::add_pass` rejects this
-    /// work with `Error::Unsupported` so callers cannot accidentally compile a
-    /// graph that will fail during command recording.
+    /// Video graph passes are design-only scaffolding until backend video
+    /// parameters, DPB image management, and command recording are wired.
+    /// `RenderGraph::add_pass` rejects this work with `Error::Unsupported` so
+    /// callers cannot accidentally compile a graph that will fail during command
+    /// recording.
     EncodeVideoFrame(EncodeFrameDesc),
     /// Execute GPU-generated commands from a pre-processed buffer.
     ///
@@ -494,10 +552,10 @@ pub enum PassWork {
     PreprocessGeneratedCommands(DgcPreprocessDesc),
     /// Estimate optical flow motion vectors between two frames.
     ///
-    /// Optical-flow graph passes are design-only scaffolding until the backend
-    /// owns `VkOpticalFlowSessionNV` resources and command recording.
-    /// `RenderGraph::add_pass` rejects this work with `Error::Unsupported` so
-    /// callers cannot compile a graph that will fail during command recording.
+    /// Requires a backend-owned optical-flow session and images created with
+    /// optical-flow input/output usage. Vulkan records
+    /// `vkBindOpticalFlowSessionImageNV` and `vkCmdOpticalFlowExecuteNV` when
+    /// `VK_NV_optical_flow` is enabled.
     EstimateOpticalFlow(OpticalFlowEstimateDesc),
 }
 
@@ -603,6 +661,12 @@ pub struct PassDesc {
     /// pipeline. Requires `BackendFeatures::shader_object`. Backends that do not
     /// support shader objects fall back to the `pipeline` field.
     pub shader_binding: Option<ShaderBinding>,
+    /// Attachment-tier variable rate shading image for this graphics pass.
+    ///
+    /// When `Some`, binds the image as `VkRenderingFragmentShadingRateAttachmentInfoKHR`
+    /// inside `cmd_begin_rendering`. Requires `BackendFeatures::vrs_attachment` and
+    /// `BackendFeatures::dynamic_rendering`.
+    pub shading_rate_image: Option<ImageHandle>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -799,10 +863,19 @@ impl RenderGraph {
                 "render graph device-generated command passes are not executable until backend DGC resources and recording are implemented",
             ));
         }
-        if matches!(pass.work, PassWork::EstimateOpticalFlow(_)) {
-            return Err(Error::Unsupported(
-                "render graph optical-flow passes are not executable until backend optical-flow sessions and recording are implemented",
-            ));
+        if let PassWork::EstimateOpticalFlow(desc) = pass.work {
+            if desc.input_current == desc.input_previous {
+                return Err(Error::InvalidInput(
+                    "optical-flow current and previous images must be distinct".into(),
+                ));
+            }
+            if desc.output_motion_vectors == desc.input_current
+                || desc.output_motion_vectors == desc.input_previous
+            {
+                return Err(Error::InvalidInput(
+                    "optical-flow output image must be distinct from input images".into(),
+                ));
+            }
         }
         let has_pipeline_binding = pass.pipeline.is_some()
             || matches!(pass.shader_binding, Some(ShaderBinding::Pipeline(_)));
@@ -1578,7 +1651,9 @@ mod tests {
             transient: false,
             clear_value: None,
             debug_name: None,
-            compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+            compression: Default::default(),
+            min_lod_bits: None,
+            msaa_resolve_to_single_sampled: false,
         }
     }
 
@@ -1632,7 +1707,9 @@ mod tests {
                 | ImageUsage::COPY_DST,
             transient: true,
             debug_name: Some("transient test image"),
-            compression: Default::default(), min_lod_bits: None, msaa_resolve_to_single_sampled: false,
+            compression: Default::default(),
+            min_lod_bits: None,
+            msaa_resolve_to_single_sampled: false,
             ..image_desc_defaults()
         }
     }
@@ -1678,6 +1755,7 @@ mod tests {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
+                shading_rate_image: None,
         }
     }
 
@@ -1760,9 +1838,9 @@ mod tests {
     }
 
     #[test]
-    fn optical_flow_estimate_pass_is_explicitly_non_executable() {
+    fn optical_flow_estimate_pass_is_executable_when_images_are_distinct() {
         let mut graph = RenderGraph::new();
-        let err = graph
+        graph
             .add_pass(pass_with_work(PassWork::EstimateOpticalFlow(
                 OpticalFlowEstimateDesc {
                     session: OpticalFlowSessionHandle(1),
@@ -1772,11 +1850,25 @@ mod tests {
                     input_hint: None,
                 },
             )))
+            .unwrap();
+    }
+
+    #[test]
+    fn optical_flow_estimate_rejects_overlapping_output() {
+        let mut graph = RenderGraph::new();
+        let err = graph
+            .add_pass(pass_with_work(PassWork::EstimateOpticalFlow(
+                OpticalFlowEstimateDesc {
+                    session: OpticalFlowSessionHandle(1),
+                    input_current: ImageHandle(2),
+                    input_previous: ImageHandle(3),
+                    output_motion_vectors: ImageHandle(2),
+                    input_hint: None,
+                },
+            )))
             .unwrap_err();
 
-        assert!(
-            matches!(err, Error::Unsupported(message) if message.contains("optical-flow passes"))
-        );
+        assert!(matches!(err, Error::InvalidInput(message) if message.contains("output image")));
     }
 
     #[test]
@@ -1844,6 +1936,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
 
@@ -1901,6 +1994,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap_err();
 
@@ -1960,6 +2054,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
 
@@ -2011,6 +2106,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -2050,6 +2146,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -2081,6 +2178,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -2110,6 +2208,7 @@ mod tests {
                 shader_binding: Some(ShaderBinding::ShaderObjects(vec![
                     crate::shader_object::ShaderObjectHandle(1),
                 ])),
+                shading_rate_image: None,
             })
             .unwrap();
     }
@@ -2136,6 +2235,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: Some(ShaderBinding::ShaderObjects(Vec::new())),
+                shading_rate_image: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -2173,6 +2273,7 @@ mod tests {
                 shader_binding: Some(ShaderBinding::ShaderObjects(vec![
                     crate::shader_object::ShaderObjectHandle(1),
                 ])),
+                shading_rate_image: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -2200,6 +2301,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap_err();
 
@@ -2233,6 +2335,7 @@ mod tests {
                     inverted: false,
                 }),
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap_err();
 
@@ -2265,6 +2368,7 @@ mod tests {
                 }),
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap_err();
 
@@ -2325,6 +2429,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -2346,6 +2451,7 @@ mod tests {
                 push_constants: None,
                 pipeline_shading_rate: None,
                 work: PassWork::BuildBlas(BlasBuildDesc {
+                    opacity_micromap: None,
                     dst: dst_as,
                     src: None,
                     scratch_buffer: None,
@@ -2373,6 +2479,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
     }
@@ -2390,6 +2497,7 @@ mod tests {
                 push_constants: None,
                 pipeline_shading_rate: None,
                 work: PassWork::BuildBlas(BlasBuildDesc {
+                    opacity_micromap: None,
                     dst: AccelerationStructureHandle(2),
                     src: None,
                     scratch_buffer: None,
@@ -2405,6 +2513,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap_err();
 
@@ -2449,6 +2558,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
 
@@ -2496,6 +2606,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
 
@@ -2546,6 +2657,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
 
@@ -2633,6 +2745,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
 
@@ -2679,6 +2792,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
         graph
@@ -2711,6 +2825,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
 
@@ -2769,6 +2884,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
         graph
@@ -2801,6 +2917,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
         graph
@@ -2827,6 +2944,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
 
@@ -2938,6 +3056,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
 
@@ -2988,6 +3107,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
 
@@ -3030,6 +3150,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
 
@@ -3080,6 +3201,7 @@ mod tests {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
+                shading_rate_image: None,
             })
             .unwrap();
 

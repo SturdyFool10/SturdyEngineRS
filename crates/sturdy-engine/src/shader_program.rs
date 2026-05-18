@@ -149,8 +149,8 @@ impl ShaderProgram {
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                    requires_cooperative_matrix: false,
+                    uses_ser: false,
                 },
             },
         )
@@ -167,8 +167,8 @@ impl ShaderProgram {
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Compute,
                     requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                    requires_cooperative_matrix: false,
+                    uses_ser: false,
                 },
             },
         )
@@ -203,8 +203,8 @@ impl ShaderProgram {
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                    requires_cooperative_matrix: false,
+                    uses_ser: false,
                 },
             },
         )?;
@@ -246,8 +246,8 @@ impl ShaderProgram {
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Compute,
                     requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+                    requires_cooperative_matrix: false,
+                    uses_ser: false,
                 },
             },
         )?;
@@ -395,7 +395,10 @@ impl ShaderProgram {
                 depth_format: None,
                 samples: key.1,
                 topology: PrimitiveTopology::TriangleList,
-                raster: RasterState { polygon_mode: Default::default(), depth_clamp: false,
+                raster: RasterState {
+                    polygon_mode: Default::default(),
+                    depth_clamp: false,
+                    rasterizer_discard: false,
                     cull_mode: CullMode::None,
                     front_face: FrontFace::CounterClockwise,
                 },
@@ -450,7 +453,7 @@ fn default_vertex_desc() -> ShaderDesc {
         entry_point: "main".to_owned(),
         stage: ShaderStage::Vertex,
         requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
+        requires_cooperative_matrix: false,
+        uses_ser: false,
     }
 }

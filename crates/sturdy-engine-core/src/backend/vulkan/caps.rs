@@ -201,6 +201,9 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     let video_encode_av1 = video_queue && has(b"VK_KHR_video_encode_av1\0");
     let video_encode_quantization_map =
         video_queue && has(b"VK_KHR_video_encode_quantization_map\0");
+    // GFX-4: video maintenance extensions (simplify session parameter management).
+    let _video_maintenance1 = video_queue && has(b"VK_KHR_video_maintenance1\0");
+    let _video_maintenance2 = video_queue && has(b"VK_KHR_video_maintenance2\0");
 
     // GFX-5: External resource interop
     let external_memory_fd = has(b"VK_KHR_external_memory_fd\0");
@@ -251,9 +254,15 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     // GFX-2j: Performance query
     let performance_query = has(b"VK_KHR_performance_query\0");
     let pipeline_executable_properties = has(b"VK_KHR_pipeline_executable_properties\0");
+    let shader_info_amd = has(b"VK_AMD_shader_info\0");
     let graphics_pipeline_library = has(b"VK_EXT_graphics_pipeline_library\0");
     let pipeline_creation_cache_control =
         properties.api_version >= vk_1_3 || has(b"VK_EXT_pipeline_creation_cache_control\0");
+    // GFX-2k: image compression swapchain
+    let image_compression_control_swapchain =
+        has(b"VK_EXT_image_compression_control_swapchain\0");
+    // GFX-5: external memory export capability
+    let external_memory_fd_export = has(b"VK_KHR_external_memory_fd\0");
 
     let features = BackendFeatures {
         ray_tracing,
@@ -368,6 +377,9 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         pipeline_executable_properties,
         graphics_pipeline_library,
         pipeline_creation_cache_control,
+        shader_info_amd,
+        image_compression_control_swapchain,
+        external_memory_fd_export,
     };
 
     let limits = Limits {
@@ -721,6 +733,7 @@ pub struct AvailableFeatureChain<'a> {
     pub msaa_render_to_single_sampled:
         vk::PhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT<'a>,
     pub shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT<'a>,
+    pub optical_flow: vk::PhysicalDeviceOpticalFlowFeaturesNV<'a>,
 }
 
 pub fn available_feature_chain(
@@ -750,6 +763,7 @@ pub fn available_feature_chain(
         msaa_render_to_single_sampled:
             vk::PhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT::default(),
         shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT::default(),
+        optical_flow: vk::PhysicalDeviceOpticalFlowFeaturesNV::default(),
     };
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut chain.descriptor_indexing)
@@ -772,7 +786,8 @@ pub fn available_feature_chain(
         .push_next(&mut chain.image_view_min_lod)
         .push_next(&mut chain.image_compression_control)
         .push_next(&mut chain.msaa_render_to_single_sampled)
-        .push_next(&mut chain.shader_object);
+        .push_next(&mut chain.shader_object)
+        .push_next(&mut chain.optical_flow);
     unsafe { instance.get_physical_device_features2(physical_device, &mut features2) };
     chain
 }

@@ -200,6 +200,8 @@ pub struct VulkanGraphicsPipelineState {
     pub polygon_mode: vk::PolygonMode,
     /// Depth clamp, recorded dynamically when extended_dynamic_state3 is available.
     pub depth_clamp: bool,
+    /// Rasterizer discard, recorded dynamically when EDS3 or basic dynamic state is available.
+    pub rasterizer_discard: bool,
 }
 
 impl PipelineRegistry {
@@ -533,6 +535,7 @@ impl PipelineRegistry {
             .cull_mode(vk_cull_mode(desc.raster.cull_mode))
             .front_face(vk_front_face(desc.raster.front_face))
             .depth_clamp_enable(desc.raster.depth_clamp)
+            .rasterizer_discard_enable(desc.raster.rasterizer_discard)
             .line_width(1.0);
         if let Some(_mode) = conservative_mode {
             rasterization = rasterization.push_next(&mut conservative_rasterization);
@@ -570,6 +573,8 @@ impl PipelineRegistry {
             dynamic_states.push(vk::DynamicState::POLYGON_MODE_EXT);
             dynamic_states.push(vk::DynamicState::DEPTH_CLAMP_ENABLE_EXT);
         }
+        // Rasterizer discard is settable dynamically via core Vulkan 1.3 / EXT_extended_dynamic_state.
+        dynamic_states.push(vk::DynamicState::RASTERIZER_DISCARD_ENABLE);
         if self.vertex_input_dynamic_state_enabled {
             // Vertex input layout is set dynamically per-draw.
             dynamic_states.push(vk::DynamicState::VERTEX_INPUT_EXT);
@@ -707,6 +712,11 @@ impl PipelineRegistry {
             .get(&handle)
             .copied()
             .ok_or(Error::InvalidHandle)
+    }
+
+    /// Return the raw VkPipeline handle for pipeline executable stats queries.
+    pub fn vk_pipeline(&self, handle: PipelineHandle) -> Result<vk::Pipeline> {
+        self.pipeline(handle).map(|p| p.pipeline)
     }
 
     pub fn graphics_state(&self, handle: PipelineHandle) -> Result<VulkanGraphicsPipelineState> {
@@ -870,6 +880,7 @@ fn shader_object_graphics_state(
         color_write_masks,
         polygon_mode: vk_polygon_mode(desc.raster.polygon_mode),
         depth_clamp: desc.raster.depth_clamp,
+        rasterizer_discard: desc.raster.rasterizer_discard,
     })
 }
 

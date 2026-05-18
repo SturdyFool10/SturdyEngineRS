@@ -200,6 +200,8 @@ enum DeferredDestroy {
     BindGroup(BindGroupHandle),
     ShaderObject(ShaderObjectHandle),
     VideoSession(VideoSessionHandle),
+    IndirectCommandLayout(crate::IndirectCommandLayoutHandle),
+    OpticalFlowSession(crate::OpticalFlowSessionHandle),
 }
 
 struct DeviceInner {
@@ -250,6 +252,11 @@ struct DeviceInner {
     frame_handles: HandleAllocator,
     video_sessions: HashMap<VideoSessionHandle, VideoSessionDesc>,
     video_session_handles: HandleAllocator,
+    indirect_command_layouts:
+        HashMap<crate::IndirectCommandLayoutHandle, crate::IndirectCommandLayoutDesc>,
+    indirect_command_layout_handles: HandleAllocator,
+    optical_flow_sessions: HashMap<crate::OpticalFlowSessionHandle, crate::OpticalFlowSessionDesc>,
+    optical_flow_session_handles: HandleAllocator,
 }
 
 struct SurfaceState {
@@ -298,6 +305,10 @@ impl Device {
                 frame_handles: HandleAllocator::default(),
                 video_sessions: HashMap::new(),
                 video_session_handles: HandleAllocator::default(),
+                indirect_command_layouts: HashMap::new(),
+                indirect_command_layout_handles: HandleAllocator::default(),
+                optical_flow_sessions: HashMap::new(),
+                optical_flow_session_handles: HandleAllocator::default(),
             })),
         })
     }
@@ -1536,7 +1547,220 @@ impl Device {
         }
     }
 
+    // ── GFX-6a: Device-generated commands ────────────────────────────────────
+
+    pub fn create_indirect_command_layout(
+        &self,
+        desc: &crate::IndirectCommandLayoutDesc,
+    ) -> Result<crate::IndirectCommandLayoutHandle> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.backend.caps().features.device_generated_commands_nv
+            && !inner.backend.caps().features.device_generated_commands
+        {
+            return Err(Error::Unsupported(
+                "indirect command layouts require VK_EXT_device_generated_commands or VK_NV_device_generated_commands".into(),
+            ));
+        }
+        let handle =
+            crate::IndirectCommandLayoutHandle(inner.indirect_command_layout_handles.alloc());
+        inner.backend.create_indirect_command_layout(handle, desc)?;
+        inner.indirect_command_layouts.insert(handle, desc.clone());
+        Ok(handle)
+    }
+
+    pub fn destroy_indirect_command_layout(&self, handle: crate::IndirectCommandLayoutHandle) {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        if inner.indirect_command_layouts.remove(&handle).is_some() {
+            inner
+                .deferred_destroys
+                .push(DeferredDestroy::IndirectCommandLayout(handle));
+        }
+    }
+
+    // ── GFX-6e: Optical flow ─────────────────────────────────────────────────
+
+    pub fn create_optical_flow_session(
+        &self,
+        desc: &crate::OpticalFlowSessionDesc,
+    ) -> Result<crate::OpticalFlowSessionHandle> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.backend.caps().features.optical_flow_nv {
+            return Err(Error::Unsupported(
+                "optical flow sessions require BackendFeatures::optical_flow_nv".into(),
+            ));
+        }
+        let handle = crate::OpticalFlowSessionHandle(inner.optical_flow_session_handles.alloc());
+        inner.backend.create_optical_flow_session(handle, desc)?;
+        inner.optical_flow_sessions.insert(handle, *desc);
+        Ok(handle)
+    }
+
+    pub fn destroy_optical_flow_session(&self, handle: crate::OpticalFlowSessionHandle) {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        if inner.optical_flow_sessions.remove(&handle).is_some() {
+            inner
+                .deferred_destroys
+                .push(DeferredDestroy::OpticalFlowSession(handle));
+        }
+    }
+
+    // ── GFX-1h: Host image copy ───────────────────────────────────────────────
+
+    /// Copy CPU memory directly into a GPU image without a staging buffer or command buffer.
+    ///
+    /// Requires `BackendFeatures::host_image_copy`. Useful on integrated/unified memory hardware
+    /// to eliminate the staging buffer round-trip.
+    pub fn copy_memory_to_image(
+        &self,
+        handle: crate::ImageHandle,
+        mip: u32,
+        layer: u32,
+        data: &[u8],
+    ) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .copy_memory_to_image(handle, mip, layer, data)
+    }
+
+    /// Transition a GPU image layout from the CPU side without recording a command buffer.
+    ///
+    /// Requires `BackendFeatures::host_image_copy`. Use after `copy_memory_to_image` to
+    /// set the image to the layout required by the first shader read.
+    pub fn transition_image_layout_cpu(
+        &self,
+        handle: crate::ImageHandle,
+        new_layout: crate::RgState,
+    ) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .transition_image_layout_cpu(handle, new_layout)
+    }
+
     // ── GFX-6b: Latency reduction ─────────────────────────────────────────────
+
+    // ── GFX-5a: External memory exports ──────────────────────────────────────
+
+    /// Create a buffer with exportable GPU memory (`VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT`).
+    ///
+    /// Call `export_buffer_fd` on the returned handle to get an opaque fd for cross-process
+    /// or cross-API sharing. Requires `BackendFeatures::external_memory_fd`.
+    pub fn create_exportable_buffer(&self, desc: crate::BufferDesc) -> Result<crate::BufferHandle> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.backend.caps().features.external_memory_fd {
+            return Err(Error::Unsupported(
+                "exportable buffers require BackendFeatures::external_memory_fd".into(),
+            ));
+        }
+        let handle = crate::BufferHandle(inner.buffer_handles.alloc());
+        inner.backend.create_exportable_buffer(handle, desc)?;
+        inner.buffers.insert(handle, desc);
+        Ok(handle)
+    }
+
+    /// Create an image with exportable GPU memory (`VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT`).
+    ///
+    /// Requires `BackendFeatures::external_memory_fd`.
+    pub fn create_exportable_image(&self, desc: crate::ImageDesc) -> Result<crate::ImageHandle> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.backend.caps().features.external_memory_fd {
+            return Err(Error::Unsupported(
+                "exportable images require BackendFeatures::external_memory_fd".into(),
+            ));
+        }
+        let handle = crate::ImageHandle(inner.image_handles.alloc());
+        inner.backend.create_exportable_image(handle, desc)?;
+        inner.images.insert(handle, desc);
+        Ok(handle)
+    }
+
+    /// Export a Linux fd for a buffer created with `create_exportable_buffer`.
+    ///
+    /// The caller owns the returned fd and must close it with `libc::close`.
+    pub fn export_buffer_fd(&self, handle: crate::BufferHandle) -> Result<i32> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .export_buffer_fd(handle)
+    }
+
+    /// Export a Linux fd for an image created with `create_exportable_image`.
+    pub fn export_image_fd(&self, handle: crate::ImageHandle) -> Result<i32> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .export_image_fd(handle)
+    }
+
+    /// Import a CPU host pointer as a zero-copy GPU buffer.
+    ///
+    /// The `ptr` must remain valid for the buffer's lifetime. Requires
+    /// `BackendFeatures::external_memory_host`. The pointer alignment must be at
+    /// least `VkPhysicalDeviceExternalMemoryHostPropertiesEXT::minImportedHostPointerAlignment`.
+    pub fn import_host_memory(
+        &self,
+        ptr: *const u8,
+        size: usize,
+        usage: crate::BufferUsage,
+    ) -> Result<crate::BufferHandle> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.backend.caps().features.external_memory_host {
+            return Err(Error::Unsupported(
+                "host memory import requires BackendFeatures::external_memory_host".into(),
+            ));
+        }
+        let desc = crate::BufferDesc { size: size as u64, usage };
+        let handle = crate::BufferHandle(inner.buffer_handles.alloc());
+        inner.backend.import_host_memory(handle, ptr, size)?;
+        inner.buffers.insert(handle, desc);
+        Ok(handle)
+    }
+
+    // ── GFX-5b: External semaphore exports ────────────────────────────────────
+
+    /// Create a binary semaphore with an exportable fd (`VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD`).
+    ///
+    /// Call `export_semaphore_fd` to get the fd. Requires `BackendFeatures::external_semaphore_fd`.
+    pub fn create_exportable_semaphore(&self) -> Result<crate::SemaphoreHandle> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.backend.caps().features.external_semaphore_fd {
+            return Err(Error::Unsupported(
+                "exportable semaphores require BackendFeatures::external_semaphore_fd".into(),
+            ));
+        }
+        let handle = crate::SemaphoreHandle(inner.indirect_command_layout_handles.alloc());
+        inner.backend.create_exportable_semaphore(handle)?;
+        Ok(handle)
+    }
+
+    /// Export a POSIX fd from an exportable semaphore. The caller must `close(fd)` when done.
+    pub fn export_semaphore_fd(&self, handle: crate::SemaphoreHandle) -> Result<i32> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner.lock().expect("device mutex poisoned").backend.export_semaphore_fd(handle)
+    }
+
+    /// Import a POSIX fd into an exportable semaphore handle for cross-process signaling.
+    pub fn import_semaphore_fd(&self, handle: crate::SemaphoreHandle, fd: i32) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner.lock().expect("device mutex poisoned").backend.import_semaphore_fd(handle, fd)
+    }
 
     pub fn set_reflex_mode(&self, mode: ReflexMode) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
@@ -1584,8 +1808,112 @@ impl Device {
             .shader_core_count
     }
 
+    /// List all cooperative matrix multiply-accumulate configurations supported by the GPU.
+    ///
+    /// Returns empty when `BackendFeatures::cooperative_matrix` is false.
+    pub fn enumerate_cooperative_matrix_properties(&self) -> Vec<crate::CoopMatrixProperty> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .enumerate_cooperative_matrix_properties()
+    }
+
+    /// List hardware performance counters available on this device.
+    ///
+    /// Requires `BackendFeatures::performance_query`. Returns empty when unavailable.
+    pub fn enumerate_performance_counters(&self) -> Vec<crate::PerfCounter> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .enumerate_performance_counters()
+    }
+
+    /// Return per-stage compiled shader statistics for a pipeline.
+    ///
+    /// Requires `BackendFeatures::pipeline_executable_properties`. Returns empty otherwise.
+    pub fn pipeline_executable_stats(
+        &self,
+        pipeline: crate::PipelineHandle,
+    ) -> Vec<crate::ExecutableStat> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .pipeline_executable_stats(pipeline)
+    }
+
+    /// Return per-stage compiled shader statistics for a pipeline via `VK_AMD_shader_info`.
+    ///
+    /// Returns register counts (VGPR/SGPR), LDS usage, and scratch memory per stage.
+    /// Requires `BackendFeatures::shader_info_amd`. Returns empty on other backends.
+    pub fn pipeline_shader_stats_amd(
+        &self,
+        pipeline: crate::PipelineHandle,
+    ) -> Vec<crate::AmdShaderStageStats> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .pipeline_shader_stats_amd(pipeline)
+    }
+
     /// Block the calling thread until the driver signals the optimal frame-start time.
     ///
+    // ── GFX-1c: Timeline semaphore cross-queue coordination ────────────────────
+
+    /// Create a timeline semaphore with the given initial value.
+    ///
+    /// Requires `BackendFeatures::timeline_semaphores`.
+    pub fn create_timeline_semaphore(&self, initial_value: u64) -> Result<crate::SemaphoreHandle> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .create_timeline_semaphore(initial_value)
+    }
+
+    /// Block until the timeline semaphore reaches `value` or the timeout (nanoseconds) expires.
+    pub fn wait_for_timeline(
+        &self,
+        semaphore: crate::SemaphoreHandle,
+        value: u64,
+        timeout_ns: u64,
+    ) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .wait_for_timeline(semaphore, value, timeout_ns)
+    }
+
+    /// Signal a timeline semaphore from the CPU to `value`.
+    pub fn signal_timeline(&self, semaphore: crate::SemaphoreHandle, value: u64) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .signal_timeline(semaphore, value)
+    }
+
+    /// Destroy a timeline semaphore.
+    pub fn destroy_timeline_semaphore(&self, semaphore: crate::SemaphoreHandle) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .destroy_timeline_semaphore(semaphore)
+    }
+
     /// Call once per frame on the render thread, before input sampling, when NVIDIA Reflex
     /// is active. Has no effect (returns `Ok(())`) when Reflex is unavailable.
     ///
@@ -2294,6 +2622,12 @@ impl Frame {
                     DeferredDestroy::PipelineLayout(h) => inner.backend.destroy_pipeline_layout(h),
                     DeferredDestroy::BindGroup(h) => inner.backend.destroy_bind_group(h),
                     DeferredDestroy::VideoSession(h) => inner.backend.destroy_video_session(h),
+                    DeferredDestroy::IndirectCommandLayout(h) => {
+                        inner.backend.destroy_indirect_command_layout(h)
+                    }
+                    DeferredDestroy::OpticalFlowSession(h) => {
+                        inner.backend.destroy_optical_flow_session(h)
+                    }
                     DeferredDestroy::ShaderObject(h) => inner.backend.destroy_shader_object(h),
                 };
             }
@@ -2553,6 +2887,7 @@ mod tests {
     #[test]
     fn blas_compaction_validation_requires_source_but_not_geometry() {
         let missing_src = validate_blas_build_desc(&BlasBuildDesc {
+            opacity_micromap: None,
             dst: AccelerationStructureHandle(1),
             src: None,
             scratch_buffer: None,
@@ -2563,6 +2898,7 @@ mod tests {
         assert!(format!("{missing_src}").contains("requires a source"));
 
         validate_blas_build_desc(&BlasBuildDesc {
+            opacity_micromap: None,
             dst: AccelerationStructureHandle(1),
             src: Some(AccelerationStructureHandle(2)),
             scratch_buffer: None,

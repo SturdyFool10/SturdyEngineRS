@@ -417,6 +417,41 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    // ── GFX-1c: Timeline semaphore cross-queue coordination ────────────────────
+
+    /// Create a timeline semaphore with the given initial value.
+    ///
+    /// Requires `BackendFeatures::timeline_semaphores`. Returns `Unsupported` when unavailable.
+    fn create_timeline_semaphore(&self, _initial_value: u64) -> Result<crate::SemaphoreHandle> {
+        Err(crate::Error::Unsupported(
+            "timeline semaphores require BackendFeatures::timeline_semaphores",
+        ))
+    }
+
+    /// Wait on a timeline semaphore until it reaches `value` or timeout (nanoseconds) expires.
+    fn wait_for_timeline(
+        &self,
+        _semaphore: crate::SemaphoreHandle,
+        _value: u64,
+        _timeout_ns: u64,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "timeline semaphores require BackendFeatures::timeline_semaphores",
+        ))
+    }
+
+    /// Signal a timeline semaphore from the CPU to `value`.
+    fn signal_timeline(&self, _semaphore: crate::SemaphoreHandle, _value: u64) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "timeline semaphores require BackendFeatures::timeline_semaphores",
+        ))
+    }
+
+    /// Destroy a timeline semaphore created by `create_timeline_semaphore`.
+    fn destroy_timeline_semaphore(&self, _semaphore: crate::SemaphoreHandle) -> Result<()> {
+        Ok(())
+    }
+
     /// Block the calling thread until the driver signals it is the optimal time to begin
     /// this frame's CPU work. Must be called once per frame, on the render thread, before
     /// input sampling. Returns `Ok(())` on backends that do not support latency sleep
@@ -461,6 +496,184 @@ pub trait Backend: Send + Sync {
     fn export_image_fd(&self, _handle: ImageHandle) -> Result<i32> {
         Err(crate::Error::Unsupported(
             "image fd export requires VK_KHR_external_memory_fd and an image created with external memory flags",
+        ))
+    }
+
+    /// Create a buffer with exportable memory (`VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT`).
+    ///
+    /// The returned handle can be passed to `export_buffer_fd()`. Requires
+    /// `BackendFeatures::external_memory_fd`.
+    fn create_exportable_buffer(
+        &self,
+        _handle: BufferHandle,
+        _desc: crate::BufferDesc,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "exportable buffers require VK_KHR_external_memory_fd",
+        ))
+    }
+
+    /// Create an image with exportable memory (`VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT`).
+    ///
+    /// The returned handle can be passed to `export_image_fd()`. Requires
+    /// `BackendFeatures::external_memory_fd`.
+    fn create_exportable_image(
+        &self,
+        _handle: ImageHandle,
+        _desc: crate::ImageDesc,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "exportable images require VK_KHR_external_memory_fd",
+        ))
+    }
+
+    /// Import a CPU host pointer as a zero-copy GPU buffer.
+    ///
+    /// Requires `BackendFeatures::external_memory_host`. The pointer must remain
+    /// valid for the lifetime of the returned buffer handle.
+    fn import_host_memory(
+        &self,
+        _handle: BufferHandle,
+        _ptr: *const u8,
+        _size: usize,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "host memory import requires VK_EXT_external_memory_host",
+        ))
+    }
+
+    // ── GFX-5b: External semaphore/fence exports ──────────────────────────────
+
+    /// Create a binary semaphore with an exportable fd handle.
+    ///
+    /// Requires `BackendFeatures::external_semaphore_fd`. Export the fd with
+    /// `export_semaphore_fd(handle)` and import it in another process/API.
+    fn create_exportable_semaphore(&self, _handle: crate::SemaphoreHandle) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "exportable semaphores require VK_KHR_external_semaphore_fd",
+        ))
+    }
+
+    /// Export a POSIX fd from a semaphore created with `create_exportable_semaphore`.
+    fn export_semaphore_fd(&self, _handle: crate::SemaphoreHandle) -> Result<i32> {
+        Err(crate::Error::Unsupported(
+            "semaphore fd export requires VK_KHR_external_semaphore_fd",
+        ))
+    }
+
+    /// Import a POSIX fd as a binary semaphore for cross-process/API synchronization.
+    fn import_semaphore_fd(&self, _handle: crate::SemaphoreHandle, _fd: i32) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "semaphore fd import requires VK_KHR_external_semaphore_fd",
+        ))
+    }
+
+    // ── GFX-6a: Device-generated commands ─────────────────────────────────────
+
+    fn create_indirect_command_layout(
+        &self,
+        _handle: crate::IndirectCommandLayoutHandle,
+        _desc: &crate::IndirectCommandLayoutDesc,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "device-generated commands require VK_EXT_device_generated_commands",
+        ))
+    }
+
+    fn destroy_indirect_command_layout(
+        &self,
+        _handle: crate::IndirectCommandLayoutHandle,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    // ── GFX-6c: Cooperative matrix ────────────────────────────────────────────
+
+    /// List all valid cooperative matrix multiply-accumulate configurations.
+    ///
+    /// Returns combinations of scope, element types (A, B, C, result), matrix
+    /// dimensions (M×N×K), and saturation flag. Empty when the extension is unavailable.
+    fn enumerate_cooperative_matrix_properties(&self) -> Vec<crate::CoopMatrixProperty> {
+        Vec::new()
+    }
+
+    // ── GFX-6e: Optical flow ─────────────────────────────────────────────────
+
+    fn create_optical_flow_session(
+        &self,
+        _handle: crate::OpticalFlowSessionHandle,
+        _desc: &crate::OpticalFlowSessionDesc,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "optical flow requires VK_NV_optical_flow",
+        ))
+    }
+
+    fn destroy_optical_flow_session(&self, _handle: crate::OpticalFlowSessionHandle) -> Result<()> {
+        Ok(())
+    }
+
+    // ── GFX-2j: Pipeline executable stats ────────────────────────────────────
+
+    /// Return per-stage register usage, code size, and IR stats for a compiled pipeline.
+    ///
+    /// Requires `BackendFeatures::pipeline_executable_properties`. Returns empty when unavailable.
+    fn pipeline_executable_stats(
+        &self,
+        _pipeline: crate::PipelineHandle,
+    ) -> Vec<crate::ExecutableStat> {
+        Vec::new()
+    }
+
+    /// Return per-stage compiled shader statistics for a pipeline via `VK_AMD_shader_info`.
+    ///
+    /// Requires `BackendFeatures::shader_info_amd`. Returns empty when unavailable.
+    fn pipeline_shader_stats_amd(
+        &self,
+        _pipeline: crate::PipelineHandle,
+    ) -> Vec<crate::AmdShaderStageStats> {
+        Vec::new()
+    }
+
+    /// List all hardware performance counters available on this device.
+    ///
+    /// Requires `BackendFeatures::performance_query`. Returns empty when unavailable.
+    fn enumerate_performance_counters(&self) -> Vec<crate::PerfCounter> {
+        Vec::new()
+    }
+
+    // ── GFX-1h: Host image copy ────────────────────────────────────────────────
+
+    /// Copy CPU memory directly into a GPU image without a staging buffer.
+    ///
+    /// Requires `BackendFeatures::host_image_copy` and unified/integrated memory.
+    /// Falls back to `Error::Unsupported` on discrete GPUs where the path is not viable.
+    ///
+    /// `data` must be the full mip level's texel data, tightly packed.
+    /// `mip` and `layer` select the target subresource.
+    fn copy_memory_to_image(
+        &self,
+        _handle: ImageHandle,
+        _mip: u32,
+        _layer: u32,
+        _data: &[u8],
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "host image copy requires VK_EXT_host_image_copy",
+        ))
+    }
+
+    /// Transition an image layout from the CPU side without a command buffer.
+    ///
+    /// Requires `BackendFeatures::host_image_copy`. Used to set the initial layout
+    /// after `copy_memory_to_image` without an explicit submit.
+    fn transition_image_layout_cpu(
+        &self,
+        _handle: ImageHandle,
+        _new_layout: crate::RgState,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "CPU-side layout transition requires VK_EXT_host_image_copy",
         ))
     }
 

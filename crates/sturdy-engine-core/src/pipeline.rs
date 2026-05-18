@@ -83,6 +83,9 @@ pub struct RasterState {
     /// Useful for shadow volume rendering and other techniques. Requires
     /// `BackendFeatures::extended_dynamic_state3` when set dynamically.
     pub depth_clamp: bool,
+    /// Discard all primitives before rasterization (e.g. for transform feedback without rendering).
+    /// Set dynamically via `cmd_set_rasterizer_discard_enable` when EDS3 is available.
+    pub rasterizer_discard: bool,
 }
 
 impl Default for RasterState {
@@ -92,6 +95,7 @@ impl Default for RasterState {
             front_face: FrontFace::CounterClockwise,
             polygon_mode: PolygonMode::Fill,
             depth_clamp: false,
+            rasterizer_discard: false,
         }
     }
 }
