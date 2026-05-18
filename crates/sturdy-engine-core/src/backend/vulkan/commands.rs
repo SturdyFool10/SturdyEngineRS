@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use ash::ext::mesh_shader;
+use ash::vk::TaggedStructure;
 use ash::{Device, vk};
 
 #[path = "commands/batch_pool.rs"]
@@ -90,8 +91,9 @@ impl CommandContext {
         device: &Device,
         queue_families: QueueFamilyMap,
         timestamp_period_ns: f32,
-        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
-        buffer_marker_amd: Option<&ash::amd::buffer_marker::Device>,
+        #[cfg_attr(not(debug_assertions), allow(unused_variables))] buffer_marker_amd: Option<
+            &ash::amd::buffer_marker::Device,
+        >,
         #[cfg_attr(not(debug_assertions), allow(unused_variables))]
         memory_properties: vk::PhysicalDeviceMemoryProperties,
         use_timeline_chains: bool,
@@ -118,7 +120,7 @@ impl CommandContext {
             let mut tl_info = vk::SemaphoreTypeCreateInfo::default()
                 .semaphore_type(vk::SemaphoreType::TIMELINE)
                 .initial_value(0);
-            let sem_info = vk::SemaphoreCreateInfo::default().push_next(&mut tl_info);
+            let sem_info = vk::SemaphoreCreateInfo::default().push(&mut tl_info);
             unsafe { device.create_semaphore(&sem_info, None).ok() }
         } else {
             None
@@ -143,8 +145,12 @@ impl CommandContext {
                         let mut mem_type = None;
                         for i in 0..memory_properties.memory_type_count {
                             if (req.memory_type_bits & (1 << i)) != 0 {
-                                let flags = memory_properties.memory_types[i as usize].property_flags;
-                                if flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT) {
+                                let flags =
+                                    memory_properties.memory_types[i as usize].property_flags;
+                                if flags.contains(
+                                    vk::MemoryPropertyFlags::HOST_VISIBLE
+                                        | vk::MemoryPropertyFlags::HOST_COHERENT,
+                                ) {
                                     mem_type = Some(i);
                                     break;
                                 }
@@ -156,11 +162,16 @@ impl CommandContext {
                             .memory_type_index(mt);
                         let memory = device.allocate_memory(&alloc_info, None).ok()?;
                         device.bind_buffer_memory(buf, memory, 0).ok()?;
-                        let ptr = device.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                        let ptr = device
+                            .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
                             .ok()? as *mut u32;
                         // Initialize to sentinel (0xFFFF_FFFF = no pass written).
                         ptr.write_bytes(0xFF, (buf_size / 4) as usize);
-                        Some(BreadcrumbBuffer { buffer: buf, memory, ptr })
+                        Some(BreadcrumbBuffer {
+                            buffer: buf,
+                            memory,
+                            ptr,
+                        })
                     })
                 };
                 maybe
@@ -220,7 +231,9 @@ impl CommandContext {
         optical_flow_nv: Option<&ash::nv::optical_flow::Device>,
         optical_flow_sessions: Option<&HashMap<OpticalFlowSessionHandle, vk::OpticalFlowSessionNV>>,
         dgc_nv: Option<&ash::nv::device_generated_commands::Device>,
-        indirect_command_layouts: Option<&HashMap<crate::IndirectCommandLayoutHandle, vk::IndirectCommandsLayoutNV>>,
+        indirect_command_layouts: Option<
+            &HashMap<crate::IndirectCommandLayoutHandle, vk::IndirectCommandsLayoutNV>,
+        >,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
     ) -> Result<SubmissionHandle> {
@@ -371,10 +384,9 @@ impl CommandContext {
                             }
                         }
                         #[cfg(debug_assertions)]
-                        if let (Some(bm), Some(bc)) = (
-                            self.buffer_marker_amd.as_ref(),
-                            self.breadcrumb.as_ref(),
-                        ) {
+                        if let (Some(bm), Some(bc)) =
+                            (self.buffer_marker_amd.as_ref(), self.breadcrumb.as_ref())
+                        {
                             unsafe {
                                 bm.cmd_write_buffer_marker(
                                     cmd,
@@ -477,10 +489,9 @@ impl CommandContext {
                             }
                         }
                         #[cfg(debug_assertions)]
-                        if let (Some(bm), Some(bc)) = (
-                            self.buffer_marker_amd.as_ref(),
-                            self.breadcrumb.as_ref(),
-                        ) {
+                        if let (Some(bm), Some(bc)) =
+                            (self.buffer_marker_amd.as_ref(), self.breadcrumb.as_ref())
+                        {
                             unsafe {
                                 bm.cmd_write_buffer_marker(
                                     cmd,
@@ -727,7 +738,9 @@ impl CommandContext {
         optical_flow_nv: Option<&ash::nv::optical_flow::Device>,
         optical_flow_sessions: Option<&HashMap<OpticalFlowSessionHandle, vk::OpticalFlowSessionNV>>,
         dgc_nv: Option<&ash::nv::device_generated_commands::Device>,
-        indirect_command_layouts: Option<&HashMap<crate::IndirectCommandLayoutHandle, vk::IndirectCommandsLayoutNV>>,
+        indirect_command_layouts: Option<
+            &HashMap<crate::IndirectCommandLayoutHandle, vk::IndirectCommandsLayoutNV>,
+        >,
     ) -> Result<()> {
         if let Some(predicate) = pass.predicate {
             let conditional_rendering = conditional_rendering.ok_or_else(|| {
@@ -783,7 +796,8 @@ impl CommandContext {
         // GFX-2d: Record rasterizer discard enable — core Vulkan 1.3 / VK_EXT_extended_dynamic_state.
         // RASTERIZER_DISCARD_ENABLE is always in the pipeline dynamic state list.
         if let Some(binding) = bound_binding.as_ref() {
-            if binding.bind_point == vk::PipelineBindPoint::GRAPHICS && !binding.uses_shader_objects {
+            if binding.bind_point == vk::PipelineBindPoint::GRAPHICS && !binding.uses_shader_objects
+            {
                 if let Some(state) = &binding.graphics_state {
                     unsafe {
                         device.cmd_set_rasterizer_discard_enable(
@@ -1916,9 +1930,7 @@ impl CommandContext {
                 let layouts = indirect_command_layouts.ok_or_else(|| {
                     Error::Unsupported("no indirect command layout registry available".into())
                 })?;
-                let layout = *layouts
-                    .get(&exec.layout)
-                    .ok_or(Error::InvalidHandle)?;
+                let layout = *layouts.get(&exec.layout).ok_or(Error::InvalidHandle)?;
                 let pipeline = exec
                     .state_pipeline
                     .map(|h| pipelines.pipeline(h).map(|p| p.pipeline))
@@ -1949,7 +1961,8 @@ impl CommandContext {
             PassWork::PreprocessGeneratedCommands(ref prep) => {
                 let dgc = dgc_nv.ok_or_else(|| {
                     Error::Unsupported(
-                        "PreprocessGeneratedCommands requires VK_NV_device_generated_commands".into(),
+                        "PreprocessGeneratedCommands requires VK_NV_device_generated_commands"
+                            .into(),
                     )
                 })?;
                 let layouts = indirect_command_layouts.ok_or_else(|| {
@@ -2136,16 +2149,22 @@ impl CommandContext {
                 }
                 // GFX-2a: attachment-tier VRS image.
                 let mut vrs_attachment_info;
-                if let (Some(vrs_handle), Some(fsr)) = (pass.shading_rate_image, fragment_shading_rate) {
+                if let (Some(vrs_handle), Some(fsr)) =
+                    (pass.shading_rate_image, fragment_shading_rate)
+                {
                     if let Ok(vrs_view) = resources.image_view(vrs_handle) {
                         vrs_attachment_info =
                             vk::RenderingFragmentShadingRateAttachmentInfoKHR::default()
                                 .image_view(vrs_view)
-                                .image_layout(vk::ImageLayout::FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR)
-                                .shading_rate_attachment_texel_size(vk::Extent2D { width: 16, height: 16 });
+                                .image_layout(
+                                    vk::ImageLayout::FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR,
+                                )
+                                .shading_rate_attachment_texel_size(vk::Extent2D {
+                                    width: 16,
+                                    height: 16,
+                                });
                         let _ = fsr; // extension loaded, chain into rendering info
-                        rendering_info =
-                            rendering_info.push_next(&mut vrs_attachment_info);
+                        rendering_info = rendering_info.push(&mut vrs_attachment_info);
                     }
                 }
 
@@ -2404,7 +2423,9 @@ fn access_mask(state: RgState) -> vk::AccessFlags {
         RgState::IndirectRead => vk::AccessFlags::INDIRECT_COMMAND_READ,
         RgState::AccelerationStructureBuild => vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR,
         RgState::AccelerationStructureRead => vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR,
-        RgState::ShadingRateAttachment => vk::AccessFlags::FRAGMENT_SHADING_RATE_ATTACHMENT_READ_KHR,
+        RgState::ShadingRateAttachment => {
+            vk::AccessFlags::FRAGMENT_SHADING_RATE_ATTACHMENT_READ_KHR
+        }
     }
 }
 
@@ -2505,7 +2526,9 @@ fn access_mask2(state: RgState) -> vk::AccessFlags2 {
         RgState::IndirectRead => vk::AccessFlags2::INDIRECT_COMMAND_READ,
         RgState::AccelerationStructureBuild => vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR,
         RgState::AccelerationStructureRead => vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR,
-        RgState::ShadingRateAttachment => vk::AccessFlags2::FRAGMENT_SHADING_RATE_ATTACHMENT_READ_KHR,
+        RgState::ShadingRateAttachment => {
+            vk::AccessFlags2::FRAGMENT_SHADING_RATE_ATTACHMENT_READ_KHR
+        }
     }
 }
 
@@ -3007,7 +3030,8 @@ fn record_shader_object_graphics_state(
         shader_object_ext.cmd_set_primitive_restart_enable(command_buffer, false);
         shader_object_ext.cmd_set_cull_mode(command_buffer, state.cull_mode);
         shader_object_ext.cmd_set_front_face(command_buffer, state.front_face);
-        shader_object_ext.cmd_set_rasterizer_discard_enable(command_buffer, state.rasterizer_discard);
+        shader_object_ext
+            .cmd_set_rasterizer_discard_enable(command_buffer, state.rasterizer_discard);
         shader_object_ext.cmd_set_depth_bias_enable(command_buffer, false);
         shader_object_ext.cmd_set_polygon_mode(command_buffer, state.polygon_mode);
         shader_object_ext.cmd_set_depth_clamp_enable(command_buffer, state.depth_clamp);
@@ -3408,7 +3432,9 @@ impl FramedCommands {
         optical_flow_nv: Option<&ash::nv::optical_flow::Device>,
         optical_flow_sessions: Option<&HashMap<OpticalFlowSessionHandle, vk::OpticalFlowSessionNV>>,
         dgc_nv: Option<&ash::nv::device_generated_commands::Device>,
-        indirect_command_layouts: Option<&HashMap<crate::IndirectCommandLayoutHandle, vk::IndirectCommandsLayoutNV>>,
+        indirect_command_layouts: Option<
+            &HashMap<crate::IndirectCommandLayoutHandle, vk::IndirectCommandsLayoutNV>,
+        >,
         wait_semaphore: Option<vk::Semaphore>,
         signal_semaphore: Option<vk::Semaphore>,
     ) -> Result<SubmissionHandle> {

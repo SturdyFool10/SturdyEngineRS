@@ -1,5 +1,6 @@
 use std::{collections::HashMap, ffi::c_void, sync::Mutex};
 
+use ash::vk::TaggedStructure;
 use ash::{Device, vk};
 use vk::Handle;
 
@@ -125,13 +126,13 @@ impl ResourceRegistry {
             &mut fixed_rate_flags,
         );
         if let Some(control) = compression_control.as_mut() {
-            info = info.push_next(control);
+            info = info.push(control);
         }
         let optical_flow_usage = vk_optical_flow_image_usage(desc.usage)?;
         let mut optical_flow_info =
             vk_optical_flow_image_info(optical_flow_usage, self.optical_flow_enabled, desc.usage)?;
         if let Some(info_ext) = optical_flow_info.as_mut() {
-            info = info.push_next(info_ext);
+            info = info.push(info_ext);
         }
 
         let image = unsafe {
@@ -145,7 +146,7 @@ impl ResourceRegistry {
             let mut dedicated_req = vk::MemoryDedicatedRequirementsKHR::default();
             let (mem_reqs, pref, req);
             {
-                let mut req2 = vk::MemoryRequirements2::default().push_next(&mut dedicated_req);
+                let mut req2 = vk::MemoryRequirements2::default().push(&mut dedicated_req);
                 let info2 = vk::ImageMemoryRequirementsInfo2::default().image(image);
                 unsafe { device.get_image_memory_requirements2(&info2, &mut req2) };
                 mem_reqs = req2.memory_requirements;
@@ -155,25 +156,31 @@ impl ResourceRegistry {
             let dedicated = pref || req || mem_reqs.size > 64 * 1024 * 1024;
             (mem_reqs, dedicated)
         } else {
-            (unsafe { device.get_image_memory_requirements(image) }, false)
+            (
+                unsafe { device.get_image_memory_requirements(image) },
+                false,
+            )
         };
 
         let allocation = if prefers_dedicated {
             // Allocate a dedicated VkDeviceMemory for this image (skip the sub-allocator pool).
             let memory_type = self
                 .allocator
-                .find_memory_type(requirements.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                .find_memory_type(
+                    requirements.memory_type_bits,
+                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                )
                 .unwrap_or(0);
             let mut dedicated_info = vk::MemoryDedicatedAllocateInfoKHR::default().image(image);
             let mut alloc_info = vk::MemoryAllocateInfo::default()
                 .allocation_size(requirements.size)
                 .memory_type_index(memory_type)
-                .push_next(&mut dedicated_info);
+                .push(&mut dedicated_info);
             // GFX-1e: chain priority for pageable memory if available.
             let mut priority_info;
             if self.allocator.memory_priority_enabled {
                 priority_info = vk::MemoryPriorityAllocateInfoEXT::default().priority(0.9);
-                alloc_info = alloc_info.push_next(&mut priority_info);
+                alloc_info = alloc_info.push(&mut priority_info);
             }
             let memory = unsafe {
                 device.allocate_memory(&alloc_info, None).map_err(|e| {
@@ -242,7 +249,7 @@ impl ResourceRegistry {
         if self.image_view_min_lod_enabled {
             if let Some(lod) = desc.min_lod() {
                 min_lod_info = min_lod_info.min_lod(lod);
-                view_info = view_info.push_next(&mut min_lod_info);
+                view_info = view_info.push(&mut min_lod_info);
             }
         }
         let view = unsafe {
@@ -310,13 +317,13 @@ impl ResourceRegistry {
             &mut fixed_rate_flags,
         );
         if let Some(control) = compression_control.as_mut() {
-            info = info.push_next(control);
+            info = info.push(control);
         }
         let optical_flow_usage = vk_optical_flow_image_usage(desc.usage)?;
         let mut optical_flow_info =
             vk_optical_flow_image_info(optical_flow_usage, self.optical_flow_enabled, desc.usage)?;
         if let Some(info_ext) = optical_flow_info.as_mut() {
-            info = info.push_next(info_ext);
+            info = info.push(info_ext);
         }
 
         let image = unsafe {

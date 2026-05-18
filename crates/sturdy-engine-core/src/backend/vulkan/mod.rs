@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 
 use ash::{Device as AshDevice, Entry, Instance, vk};
+use ash::vk::TaggedStructure;
 use std::sync::{Mutex, RwLock};
 use std::{fs, path::PathBuf};
 
@@ -282,7 +283,7 @@ impl VulkanBackend {
         // Pre-load buffer_marker_amd for breadcrumb buffer creation in CommandContext.
         #[cfg(debug_assertions)]
         let bm_amd_for_create = if caps.features.buffer_marker_amd {
-            Some(ash::amd::buffer_marker::Device::new(&instance, &logical.device))
+            Some(ash::amd::buffer_marker::Device::load(&instance, &logical.device))
         } else {
             None
         };
@@ -314,7 +315,7 @@ impl VulkanBackend {
             None
         };
         let mesh_shader_ext = if logical.mesh_shader_enabled {
-            Some(ash::ext::mesh_shader::Device::new(
+            Some(ash::ext::mesh_shader::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -322,7 +323,7 @@ impl VulkanBackend {
             None
         };
         let synchronization2_khr = if logical.synchronization2_enabled {
-            Some(ash::khr::synchronization2::Device::new(
+            Some(ash::khr::synchronization2::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -330,7 +331,7 @@ impl VulkanBackend {
             None
         };
         let dynamic_rendering_khr = if logical.dynamic_rendering_enabled {
-            Some(ash::khr::dynamic_rendering::Device::new(
+            Some(ash::khr::dynamic_rendering::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -338,7 +339,7 @@ impl VulkanBackend {
             None
         };
         let device_fault_ext = if caps.features.device_fault {
-            Some(ash::ext::device_fault::Device::new(
+            Some(ash::ext::device_fault::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -347,7 +348,7 @@ impl VulkanBackend {
         };
         #[cfg(debug_assertions)]
         let diagnostic_checkpoints_nv = if caps.features.device_diagnostic_checkpoints_nv {
-            Some(ash::nv::device_diagnostic_checkpoints::Device::new(
+            Some(ash::nv::device_diagnostic_checkpoints::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -360,7 +361,7 @@ impl VulkanBackend {
         > = None;
         #[cfg(debug_assertions)]
         let buffer_marker_amd = if caps.features.buffer_marker_amd {
-            Some(ash::amd::buffer_marker::Device::new(
+            Some(ash::amd::buffer_marker::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -370,7 +371,7 @@ impl VulkanBackend {
         #[cfg(not(debug_assertions))]
         let buffer_marker_amd: Option<ash::amd::buffer_marker::Device> = None;
         let push_descriptor_khr = if logical.push_descriptors_enabled {
-            Some(ash::khr::push_descriptor::Device::new(
+            Some(ash::khr::push_descriptor::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -378,7 +379,7 @@ impl VulkanBackend {
             None
         };
         let conditional_rendering_ext = if logical.conditional_rendering_enabled {
-            Some(ash::ext::conditional_rendering::Device::new(
+            Some(ash::ext::conditional_rendering::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -389,7 +390,7 @@ impl VulkanBackend {
             || logical.vrs_primitive_enabled
             || logical.vrs_attachment_enabled
         {
-            Some(ash::khr::fragment_shading_rate::Device::new(
+            Some(ash::khr::fragment_shading_rate::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -398,7 +399,7 @@ impl VulkanBackend {
         };
         let conservative_rasterization_enabled = logical.conservative_rasterization_enabled;
         let acceleration_structure_khr = if logical.acceleration_structure_enabled {
-            Some(ash::khr::acceleration_structure::Device::new(
+            Some(ash::khr::acceleration_structure::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -406,7 +407,7 @@ impl VulkanBackend {
             None
         };
         let ray_tracing_pipeline_khr = if logical.ray_tracing_pipeline_enabled {
-            Some(ash::khr::ray_tracing_pipeline::Device::new(
+            Some(ash::khr::ray_tracing_pipeline::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -417,7 +418,7 @@ impl VulkanBackend {
             .ray_tracing_pipeline_enabled
             .then(|| query_ray_tracing_sbt_properties(&instance, selection.physical_device));
         let reflex_nv = if caps.features.reflex {
-            Some(ash::nv::low_latency2::Device::new(
+            Some(ash::nv::low_latency2::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -431,13 +432,13 @@ impl VulkanBackend {
             let mut timeline_info = ash::vk::SemaphoreTypeCreateInfo::default()
                 .semaphore_type(ash::vk::SemaphoreType::TIMELINE)
                 .initial_value(0);
-            let sem_info = ash::vk::SemaphoreCreateInfo::default().push_next(&mut timeline_info);
+            let sem_info = ash::vk::SemaphoreCreateInfo::default().push(&mut timeline_info);
             unsafe { logical.device.create_semaphore(&sem_info, None).ok() }
         } else {
             None
         };
         let hdr_metadata_ext = if caps.features.hdr_output {
-            Some(ash::ext::hdr_metadata::Device::new(
+            Some(ash::ext::hdr_metadata::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -445,7 +446,7 @@ impl VulkanBackend {
             None
         };
         let extended_dynamic_state3_ext = if logical.extended_dynamic_state3_enabled {
-            Some(ash::ext::extended_dynamic_state3::Device::new(
+            Some(ash::ext::extended_dynamic_state3::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -453,7 +454,7 @@ impl VulkanBackend {
             None
         };
         let vertex_input_dynamic_state_ext = if logical.vertex_input_dynamic_state_enabled {
-            Some(ash::ext::vertex_input_dynamic_state::Device::new(
+            Some(ash::ext::vertex_input_dynamic_state::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -461,7 +462,7 @@ impl VulkanBackend {
             None
         };
         let shader_object_ext = if logical.shader_object_enabled {
-            Some(ash::ext::shader_object::Device::new(
+            Some(ash::ext::shader_object::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -469,7 +470,7 @@ impl VulkanBackend {
             None
         };
         let device_generated_commands_nv = if caps.features.device_generated_commands_nv {
-            Some(ash::nv::device_generated_commands::Device::new(
+            Some(ash::nv::device_generated_commands::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -477,7 +478,7 @@ impl VulkanBackend {
             None
         };
         let optical_flow_nv_ext = if caps.features.optical_flow_nv {
-            Some(ash::nv::optical_flow::Device::new(
+            Some(ash::nv::optical_flow::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -485,7 +486,7 @@ impl VulkanBackend {
             None
         };
         let host_image_copy_ext = if caps.features.host_image_copy {
-            Some(ash::ext::host_image_copy::Device::new(
+            Some(ash::ext::host_image_copy::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -493,7 +494,7 @@ impl VulkanBackend {
             None
         };
         let ray_tracing_maintenance1_khr = if caps.features.ray_tracing_maintenance1 {
-            Some(ash::khr::ray_tracing_maintenance1::Device::new(
+            Some(ash::khr::ray_tracing_maintenance1::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -502,7 +503,7 @@ impl VulkanBackend {
         };
         // Video queue extension — loaded for backend-owned video session creation.
         let video_queue_khr = if video_queue_enabled {
-            Some(ash::khr::video_queue::Device::new(
+            Some(ash::khr::video_queue::Device::load(
                 &instance,
                 &logical.device,
             ))
@@ -511,7 +512,7 @@ impl VulkanBackend {
         };
         let pageable_memory_ext =
             if caps.features.pageable_device_local_memory && caps.features.memory_priority {
-                Some(ash::ext::pageable_device_local_memory::Device::new(
+                Some(ash::ext::pageable_device_local_memory::Device::load(
                     &instance,
                     &logical.device,
                 ))
@@ -519,17 +520,17 @@ impl VulkanBackend {
                 None
             };
         let external_memory_fd_khr = if caps.features.external_memory_fd {
-            Some(ash::khr::external_memory_fd::Device::new(&instance, &logical.device))
+            Some(ash::khr::external_memory_fd::Device::load(&instance, &logical.device))
         } else {
             None
         };
         let external_memory_host_ext = if caps.features.external_memory_host {
-            Some(ash::ext::external_memory_host::Device::new(&instance, &logical.device))
+            Some(ash::ext::external_memory_host::Device::load(&instance, &logical.device))
         } else {
             None
         };
         let external_semaphore_fd_khr = if caps.features.external_semaphore_fd {
-            Some(ash::khr::external_semaphore_fd::Device::new(&instance, &logical.device))
+            Some(ash::khr::external_semaphore_fd::Device::load(&instance, &logical.device))
         } else {
             None
         };
@@ -723,7 +724,7 @@ impl Backend for VulkanBackend {
         let memory_heaps;
         {
             let mut props2 =
-                ash::vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget_props);
+                ash::vk::PhysicalDeviceMemoryProperties2::default().push(&mut budget_props);
             unsafe {
                 self.instance
                     .get_physical_device_memory_properties2(self.physical_device, &mut props2);
@@ -761,7 +762,7 @@ impl Backend for VulkanBackend {
         if !self.caps.features.performance_query {
             return Vec::new();
         }
-        let perf_khr = ash::khr::performance_query::Instance::new(&self._entry, &self.instance);
+        let perf_khr = ash::khr::performance_query::Instance::load(&self._entry, &self.instance);
         // Query the graphics queue family — it exposes the widest set of counters.
         let queue_family_index = self.queue_families.graphics;
         // First, get the count.
@@ -826,11 +827,19 @@ impl Backend for VulkanBackend {
         if !self.caps.features.cooperative_matrix {
             return Vec::new();
         }
-        let coop_khr = ash::khr::cooperative_matrix::Instance::new(&self._entry, &self.instance);
+        let coop_khr = ash::khr::cooperative_matrix::Instance::load(&self._entry, &self.instance);
         let props = unsafe {
-            coop_khr
-                .get_physical_device_cooperative_matrix_properties(self.physical_device)
-                .unwrap_or_default()
+            let count = coop_khr
+                .get_physical_device_cooperative_matrix_properties_len(self.physical_device)
+                .unwrap_or(0);
+            let mut out = vec![ash::vk::CooperativeMatrixPropertiesKHR::default(); count];
+            if count > 0 {
+                let _ = coop_khr.get_physical_device_cooperative_matrix_properties(
+                    self.physical_device,
+                    &mut out,
+                );
+            }
+            out
         };
         props
             .into_iter()
@@ -871,11 +880,17 @@ impl Backend for VulkanBackend {
         };
         let pipeline_info = ash::vk::PipelineInfoKHR::default().pipeline(vk_pipeline);
         let pipeline_exe_ext =
-            ash::khr::pipeline_executable_properties::Device::new(&self.instance, &self.device);
+            ash::khr::pipeline_executable_properties::Device::load(&self.instance, &self.device);
         let executables = unsafe {
-            pipeline_exe_ext
-                .get_pipeline_executable_properties(&pipeline_info)
-                .unwrap_or_default()
+            let count = pipeline_exe_ext
+                .get_pipeline_executable_properties_len(&pipeline_info)
+                .unwrap_or(0);
+            let mut out = vec![ash::vk::PipelineExecutablePropertiesKHR::default(); count];
+            if count > 0 {
+                let _ = pipeline_exe_ext
+                    .get_pipeline_executable_properties(&pipeline_info, &mut out);
+            }
+            out
         };
         let mut stats = Vec::new();
         for (idx, _exe) in executables.iter().enumerate() {
@@ -883,9 +898,15 @@ impl Backend for VulkanBackend {
                 .pipeline(vk_pipeline)
                 .executable_index(idx as u32);
             let raw_stats = unsafe {
-                pipeline_exe_ext
-                    .get_pipeline_executable_statistics(&exe_info)
-                    .unwrap_or_default()
+                let count = pipeline_exe_ext
+                    .get_pipeline_executable_statistics_len(&exe_info)
+                    .unwrap_or(0);
+                let mut out = vec![ash::vk::PipelineExecutableStatisticKHR::default(); count];
+                if count > 0 {
+                    let _ = pipeline_exe_ext
+                        .get_pipeline_executable_statistics(&exe_info, &mut out);
+                }
+                out
             };
             for s in raw_stats {
                 let name = s
@@ -945,7 +966,7 @@ impl Backend for VulkanBackend {
             Ok(p) => p,
             Err(_) => return Vec::new(),
         };
-        let shader_info = ash::amd::shader_info::Device::new(&self.instance, &self.device);
+        let shader_info = ash::amd::shader_info::Device::load(&self.instance, &self.device);
         // Query all standard graphics and compute stages.
         let stages = [
             ash::vk::ShaderStageFlags::VERTEX,
@@ -2219,7 +2240,7 @@ impl Backend for VulkanBackend {
         let mut timeline_info = ash::vk::SemaphoreTypeCreateInfo::default()
             .semaphore_type(ash::vk::SemaphoreType::TIMELINE)
             .initial_value(initial_value);
-        let sem_info = ash::vk::SemaphoreCreateInfo::default().push_next(&mut timeline_info);
+        let sem_info = ash::vk::SemaphoreCreateInfo::default().push(&mut timeline_info);
         let semaphore = unsafe {
             self.device.create_semaphore(&sem_info, None)
                 .map_err(|e| Error::Backend(format!("vkCreateSemaphore (timeline) failed: {e:?}")))?
@@ -2306,7 +2327,7 @@ impl Backend for VulkanBackend {
             .size(desc.size)
             .usage(ash::vk::BufferUsageFlags::STORAGE_BUFFER | ash::vk::BufferUsageFlags::TRANSFER_SRC | ash::vk::BufferUsageFlags::TRANSFER_DST)
             .sharing_mode(ash::vk::SharingMode::EXCLUSIVE)
-            .push_next(&mut ext_buf_info);
+            .push(&mut ext_buf_info);
         let buffer = unsafe {
             self.device.create_buffer(&buf_info, None)
                 .map_err(|e| Error::Backend(format!("vkCreateBuffer (exportable) failed: {e:?}")))?
@@ -2318,7 +2339,7 @@ impl Backend for VulkanBackend {
         let alloc_info = ash::vk::MemoryAllocateInfo::default()
             .allocation_size(req.size)
             .memory_type_index(memory_type)
-            .push_next(&mut export_info);
+            .push(&mut export_info);
         let memory = unsafe {
             self.device.allocate_memory(&alloc_info, None)
                 .map_err(|e| { self.device.destroy_buffer(buffer, None); Error::Backend(format!("vkAllocateMemory (exportable buffer) failed: {e:?}")) })?
@@ -2357,7 +2378,7 @@ impl Backend for VulkanBackend {
             .tiling(ash::vk::ImageTiling::OPTIMAL)
             .usage(ash::vk::ImageUsageFlags::SAMPLED | ash::vk::ImageUsageFlags::TRANSFER_SRC | ash::vk::ImageUsageFlags::TRANSFER_DST)
             .sharing_mode(ash::vk::SharingMode::EXCLUSIVE)
-            .push_next(&mut ext_img_info);
+            .push(&mut ext_img_info);
         let image = unsafe {
             self.device.create_image(&img_info, None)
                 .map_err(|e| Error::Backend(format!("vkCreateImage (exportable) failed: {e:?}")))?
@@ -2370,8 +2391,8 @@ impl Backend for VulkanBackend {
         let alloc_info = ash::vk::MemoryAllocateInfo::default()
             .allocation_size(req.size)
             .memory_type_index(memory_type)
-            .push_next(&mut export_info)
-            .push_next(&mut dedicated_info);
+            .push(&mut export_info)
+            .push(&mut dedicated_info);
         let memory = unsafe {
             self.device.allocate_memory(&alloc_info, None)
                 .map_err(|e| { self.device.destroy_image(image, None); Error::Backend(format!("vkAllocateMemory (exportable image) failed: {e:?}")) })?
@@ -2429,7 +2450,7 @@ impl Backend for VulkanBackend {
         })?;
         let mut export_info = ash::vk::ExportSemaphoreCreateInfo::default()
             .handle_types(ash::vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
-        let sem_info = ash::vk::SemaphoreCreateInfo::default().push_next(&mut export_info);
+        let sem_info = ash::vk::SemaphoreCreateInfo::default().push(&mut export_info);
         let semaphore = unsafe {
             self.device.create_semaphore(&sem_info, None)
                 .map_err(|e| Error::Backend(format!("vkCreateSemaphore (exportable) failed: {e:?}")))?
@@ -2960,7 +2981,7 @@ fn query_ray_tracing_sbt_properties(
     physical_device: vk::PhysicalDevice,
 ) -> ShaderBindingTableProperties {
     let mut rt_props = vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
-    let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut rt_props);
+    let mut props2 = vk::PhysicalDeviceProperties2::default().push(&mut rt_props);
     unsafe {
         instance.get_physical_device_properties2(physical_device, &mut props2);
     }

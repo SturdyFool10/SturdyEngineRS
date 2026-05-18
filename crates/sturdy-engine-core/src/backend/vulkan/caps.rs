@@ -1,6 +1,7 @@
 use std::ffi::CStr;
 
 use ash::{Instance, vk};
+use ash::vk::TaggedStructure;
 
 use crate::{BackendFeatures, Caps, Format, FormatCapabilities, Limits};
 
@@ -766,28 +767,28 @@ pub fn available_feature_chain(
         optical_flow: vk::PhysicalDeviceOpticalFlowFeaturesNV::default(),
     };
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
-        .push_next(&mut chain.descriptor_indexing)
-        .push_next(&mut chain.timeline)
-        .push_next(&mut chain.dynamic_rendering)
-        .push_next(&mut chain.synchronization2)
-        .push_next(&mut chain.buffer_device_address)
-        .push_next(&mut chain.shader_float16_int8)
-        .push_next(&mut chain.mesh_shader)
-        .push_next(&mut chain.acceleration_structure)
-        .push_next(&mut chain.ray_tracing)
-        .push_next(&mut chain.ray_query)
-        .push_next(&mut chain.ray_tracing_position_fetch)
-        .push_next(&mut chain.fragment_shading_rate)
-        .push_next(&mut chain.memory_priority)
-        .push_next(&mut chain.conditional_rendering)
-        .push_next(&mut chain.extended_dynamic_state3)
-        .push_next(&mut chain.vertex_input_dynamic_state)
-        .push_next(&mut chain.custom_border_color)
-        .push_next(&mut chain.image_view_min_lod)
-        .push_next(&mut chain.image_compression_control)
-        .push_next(&mut chain.msaa_render_to_single_sampled)
-        .push_next(&mut chain.shader_object)
-        .push_next(&mut chain.optical_flow);
+        .push(&mut chain.descriptor_indexing)
+        .push(&mut chain.timeline)
+        .push(&mut chain.dynamic_rendering)
+        .push(&mut chain.synchronization2)
+        .push(&mut chain.buffer_device_address)
+        .push(&mut chain.shader_float16_int8)
+        .push(&mut chain.mesh_shader)
+        .push(&mut chain.acceleration_structure)
+        .push(&mut chain.ray_tracing)
+        .push(&mut chain.ray_query)
+        .push(&mut chain.ray_tracing_position_fetch)
+        .push(&mut chain.fragment_shading_rate)
+        .push(&mut chain.memory_priority)
+        .push(&mut chain.conditional_rendering)
+        .push(&mut chain.extended_dynamic_state3)
+        .push(&mut chain.vertex_input_dynamic_state)
+        .push(&mut chain.custom_border_color)
+        .push(&mut chain.image_view_min_lod)
+        .push(&mut chain.image_compression_control)
+        .push(&mut chain.msaa_render_to_single_sampled)
+        .push(&mut chain.shader_object)
+        .push(&mut chain.optical_flow);
     unsafe { instance.get_physical_device_features2(physical_device, &mut features2) };
     chain
 }
@@ -918,7 +919,7 @@ fn conservative_rasterization_properties(
     physical_device: vk::PhysicalDevice,
 ) -> vk::PhysicalDeviceConservativeRasterizationPropertiesEXT<'static> {
     let mut properties = vk::PhysicalDeviceConservativeRasterizationPropertiesEXT::default();
-    let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut properties);
+    let mut properties2 = vk::PhysicalDeviceProperties2::default().push(&mut properties);
     unsafe {
         instance.get_physical_device_properties2(physical_device, &mut properties2);
     }
@@ -937,7 +938,7 @@ pub(crate) fn query_shader_core_count(
 ) -> Option<u32> {
     if has_amd_shader_core_properties {
         let mut props = vk::PhysicalDeviceShaderCorePropertiesAMD::default();
-        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut props);
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push(&mut props);
         unsafe { instance.get_physical_device_properties2(physical_device, &mut props2) };
         let total = props.shader_engine_count
             * props.shader_arrays_per_engine_count
@@ -946,7 +947,7 @@ pub(crate) fn query_shader_core_count(
     }
     if has_nv_shader_sm_builtins {
         let mut props = vk::PhysicalDeviceShaderSMBuiltinsPropertiesNV::default();
-        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut props);
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push(&mut props);
         unsafe { instance.get_physical_device_properties2(physical_device, &mut props2) };
         return Some(props.shader_sm_count);
     }

@@ -12,6 +12,12 @@ members = [
 ]
 resolver = "3"
 
+[patch.crates-io]
+# Use ash from git to access extensions not yet published (e.g. VK_EXT_descriptor_heap).
+# ash-window lives in the same repo and must track ash exactly.
+ash = { git = "https://github.com/ash-rs/ash" }
+ash-window = { git = "https://github.com/ash-rs/ash" }
+
 [workspace.package]
 edition = "2024"
 license = "MIT OR Apache-2.0"

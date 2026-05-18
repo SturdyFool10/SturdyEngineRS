@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_void};
 
 use ash::{Device as AshDevice, Instance, vk};
+use ash::vk::TaggedStructure;
 
 use crate::{AdapterSelection, Error, Result};
 
@@ -262,7 +263,7 @@ pub fn create_logical_device(
         memory_report_info = vk::DeviceDeviceMemoryReportCreateInfoEXT::default()
             .pfn_user_callback(Some(device_memory_report_callback))
             .user_data(std::ptr::null_mut());
-        device_info = device_info.push_next(&mut memory_report_info);
+        device_info = device_info.push(&mut memory_report_info);
     }
     // GFX-1g: Enable address binding report feature when extension is available.
     let mut address_binding_report_features;
@@ -274,7 +275,7 @@ pub fn create_logical_device(
         address_binding_report_features =
             vk::PhysicalDeviceAddressBindingReportFeaturesEXT::default()
                 .report_address_binding(true);
-        device_info = device_info.push_next(&mut address_binding_report_features);
+        device_info = device_info.push(&mut address_binding_report_features);
     }
 
     let device = unsafe {
@@ -532,7 +533,7 @@ impl FeatureRequest<'static> {
 
     fn apply_to<'a>(&'a mut self, info: vk::DeviceCreateInfo<'a>) -> vk::DeviceCreateInfo<'a> {
         if self.use_feature_chain {
-            info.push_next(&mut self.features2)
+            info.push(&mut self.features2)
         } else {
             info.enabled_features(&self.features2.features)
         }

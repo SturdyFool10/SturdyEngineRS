@@ -55,7 +55,7 @@ impl AddressBindingMessenger {
         }
         #[cfg(debug_assertions)]
         {
-            let loader = ext::debug_utils::Instance::new(entry, instance);
+            let loader = ext::debug_utils::Instance::load(entry, instance);
             let create_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
                 .message_severity(
                     vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE
@@ -85,7 +85,7 @@ pub struct DebugUtils {
 
 impl DebugUtils {
     pub fn new(instance: &ash::Instance, device: &ash::Device) -> Self {
-        let loader = ext::debug_utils::Device::new(instance, device);
+        let loader = ext::debug_utils::Device::load(instance, device);
         Self {
             loader: Some(loader),
         }

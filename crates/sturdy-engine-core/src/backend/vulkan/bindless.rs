@@ -8,6 +8,8 @@
 // # Vulkan requirements
 //
 // The heap requires these descriptor_indexing features (detected and enabled by
+
+use ash::vk::TaggedStructure;
 // the device creation code):
 //   - runtimeDescriptorArray         — unbounded [] arrays in shaders
 //   - descriptorBindingPartiallyBound — allocated but unwritten slots are ok
@@ -146,7 +148,7 @@ impl BindlessHeap {
             // UPDATE_AFTER_BIND_POOL: the pool must have the matching flag
             .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
             .bindings(&bindings)
-            .push_next(&mut binding_flags_info);
+            .push(&mut binding_flags_info);
 
         let set_layout = unsafe {
             device

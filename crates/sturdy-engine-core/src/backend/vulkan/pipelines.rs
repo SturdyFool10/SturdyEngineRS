@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 
 use ash::{Device, vk};
+use ash::vk::TaggedStructure;
 
 use crate::{
     ComputePipelineDesc, ConservativeRasterMode, CullMode, Error, FrontFace, GraphicsPipelineDesc,
@@ -538,7 +539,7 @@ impl PipelineRegistry {
             .rasterizer_discard_enable(desc.raster.rasterizer_discard)
             .line_width(1.0);
         if let Some(_mode) = conservative_mode {
-            rasterization = rasterization.push_next(&mut conservative_rasterization);
+            rasterization = rasterization.push(&mut conservative_rasterization);
         }
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk_samples(desc.samples)?);
@@ -621,7 +622,7 @@ impl PipelineRegistry {
 
         let mut info = base_info;
         if render_pass == vk::RenderPass::null() {
-            info = info.push_next(&mut pipeline_rendering_info);
+            info = info.push(&mut pipeline_rendering_info);
         }
 
         let pipeline = unsafe {

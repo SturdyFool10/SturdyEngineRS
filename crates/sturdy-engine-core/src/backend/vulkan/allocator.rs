@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use ash::{Device, vk};
+use ash::vk::TaggedStructure;
 
 use crate::{Error, Result};
 
@@ -234,7 +235,7 @@ impl TypePool {
         let mut priority_info;
         if let Some(p) = priority {
             priority_info = vk::MemoryPriorityAllocateInfoEXT::default().priority(p);
-            alloc_info = alloc_info.push_next(&mut priority_info);
+            alloc_info = alloc_info.push(&mut priority_info);
         }
         let alloc_info = alloc_info;
         let memory = unsafe {

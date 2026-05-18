@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use ash::vk::TaggedStructure;
 use ash::{Device, Entry, Instance, khr, vk};
 
 use crate::{
@@ -70,17 +71,13 @@ impl SurfaceRegistry {
         use_timeline: bool,
     ) -> Result<SurfaceInfo> {
         let surface = unsafe {
-            ash_window::create_surface(
-                entry,
-                instance,
-                desc.display_handle,
-                desc.window_handle,
-                None,
-            )
-            .map_err(|error| Error::Backend(format!("vkCreateSurfaceKHR failed: {error:?}")))?
+            ash_window::SurfaceFactory::new(entry, instance, desc.display_handle)
+                .map_err(|error| Error::Backend(format!("vkCreateSurfaceKHR (factory) failed: {error:?}")))?
+                .create_surface(desc.window_handle, None)
+                .map_err(|error| Error::Backend(format!("vkCreateSurfaceKHR failed: {error:?}")))?
         };
-        let surface_loader = khr::surface::Instance::new(entry, instance);
-        let swapchain_loader = khr::swapchain::Device::new(instance, device);
+        let surface_loader = khr::surface::Instance::load(entry, instance);
+        let swapchain_loader = khr::swapchain::Device::load(instance, device);
 
         let sem_info = vk::SemaphoreCreateInfo::default();
         let image_available = unsafe {
@@ -523,7 +520,7 @@ fn create_swapchain(
         .old_swapchain(old_swapchain);
     // GFX-2k: Chain compression control when VK_EXT_image_compression_control_swapchain is active.
     if let Some(ctrl) = compression_control {
-        create_info = create_info.push_next(ctrl);
+        create_info = create_info.push(ctrl);
     }
     let swapchain = unsafe {
         swapchain_loader
@@ -572,7 +569,7 @@ fn create_swapchain(
         let mut type_info = vk::SemaphoreTypeCreateInfo::default()
             .semaphore_type(vk::SemaphoreType::TIMELINE)
             .initial_value(0);
-        let sem_info = vk::SemaphoreCreateInfo::default().push_next(&mut type_info);
+        let sem_info = vk::SemaphoreCreateInfo::default().push(&mut type_info);
         let semaphore = unsafe {
             match device.create_semaphore(&sem_info, None) {
                 Ok(s) => s,
