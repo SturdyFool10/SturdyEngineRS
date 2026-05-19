@@ -1,13 +1,13 @@
 use glam::Mat4;
 
 use super::scene::Scene;
-use crate::{ComputeProgram, Engine, Frustum, GeometryBackend, RenderFrame, Result};
+use crate::{ComputeProgram, Engine, Frustum, GeometryBackend, RenderFrame, RenderWorld, Result};
 
 impl Scene {
     /// Dispatch the GPU frustum culling compute shader for all batches.
     ///
-    /// Call this once per frame **after** `scene.prepare()` and **before** the
-    /// draw pass. Only active when `geometry_backend == ComputeIndirect`.
+    /// Call this once per frame **after** `scene.prepare_render_world()` and
+    /// **before** the draw pass. Only active when `geometry_backend == ComputeIndirect`.
     ///
     /// The compute shader writes one `DrawIndexedIndirectCommand` per instance
     /// slot: visible instances get `instance_count = 1`, invisible ones get
@@ -18,6 +18,7 @@ impl Scene {
         view_proj: Mat4,
         frame: &RenderFrame,
         engine: &Engine,
+        render_world: &RenderWorld,
     ) -> Result<()> {
         if self.geometry_backend != GeometryBackend::ComputeIndirect {
             return Ok(());
@@ -45,11 +46,6 @@ impl Scene {
             ]
         };
 
-        let scene_buf = match &self.gpu_scene_buffer {
-            Some(b) => b,
-            None => return Ok(()),
-        };
-
         #[repr(C)]
         #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
         struct CullConstants {
@@ -62,48 +58,59 @@ impl Scene {
             _pad: u32,
         }
 
-        for batch in self.batches.values() {
-            let total = batch.scene_count;
-            if total == 0 {
-                continue;
-            }
-
-            let indirect_buf = match &batch.indirect_gpu_buffer {
-                Some(b) => b,
-                None => continue,
+        let dispatched = render_world.with_gpu_scene_buffer(|scene_buf| -> Result<bool> {
+            let Some(scene_buf) = scene_buf else {
+                return Ok(false);
             };
-            let mesh_idx = batch.mesh_idx as usize;
-            let mesh = &self.meshes[mesh_idx].0;
+            render_world.with_gpu_indirect_buffer(|indirect_buf| -> Result<bool> {
+                let Some(indirect_buf) = indirect_buf else {
+                    return Ok(false);
+                };
 
-            let index_count = if mesh.is_indexed() {
-                mesh.index_count
-            } else {
-                mesh.vertex_count
-            };
+                let mut dispatched = false;
+                for batch in self.batches.values() {
+                    let total = batch.scene_count;
+                    if total == 0 {
+                        continue;
+                    }
 
-            let constants = CullConstants {
-                frustum_planes: planes,
-                instance_count: total,
-                batch_base_idx: batch.scene_base_idx,
-                index_count,
-                first_index: 0,
-                vertex_offset: 0,
-                _pad: 0,
-            };
+                    let mesh_idx = batch.mesh_idx as usize;
+                    let mesh = &self.meshes[mesh_idx].0;
 
-            frame.bind_buffer("scene_instances", scene_buf);
-            frame.bind_buffer("indirect_commands", indirect_buf);
+                    let index_count = if mesh.is_indexed() {
+                        mesh.index_count
+                    } else {
+                        mesh.vertex_count
+                    };
 
-            let groups = [(total + 63) / 64, 1, 1];
-            frame.dispatch_compute_auto(
-                format!("cull-batch-{mesh_idx}"),
-                program,
-                &constants,
-                groups,
-            )?;
-        }
+                    let constants = CullConstants {
+                        frustum_planes: planes,
+                        instance_count: total,
+                        batch_base_idx: batch.scene_base_idx,
+                        index_count,
+                        first_index: 0,
+                        vertex_offset: 0,
+                        _pad: 0,
+                    };
 
-        self.gpu_cull_active = true;
+                    frame.bind_buffer("scene_instances", scene_buf);
+                    frame.bind_buffer("indirect_commands", indirect_buf);
+
+                    let groups = [(total + 63) / 64, 1, 1];
+                    frame.dispatch_compute_auto(
+                        format!("cull-batch-{mesh_idx}"),
+                        program,
+                        &constants,
+                        groups,
+                    )?;
+                    dispatched = true;
+                }
+
+                Ok(dispatched)
+            })
+        })?;
+
+        self.gpu_cull_active = dispatched;
         Ok(())
     }
 }

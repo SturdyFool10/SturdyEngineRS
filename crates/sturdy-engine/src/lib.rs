@@ -189,8 +189,9 @@ pub use quad_batch::QuadBatch;
 pub use render_world::{
     Aabb, GpuObjectAllocator, GpuObjectId, LayerMask, LocalToWorld, LodGroupId, MaterialId,
     PreviousTransform, RenderBounds, RenderDirtyFlags, RenderExtractionStats, RenderMaterial,
-    RenderMesh, RenderObjectState, RenderVisibility, RenderWorld, RenderWorldCommand,
-    RenderWorldCommands, VisibilityFlags,
+    RenderMesh, RenderObjectState, RenderVisibility, RenderWorld, RenderWorldBatchRange,
+    RenderWorldCommand, RenderWorldCommands, RenderWorldGpuSceneData, RenderWorldGpuSceneStats,
+    VisibilityFlags,
 };
 pub use runtime::{
     AppLayer, AppRuntime, AppRuntimeFrame, AssetDiagnostic, AssetState, DebugImageRegistry,

@@ -2299,6 +2299,29 @@ impl GraphImage {
         constants: &T,
         depth: Option<&GraphImage>,
     ) -> Result<()> {
+        self.draw_mesh_indirect_range_with_push_constants_and_depth(
+            mesh,
+            program,
+            instances,
+            indirect_commands,
+            0,
+            draw_count,
+            constants,
+            depth,
+        )
+    }
+
+    pub fn draw_mesh_indirect_range_with_push_constants_and_depth<T: bytemuck::Pod>(
+        &self,
+        mesh: &Mesh,
+        program: &MeshProgram,
+        instances: &crate::Buffer,
+        indirect_commands: &crate::Buffer,
+        indirect_offset: u64,
+        draw_count: u32,
+        constants: &T,
+        depth: Option<&GraphImage>,
+    ) -> Result<()> {
         if draw_count == 0 {
             return Ok(());
         }
@@ -2316,6 +2339,7 @@ impl GraphImage {
             }),
             instances,
             indirect_commands,
+            indirect_offset,
             draw_count,
             depth,
         )
@@ -2328,6 +2352,7 @@ impl GraphImage {
         push_constants: Option<PushConstants>,
         instance_buf: &crate::Buffer,
         indirect_buf: &crate::Buffer,
+        indirect_offset: u64,
         draw_count: u32,
         depth: Option<&GraphImage>,
     ) -> Result<()> {
@@ -2449,7 +2474,7 @@ impl GraphImage {
                 pipeline_shading_rate: None,
                 work: PassWork::DrawIndirect(DrawIndirectDesc {
                     indirect_buffer: indirect_buf.handle(),
-                    offset: 0,
+                    offset: indirect_offset,
                     draw_count,
                     stride: INDIRECT_STRIDE,
                     indexed: true,

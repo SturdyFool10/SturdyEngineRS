@@ -1,8 +1,12 @@
 mod aabb;
+mod batch_range;
 mod dirty_flags;
 mod extraction_stats;
 mod gpu_object_allocator;
 mod gpu_object_id;
+mod gpu_scene_data;
+mod gpu_scene_state;
+mod gpu_scene_stats;
 mod layer_mask;
 mod local_to_world;
 mod lod_group_id;
@@ -19,10 +23,14 @@ mod render_world_commands;
 mod visibility_flags;
 
 pub use aabb::Aabb;
+pub use batch_range::RenderWorldBatchRange;
 pub use dirty_flags::RenderDirtyFlags;
 pub use extraction_stats::RenderExtractionStats;
 pub use gpu_object_allocator::GpuObjectAllocator;
 pub use gpu_object_id::GpuObjectId;
+pub use gpu_scene_data::RenderWorldGpuSceneData;
+pub(super) use gpu_scene_state::RenderWorldGpuSceneState;
+pub use gpu_scene_stats::RenderWorldGpuSceneStats;
 pub use layer_mask::LayerMask;
 pub use local_to_world::LocalToWorld;
 pub use lod_group_id::LodGroupId;

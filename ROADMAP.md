@@ -167,7 +167,7 @@ Without this, the CPU submits one draw call per mesh. At 10,000 objects the CPU 
 - [x] Validate descriptor indices in debug builds; readable error instead of GPU hang.
 
 **8b — Fully GPU-driven scene submission**
-- [ ] GPU scene buffer: one `GpuInstanceData` per scene object (model matrix, AABB, LOD bias, material ID, visibility flags); upload once on change.
+- [x] GPU scene buffer: one `GpuInstanceData` per render-world object (model matrix, bounds, LOD bias, material ID, visibility flags); render-world owned, stable-slotted, and partially uploaded on object changes.
 - [ ] Single GPU compute dispatch for frustum culling + HZB occlusion; writes `DrawIndexedIndirectCommand` per visible instance.
 - [ ] `vkCmdDrawIndexedIndirectCount` (Vulkan 1.2): GPU-written draw count drives actual draw count, no CPU readback.
 - [ ] Two-phase occlusion culling: Phase 1 renders last frame's visible set; Phase 2 re-tests newly unoccluded objects against fresh depth buffer.

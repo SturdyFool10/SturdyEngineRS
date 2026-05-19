@@ -1,7 +1,7 @@
 use glam::Vec3;
 
 use crate::ecs::{Transform, World};
-use crate::{BoundingSphere, MeshId};
+use crate::{BackendKind, BoundingSphere, Engine, GpuInstanceData, MeshId};
 
 use super::*;
 
@@ -95,4 +95,72 @@ fn releasing_object_returns_slot_after_apply() {
 
     let reused = render_world.reserve_object();
     assert_eq!(reused, object);
+}
+
+#[test]
+fn gpu_scene_data_groups_by_mesh_and_preserves_material_bounds_and_flags() {
+    let render_world = RenderWorld::new();
+    let object_a = render_world.reserve_object();
+    let object_b = render_world.reserve_object();
+
+    render_world.set_mesh(object_a, RenderMesh::new(MeshId::from_raw(1)));
+    render_world.set_material(object_a, RenderMaterial::new(MaterialId::from_raw(7)));
+    render_world.set_transform(
+        object_a,
+        Transform::from_position(Vec3::new(10.0, 0.0, 0.0)),
+    );
+    render_world.set_bounds(
+        object_a,
+        RenderBounds::from_sphere(BoundingSphere {
+            center: Vec3::ZERO,
+            radius: 3.0,
+        }),
+    );
+    render_world.set_visibility(object_a, RenderVisibility::default().shadow_caster(false));
+
+    render_world.set_mesh(object_b, RenderMesh::new(MeshId::from_raw(0)));
+    render_world.set_visibility(object_b, RenderVisibility::hidden());
+    render_world.apply_pending();
+
+    let data = render_world.build_gpu_scene_data(2);
+    assert_eq!(data.len(), 1);
+    assert_eq!(
+        data.range_for_mesh(1),
+        Some(RenderWorldBatchRange::new(0, 1))
+    );
+    assert_eq!(data.range_for_mesh(0), None);
+
+    let instance = data.instances[0];
+    assert_eq!(instance.mesh_id, 1);
+    assert_eq!(instance.material_id, 7);
+    assert_eq!(instance.bounds, [10.0, 0.0, 0.0, 3.0]);
+    assert!(instance.flags & GpuInstanceData::FLAG_DYNAMIC != 0);
+    assert_eq!(instance.flags & GpuInstanceData::FLAG_CAST_SHADOW, 0);
+    assert!(instance.flags & GpuInstanceData::FLAG_RECEIVE_SHADOW != 0);
+}
+
+#[test]
+fn gpu_scene_upload_reuses_slots_for_non_structural_changes() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let render_world = RenderWorld::new();
+    let object = render_world.reserve_object();
+
+    render_world.set_mesh(object, RenderMesh::new(MeshId::from_raw(0)));
+    render_world.set_transform(object, Transform::from_position(Vec3::ZERO));
+    render_world.apply_pending();
+
+    let first = render_world.prepare_gpu_scene(&engine, 1).unwrap();
+    assert!(first.full_rebuild);
+    assert!(first.indirect_reallocated);
+    assert_eq!(first.uploaded_instances, 1);
+
+    render_world.set_transform(object, Transform::from_position(Vec3::X));
+    let second = render_world.prepare_gpu_scene(&engine, 1).unwrap();
+    assert!(!second.full_rebuild);
+    assert!(!second.indirect_reallocated);
+    assert_eq!(second.uploaded_instances, 1);
+
+    let third = render_world.prepare_gpu_scene(&engine, 1).unwrap();
+    assert!(!third.full_rebuild);
+    assert_eq!(third.uploaded_instances, 0);
 }

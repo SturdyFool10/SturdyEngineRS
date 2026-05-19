@@ -7,7 +7,6 @@ use super::{
     camera::{CameraId, CameraOutput, SceneCamera},
     commands::{SceneCommands, SceneView},
     gpu_constants::{CameraConstants, LightingUniforms},
-    gpu_instance::GpuInstanceData,
     lights::{
         DirectionalLight, DiskLight, GpuLightData, PointLight, RectLight, SphereLight, SpotLight,
     },
@@ -82,19 +81,6 @@ pub struct Scene {
     /// Set by `cull_gpu()` each frame; tells the draw path to use `total_count`
     /// rather than `indirect_commands.len()` as the indirect draw count.
     pub(super) gpu_cull_active: bool,
-
-    // ── Track 8b: flat GPU scene buffer ───────────────────────────────────────
-    /// One `GpuInstanceData` per scene object, uploaded to the GPU.
-    ///
-    /// Objects are ordered by mesh_id (same grouping as batches) so each batch
-    /// has a contiguous slice. `batch.scene_base_idx` and `batch.scene_count`
-    /// identify each batch's slice within this buffer.
-    ///
-    /// Populated every frame during `prepare()`. Only objects whose transforms
-    /// changed (dynamic objects always; static objects only when dirty) are
-    /// re-uploaded — the rest retain their previous GPU values.
-    pub(super) gpu_scene_buffer: Option<Buffer>,
-    gpu_scene_capacity: usize,
 }
 
 impl Scene {
@@ -120,8 +106,6 @@ impl Scene {
             geometry_backend: GeometryBackend::ClassicVertex,
             culling_program: None,
             gpu_cull_active: false,
-            gpu_scene_buffer: None,
-            gpu_scene_capacity: 0,
         }
     }
 
@@ -357,6 +341,12 @@ impl Scene {
                     object.kind = kind;
                     object.static_dirty.store(true, Ordering::Release);
                 }
+                object.set_render_metadata(
+                    state.bounds,
+                    state.material.map(|material| material.material.as_u32()),
+                    state.visibility.flags,
+                    0.0,
+                );
                 object.set_transform_atomic(transform);
             }
 
@@ -426,10 +416,30 @@ impl Scene {
         self.cameras.get_mut(id.0 as usize)
     }
 
-    /// Upload instance data for all dirty batches.
+    /// Upload legacy per-batch instance data.
     ///
     /// Call once per frame after all `set_transform` calls, before `render`.
+    /// Use [`prepare_render_world`](Self::prepare_render_world) when this scene
+    /// is mirroring a [`RenderWorld`], so the flat GPU scene buffer is owned and
+    /// uploaded by the render world.
     pub fn prepare(&mut self, engine: &Engine) -> Result<()> {
+        self.prepare_internal(engine, None)
+    }
+
+    /// Upload legacy per-batch instance data and render-world-owned GPU scene data.
+    pub fn prepare_render_world(
+        &mut self,
+        engine: &Engine,
+        render_world: &RenderWorld,
+    ) -> Result<()> {
+        self.prepare_internal(engine, Some(render_world))
+    }
+
+    fn prepare_internal(
+        &mut self,
+        engine: &Engine,
+        render_world: Option<&RenderWorld>,
+    ) -> Result<()> {
         // Drain structural mutations queued from worker threads.
         // `take_all` extracts the Vec without borrowing self, so we can then
         // pass `&mut self` to each command.
@@ -439,171 +449,76 @@ impl Scene {
 
         self.gpu_cull_active = false;
 
-        // Clear dynamic lists; static lists persist across frames.
+        // Pre-collect mesh bounding spheres so we can borrow them while filling
+        // batches and later while uploading GPU scene data.
+        let mesh_spheres: Vec<crate::BoundingSphere> = self
+            .meshes
+            .iter()
+            .map(|(mesh, _)| mesh.bounding_sphere)
+            .collect();
+
+        // Rebuild compatibility batches from scene objects every frame. This is
+        // simpler and more correct for the render-world bridge than preserving
+        // stale static slots when objects are hidden, released, or change mesh.
         for batch in self.batches.values_mut() {
-            batch.dynamic_instances.clear();
+            batch.clear_instances();
         }
 
-        // First pass: detect which static batches are dirty.
-        for obj in &self.objects {
-            if matches!(obj.kind, ObjectKind::Static) && obj.static_dirty.load(Ordering::Acquire) {
-                if let Some(batch) = self.batches.get_mut(&obj.mesh_id.0) {
-                    batch.static_dirty = true;
-                }
-                obj.static_dirty.store(false, Ordering::Release);
-            }
-        }
-
-        // Clear static lists for dirty batches before rebuilding.
-        for batch in self.batches.values_mut() {
-            if batch.static_dirty {
-                batch.static_instances.clear();
-            }
-        }
-
-        // Second pass: fill instance lists.
+        // Fill instance lists and per-instance render metadata.
         // Use atomic Acquire loads for transforms — visible to any Release store
         // performed by worker threads via set_transform().
         for obj in &self.objects {
+            if obj.mesh_id.index() >= self.meshes.len()
+                || !obj.visibility_flags.contains(VisibilityFlags::VISIBLE)
+            {
+                continue;
+            }
+
             let transform = obj.transform.load();
+            let fallback_sphere = mesh_spheres
+                .get(obj.mesh_id.index())
+                .copied()
+                .unwrap_or(crate::BoundingSphere::EMPTY);
+            let metadata = obj.instance_metadata(fallback_sphere);
             let batch = self
                 .batches
                 .entry(obj.mesh_id.0)
                 .or_insert_with(|| InstanceBatch::new(obj.mesh_id.0));
             match obj.kind {
                 ObjectKind::Static => {
-                    if batch.static_dirty || batch.static_instances.is_empty() {
-                        batch
-                            .static_instances
-                            .push(InstanceData::from_transform(transform));
-                    }
+                    batch
+                        .static_instances
+                        .push(InstanceData::from_transform(transform));
+                    batch.static_metadata.push(metadata);
+                    obj.static_dirty.store(false, Ordering::Release);
                 }
                 ObjectKind::Dynamic => {
                     batch
                         .dynamic_instances
                         .push(InstanceData::from_transform(transform));
+                    batch.dynamic_metadata.push(metadata);
                 }
             }
         }
-
-        // Pre-collect mesh bounding spheres so we can borrow them inside the
-        // mutable batch loop without conflicting with &self.meshes.
-        let mesh_spheres: Vec<crate::BoundingSphere> = self
-            .meshes
-            .iter()
-            .map(|(mesh, _)| mesh.bounding_sphere)
-            .collect();
-        let gpu_cull = self.geometry_backend == GeometryBackend::ComputeIndirect;
-
-        // Count total instances across all batches to size the GPU scene buffer.
-        let total_gpu_instances: usize = self
-            .batches
-            .values()
-            .map(|b| b.total_count() as usize)
-            .sum();
-
-        // Grow the flat GPU scene buffer if needed.
-        let gpu_stride = std::mem::size_of::<GpuInstanceData>();
-        if total_gpu_instances > self.gpu_scene_capacity || self.gpu_scene_buffer.is_none() {
-            let new_cap = total_gpu_instances.next_power_of_two().max(4);
-            self.gpu_scene_buffer = Some(engine.create_buffer(BufferDesc {
-                size: (new_cap * gpu_stride) as u64,
-                usage: BufferUsage::STORAGE,
-            })?);
-            self.gpu_scene_capacity = new_cap;
+        if let Some(render_world) = render_world {
+            render_world.prepare_gpu_scene(engine, self.meshes.len())?;
         }
 
-        // Build GpuInstanceData for every batch and upload into the flat buffer.
-        // Batches are assigned contiguous ranges; scene_base_idx / scene_count
-        // are updated so cull_gpu() can dispatch per-batch slices.
-        let mut scene_offset: u32 = 0;
         for batch in self.batches.values_mut() {
             batch.prepare(engine)?;
             batch.indirect_commands.clear();
 
-            let mesh_idx = batch.mesh_idx as usize;
-            let local_sphere =
-                mesh_spheres
-                    .get(mesh_idx)
-                    .copied()
-                    .unwrap_or(crate::BoundingSphere {
-                        center: glam::Vec3::ZERO,
-                        radius: 0.0,
-                    });
-            let total = batch.total_count();
-
-            if total > 0 {
-                // Build GpuInstanceData for this batch's instances.
-                let mut gpu_data: Vec<GpuInstanceData> = Vec::with_capacity(total as usize);
-
-                for inst in batch
-                    .static_instances
-                    .iter()
-                    .chain(batch.dynamic_instances.iter())
-                {
-                    let model_mat = Mat4::from_cols_array_2d(&inst.model);
-                    let ws = local_sphere.transform(model_mat);
-                    let is_static = {
-                        let static_len = batch.static_instances.len();
-                        let dynamic_len = batch.dynamic_instances.len();
-                        let built_so_far = gpu_data.len();
-                        built_so_far < static_len && dynamic_len > 0 || {
-                            // Simpler: the first static_len entries are static.
-                            gpu_data.len() < static_len
-                        }
-                    };
-                    let flags = if is_static {
-                        GpuInstanceData::FLAG_STATIC
-                            | GpuInstanceData::FLAG_CAST_SHADOW
-                            | GpuInstanceData::FLAG_RECEIVE_SHADOW
-                    } else {
-                        GpuInstanceData::FLAG_DYNAMIC
-                            | GpuInstanceData::FLAG_CAST_SHADOW
-                            | GpuInstanceData::FLAG_RECEIVE_SHADOW
-                    };
-                    gpu_data.push(GpuInstanceData {
-                        model: inst.model,
-                        bounds: [ws.center.x, ws.center.y, ws.center.z, ws.radius],
-                        mesh_id: batch.mesh_idx,
-                        material_id: batch.mesh_idx, // same until bindless material system
-                        lod_bias: 0.0,
-                        flags,
-                    });
+            if let Some(render_world) = render_world {
+                if let Some(range) = render_world.gpu_scene_batch_range(batch.mesh_idx) {
+                    batch.scene_base_idx = range.base;
+                    batch.scene_count = range.count;
+                } else {
+                    batch.scene_base_idx = 0;
+                    batch.scene_count = 0;
                 }
-
-                // Record this batch's slice in the flat scene buffer.
-                batch.scene_base_idx = scene_offset;
-                batch.scene_count = total;
-
-                // Upload to gpu_scene_buffer.
-                if let Some(buf) = &self.gpu_scene_buffer {
-                    buf.write(
-                        (scene_offset as usize * gpu_stride) as u64,
-                        bytemuck::cast_slice(&gpu_data),
-                    )?;
-                }
-
-                scene_offset += total;
             } else {
-                batch.scene_base_idx = scene_offset;
+                batch.scene_base_idx = 0;
                 batch.scene_count = 0;
-            }
-
-            // Per-batch culling buffers (existing path, kept for compatibility).
-            if gpu_cull && total > 0 {
-                if let Some(sphere) = mesh_spheres.get(mesh_idx) {
-                    let spheres: Vec<[f32; 4]> = batch
-                        .static_instances
-                        .iter()
-                        .chain(batch.dynamic_instances.iter())
-                        .map(|inst| {
-                            let ws = sphere.transform(Mat4::from_cols_array_2d(&inst.model));
-                            [ws.center.x, ws.center.y, ws.center.z, ws.radius]
-                        })
-                        .collect();
-                    batch.prepare_bounds(engine, &spheres)?;
-                    batch.prepare_indirect_slots(engine, total)?;
-                }
             }
         }
 
@@ -854,6 +769,31 @@ impl Scene {
         frame: &RenderFrame,
         engine: &Engine,
     ) -> Result<()> {
+        self.draw_inner(view, proj, output, frame, engine, None)
+    }
+
+    /// Draw using render-world-owned GPU scene and indirect buffers.
+    pub fn draw_render_world(
+        &mut self,
+        view: Mat4,
+        proj: Mat4,
+        output: &GraphImage,
+        frame: &RenderFrame,
+        engine: &Engine,
+        render_world: &RenderWorld,
+    ) -> Result<()> {
+        self.draw_inner(view, proj, output, frame, engine, Some(render_world))
+    }
+
+    fn draw_inner(
+        &mut self,
+        view: Mat4,
+        proj: Mat4,
+        output: &GraphImage,
+        frame: &RenderFrame,
+        engine: &Engine,
+        render_world: Option<&RenderWorld>,
+    ) -> Result<()> {
         let out_desc = output.desc();
 
         if matches!(
@@ -918,7 +858,15 @@ impl Scene {
                 drm_format_modifier: None,
             },
         )?;
-        self.draw_batches(&constants, view_proj, output, Some(&depth), frame, engine)
+        self.draw_batches(
+            &constants,
+            view_proj,
+            output,
+            Some(&depth),
+            frame,
+            engine,
+            render_world,
+        )
     }
 
     /// Draw a single registered camera into an explicit output image.
@@ -949,6 +897,7 @@ impl Scene {
         depth: Option<&GraphImage>,
         frame: &RenderFrame,
         engine: &Engine,
+        render_world: Option<&RenderWorld>,
     ) -> Result<()> {
         if self.geometry_backend != GeometryBackend::ComputeIndirect {
             return self.draw_batches_classic(constants, output, depth, frame);
@@ -971,15 +920,20 @@ impl Scene {
                 mesh.vertex_count
             };
 
-            let all_instances: Vec<_> = batch
+            for (instance_idx, (inst, metadata)) in batch
                 .static_instances
                 .iter()
-                .chain(batch.dynamic_instances.iter())
+                .zip(batch.static_metadata.iter())
+                .chain(
+                    batch
+                        .dynamic_instances
+                        .iter()
+                        .zip(batch.dynamic_metadata.iter()),
+                )
                 .enumerate()
-                .collect();
-            for (instance_idx, inst) in all_instances {
+            {
                 let model = Mat4::from_cols_array_2d(&inst.model);
-                let world_sphere = mesh.bounding_sphere.transform(model);
+                let world_sphere = metadata.local_sphere.transform(model);
                 if frustum.intersects_sphere(&world_sphere) {
                     batch.indirect_commands.push(DrawIndexedIndirectCommand {
                         index_count,
@@ -1009,10 +963,6 @@ impl Scene {
             if draw_count == 0 {
                 continue;
             }
-            let indirect_buf = match &batch.indirect_gpu_buffer {
-                Some(b) => b,
-                None => continue,
-            };
             let mesh_idx = batch.mesh_idx as usize;
             let (mesh, program) = &self.meshes[mesh_idx];
             frame.bind_buffer("instances", instance_buf);
@@ -1025,15 +975,43 @@ impl Scene {
                 }
             }
             let effective_depth = if program.uses_depth { depth } else { None };
-            output.draw_mesh_indirect_with_push_constants_and_depth(
-                mesh,
-                program,
-                instance_buf,
-                indirect_buf,
-                draw_count,
-                constants,
-                effective_depth,
-            )?;
+            if self.gpu_cull_active {
+                let Some(render_world) = render_world else {
+                    continue;
+                };
+                const INDIRECT_STRIDE: u64 =
+                    std::mem::size_of::<DrawIndexedIndirectCommand>() as u64;
+                let indirect_offset = batch.scene_base_idx as u64 * INDIRECT_STRIDE;
+                render_world.with_gpu_indirect_buffer(|indirect_buf| -> Result<()> {
+                    let Some(indirect_buf) = indirect_buf else {
+                        return Ok(());
+                    };
+                    output.draw_mesh_indirect_range_with_push_constants_and_depth(
+                        mesh,
+                        program,
+                        instance_buf,
+                        indirect_buf,
+                        indirect_offset,
+                        draw_count,
+                        constants,
+                        effective_depth,
+                    )
+                })?;
+            } else {
+                let indirect_buf = match &batch.indirect_gpu_buffer {
+                    Some(b) => b,
+                    None => continue,
+                };
+                output.draw_mesh_indirect_with_push_constants_and_depth(
+                    mesh,
+                    program,
+                    instance_buf,
+                    indirect_buf,
+                    draw_count,
+                    constants,
+                    effective_depth,
+                )?;
+            }
         }
         Ok(())
     }

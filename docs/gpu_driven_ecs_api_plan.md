@@ -19,19 +19,19 @@ Already present:
 
 - `World`, `WorldView`, `ParallelSystem`, and `CompiledSchedule` provide a wave-based multithreaded ECS scheduler.
 - `Scene` already has thread-safe command scaffolding (`SceneCommands`) and stable IDs.
-- `Scene::gpu_scene_buffer` and `GpuInstanceData` already exist as a flat per-object GPU buffer concept.
-- `Scene::cull_gpu` exists but currently dispatches per batch and writes one indirect command per instance slot.
+- `RenderWorld::prepare_gpu_scene` owns the flat `GpuInstanceData` buffer and partially uploads stable object slots when render-world data changes.
+- `Scene::cull_gpu` exists and consumes render-world-owned GPU scene and indirect-command buffers, but still dispatches per batch over contiguous render-world slices.
 - Bindless and descriptor-indexing groundwork exists in core.
 - Render graph has indirect draw and multi-queue concepts.
 
 Main gaps:
 
-1. ECS render components are not yet the primary scene-authoring API.
-2. CPU still materializes too much per-object render data.
-3. GPU culling is per batch, not one dispatch over the render world.
-4. Object matrices are still CPU-produced; GPU matrix expansion from compact transform state is not the default.
+1. ECS render components exist and extract into `RenderWorld`, but the legacy `Scene` facade is still the draw compatibility path.
+2. CPU still materializes model matrices and world bounds before upload; GPU matrix expansion from compact transform state is not the default.
+3. GPU culling writes to one render-world-owned indirect command buffer, but dispatch is still per batch rather than one dispatch over the render world.
+4. HZB occlusion and indirect draw-count compaction are not yet wired into the render-world path.
 5. Material data is not fully centralized in one GPU-resident material table.
-6. Draw batching is not yet organized around a persistent `GpuRenderWorld` with mesh/material/pipeline bins.
+6. Draw batching is not yet organized around persistent mesh/material/pipeline bins independent of the legacy `Scene` batch map.
 
 ## Design principles
 
@@ -49,7 +49,7 @@ Avoid uploading per-frame per-object derived data:
 
 The GPU scene is global and persistent. Per camera/light/shadow pass data is view-specific:
 
-- Object data buffer: persistent.
+- Object data buffer: persistent and render-world owned.
 - Transform source buffer: persistent, dirty-updated.
 - World matrix buffer: persistent, GPU-written.
 - Previous world matrix buffer: persistent, GPU-copied/rotated.

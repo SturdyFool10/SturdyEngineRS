@@ -1,7 +1,8 @@
 use glam::Mat4;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::atomic_transform::AtomicMat4;
+use super::{atomic_transform::AtomicMat4, instance_metadata::SceneInstanceMetadata};
+use crate::{BoundingSphere, GpuInstanceData, RenderBounds, VisibilityFlags};
 
 /// Stable handle to a mesh+program pair registered with a [`Scene`](super::Scene).
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -90,10 +91,24 @@ pub struct SceneObject {
     /// read by the render thread during `prepare()`.
     pub(super) transform: AtomicMat4,
     pub kind: ObjectKind,
+    pub(super) local_sphere: Option<BoundingSphere>,
+    pub(super) material_id: Option<u32>,
+    pub(super) visibility_flags: VisibilityFlags,
+    pub(super) lod_bias: f32,
     /// True when static instance data needs to be re-uploaded to the GPU.
     /// Set to `true` on construction and whenever the transform changes for
     /// a static object.
     pub(super) static_dirty: AtomicBool,
+}
+
+fn default_visibility_flags(kind: ObjectKind) -> VisibilityFlags {
+    let mut flags =
+        VisibilityFlags::VISIBLE | VisibilityFlags::CAST_SHADOW | VisibilityFlags::RECEIVE_SHADOW;
+    match kind {
+        ObjectKind::Static => flags.insert(VisibilityFlags::STATIC),
+        ObjectKind::Dynamic => flags.insert(VisibilityFlags::DYNAMIC),
+    }
+    flags
 }
 
 impl SceneObject {
@@ -102,8 +117,57 @@ impl SceneObject {
             mesh_id,
             transform: AtomicMat4::new(transform),
             kind,
+            local_sphere: None,
+            material_id: None,
+            visibility_flags: default_visibility_flags(kind),
+            lod_bias: 0.0,
             static_dirty: AtomicBool::new(true),
         }
+    }
+
+    pub(super) fn set_render_metadata(
+        &mut self,
+        bounds: Option<RenderBounds>,
+        material_id: Option<u32>,
+        visibility_flags: VisibilityFlags,
+        lod_bias: f32,
+    ) {
+        self.local_sphere = bounds.map(|bounds| bounds.local_sphere);
+        self.material_id = material_id;
+        self.visibility_flags = visibility_flags;
+        self.lod_bias = lod_bias;
+        if matches!(self.kind, ObjectKind::Static) {
+            self.static_dirty.store(true, Ordering::Release);
+        }
+    }
+
+    pub(super) fn instance_metadata(
+        &self,
+        fallback_sphere: BoundingSphere,
+    ) -> SceneInstanceMetadata {
+        SceneInstanceMetadata::new(
+            self.local_sphere.unwrap_or(fallback_sphere),
+            self.material_id.unwrap_or(self.mesh_id.0),
+            self.gpu_flags(),
+        )
+        .with_lod_bias(self.lod_bias)
+    }
+
+    fn gpu_flags(&self) -> u32 {
+        let mut flags = match self.kind {
+            ObjectKind::Static => GpuInstanceData::FLAG_STATIC,
+            ObjectKind::Dynamic => GpuInstanceData::FLAG_DYNAMIC,
+        };
+        if self.visibility_flags.contains(VisibilityFlags::CAST_SHADOW) {
+            flags |= GpuInstanceData::FLAG_CAST_SHADOW;
+        }
+        if self
+            .visibility_flags
+            .contains(VisibilityFlags::RECEIVE_SHADOW)
+        {
+            flags |= GpuInstanceData::FLAG_RECEIVE_SHADOW;
+        }
+        flags
     }
 
     /// Read the current transform. Uses Acquire ordering.

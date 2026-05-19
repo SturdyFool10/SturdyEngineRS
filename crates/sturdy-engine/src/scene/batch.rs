@@ -1,4 +1,4 @@
-use super::object::InstanceData;
+use super::{instance_metadata::SceneInstanceMetadata, object::InstanceData};
 use crate::{Buffer, BufferDesc, BufferUsage, DrawIndexedIndirectCommand, Engine, Result};
 
 /// Accumulated instance data for a single mesh, split into static and dynamic halves.
@@ -17,7 +17,9 @@ pub(super) struct InstanceBatch {
     /// Index into `Scene::meshes`.
     pub mesh_idx: u32,
     pub static_instances: Vec<InstanceData>,
+    pub static_metadata: Vec<SceneInstanceMetadata>,
     pub dynamic_instances: Vec<InstanceData>,
+    pub dynamic_metadata: Vec<SceneInstanceMetadata>,
     pub gpu_buffer: Option<Buffer>,
     buffer_capacity: usize,
     pub static_dirty: bool,
@@ -41,13 +43,13 @@ pub(super) struct InstanceBatch {
     pub bounds_gpu_buffer: Option<Buffer>,
     bounds_capacity: usize,
 
-    // ── Track 8b: flat GPU scene buffer integration ───────────────────────────
-    /// First index into `Scene::gpu_scene_buffer` that belongs to this batch.
+    // ── Track 8b: render-world GPU scene buffer integration ──────────────────
+    /// First index into the render-world-owned GPU scene buffer for this batch.
     ///
-    /// Set during `prepare()` after the scene buffer is (re)built.
+    /// Set during `Scene::prepare_render_world()` from `RenderWorld` batch ranges.
     /// Used as the `batch_base_idx` push constant in the culling dispatch.
     pub scene_base_idx: u32,
-    /// Number of instances from `gpu_scene_buffer` that belong to this batch.
+    /// Number of instances from the render-world GPU scene buffer for this batch.
     pub scene_count: u32,
 }
 
@@ -56,7 +58,9 @@ impl InstanceBatch {
         Self {
             mesh_idx,
             static_instances: Vec::new(),
+            static_metadata: Vec::new(),
             dynamic_instances: Vec::new(),
+            dynamic_metadata: Vec::new(),
             gpu_buffer: None,
             buffer_capacity: 0,
             static_dirty: false,
@@ -72,6 +76,14 @@ impl InstanceBatch {
 
     pub fn total_count(&self) -> u32 {
         (self.static_instances.len() + self.dynamic_instances.len()) as u32
+    }
+
+    pub fn clear_instances(&mut self) {
+        self.static_instances.clear();
+        self.static_metadata.clear();
+        self.dynamic_instances.clear();
+        self.dynamic_metadata.clear();
+        self.static_dirty = true;
     }
 
     /// Ensure the instance GPU buffer is large enough and upload dirty data.

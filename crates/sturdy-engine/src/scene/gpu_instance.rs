@@ -1,7 +1,7 @@
 // GpuInstanceData — unified per-object GPU data structure (Track 8b).
 //
-// One `GpuInstanceData` entry lives in the GPU scene buffer for every
-// `SceneObject`. It consolidates data that is currently split across three
+// One `GpuInstanceData` entry lives in the render-world GPU scene buffer for every
+// render-world object. It consolidates data that is currently split across three
 // separate per-batch buffers:
 //
 //   InstanceData  (matrix only, uploaded per-batch per-frame)
@@ -27,20 +27,20 @@
 //
 // ## Upload policy
 //
-// The initial implementation re-uploads all GpuInstanceData every frame where
-// any object is dirty (same overhead as the current path, but in a single
-// contiguous write). A future refinement will dirty-track individual slots so
-// only changed objects are re-uploaded.
+// `RenderWorld::prepare_gpu_scene` currently re-uploads all `GpuInstanceData`
+// every frame in one contiguous write. A future refinement will dirty-track
+// individual slots/pages so only changed objects are re-uploaded.
 //
 // ## Batch ordering
 //
-// To enable single-dispatch culling, `Scene::prepare()` fills the scene buffer
-// with objects grouped by `mesh_id`: all instances of mesh 0 first, then mesh
-// 1, etc. Each `InstanceBatch` records its `scene_base_idx` — the first index
-// in the flat buffer that belongs to it — and `scene_count` — how many entries.
-// The culling shader receives these as push constants.
+// To enable culling over a flat scene buffer, `RenderWorld::prepare_gpu_scene`
+// fills the scene buffer with objects grouped by `mesh_id`: all instances of
+// mesh 0 first, then mesh 1, etc. Each compatibility `InstanceBatch` records
+// its `scene_base_idx` — the first index in the flat buffer that belongs to it
+// — and `scene_count` — how many entries. The culling shader receives these as
+// push constants.
 
-/// Per-object GPU data block uploaded to `Scene::gpu_scene_buffer`.
+/// Per-object GPU data block uploaded to the render-world GPU scene buffer.
 ///
 /// All fields are `f32`/`u32` so the struct is `bytemuck::Pod`.
 #[repr(C)]

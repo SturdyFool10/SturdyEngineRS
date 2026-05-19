@@ -5,6 +5,7 @@ mod commands;
 mod gpu_constants;
 mod gpu_culling;
 mod gpu_instance;
+mod instance_metadata;
 mod lights;
 pub mod material;
 mod material_state;
