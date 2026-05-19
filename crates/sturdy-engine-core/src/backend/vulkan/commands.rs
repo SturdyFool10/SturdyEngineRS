@@ -2959,34 +2959,16 @@ fn record_bound_resources(
         }
     }
 
-    let mut sets = Vec::new();
-    let mut first_set = None;
-    for bind_group in &pass.bind_groups {
-        let group_first_set = descriptors.bind_group_first_set(*bind_group)?;
-        if let Some(first) = first_set {
-            if first != group_first_set {
-                return Err(Error::InvalidInput(
-                    "a pass cannot bind groups from layouts with different first set indices"
-                        .into(),
-                ));
-            }
-        } else {
-            first_set = Some(group_first_set);
-        }
-        sets.extend_from_slice(descriptors.descriptor_sets(*bind_group)?);
-    }
-    if !sets.is_empty() {
-        unsafe {
-            device.cmd_bind_descriptor_sets(
-                command_buffer,
-                binding.bind_point,
-                binding.layout,
-                first_set.unwrap_or(0),
-                &sets,
-                &[],
-            );
-        }
-    }
+    // GFX-7a: use descriptor buffer binding when all groups have buffer backing,
+    // otherwise fall back to pool-based descriptor set binding.
+    descriptors.bind_descriptor_buffer_or_sets(
+        device,
+        command_buffer,
+        binding.bind_point,
+        binding.layout,
+        &pass.bind_groups,
+        binding.uses_bindless,
+    )?;
 
     if let Some(push_descriptor_set) = &pass.push_descriptor_set {
         let push_descriptor = push_descriptor.ok_or_else(|| {

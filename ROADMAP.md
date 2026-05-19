@@ -372,8 +372,8 @@ Required for GPU-driven occlusion culling to skip draw calls without a CPU readb
 Pre-compiles disjoint pipeline state chunks that are linked at draw time. Eliminates PSO stutter for the pre-rasterization and fragment-shader stages.
 
 - [x] Detect `VK_EXT_graphics_pipeline_library`; add `BackendFeatures::graphics_pipeline_library`.
-- [ ] Split `create_graphics_pipeline` into four library linkage stages: `VertexInput`, `PreRasterization`, `FragmentShader`, `FragmentOutput`. Pre-compile vertex-input and fragment-output libraries at startup (they are material-independent and rarely change).
-- [ ] Material variant compilation only produces `PreRasterization` + `FragmentShader` libraries; link against the cached vertex-input and fragment-output libraries to produce the final pipeline. First-draw compile time drops proportionally.
+- [x] Split `create_graphics_pipeline` into four library linkage stages: `VertexInput`, `PreRasterization`, `FragmentShader`, `FragmentOutput` via `VK_EXT_graphics_pipeline_library`. VertexInput and FragmentOutput libraries are cached by descriptor hash and reused across materials; PreRasterization (VS) and FragmentShader (FS) libraries are per-material and linked immediately. Active when `graphics_pipeline_library_enabled && dynamic_rendering`.
+- [x] Material variant compilation only produces `PreRasterization` + `FragmentShader` libraries; links against cached VertexInput and FragmentOutput libraries into a final pipeline with `VK_PIPELINE_CREATE_LINK_TIME_OPTIMIZATION_EXT`.
 - [x] Detect `VK_EXT_pipeline_creation_cache_control` (Vulkan 1.3 core); add `BackendFeatures::pipeline_creation_cache_control`. `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` integration pending.
 - [ ] **Enables**: Track 8e (PSO pre-warm pass, `PsoWarmupReport`). Reduces first-draw stutter from Track ECS-MT-d-6.
 
@@ -626,9 +626,9 @@ These require a larger architectural change to the descriptor management layer. 
 Moves descriptors into application-managed buffers, composable with the existing bindless heap. Eliminates descriptor pool management entirely.
 
 - [x] Detect `VK_EXT_descriptor_buffer`; add `BackendFeatures::descriptor_buffer`. Query `VkPhysicalDeviceDescriptorBufferPropertiesEXT` for descriptor offset alignment.
-- [ ] Implement `DescriptorBufferHeap`: a `Buffer` (created with `DESCRIPTOR_BUFFER_BIT_EXT`) holding all descriptor data addressed by byte offset. When `descriptor_buffer` is available, offer it as an alternative backing for the `DescriptorRegistry`.
+- [x] Implement `DescriptorBufferHeap`: a `Buffer` (created with `DESCRIPTOR_BUFFER_BIT_EXT`) holding all descriptor data addressed by byte offset. When `descriptor_buffer` is available, offer it as an alternative backing for the `DescriptorRegistry`.
 - [x] Expose `Device::descriptor_buffer_offset_alignment() -> Option<u64>` from the physical device properties.
-- [ ] Map `BindGroupDesc` to a `DescriptorBufferHeap` sub-range. Bind groups become CPU-written buffer regions rather than `VkDescriptorSet`s; bind via `cmd_bind_descriptor_buffer_embedded_samplers_ext` + `cmd_set_descriptor_buffer_offsets_ext`.
+- [x] Map `BindGroupDesc` to a `DescriptorBufferHeap` sub-range. Bind groups become CPU-written buffer regions rather than `VkDescriptorSet`s; bind via `cmd_bind_descriptor_buffer_embedded_samplers_ext` + `cmd_set_descriptor_buffer_offsets_ext`.
 - [ ] **Depends on**: GFX-1d (buffer device address required for descriptor buffer binding). **Improves**: bindless heap management and per-draw descriptor binding overhead at scale.
 
 **GFX-7b — Descriptor heap (`VK_EXT_descriptor_heap`, Roadmap 2026)**

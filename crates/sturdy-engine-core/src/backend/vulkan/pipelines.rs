@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use ash::vk::TaggedStructure;
 use ash::{Device, vk};
@@ -44,6 +45,15 @@ pub struct PipelineRegistry {
     pub vertex_input_dynamic_state_enabled: bool,
     /// GFX-7b: When true, pipelines carry `VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT`.
     pub descriptor_heap_enabled: bool,
+    /// GFX-7a: When true, non-bindless pipelines carry `VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT`.
+    pub descriptor_buffer_enabled: bool,
+    /// GFX-2c: VK_EXT_graphics_pipeline_library enabled; use 4-stage library linkage.
+    pub graphics_pipeline_library_enabled: bool,
+    /// GFX-2c: Cached VertexInput libraries keyed by (vertex format + topology) hash.
+    /// These are material-independent and rarely change.
+    vertex_input_libs: HashMap<u64, vk::Pipeline>,
+    /// GFX-2c: Cached FragmentOutput libraries keyed by (attachment formats + blend + samples) hash.
+    fragment_output_libs: HashMap<u64, vk::Pipeline>,
 }
 
 impl PipelineRegistry {
@@ -69,6 +79,10 @@ impl PipelineRegistry {
             extended_dynamic_state3_enabled: false,
             vertex_input_dynamic_state_enabled: false,
             descriptor_heap_enabled: false,
+            graphics_pipeline_library_enabled: false,
+            vertex_input_libs: HashMap::new(),
+            fragment_output_libs: HashMap::new(),
+            descriptor_buffer_enabled: false,
         })
     }
 
@@ -166,6 +180,10 @@ impl PipelineRegistry {
             heap_flags_info = vk::PipelineCreateFlags2CreateInfo::default()
                 .flags(vk::PipelineCreateFlags2::DESCRIPTOR_HEAP_EXT);
             info = info.push(&mut heap_flags_info);
+        }
+        // GFX-7a: non-bindless compute pipelines use descriptor buffer when available.
+        if self.descriptor_buffer_enabled && !uses_bindless {
+            info = info.flags(info.flags | vk::PipelineCreateFlags::DESCRIPTOR_BUFFER_EXT);
         }
         let pipeline = unsafe {
             device
@@ -553,6 +571,39 @@ impl PipelineRegistry {
             .color_attachment_formats(&color_formats)
             .depth_attachment_format(depth_vk_format);
 
+        // GFX-2c: When graphics_pipeline_library is available and dynamic rendering is active,
+        // split into 4 stage-specialised library pipelines and link them. This allows the
+        // material-independent VertexInput and FragmentOutput libraries to be cached and
+        // reused across materials, and lets VS + FS compilation happen independently.
+        if self.graphics_pipeline_library_enabled && render_pass == vk::RenderPass::null() {
+            let pipeline = self.create_with_pipeline_library(
+                device,
+                desc,
+                &stages,
+                &vertex_input,
+                &input_assembly,
+                &viewport_state,
+                &rasterization,
+                &multisample,
+                &color_blend,
+                &color_blend_attachments,
+                &dynamic_state,
+                &mut pipeline_rendering_info,
+                &color_formats,
+                depth_vk_format,
+                layout,
+                push_constants_bytes,
+                push_constant_stages,
+                uses_bindless,
+                handle,
+                graphics_state.clone(),
+            )?;
+            if pipeline {
+                return Ok(());
+            }
+            // Fall through to monolithic path on error.
+        }
+
         let mut info = base_info;
         if render_pass == vk::RenderPass::null() {
             info = info.push(&mut pipeline_rendering_info);
@@ -563,6 +614,10 @@ impl PipelineRegistry {
             heap_flags_info = vk::PipelineCreateFlags2CreateInfo::default()
                 .flags(vk::PipelineCreateFlags2::DESCRIPTOR_HEAP_EXT);
             info = info.push(&mut heap_flags_info);
+        }
+        // GFX-7a: non-bindless pipelines use descriptor buffer when available.
+        if self.descriptor_buffer_enabled && !uses_bindless {
+            info = info.flags(info.flags | vk::PipelineCreateFlags::DESCRIPTOR_BUFFER_EXT);
         }
 
         let pipeline = unsafe {
@@ -591,6 +646,183 @@ impl PipelineRegistry {
         Ok(())
     }
 
+    /// GFX-2c: 4-stage pipeline library path.
+    ///
+    /// Creates VertexInput + FragmentOutput libraries (cached by hash) and
+    /// per-material PreRasterization + FragmentShader libraries, then links them.
+    /// Returns `true` when the linked pipeline was successfully stored; `false`
+    /// to fall back to the monolithic path.
+    #[allow(clippy::too_many_arguments)]
+    fn create_with_pipeline_library(
+        &mut self,
+        device: &Device,
+        desc: &crate::GraphicsPipelineDesc,
+        stages: &[vk::PipelineShaderStageCreateInfo<'_>],
+        vertex_input: &vk::PipelineVertexInputStateCreateInfo<'_>,
+        input_assembly: &vk::PipelineInputAssemblyStateCreateInfo<'_>,
+        viewport_state: &vk::PipelineViewportStateCreateInfo<'_>,
+        rasterization: &vk::PipelineRasterizationStateCreateInfo<'_>,
+        multisample: &vk::PipelineMultisampleStateCreateInfo<'_>,
+        color_blend: &vk::PipelineColorBlendStateCreateInfo<'_>,
+        _color_blend_attachments: &[vk::PipelineColorBlendAttachmentState],
+        dynamic_state: &vk::PipelineDynamicStateCreateInfo<'_>,
+        pipeline_rendering_info: &mut vk::PipelineRenderingCreateInfo<'_>,
+        color_formats: &[vk::Format],
+        depth_vk_format: vk::Format,
+        layout: vk::PipelineLayout,
+        push_constants_bytes: u32,
+        push_constant_stages: vk::ShaderStageFlags,
+        uses_bindless: bool,
+        handle: crate::PipelineHandle,
+        graphics_state: VulkanGraphicsPipelineState,
+    ) -> Result<bool> {
+        // ── 1. VertexInput library (cache by vertex format + topology hash) ────
+        let vi_key = {
+            let mut h = DefaultHasher::new();
+            desc.vertex_buffers.iter().for_each(|b| {
+                b.binding.hash(&mut h);
+                b.stride.hash(&mut h);
+                (b.input_rate as u32).hash(&mut h);
+            });
+            desc.vertex_attributes.iter().for_each(|a| {
+                a.location.hash(&mut h);
+                a.binding.hash(&mut h);
+                (a.format as u32).hash(&mut h);
+                a.offset.hash(&mut h);
+            });
+            (desc.topology as u32).hash(&mut h);
+            h.finish()
+        };
+        let vi_lib = if let Some(&lib) = self.vertex_input_libs.get(&vi_key) {
+            lib
+        } else {
+            let mut lib_stage_info = vk::GraphicsPipelineLibraryCreateInfoEXT::default()
+                .flags(vk::GraphicsPipelineLibraryFlagsEXT::VERTEX_INPUT_INTERFACE);
+            let vi_info = vk::GraphicsPipelineCreateInfo::default()
+                .flags(vk::PipelineCreateFlags::LIBRARY_KHR)
+                .vertex_input_state(vertex_input)
+                .input_assembly_state(input_assembly)
+                .dynamic_state(dynamic_state)
+                .push(&mut lib_stage_info);
+            let lib = unsafe {
+                device.create_graphics_pipelines(self.pipeline_cache, &[vi_info], None)
+                    .map_err(|(_, e)| Error::Backend(format!("VertexInput library failed: {e:?}")))?
+            }.remove(0);
+            self.vertex_input_libs.insert(vi_key, lib);
+            lib
+        };
+
+        // ── 2. FragmentOutput library (cache by attachment formats + blend + samples) ──
+        let fo_key = {
+            let mut h = DefaultHasher::new();
+            color_formats.iter().for_each(|f| f.as_raw().hash(&mut h));
+            depth_vk_format.as_raw().hash(&mut h);
+            desc.color_targets.iter().for_each(|t| (t.blend as u32).hash(&mut h));
+            (desc.samples as u32).hash(&mut h);
+            h.finish()
+        };
+        let fo_lib = if let Some(&lib) = self.fragment_output_libs.get(&fo_key) {
+            lib
+        } else {
+            let mut lib_stage_info = vk::GraphicsPipelineLibraryCreateInfoEXT::default()
+                .flags(vk::GraphicsPipelineLibraryFlagsEXT::FRAGMENT_OUTPUT_INTERFACE);
+            let fo_info = vk::GraphicsPipelineCreateInfo::default()
+                .flags(vk::PipelineCreateFlags::LIBRARY_KHR)
+                .multisample_state(multisample)
+                .color_blend_state(color_blend)
+                .dynamic_state(dynamic_state)
+                .push(&mut lib_stage_info)
+                .push(pipeline_rendering_info);
+            let lib = unsafe {
+                device.create_graphics_pipelines(self.pipeline_cache, &[fo_info], None)
+                    .map_err(|(_, e)| Error::Backend(format!("FragmentOutput library failed: {e:?}")))?
+            }.remove(0);
+            self.fragment_output_libs.insert(fo_key, lib);
+            lib
+        };
+
+        // ── 3. PreRasterization library (VS + rasterization; per-material) ────
+        let vs_stages: Vec<_> = stages.iter().filter(|s| s.stage.contains(vk::ShaderStageFlags::VERTEX)).copied().collect();
+        let mut pre_raster_lib_info = vk::GraphicsPipelineLibraryCreateInfoEXT::default()
+            .flags(vk::GraphicsPipelineLibraryFlagsEXT::PRE_RASTERIZATION_SHADERS);
+        let pre_raster_info = vk::GraphicsPipelineCreateInfo::default()
+            .flags(vk::PipelineCreateFlags::LIBRARY_KHR)
+            .stages(&vs_stages)
+            .vertex_input_state(vertex_input)
+            .input_assembly_state(input_assembly)
+            .viewport_state(viewport_state)
+            .rasterization_state(rasterization)
+            .dynamic_state(dynamic_state)
+            .layout(layout)
+            .push(&mut pre_raster_lib_info)
+            .push(pipeline_rendering_info);
+        let pre_raster_lib = unsafe {
+            device.create_graphics_pipelines(self.pipeline_cache, &[pre_raster_info], None)
+                .map_err(|(_, e)| Error::Backend(format!("PreRasterization library failed: {e:?}")))?
+        }.remove(0);
+
+        // ── 4. FragmentShader library (FS; per-material) ─────────────────────
+        let fs_stages: Vec<_> = stages.iter().filter(|s| s.stage.contains(vk::ShaderStageFlags::FRAGMENT)).copied().collect();
+        let frag_lib = if !fs_stages.is_empty() {
+            let mut frag_lib_info = vk::GraphicsPipelineLibraryCreateInfoEXT::default()
+                .flags(vk::GraphicsPipelineLibraryFlagsEXT::FRAGMENT_SHADER);
+            let frag_info = vk::GraphicsPipelineCreateInfo::default()
+                .flags(vk::PipelineCreateFlags::LIBRARY_KHR)
+                .stages(&fs_stages)
+                .multisample_state(multisample)
+                .dynamic_state(dynamic_state)
+                .layout(layout)
+                .push(&mut frag_lib_info)
+                .push(pipeline_rendering_info);
+            let lib = unsafe {
+                device.create_graphics_pipelines(self.pipeline_cache, &[frag_info], None)
+                    .map_err(|(_, e)| {
+                        device.destroy_pipeline(pre_raster_lib, None);
+                        Error::Backend(format!("FragmentShader library failed: {e:?}"))
+                    })?
+            }.remove(0);
+            Some(lib)
+        } else {
+            None
+        };
+
+        // ── 5. Link into final pipeline ───────────────────────────────────────
+        let mut all_libs = vec![vi_lib, fo_lib, pre_raster_lib];
+        if let Some(fl) = frag_lib {
+            all_libs.push(fl);
+        }
+        let mut lib_create_info = vk::PipelineLibraryCreateInfoKHR::default().libraries(&all_libs);
+        let link_info = vk::GraphicsPipelineCreateInfo::default()
+            .flags(vk::PipelineCreateFlags::LINK_TIME_OPTIMIZATION_EXT)
+            .layout(layout)
+            .push(&mut lib_create_info);
+        let linked = unsafe {
+            device.create_graphics_pipelines(self.pipeline_cache, &[link_info], None)
+        };
+
+        // Destroy the per-material intermediate libs (vi + fo stay in the cache).
+        unsafe { device.destroy_pipeline(pre_raster_lib, None) };
+        if let Some(fl) = frag_lib {
+            unsafe { device.destroy_pipeline(fl, None) };
+        }
+
+        let pipeline = linked.map_err(|(_, e)| Error::Backend(format!("pipeline library link failed: {e:?}")))?
+            .remove(0);
+
+        self.pipelines.insert(handle, VulkanPipeline {
+            pipeline,
+            layout,
+            bind_point: vk::PipelineBindPoint::GRAPHICS,
+            render_pass: vk::RenderPass::null(),
+            push_constants_bytes,
+            push_constant_stages,
+            uses_bindless,
+        });
+        self.graphics_states.insert(handle, graphics_state);
+        self.note_pipeline_created();
+        Ok(true)
+    }
+
     pub fn destroy_pipeline(&mut self, device: &Device, handle: PipelineHandle) -> Result<()> {
         let pipeline = self.pipelines.remove(&handle).ok_or(Error::InvalidHandle)?;
         self.graphics_states.remove(&handle);
@@ -612,6 +844,13 @@ impl PipelineRegistry {
                     device.destroy_render_pass(pipeline.render_pass, None);
                 }
             }
+        }
+        // GFX-2c: destroy cached pipeline library objects.
+        for (_, lib) in self.vertex_input_libs.drain() {
+            unsafe { device.destroy_pipeline(lib, None) };
+        }
+        for (_, lib) in self.fragment_output_libs.drain() {
+            unsafe { device.destroy_pipeline(lib, None) };
         }
         unsafe { device.destroy_pipeline_cache(self.pipeline_cache, None) };
     }

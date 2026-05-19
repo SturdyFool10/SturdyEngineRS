@@ -344,6 +344,15 @@ impl VulkanBackend {
         pipeline_registry.conservative_rasterization_underestimate_enabled =
             caps.features.conservative_rasterization_underestimate;
         pipeline_registry.descriptor_heap_enabled = caps.features.descriptor_heap;
+        pipeline_registry.descriptor_buffer_enabled = caps.features.descriptor_buffer && caps.features.buffer_device_address;
+        pipeline_registry.graphics_pipeline_library_enabled = caps.features.graphics_pipeline_library;
+        // GFX-7a: set up descriptor buffer backing BEFORE caps/instance/device are moved into Self.
+        let mut descriptors_reg = descriptors::DescriptorRegistry::default();
+        if caps.features.descriptor_buffer && caps.features.buffer_device_address {
+            let db_device = ash::ext::descriptor_buffer::Device::load(&instance, &logical.device);
+            descriptors_reg.set_descriptor_buffer(db_device);
+            descriptors_reg.buffer_device_address_enabled = true;
+        }
 
         let debug_utils = debug::DebugUtils::new(&instance, &logical.device);
         // GFX-1g: Create address binding report messenger in debug builds when extension is enabled.
@@ -692,7 +701,7 @@ impl VulkanBackend {
             debug: debug_utils,
             address_binding_messenger,
             commands: Mutex::new(commands),
-            descriptors: RwLock::new(descriptors::DescriptorRegistry::default()),
+            descriptors: RwLock::new(descriptors_reg),
             pipelines: Mutex::new(pipeline_registry),
             resources: RwLock::new(resource_registry),
             shaders: Mutex::new(shaders::ShaderRegistry::default()),
@@ -1189,6 +1198,16 @@ impl Backend for VulkanBackend {
             }
         }
         stats
+    }
+
+    fn descriptor_buffer_offset_alignment(&self) -> Option<u64> {
+        if !self.caps.features.descriptor_buffer {
+            return None;
+        }
+        let mut db_props = ash::vk::PhysicalDeviceDescriptorBufferPropertiesEXT::default();
+        let mut props2 = ash::vk::PhysicalDeviceProperties2::default().push(&mut db_props);
+        unsafe { self.instance.get_physical_device_properties2(self.physical_device, &mut props2) };
+        Some(db_props.descriptor_buffer_offset_alignment)
     }
 
     fn descriptor_heap_type_size(&self, descriptor_type: u32) -> Option<u64> {
