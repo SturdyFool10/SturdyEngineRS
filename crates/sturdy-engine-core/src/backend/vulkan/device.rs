@@ -547,7 +547,9 @@ impl FeatureRequest<'static> {
 
     fn apply_to<'a>(&'a mut self, info: vk::DeviceCreateInfo<'a>) -> vk::DeviceCreateInfo<'a> {
         if self.use_feature_chain {
-            info.push(&mut self.features2)
+            let mut info = info;
+            info.p_next = (&mut self.features2 as *mut vk::PhysicalDeviceFeatures2<'static>).cast();
+            info
         } else {
             info.enabled_features(&self.features2.features)
         }

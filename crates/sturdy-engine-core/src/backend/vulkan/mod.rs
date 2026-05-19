@@ -1,8 +1,8 @@
 mod adapter;
 mod alias_heaps;
 mod allocator;
-mod buffer_pool;
 pub(crate) mod bindless;
+mod buffer_pool;
 mod caps;
 mod commands;
 mod config;
@@ -259,6 +259,11 @@ impl VulkanBackend {
             && caps.features.extended_dynamic_state3_color_blend;
         caps.features.vertex_input_dynamic_state = logical.vertex_input_dynamic_state_enabled;
         caps.features.shader_object = logical.shader_object_enabled && caps.features.shader_object;
+        // GFX-7a descriptor buffers require both the extension and its feature struct
+        // to be enabled on the logical device. Feature-chain enablement is not wired
+        // yet, so keep runtime descriptor-buffer paths disabled and use descriptor
+        // set pools instead of loading unusable extension entry points.
+        caps.features.descriptor_buffer = false;
         let video_queue_enabled =
             enabled_extension(&logical.enabled_extension_names, "VK_KHR_video_queue");
         // Raw codec extensions are exposed through `raw_extension_names`, but
@@ -339,9 +344,15 @@ impl VulkanBackend {
         // Each context gets its own pool so frames-in-flight don't conflict.
         const TRANSIENT_POOL_BYTES: u64 = 4 * 1024 * 1024;
         for ctx in commands.contexts_mut() {
-            match buffer_pool::BufferPool::create(&logical.device, memory_properties, TRANSIENT_POOL_BYTES) {
+            match buffer_pool::BufferPool::create(
+                &logical.device,
+                memory_properties,
+                TRANSIENT_POOL_BYTES,
+            ) {
                 Ok(pool) => ctx.set_buffer_pool(pool),
-                Err(e) => eprintln!("[SturdyEngine] transient buffer pool creation failed (no-op fallback): {e}"),
+                Err(e) => eprintln!(
+                    "[SturdyEngine] transient buffer pool creation failed (no-op fallback): {e}"
+                ),
             }
         }
         let cache_data = load_pipeline_cache_file();
@@ -354,8 +365,10 @@ impl VulkanBackend {
         pipeline_registry.conservative_rasterization_underestimate_enabled =
             caps.features.conservative_rasterization_underestimate;
         pipeline_registry.descriptor_heap_enabled = caps.features.descriptor_heap;
-        pipeline_registry.descriptor_buffer_enabled = caps.features.descriptor_buffer && caps.features.buffer_device_address;
-        pipeline_registry.graphics_pipeline_library_enabled = caps.features.graphics_pipeline_library;
+        pipeline_registry.descriptor_buffer_enabled =
+            caps.features.descriptor_buffer && caps.features.buffer_device_address;
+        pipeline_registry.graphics_pipeline_library_enabled =
+            caps.features.graphics_pipeline_library;
         // GFX-7a: set up descriptor buffer backing BEFORE caps/instance/device are moved into Self.
         let mut descriptors_reg = descriptors::DescriptorRegistry::default();
         if caps.features.descriptor_buffer && caps.features.buffer_device_address {
@@ -1216,7 +1229,10 @@ impl Backend for VulkanBackend {
         }
         let mut db_props = ash::vk::PhysicalDeviceDescriptorBufferPropertiesEXT::default();
         let mut props2 = ash::vk::PhysicalDeviceProperties2::default().push(&mut db_props);
-        unsafe { self.instance.get_physical_device_properties2(self.physical_device, &mut props2) };
+        unsafe {
+            self.instance
+                .get_physical_device_properties2(self.physical_device, &mut props2)
+        };
         Some(db_props.descriptor_buffer_offset_alignment)
     }
 
@@ -1253,7 +1269,10 @@ impl Backend for VulkanBackend {
         }
 
         let t0 = std::time::Instant::now();
-        let pipelines = self.pipelines.lock().expect("vulkan pipeline registry mutex poisoned");
+        let pipelines = self
+            .pipelines
+            .lock()
+            .expect("vulkan pipeline registry mutex poisoned");
 
         // Pre-warm VertexInput libraries for the most common vertex formats.
         // These are the engine's standard vertex layouts — new layouts are cached lazily.
@@ -1262,10 +1281,24 @@ impl Backend for VulkanBackend {
             (&[], &[], crate::PrimitiveTopology::TriangleList),
             // Position + UV (2D / fullscreen)
             (
-                &[crate::VertexBufferLayout { binding: 0, stride: 16, input_rate: crate::VertexInputRate::Vertex }],
+                &[crate::VertexBufferLayout {
+                    binding: 0,
+                    stride: 16,
+                    input_rate: crate::VertexInputRate::Vertex,
+                }],
                 &[
-                    crate::VertexAttributeDesc { location: 0, binding: 0, format: crate::VertexFormat::Float32x3, offset: 0 },
-                    crate::VertexAttributeDesc { location: 1, binding: 0, format: crate::VertexFormat::Float32x2, offset: 12 },
+                    crate::VertexAttributeDesc {
+                        location: 0,
+                        binding: 0,
+                        format: crate::VertexFormat::Float32x3,
+                        offset: 0,
+                    },
+                    crate::VertexAttributeDesc {
+                        location: 1,
+                        binding: 0,
+                        format: crate::VertexFormat::Float32x2,
+                        offset: 12,
+                    },
                 ],
                 crate::PrimitiveTopology::TriangleList,
             ),
@@ -1287,8 +1320,17 @@ impl Backend for VulkanBackend {
             };
             use std::hash::{DefaultHasher, Hash, Hasher};
             let mut h = DefaultHasher::new();
-            dummy_desc.vertex_buffers.iter().for_each(|b| { b.binding.hash(&mut h); b.stride.hash(&mut h); (b.input_rate as u32).hash(&mut h); });
-            dummy_desc.vertex_attributes.iter().for_each(|a| { a.location.hash(&mut h); a.binding.hash(&mut h); (a.format as u32).hash(&mut h); a.offset.hash(&mut h); });
+            dummy_desc.vertex_buffers.iter().for_each(|b| {
+                b.binding.hash(&mut h);
+                b.stride.hash(&mut h);
+                (b.input_rate as u32).hash(&mut h);
+            });
+            dummy_desc.vertex_attributes.iter().for_each(|a| {
+                a.location.hash(&mut h);
+                a.binding.hash(&mut h);
+                (a.format as u32).hash(&mut h);
+                a.offset.hash(&mut h);
+            });
             (dummy_desc.topology as u32).hash(&mut h);
             let key = h.finish();
 
@@ -1307,9 +1349,15 @@ impl Backend for VulkanBackend {
         // Pre-warm FragmentOutput libraries for the most common attachment formats.
         let common_output_configs: &[(&[crate::Format], Option<crate::Format>)] = &[
             // Standard HDR colour, depth
-            (&[crate::Format::Rgba16Float], Some(crate::Format::Depth32Float)),
+            (
+                &[crate::Format::Rgba16Float],
+                Some(crate::Format::Depth32Float),
+            ),
             // RGBA8 + depth (forward path)
-            (&[crate::Format::Rgba8Unorm], Some(crate::Format::Depth32Float)),
+            (
+                &[crate::Format::Rgba8Unorm],
+                Some(crate::Format::Depth32Float),
+            ),
             // Present-ready (no depth)
             (&[crate::Format::Bgra8Unorm], None),
         ];
@@ -1336,7 +1384,10 @@ impl Backend for VulkanBackend {
     fn alloc_transient(&self, size: u64, alignment: u64) -> Option<crate::TransientAllocation> {
         // Track 11a: bump-allocate from the current frame context's pool.
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut commands = self.commands.lock().expect("vulkan command context mutex poisoned");
+        let mut commands = self
+            .commands
+            .lock()
+            .expect("vulkan command context mutex poisoned");
         let ctx = commands.current_context_mut();
         let pool = ctx.transient_buffer_pool.as_mut()?;
         let alloc = pool.alloc(size, alignment)?;
@@ -3049,39 +3100,54 @@ impl Backend for VulkanBackend {
             .usage(usage)
             .sharing_mode(ash::vk::SharingMode::EXCLUSIVE);
         let buffer = unsafe {
-            self.device.create_buffer(&buf_info, None)
-                .map_err(|e| Error::Backend(format!("video encode output buffer creation failed: {e:?}")))?
+            self.device.create_buffer(&buf_info, None).map_err(|e| {
+                Error::Backend(format!("video encode output buffer creation failed: {e:?}"))
+            })?
         };
         let req = unsafe { self.device.get_buffer_memory_requirements(buffer) };
         let memory_properties = unsafe {
-            self.instance.get_physical_device_memory_properties(self.physical_device)
+            self.instance
+                .get_physical_device_memory_properties(self.physical_device)
         };
-        let memory_type = (0..memory_properties.memory_type_count).find(|&i| {
-            (req.memory_type_bits & (1 << i)) != 0
-                && memory_properties.memory_types[i as usize].property_flags.contains(
-                    ash::vk::MemoryPropertyFlags::HOST_VISIBLE | ash::vk::MemoryPropertyFlags::HOST_COHERENT,
+        let memory_type = (0..memory_properties.memory_type_count)
+            .find(|&i| {
+                (req.memory_type_bits & (1 << i)) != 0
+                    && memory_properties.memory_types[i as usize]
+                        .property_flags
+                        .contains(
+                            ash::vk::MemoryPropertyFlags::HOST_VISIBLE
+                                | ash::vk::MemoryPropertyFlags::HOST_COHERENT,
+                        )
+            })
+            .ok_or_else(|| {
+                unsafe { self.device.destroy_buffer(buffer, None) };
+                Error::Unsupported(
+                    "no HOST_VISIBLE memory type for video encode output buffer".into(),
                 )
-        }).ok_or_else(|| {
-            unsafe { self.device.destroy_buffer(buffer, None) };
-            Error::Unsupported("no HOST_VISIBLE memory type for video encode output buffer".into())
-        })?;
+            })?;
         let alloc_info = ash::vk::MemoryAllocateInfo::default()
             .allocation_size(req.size)
             .memory_type_index(memory_type);
         let memory = unsafe {
-            self.device.allocate_memory(&alloc_info, None).map_err(|e| {
-                self.device.destroy_buffer(buffer, None);
-                Error::Backend(format!("video encode output buffer memory failed: {e:?}"))
-            })?
+            self.device
+                .allocate_memory(&alloc_info, None)
+                .map_err(|e| {
+                    self.device.destroy_buffer(buffer, None);
+                    Error::Backend(format!("video encode output buffer memory failed: {e:?}"))
+                })?
         };
         unsafe {
-            self.device.bind_buffer_memory(buffer, memory, 0).map_err(|e| {
-                self.device.free_memory(memory, None);
-                self.device.destroy_buffer(buffer, None);
-                Error::Backend(format!("video encode output bind_memory failed: {e:?}"))
-            })?;
+            self.device
+                .bind_buffer_memory(buffer, memory, 0)
+                .map_err(|e| {
+                    self.device.free_memory(memory, None);
+                    self.device.destroy_buffer(buffer, None);
+                    Error::Backend(format!("video encode output bind_memory failed: {e:?}"))
+                })?;
         }
-        self.exportable_buffer_memories.lock().expect("exportable buffer mutex poisoned")
+        self.exportable_buffer_memories
+            .lock()
+            .expect("exportable buffer mutex poisoned")
             .insert(handle, memory);
         Ok(())
     }
@@ -3089,20 +3155,28 @@ impl Backend for VulkanBackend {
     fn read_encode_bitstream(&self, handle: BufferHandle, max_bytes: u64) -> Result<Vec<u8>> {
         // GFX-4b: copy the encoded bitstream from the output buffer to a Vec<u8>.
         // The buffer must have been created with HOST_VISIBLE memory so we can map it.
-        let resources = self.resources.read().expect("resource registry rwlock poisoned");
+        let resources = self
+            .resources
+            .read()
+            .expect("resource registry rwlock poisoned");
         let buf = resources.buffer(handle)?;
         let requirements = unsafe { self.device.get_buffer_memory_requirements(buf) };
         let _ = requirements; // size info used for validation
         // Find the buffer's memory — for encode buffers we track them in exportable_buffer_memories.
-        let memory = self.exportable_buffer_memories.lock()
+        let memory = self
+            .exportable_buffer_memories
+            .lock()
             .expect("exportable buffer mutex poisoned")
             .get(&handle)
             .copied();
         if let Some(mem) = memory {
             let byte_count = max_bytes.min(max_bytes) as usize;
             let ptr = unsafe {
-                self.device.map_memory(mem, 0, max_bytes, vk::MemoryMapFlags::empty())
-                    .map_err(|e| Error::Backend(format!("map_memory for bitstream readback failed: {e:?}")))?
+                self.device
+                    .map_memory(mem, 0, max_bytes, vk::MemoryMapFlags::empty())
+                    .map_err(|e| {
+                        Error::Backend(format!("map_memory for bitstream readback failed: {e:?}"))
+                    })?
             };
             let slice = unsafe { std::slice::from_raw_parts(ptr as *const u8, byte_count) };
             let data = slice.to_vec();
