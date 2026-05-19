@@ -1,15 +1,10 @@
 use crate::{
     AntiAliasingMode, Engine, Format, GraphImage, ImageDesc, ImageDimension, ImageUsage,
-    RenderFrame, Result, ShaderProgram, StageMask,
+    RenderFrame, Result, ShaderProgram, StageMask, shader_program::builtin_shader_path,
 };
 use glam::Mat4;
 use std::sync::Mutex;
 use sturdy_engine_core::Extent3d;
-
-const ANTI_ALIASING_SHADER: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/shaders/anti_aliasing.slang"
-));
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -52,7 +47,10 @@ struct AntiAliasingFrameState {
 impl AntiAliasingPass {
     pub fn new(engine: &Engine) -> Result<Self> {
         Ok(Self {
-            program: ShaderProgram::from_inline_fragment(engine, ANTI_ALIASING_SHADER)?,
+            program: ShaderProgram::load_fragment(
+                engine,
+                builtin_shader_path("anti_aliasing.slang"),
+            )?,
             passthrough: ShaderProgram::passthrough(engine)?,
             history: Mutex::new(AntiAliasingHistory::default()),
         })

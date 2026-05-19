@@ -1,12 +1,16 @@
+use std::path::PathBuf;
+
 use crate::{
     DebugDraw2d, DebugDrawStyle, Engine, GraphImage, Mesh, MeshProgram, MeshProgramDesc,
     MeshVertexKind, QuadBatch, RenderFrame, Result, ShaderDesc, ShaderSource, ShaderStage,
     StageMask, TextDrawDesc, TextOverlay, TextPlacement, TextTypography,
 };
 
-const SOLID_COLOR_FRAGMENT: &str =
-    include_str!("../shaders/debug_overlay_solid_color_fragment.slang");
-const UI_SHAPE_FRAGMENT: &str = include_str!("../shaders/debug_overlay_ui_shape_fragment.slang");
+fn shader_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("shaders")
+        .join(name)
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -363,7 +367,9 @@ impl DebugOverlayRenderer {
                 engine,
                 MeshProgramDesc {
                     fragment: ShaderDesc {
-                        source: ShaderSource::Inline(SOLID_COLOR_FRAGMENT.to_string()),
+                        source: ShaderSource::File(shader_path(
+                            "debug_overlay_solid_color_fragment.slang",
+                        )),
                         entry_point: "main".to_string(),
                         stage: ShaderStage::Fragment,
                         requires_ray_query: false,
@@ -380,7 +386,9 @@ impl DebugOverlayRenderer {
                 engine,
                 MeshProgramDesc {
                     fragment: ShaderDesc {
-                        source: ShaderSource::Inline(UI_SHAPE_FRAGMENT.to_string()),
+                        source: ShaderSource::File(shader_path(
+                            "debug_overlay_ui_shape_fragment.slang",
+                        )),
                         entry_point: "main".to_string(),
                         stage: ShaderStage::Fragment,
                         requires_ray_query: false,
@@ -471,71 +479,5 @@ fn ui_shape_mesh(engine: &Engine, width: u32, height: u32, shape: &UiShape) -> R
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn screen_space_primitives_emit_geometry() {
-        let mut overlay = DebugOverlay::new();
-        overlay.line_screen(800, 600, [0.0, 0.0], [800.0, 600.0]);
-        overlay.rectangle_screen(800, 600, [100.0, 100.0], [200.0, 50.0]);
-        overlay.circle_screen(800, 600, [400.0, 300.0], 20.0);
-        overlay.cross_marker_screen(800, 600, [400.0, 300.0], 12.0);
-
-        assert!(!overlay.shapes().is_empty());
-        assert_eq!(overlay.text_descs().len(), 0);
-    }
-
-    #[test]
-    fn text_and_shapes_can_coexist() {
-        let mut overlay = DebugOverlay::new();
-        overlay.add_screen_text("hello", 18.0, 18.0);
-        overlay.filled_rect_screen(1280, 720, [8.0, 8.0], [220.0, 64.0], [0.0, 0.0, 0.0, 0.35]);
-
-        assert!(!overlay.is_empty());
-        assert_eq!(overlay.text_descs().len(), 1);
-        assert_eq!(overlay.ui_shapes.len(), 1);
-    }
-
-    #[test]
-    fn transform_and_hit_regions_are_applied_in_screen_space() {
-        let mut overlay = DebugOverlay::new();
-        overlay
-            .set_antialiasing(DebugOverlayAntialiasing::Disabled)
-            .set_transform(DebugOverlayTransform {
-                translation: [10.0, 20.0],
-                scale: [2.0, 2.0],
-            })
-            .register_hit_region("panel", [10.0, 20.0], [100.0, 40.0]);
-        overlay.rectangle_screen(800, 600, [0.0, 0.0], [50.0, 20.0]);
-
-        assert_eq!(
-            overlay
-                .hit_test_screen([32.0, 38.0])
-                .map(|region| region.tag.as_str()),
-            Some("panel")
-        );
-        assert_eq!(
-            overlay.config().antialiasing,
-            DebugOverlayAntialiasing::Disabled
-        );
-        assert!(!overlay.shapes().is_empty());
-    }
-
-    #[test]
-    fn rounded_rectangle_outline_emits_geometry() {
-        let mut overlay = DebugOverlay::new();
-        overlay.rounded_rectangle_outline_screen(
-            1280,
-            720,
-            [16.0, 16.0],
-            [200.0, 80.0],
-            10.0,
-            3.0,
-            [1.0, 1.0, 1.0, 1.0],
-        );
-
-        assert_eq!(overlay.ui_shapes.len(), 1);
-        assert_eq!(overlay.ui_shapes[0].border_width, 3.0);
-    }
-}
+#[path = "debug_overlay_tests.rs"]
+mod tests;

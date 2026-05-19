@@ -71,5 +71,5 @@ impl ExternalBufferDesc {
 }
 
 #[cfg(test)]
+#[path = "external_resource_tests.rs"]
 mod tests;
-

@@ -14,11 +14,18 @@
 // Roadmap: Track 6.
 
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
-const MATERIAL_GBUFFER_TEMPLATE: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/shaders/material_gbuffer_template.slang"
-));
+fn material_gbuffer_template() -> &'static str {
+    static TEMPLATE: OnceLock<String> = OnceLock::new();
+    TEMPLATE.get_or_init(|| {
+        std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("shaders/material_gbuffer_template.slang"),
+        )
+        .expect("material G-Buffer shader template should be readable")
+    })
+}
 
 // ── Rendering state ───────────────────────────────────────────────────────────
 
@@ -735,7 +742,7 @@ impl UnifiedMaterial {
 
         // The normal channel's expression returns float3 in tangent space.
         // We always apply TBN (even when normal is [0,0,1] -> geometric normal).
-        MATERIAL_GBUFFER_TEMPLATE
+        material_gbuffer_template()
             .replace("__MATERIAL_NAME__", &self.name)
             .replace("/*__MATERIAL_DECLS__*/", &decls)
             .replace(

@@ -32,7 +32,10 @@
 // ```
 
 use crate::push_constants;
-use crate::{Engine, GraphImage, RenderFrame, Result, ShaderProgram, StageMask};
+use crate::{
+    Engine, GraphImage, RenderFrame, Result, ShaderProgram, StageMask,
+    shader_program::builtin_shader_path,
+};
 
 // ── Config types ──────────────────────────────────────────────────────────────
 
@@ -252,7 +255,7 @@ struct LensConstants {
 /// Vignette post-processing pass.
 ///
 /// Darkens the corners of the screen using a smooth radial ramp. Backed by
-/// `vignette.slang` (embedded at compile time). Create once, reuse every frame.
+/// `vignette.slang`. Create once, reuse every frame.
 pub struct VignettePass {
     program: ShaderProgram,
 }
@@ -260,13 +263,7 @@ pub struct VignettePass {
 impl VignettePass {
     /// Create the pass, compiling the built-in vignette shader.
     pub fn new(engine: &Engine) -> Result<Self> {
-        let program = ShaderProgram::from_inline_fragment(
-            engine,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/shaders/vignette.slang"
-            )),
-        )?;
+        let program = ShaderProgram::load_fragment(engine, builtin_shader_path("vignette.slang"))?;
         Ok(Self { program })
     }
 
@@ -305,7 +302,7 @@ impl VignettePass {
 /// Film grain post-processing pass.
 ///
 /// Adds animated per-pixel noise after tone mapping. Backed by
-/// `film_grain.slang` (embedded at compile time).
+/// `film_grain.slang`.
 pub struct GrainPass {
     program: ShaderProgram,
 }
@@ -313,13 +310,8 @@ pub struct GrainPass {
 impl GrainPass {
     /// Create the pass, compiling the built-in film grain shader.
     pub fn new(engine: &Engine) -> Result<Self> {
-        let program = ShaderProgram::from_inline_fragment(
-            engine,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/shaders/film_grain.slang"
-            )),
-        )?;
+        let program =
+            ShaderProgram::load_fragment(engine, builtin_shader_path("film_grain.slang"))?;
         Ok(Self { program })
     }
 
@@ -360,7 +352,7 @@ impl GrainPass {
 /// Chromatic aberration post-processing pass.
 ///
 /// Separates RGB channels radially toward screen edges. Backed by
-/// `chromatic_aberration.slang` (embedded at compile time).
+/// `chromatic_aberration.slang`.
 pub struct CaPass {
     program: ShaderProgram,
 }
@@ -375,13 +367,8 @@ pub struct LensPass {
 
 impl LensPass {
     pub fn new(engine: &Engine) -> Result<Self> {
-        let program = ShaderProgram::from_inline_fragment(
-            engine,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/shaders/lens_dirt_flare.slang"
-            )),
-        )?;
+        let program =
+            ShaderProgram::load_fragment(engine, builtin_shader_path("lens_dirt_flare.slang"))?;
         Ok(Self { program })
     }
 
@@ -414,12 +401,9 @@ impl LensPass {
 impl CaPass {
     /// Create the pass, compiling the built-in CA shader.
     pub fn new(engine: &Engine) -> Result<Self> {
-        let program = ShaderProgram::from_inline_fragment(
+        let program = ShaderProgram::load_fragment(
             engine,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/shaders/chromatic_aberration.slang"
-            )),
+            builtin_shader_path("chromatic_aberration.slang"),
         )?;
         Ok(Self { program })
     }
@@ -514,44 +498,5 @@ impl PostProcessPasses {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn lens_config_defaults_to_disabled() {
-        let config = LensConfig::default();
-
-        assert!(!config.enabled());
-        assert_eq!(config.dirt_strength, 0.0);
-        assert!(!config.flare_enabled);
-        assert_eq!(config.flare_strength, 0.25);
-    }
-
-    #[test]
-    fn lens_config_enables_for_dirt_or_flare() {
-        assert!(
-            LensConfig {
-                dirt_strength: 0.1,
-                ..Default::default()
-            }
-            .enabled()
-        );
-        assert!(
-            LensConfig {
-                flare_enabled: true,
-                ..Default::default()
-            }
-            .enabled()
-        );
-    }
-
-    #[test]
-    fn auto_exposure_documents_reserved_runtime_behavior() {
-        let config = AutoExposureConfig {
-            enabled: true,
-            ..Default::default()
-        };
-
-        assert!(config.enabled);
-    }
-}
+#[path = "post_process_tests.rs"]
+mod tests;

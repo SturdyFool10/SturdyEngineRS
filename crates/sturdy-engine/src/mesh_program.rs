@@ -4,6 +4,7 @@ use std::{
     sync::Mutex,
 };
 
+use crate::shader_program::builtin_shader_path;
 use crate::shader_watcher::Reloadable;
 
 use sturdy_engine_core as core;
@@ -16,31 +17,6 @@ use crate::{
         Vertex2d, Vertex3d, skinned_vertex3d_attributes, vertex2d_attributes, vertex3d_attributes,
     },
 };
-
-const DEFAULT_VERTEX_2D: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/shaders/mesh_vertex_2d.slang"
-));
-
-const DEFAULT_VERTEX_3D: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/shaders/mesh_vertex_3d.slang"
-));
-
-const DEFAULT_VERTEX_3D_SKINNED: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/shaders/mesh_vertex_skinned_3d.slang"
-));
-
-const UNLIT_FRAGMENT: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/shaders/unlit_fragment.slang"
-));
-
-const LIT_FRAGMENT: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/shaders/lit_fragment.slang"
-));
 
 pub struct MeshProgramDesc {
     pub fragment: ShaderDesc,
@@ -136,7 +112,7 @@ impl MeshProgram {
             engine,
             MeshProgramDesc {
                 fragment: ShaderDesc {
-                    source: ShaderSource::Inline(UNLIT_FRAGMENT.to_owned()),
+                    source: ShaderSource::File(builtin_shader_path("unlit_fragment.slang")),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
@@ -167,7 +143,7 @@ impl MeshProgram {
             engine,
             MeshProgramDesc {
                 fragment: ShaderDesc {
-                    source: ShaderSource::Inline(LIT_FRAGMENT.to_owned()),
+                    source: ShaderSource::File(builtin_shader_path("lit_fragment.slang")),
                     entry_point: "main".to_owned(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
@@ -218,10 +194,10 @@ impl MeshProgram {
     }
 
     pub fn new(engine: &Engine, desc: MeshProgramDesc) -> Result<Self> {
-        let default_vertex_src = match desc.vertex_kind {
-            MeshVertexKind::V2d => DEFAULT_VERTEX_2D,
-            MeshVertexKind::V3d => DEFAULT_VERTEX_3D,
-            MeshVertexKind::V3dSkinned => DEFAULT_VERTEX_3D_SKINNED,
+        let default_vertex_file = match desc.vertex_kind {
+            MeshVertexKind::V2d => "mesh_vertex_2d.slang",
+            MeshVertexKind::V3d => "mesh_vertex_3d.slang",
+            MeshVertexKind::V3dSkinned => "mesh_vertex_skinned_3d.slang",
         };
         let vertex_path = desc.vertex.as_ref().and_then(|v| match &v.source {
             ShaderSource::File(p) => Some(p.clone()),
@@ -232,7 +208,7 @@ impl MeshProgram {
             _ => None,
         };
         let vertex_desc = desc.vertex.unwrap_or_else(|| ShaderDesc {
-            source: ShaderSource::Inline(default_vertex_src.to_owned()),
+            source: ShaderSource::File(builtin_shader_path(default_vertex_file)),
             entry_point: "main".to_owned(),
             stage: ShaderStage::Vertex,
             requires_ray_query: false,

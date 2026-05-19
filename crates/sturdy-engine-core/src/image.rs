@@ -479,5 +479,5 @@ impl ImageBuilder {
 }
 
 #[cfg(test)]
+#[path = "image_tests.rs"]
 mod tests;
-

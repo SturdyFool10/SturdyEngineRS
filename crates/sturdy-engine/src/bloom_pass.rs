@@ -19,7 +19,7 @@
 
 use crate::{
     Engine, Format, GraphImage, ImageDesc, MipPyramid, RenderFrame, Result, ShaderProgram,
-    StageMask, push_constants,
+    StageMask, push_constants, shader_program::builtin_shader_path,
 };
 
 /// Configuration for the bloom post-processing pass.
@@ -64,34 +64,16 @@ pub struct BloomPass {
 impl BloomPass {
     /// Create a `BloomPass` with the engine's built-in bloom shaders.
     pub fn new(engine: &Engine) -> Result<Self> {
-        let bright_extract = ShaderProgram::from_inline_fragment(
+        let bright_extract = ShaderProgram::load_fragment(
             engine,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/shaders/bloom_bright_extract.slang"
-            )),
+            builtin_shader_path("bloom_bright_extract.slang"),
         )?;
-        let downsample = ShaderProgram::from_inline_fragment(
-            engine,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/shaders/bloom_downsample.slang"
-            )),
-        )?;
-        let upsample = ShaderProgram::from_inline_fragment(
-            engine,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/shaders/bloom_upsample.slang"
-            )),
-        )?;
-        let composite = ShaderProgram::from_inline_fragment(
-            engine,
-            include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/shaders/bloom_composite.slang"
-            )),
-        )?;
+        let downsample =
+            ShaderProgram::load_fragment(engine, builtin_shader_path("bloom_downsample.slang"))?;
+        let upsample =
+            ShaderProgram::load_fragment(engine, builtin_shader_path("bloom_upsample.slang"))?;
+        let composite =
+            ShaderProgram::load_fragment(engine, builtin_shader_path("bloom_composite.slang"))?;
 
         Ok(Self {
             bright_extract_program: bright_extract,

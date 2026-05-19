@@ -539,5 +539,5 @@ fn align_up_checked(offset: u64, alignment: u64, memory_type: u32) -> Result<u64
 }
 
 #[cfg(test)]
+#[path = "allocator_tests.rs"]
 mod tests;
-

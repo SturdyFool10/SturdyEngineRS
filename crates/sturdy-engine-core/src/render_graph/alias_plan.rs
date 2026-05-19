@@ -333,5 +333,5 @@ fn mip_extent(base: u32, mip_level: u32) -> u32 {
 }
 
 #[cfg(test)]
+#[path = "alias_plan_tests.rs"]
 mod tests;
-

@@ -27,25 +27,5 @@ impl SurfaceRecreateDesc {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_recreate_desc_is_valid() {
-        SurfaceRecreateDesc::default().validate().unwrap();
-    }
-
-    #[test]
-    fn recreate_desc_rejects_zero_size() {
-        let err = SurfaceRecreateDesc {
-            size: Some(SurfaceSize {
-                width: 0,
-                height: 720,
-            }),
-            ..Default::default()
-        }
-        .validate()
-        .unwrap_err();
-        assert!(matches!(err, crate::Error::InvalidInput(_)));
-    }
-}
+#[path = "surface_recreate_desc_tests.rs"]
+mod tests;

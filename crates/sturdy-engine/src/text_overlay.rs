@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::{
     Engine, Extent3d, Format, GraphImage, Image, ImageDesc, ImageDimension, ImageUsage, Mesh,
     MeshProgram, MeshProgramDesc, MeshVertexKind, QuadBatch, RenderFrame, Result, ShaderDesc,
@@ -5,11 +7,11 @@ use crate::{
     TextTypography, TextUiRenderer, TiledTextAtlasPage,
 };
 
-const TEXT_OVERLAY_ALPHA_FRAGMENT: &str =
-    include_str!("../shaders/text_overlay_alpha_fragment.slang");
-const TEXT_OVERLAY_SDF_FRAGMENT: &str = include_str!("../shaders/text_overlay_sdf_fragment.slang");
-const TEXT_OVERLAY_MSDF_FRAGMENT: &str =
-    include_str!("../shaders/text_overlay_msdf_fragment.slang");
+fn shader_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("shaders")
+        .join(name)
+}
 
 /// First-party text/debug overlay built on top of `textui`.
 pub struct TextOverlay {
@@ -31,9 +33,9 @@ impl TextOverlay {
         Ok(Self {
             engine: engine.clone(),
             text_engine: TextEngine::new(TextUiRenderer::with_engine(engine)),
-            alpha_program: text_program(engine, TEXT_OVERLAY_ALPHA_FRAGMENT)?,
-            sdf_program: text_program(engine, TEXT_OVERLAY_SDF_FRAGMENT)?,
-            msdf_program: text_program(engine, TEXT_OVERLAY_MSDF_FRAGMENT)?,
+            alpha_program: text_program(engine, "text_overlay_alpha_fragment.slang")?,
+            sdf_program: text_program(engine, "text_overlay_sdf_fragment.slang")?,
+            msdf_program: text_program(engine, "text_overlay_msdf_fragment.slang")?,
             atlas_images: Vec::new(),
             atlas_image_hashes: Vec::new(),
             meshes: Vec::new(),
@@ -250,12 +252,12 @@ impl TextOverlay {
     }
 }
 
-fn text_program(engine: &Engine, fragment: &str) -> Result<MeshProgram> {
+fn text_program(engine: &Engine, fragment_file: &str) -> Result<MeshProgram> {
     MeshProgram::new(
         engine,
         MeshProgramDesc {
             fragment: ShaderDesc {
-                source: ShaderSource::Inline(fragment.to_string()),
+                source: ShaderSource::File(shader_path(fragment_file)),
                 entry_point: "main".to_string(),
                 stage: ShaderStage::Fragment,
                 requires_ray_query: false,

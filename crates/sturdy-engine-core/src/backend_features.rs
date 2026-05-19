@@ -268,6 +268,7 @@ impl BackendFeatures {
 }
 
 #[cfg(test)]
+#[path = "backend_features_tests.rs"]
 mod tests;
 
 impl BackendFeatures {

@@ -13,7 +13,6 @@ The source file gets:
 in place of the original block.
 """
 
-import os
 import re
 import sys
 from pathlib import Path
@@ -88,9 +87,9 @@ def find_cfg_test_block(text: str):
     """
     # Find #[cfg(test)] that precedes a mod declaration
     pattern = re.compile(
-        r'(#\[cfg\(test\)\]\s*)'  # attribute
-        r'((?:#\[.*?\]\s*)*)'     # additional attributes
-        r'(pub\s+)?mod\s+(\w+)\s*\{',  # mod name and opening brace
+        r"(#\[cfg\(test\)\]\s*)"  # attribute
+        r"((?:#\[.*?\]\s*)*)"  # additional attributes
+        r"(pub\s+)?mod\s+(\w+)\s*\{",  # mod name and opening brace
         re.DOTALL,
     )
     for m in pattern.finditer(text):
@@ -100,9 +99,9 @@ def find_cfg_test_block(text: str):
         depth = 0
         i = brace_start
         while i < len(text):
-            if text[i] == '{':
+            if text[i] == "{":
                 depth += 1
-            elif text[i] == '}':
+            elif text[i] == "}":
                 depth -= 1
                 if depth == 0:
                     end = i + 1
@@ -115,8 +114,8 @@ def find_cfg_test_block(text: str):
 def extract_mod_body(text: str, block_start: int, block_end: int, mod_name: str) -> str:
     """Extract the body of the mod block, stripping the outer braces."""
     # Find the opening { of the mod
-    header_end = text.index('{', block_start) + 1
-    body = text[header_end:block_end - 1]  # strip outer { }
+    header_end = text.index("{", block_start) + 1
+    body = text[header_end : block_end - 1]  # strip outer { }
     # Un-indent one level (4 spaces)
     lines = body.splitlines(keepends=True)
     unindented = []
@@ -190,7 +189,7 @@ def process(src_rel: str, dst_rel: str, dry_run: bool = False) -> bool:
 
     new_source = text[:block_start] + replacement + text[block_end:]
     # Clean up double blank lines that might result
-    new_source = re.sub(r'\n{3,}', '\n\n', new_source)
+    new_source = re.sub(r"\n{3,}", "\n\n", new_source)
 
     if dry_run:
         print(f"  DRY RUN: would extract {block_end - block_start} chars → {dst_rel}")
@@ -200,7 +199,7 @@ def process(src_rel: str, dst_rel: str, dry_run: bool = False) -> bool:
     dst.parent.mkdir(parents=True, exist_ok=True)
     dst.write_text(test_content, encoding="utf-8")
     src.write_text(new_source, encoding="utf-8")
-    lines_moved = body.count('\n')
+    lines_moved = body.count("\n")
     print(f"  OK  {src_rel} → {dst_rel}  ({lines_moved} lines moved, mod '{mod_name}')")
     return True
 

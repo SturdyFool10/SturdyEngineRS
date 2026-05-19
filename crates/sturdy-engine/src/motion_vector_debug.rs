@@ -1,12 +1,7 @@
 use crate::{
     Engine, Extent3d, Format, GraphImage, ImageDesc, ImageDimension, ImageUsage, RenderFrame,
-    Result, ShaderProgram,
+    Result, ShaderProgram, shader_program::builtin_shader_path,
 };
-
-const SHADER: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/shaders/motion_vector_debug.slang"
-));
 
 pub struct MotionVectorDebugPass {
     program: ShaderProgram,
@@ -15,7 +10,10 @@ pub struct MotionVectorDebugPass {
 impl MotionVectorDebugPass {
     pub fn new(engine: &Engine) -> Result<Self> {
         Ok(Self {
-            program: ShaderProgram::from_inline_fragment(engine, SHADER)?,
+            program: ShaderProgram::load_fragment(
+                engine,
+                builtin_shader_path("motion_vector_debug.slang"),
+            )?,
         })
     }
 

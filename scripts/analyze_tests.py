@@ -6,19 +6,17 @@ Analyze the SturdyEngine codebase for:
 3. DRY opportunities in runtime code (repeated patterns)
 """
 
-import ast
 import os
 import re
-import sys
-from collections import Counter, defaultdict
-from pathlib import Path
+from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 CRATES = ROOT / "crates"
 
 # ── Data structures ───────────────────────────────────────────────────────────
+
 
 @dataclass
 class TestModule:
@@ -27,6 +25,7 @@ class TestModule:
     end_line: int
     test_count: int
     lines: int
+
 
 @dataclass
 class FileStats:
@@ -37,13 +36,16 @@ class FileStats:
     test_modules: list[TestModule] = field(default_factory=list)
     has_separate_test_file: bool = False
 
+
 @dataclass
 class DryPattern:
     pattern: str
     locations: list[tuple[Path, int]]
     category: str  # "test_setup", "assertion", "struct_literal", "match_arm", "runtime"
 
+
 # ── Parsers ───────────────────────────────────────────────────────────────────
+
 
 def find_cfg_test_blocks(text: str, path: Path) -> list[TestModule]:
     """Find all #[cfg(test)] mod ... { ... } blocks and their metadata."""
@@ -58,28 +60,32 @@ def find_cfg_test_blocks(text: str, path: Path) -> list[TestModule]:
         if line == "#[cfg(test)]":
             # Find the mod ... { that follows
             j = i + 1
-            while j < len(lines) and lines[j].strip() in ("", "//") or lines[j].strip().startswith("//"):
+            while j < len(lines) and (
+                lines[j].strip() in ("", "//") or lines[j].strip().startswith("//")
+            ):
                 j += 1
-            if j < len(lines) and re.match(r'\s*(pub\s+)?mod\s+\w+\s*\{', lines[j]):
+            if j < len(lines) and re.match(r"\s*(pub\s+)?mod\s+\w+\s*\{", lines[j]):
                 start = i
                 # Count braces to find end
                 brace_depth = 0
                 k = j
                 test_count = 0
                 while k < len(lines):
-                    l = lines[k]
-                    brace_depth += l.count('{') - l.count('}')
-                    if re.search(r'#\[(?:tokio::)?test\]', l):
+                    block_line = lines[k]
+                    brace_depth += block_line.count("{") - block_line.count("}")
+                    if re.search(r"#\[(?:tokio::)?test\]", block_line):
                         test_count += 1
                     if brace_depth == 0 and k > j:
                         end = k
-                        modules.append(TestModule(
-                            file=path,
-                            start_line=start + 1,
-                            end_line=end + 1,
-                            test_count=test_count,
-                            lines=end - start + 1,
-                        ))
+                        modules.append(
+                            TestModule(
+                                file=path,
+                                start_line=start + 1,
+                                end_line=end + 1,
+                                test_count=test_count,
+                                lines=end - start + 1,
+                            )
+                        )
                         break
                     k += 1
         i += 1
@@ -103,9 +109,9 @@ def analyze_file(path: Path) -> FileStats:
     crate = path.parent
     stem = path.stem
     has_sep = (
-        (crate / "tests" / f"{stem}_tests.rs").exists() or
-        (crate / "tests" / f"{stem}.rs").exists() or
-        (crate / "src" / "tests" / f"{stem}.rs").exists()
+        (crate / "tests" / f"{stem}_tests.rs").exists()
+        or (crate / "tests" / f"{stem}.rs").exists()
+        or (crate / "src" / "tests" / f"{stem}.rs").exists()
     )
     # Also check if there's a tests.rs in the same directory
     if not has_sep:
@@ -123,6 +129,7 @@ def analyze_file(path: Path) -> FileStats:
 
 # ── DRY pattern detection ─────────────────────────────────────────────────────
 
+
 def extract_patterns(text: str, path: Path) -> list[tuple[str, int, str]]:
     """
     Extract repeating code patterns from a Rust file.
@@ -136,42 +143,43 @@ def extract_patterns(text: str, path: Path) -> list[tuple[str, int, str]]:
         stripped = line.strip()
 
         # Repeated struct literal openers
-        if re.match(r'(crate::)?PassDesc\s*\{', stripped):
+        if re.match(r"(crate::)?PassDesc\s*\{", stripped):
             results.append(("PassDesc{}", i, "struct_literal"))
 
         # Repeated ImageDesc::new() patterns
-        if re.match(r'(crate::)?ImageDesc::new\(\)', stripped) or \
-           re.match(r'\.\.(crate::)?ImageDesc::new\(\)', stripped):
+        if re.match(r"(crate::)?ImageDesc::new\(\)", stripped) or re.match(
+            r"\.\.(crate::)?ImageDesc::new\(\)", stripped
+        ):
             results.append(("..ImageDesc::new()", i, "struct_update"))
 
         # Repeated graph.add_pass calls
-        if re.search(r'\.add_pass\(', stripped):
+        if re.search(r"\.add_pass\(", stripped):
             results.append(("graph.add_pass()", i, "api_call"))
 
         # Repeated assert! patterns in tests
-        if re.match(r'assert!\(matches!\(', stripped):
+        if re.match(r"assert!\(matches!\(", stripped):
             results.append(("assert!(matches!(...))", i, "assertion"))
-        if re.match(r'assert_eq!\(', stripped):
+        if re.match(r"assert_eq!\(", stripped):
             results.append(("assert_eq!", i, "assertion"))
 
         # Repeated Error::Backend patterns
-        if 'Error::Backend(format!(' in stripped:
-            results.append(('Error::Backend(format!(...)', i, "error_pattern"))
+        if "Error::Backend(format!(" in stripped:
+            results.append(("Error::Backend(format!(...)", i, "error_pattern"))
 
         # Repeated expect("...mutex poisoned") patterns
-        if 'expect("' in stripped and 'mutex poisoned' in stripped:
-            results.append(("expect(\"...mutex poisoned\")", i, "mutex_unwrap"))
+        if 'expect("' in stripped and "mutex poisoned" in stripped:
+            results.append(('expect("...mutex poisoned")', i, "mutex_unwrap"))
 
         # Repeated unsafe { device.xxx } in error closures
-        if re.search(r'\.map_err\(\|e\|\s*\{', stripped):
+        if re.search(r"\.map_err\(\|e\|\s*\{", stripped):
             results.append(("map_err closure", i, "error_handling"))
 
         # Test fixture patterns - device/graph setup
-        if re.search(r'let mut graph\s*=\s*RenderGraph::new\(\)', stripped):
+        if re.search(r"let mut graph\s*=\s*RenderGraph::new\(\)", stripped):
             results.append(("RenderGraph::new() setup", i, "test_setup"))
 
         # Repeated validate_pipeline_layout calls in tests
-        if re.search(r'validate_pipeline_layout\(', stripped):
+        if re.search(r"validate_pipeline_layout\(", stripped):
             results.append(("validate_pipeline_layout()", i, "test_assertion"))
 
     return results
@@ -218,7 +226,10 @@ def find_dry_opportunities(files: list[FileStats]) -> dict[str, list[DryPattern]
 
 # ── Specific repeated-block detection ────────────────────────────────────────
 
-def find_repeated_test_helpers(all_texts: dict[Path, str]) -> list[tuple[str, list[Path]]]:
+
+def find_repeated_test_helpers(
+    all_texts: dict[Path, str],
+) -> list[tuple[str, list[Path]]]:
     """Find common test setup blocks that should be helper functions."""
     helpers = []
 
@@ -236,7 +247,12 @@ def find_repeated_test_helpers(all_texts: dict[Path, str]) -> list[tuple[str, li
         if "pass_with_work" in text and "#[cfg(test)]" in text:
             pass_with_work_files.append(path)
     if pass_with_work_files:
-        helpers.append(("pass_with_work() (already exists in render_graph.rs, should be shared)", pass_with_work_files))
+        helpers.append(
+            (
+                "pass_with_work() (already exists in render_graph.rs, should be shared)",
+                pass_with_work_files,
+            )
+        )
 
     # Pattern: PassDesc { name: ..., shading_rate_image: None, perf_counters: None, ... }
     passdesc_files = []
@@ -245,13 +261,18 @@ def find_repeated_test_helpers(all_texts: dict[Path, str]) -> list[tuple[str, li
         if count > 2:
             passdesc_files.append((path, count))
     if passdesc_files:
-        helpers.append(("PassDesc::default_graphics(name) / PassDesc::default_compute(name) constructors",
-                        [p for p, _ in sorted(passdesc_files, key=lambda x: -x[1])]))
+        helpers.append(
+            (
+                "PassDesc::default_graphics(name) / PassDesc::default_compute(name) constructors",
+                [p for p, _ in sorted(passdesc_files, key=lambda x: -x[1])],
+            )
+        )
 
     return helpers
 
 
 # ── Reporting ─────────────────────────────────────────────────────────────────
+
 
 def report(all_stats: list[FileStats], dry: dict, test_helpers: list) -> str:
     lines = []
@@ -260,12 +281,13 @@ def report(all_stats: list[FileStats], dry: dict, test_helpers: list) -> str:
     lines.append("=" * 72)
     lines.append("TEST EXTRACTION CANDIDATES (embedded test modules by size)")
     lines.append("=" * 72)
-    lines.append(f"{'File':<55} {'Runtime':>8} {'Tests':>8} {'%Test':>7} {'Modules':>8}")
+    lines.append(
+        f"{'File':<55} {'Runtime':>8} {'Tests':>8} {'%Test':>7} {'Modules':>8}"
+    )
     lines.append("-" * 72)
 
     candidates = [
-        fs for fs in all_stats
-        if fs.test_lines > 50 and not fs.has_separate_test_file
+        fs for fs in all_stats if fs.test_lines > 50 and not fs.has_separate_test_file
     ]
     candidates.sort(key=lambda fs: fs.test_lines, reverse=True)
 
@@ -273,7 +295,9 @@ def report(all_stats: list[FileStats], dry: dict, test_helpers: list) -> str:
         rel = fs.path.relative_to(ROOT)
         pct = (fs.test_lines / fs.total_lines * 100) if fs.total_lines else 0
         mods = len(fs.test_modules)
-        lines.append(f"{str(rel):<55} {fs.runtime_lines:>8} {fs.test_lines:>8} {pct:>6.0f}%  {mods:>7}")
+        lines.append(
+            f"{str(rel):<55} {fs.runtime_lines:>8} {fs.test_lines:>8} {pct:>6.0f}%  {mods:>7}"
+        )
 
     lines.append("")
     total_extractable = sum(fs.test_lines for fs in candidates)
@@ -289,8 +313,10 @@ def report(all_stats: list[FileStats], dry: dict, test_helpers: list) -> str:
         rel = fs.path.relative_to(ROOT)
         lines.append(f"\n  {rel}")
         for m in fs.test_modules:
-            lines.append(f"    cfg(test) block: lines {m.start_line}–{m.end_line} "
-                         f"({m.lines} lines, {m.test_count} tests)")
+            lines.append(
+                f"    cfg(test) block: lines {m.start_line}–{m.end_line} "
+                f"({m.lines} lines, {m.test_count} tests)"
+            )
 
     # ── Section 3: DRY opportunities ─────────────────────────────────────────
     lines.append("")
@@ -310,13 +336,17 @@ def report(all_stats: list[FileStats], dry: dict, test_helpers: list) -> str:
         "error_handling": "Error handling closures",
     }
 
-    for cat, patterns in sorted(dry.items(), key=lambda kv: -sum(len(d.locations) for d in kv[1])):
+    for cat, patterns in sorted(
+        dry.items(), key=lambda kv: -sum(len(d.locations) for d in kv[1])
+    ):
         label = cat_labels.get(cat, cat)
         total_occurrences = sum(len(d.locations) for d in patterns)
         lines.append(f"\n  {label} — {total_occurrences} total occurrences")
         for dp in patterns[:5]:
             unique_files = len(set(p for p, _ in dp.locations))
-            lines.append(f"    [{len(dp.locations):4d}× in {unique_files:3d} files] {dp.pattern}")
+            lines.append(
+                f"    [{len(dp.locations):4d}× in {unique_files:3d} files] {dp.pattern}"
+            )
 
     # ── Section 4: Test helper functions needed ───────────────────────────────
     lines.append("")
@@ -345,13 +375,16 @@ def report(all_stats: list[FileStats], dry: dict, test_helpers: list) -> str:
     lines.append(f"  Files with embedded tests:       {files_with_tests:6,}")
     lines.append(f"  Total embedded test lines:       {total_test_lines:6,}")
     lines.append(f"  Total runtime lines:             {total_runtime:6,}")
-    lines.append(f"  Test / runtime ratio:            {total_test_lines/max(total_runtime,1)*100:6.1f}%")
+    lines.append(
+        f"  Test / runtime ratio:            {total_test_lines / max(total_runtime, 1) * 100:6.1f}%"
+    )
     lines.append(f"  Extractable test lines:          {total_extractable:6,}")
 
     return "\n".join(lines)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+
 
 def main():
     print("Scanning codebase...", flush=True)

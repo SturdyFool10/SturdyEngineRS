@@ -6,11 +6,26 @@ use crate::BINDLESS_COUNT;
 use std::path::PathBuf;
 
 mod shader_fixtures {
-    pub const BINDLESS_ARRAYS: &str = include_str!("../shaders/tests/bindless_arrays.slang");
-    pub const MEMORY_UTF8_COMPUTE: &str =
-        include_str!("../shaders/tests/memory_utf8_compute.slang");
-    pub const MEMORY_BYTES_VERTEX: &str =
-        include_str!("../shaders/tests/memory_bytes_vertex.slang");
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn shader_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("shaders/tests")
+            .join(name)
+    }
+
+    pub fn source(name: &str) -> String {
+        fs::read_to_string(shader_path(name)).expect("shader fixture should be readable")
+    }
+
+    pub fn leaked_source(name: &str) -> &'static str {
+        Box::leak(source(name).into_boxed_str())
+    }
+
+    pub fn leaked_bytes(name: &str) -> &'static [u8] {
+        Box::leak(source(name).into_bytes().into_boxed_slice())
+    }
 }
 
 fn testbed_shader(name: &str) -> PathBuf {
@@ -203,7 +218,7 @@ mod shader_source_tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn reflect_bindless_arrays_use_bindless_count() {
         let desc = ShaderDesc {
-            source: ShaderSource::Inline(shader_fixtures::BINDLESS_ARRAYS.into()),
+            source: ShaderSource::Inline(shader_fixtures::source("bindless_arrays.slang")),
             entry_point: "main".into(),
             stage: ShaderStage::Fragment,
             requires_ray_query: false,
@@ -250,8 +265,7 @@ mod shader_source_tests {
             requires_cooperative_matrix: false,
             uses_ser: false,
         };
-        let reflection =
-            reflect_pipeline_layout(&desc).expect("should not error for SPIRV source");
+        let reflection = reflect_pipeline_layout(&desc).expect("should not error for SPIRV source");
         assert_eq!(reflection, ShaderReflection::default());
     }
 
@@ -259,7 +273,9 @@ mod shader_source_tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn embedded_str_source_compiles_and_reflects() {
         let desc = ShaderDesc {
-            source: ShaderSource::MemoryUtf8(shader_fixtures::MEMORY_UTF8_COMPUTE),
+            source: ShaderSource::MemoryUtf8(shader_fixtures::leaked_source(
+                "memory_utf8_compute.slang",
+            )),
             entry_point: "main".into(),
             stage: ShaderStage::Compute,
             requires_ray_query: false,
@@ -282,7 +298,9 @@ mod shader_source_tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn memory_bytes_source_compiles_as_utf8_slang() {
         let desc = ShaderDesc {
-            source: ShaderSource::MemoryBytes(shader_fixtures::MEMORY_BYTES_VERTEX.as_bytes()),
+            source: ShaderSource::MemoryBytes(shader_fixtures::leaked_bytes(
+                "memory_bytes_vertex.slang",
+            )),
             entry_point: "vs_main".into(),
             stage: ShaderStage::Vertex,
             requires_ray_query: false,

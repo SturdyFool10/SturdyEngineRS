@@ -388,15 +388,5 @@ fn full_mip_count(width: u32, height: u32) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::full_mip_count;
-
-    #[test]
-    fn hiz_full_mip_count_handles_non_power_of_two_extents() {
-        assert_eq!(full_mip_count(1, 1), 1);
-        assert_eq!(full_mip_count(2, 1), 2);
-        assert_eq!(full_mip_count(3, 2), 2);
-        assert_eq!(full_mip_count(4, 4), 3);
-        assert_eq!(full_mip_count(1920, 1080), 11);
-    }
-}
+#[path = "hiz_pass_tests.rs"]
+mod tests;

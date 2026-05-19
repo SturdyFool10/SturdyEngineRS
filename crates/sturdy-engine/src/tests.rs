@@ -1,10 +1,25 @@
 use crate::*;
 
 mod shader_fixtures {
-    pub const PUSH_CONSTANTS_FRAGMENT: &str =
-        include_str!("../shaders/tests/push_constants_fragment.slang");
-    pub const CONSTANT_RED_FRAGMENT: &str =
-        include_str!("../shaders/tests/constant_red_fragment.slang");
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn shader_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("shaders/tests")
+            .join(name)
+    }
+
+    pub fn push_constants_fragment() -> String {
+        fs::read_to_string(shader_path("push_constants_fragment.slang"))
+            .expect("push constants shader fixture should be readable")
+    }
+
+    pub fn constant_red_fragment() -> String {
+        fs::read_to_string(shader_path("constant_red_fragment.slang"))
+            .expect("constant red shader fixture should be readable")
+    }
+
     pub const STORAGE_IMAGE_COMPUTE_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/shaders/tests/storage_image_compute.slang"
@@ -759,9 +774,8 @@ mod shader_source_tests {
     #[test]
     fn shader_pass_intent_validate_warns_when_push_constants_declared_but_not_provided() {
         let engine = Engine::with_backend(BackendKind::Null).unwrap();
-        let program =
-            ShaderProgram::from_inline_fragment(&engine, shader_fixtures::PUSH_CONSTANTS_FRAGMENT)
-                .unwrap();
+        let fragment = shader_fixtures::push_constants_fragment();
+        let program = ShaderProgram::from_inline_fragment(&engine, &fragment).unwrap();
         let frame = engine.begin_render_frame().unwrap();
         let target = frame
             .image(
@@ -856,10 +870,11 @@ mod shader_source_tests {
     #[test]
     fn load_slang_source_fragment_entry_creates_fullscreen_program() {
         let engine = Engine::with_backend(BackendKind::Null).unwrap();
+        let fragment = shader_fixtures::constant_red_fragment();
         let program = engine
             .load_slang_source(
                 ShaderName::new("test/constant-red"),
-                shader_fixtures::CONSTANT_RED_FRAGMENT,
+                Box::leak(fragment.into_boxed_str()),
                 SlangEntryPoints::fragment("main"),
             )
             .unwrap();
@@ -886,12 +901,9 @@ mod shader_source_tests {
 
         // Two separate ShaderProgram instances from the same inline source.
         // The cache means Slang compiles only once; both handle creation should succeed.
-        let a =
-            ShaderProgram::from_inline_fragment(&engine, shader_fixtures::CONSTANT_RED_FRAGMENT)
-                .unwrap();
-        let b =
-            ShaderProgram::from_inline_fragment(&engine, shader_fixtures::CONSTANT_RED_FRAGMENT)
-                .unwrap();
+        let fragment = shader_fixtures::constant_red_fragment();
+        let a = ShaderProgram::from_inline_fragment(&engine, &fragment).unwrap();
+        let b = ShaderProgram::from_inline_fragment(&engine, &fragment).unwrap();
 
         // Each program is an independent object (different internal handles).
         let frame = engine.begin_render_frame().unwrap();

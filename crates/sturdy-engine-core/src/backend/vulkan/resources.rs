@@ -1482,5 +1482,5 @@ fn vk_sampler_reduction_mode(mode: SamplerReductionMode) -> vk::SamplerReduction
 }
 
 #[cfg(test)]
+#[path = "resources_tests.rs"]
 mod tests;
-

@@ -25,10 +25,10 @@ pub enum ShaderSource {
     /// Slang source addressed through the engine asset system. Runtime compilation
     /// requires an asset resolver; direct device creation rejects unresolved virtual paths.
     VirtualAssetPath(&'static Path),
-    /// Borrowed UTF-8 Slang source, including `include_str!` output.
+    /// Borrowed UTF-8 Slang source supplied by the caller.
     MemoryUtf8(&'static str),
-    /// Borrowed bytes, including `include_bytes!` output. UTF-8 bytes are compiled
-    /// as Slang source; SPIR-V bytes are accepted for SPIR-V targets.
+    /// Borrowed bytes supplied by the caller. UTF-8 bytes are compiled as Slang
+    /// source; SPIR-V bytes are accepted for SPIR-V targets.
     MemoryBytes(&'static [u8]),
     Spirv(Vec<u32>),
     /// Pre-compiled DXIL bytecode for D3D12 backends.

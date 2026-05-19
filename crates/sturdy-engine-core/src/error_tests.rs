@@ -1,8 +1,6 @@
 // Tests extracted from crates/sturdy-engine-core/src/error.rs
 // See scripts/extract_tests.py for the extraction logic.
 
-use super::*;
-
 use super::{Error, ErrorCategory};
 
 #[test]

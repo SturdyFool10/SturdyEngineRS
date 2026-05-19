@@ -27,6 +27,7 @@
 // ```
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use clay_ui::{GpuWorkQueue, RenderCommandKind, RenderData};
@@ -36,21 +37,11 @@ use crate::{
     RenderFrame, Result, ShaderDesc, ShaderSource, ShaderStage, TextureUploadDesc,
 };
 
-const UI_SHAPE_FRAGMENT: &str = include_str!("../shaders/debug_overlay_ui_shape_fragment.slang");
-const UI_IMAGE_FRAGMENT: &str = r#"
-Texture2D<float4> ui_image;
-SamplerState ui_image_sampler;
-
-struct FSInput {
-    float4 position : SV_POSITION;
-    float2 uv : TEXCOORD0;
-    float4 color : COLOR0;
-};
-
-float4 main(FSInput input) : SV_TARGET {
-    return ui_image.SampleLevel(ui_image_sampler, input.uv, 0.0) * input.color;
+fn shader_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("shaders")
+        .join(name)
 }
-"#;
 
 // ── Push-constant layout (must match debug_overlay_ui_shape_fragment.slang) ──
 
@@ -83,7 +74,9 @@ impl UiRenderer {
             engine,
             MeshProgramDesc {
                 fragment: ShaderDesc {
-                    source: ShaderSource::Inline(UI_SHAPE_FRAGMENT.to_string()),
+                    source: ShaderSource::File(shader_path(
+                        "debug_overlay_ui_shape_fragment.slang",
+                    )),
                     entry_point: "main".to_string(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
@@ -100,7 +93,7 @@ impl UiRenderer {
             engine,
             MeshProgramDesc {
                 fragment: ShaderDesc {
-                    source: ShaderSource::Inline(UI_IMAGE_FRAGMENT.to_string()),
+                    source: ShaderSource::File(shader_path("ui_image_fragment.slang")),
                     entry_point: "main".to_string(),
                     stage: ShaderStage::Fragment,
                     requires_ray_query: false,
@@ -376,9 +369,6 @@ fn clipped_uv(original: clay_ui::Rect, clipped: clay_ui::Rect) -> [f32; 4] {
 
 // ── Text rendering ────────────────────────────────────────────────────────────
 
-/// Text atlas shader — alpha mask path (same as text_overlay_alpha_fragment.slang).
-const TEXT_ATLAS_FRAGMENT: &str = include_str!("../shaders/text_overlay_alpha_fragment.slang");
-
 /// Draw all text scenes from a [`clay_ui::UiFrameOutput`] into `target`.
 ///
 /// Each text scene is a pre-rendered glyph atlas (CPU-side RGBA8 pixels) plus
@@ -409,7 +399,7 @@ pub fn draw_ui_text(
             engine,
             MeshProgramDesc {
                 fragment: ShaderDesc {
-                    source: ShaderSource::Inline(TEXT_ATLAS_FRAGMENT.to_string()),
+                    source: ShaderSource::File(shader_path("text_overlay_alpha_fragment.slang")),
                     entry_point: "main".to_string(),
                     stage: crate::ShaderStage::Fragment,
                     requires_ray_query: false,
@@ -544,47 +534,5 @@ fn pixel_rect_to_ndc(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pixel_rect_to_ndc_uses_viewport_dimensions() {
-        let (pos, size) = pixel_rect_to_ndc(100.0, 50.0, 300.0, 250.0, 800, 600);
-
-        assert_eq!(pos, [-0.75, 1.0 - 250.0 / 600.0 * 2.0]);
-        assert_eq!(size, [0.5, 200.0 / 600.0 * 2.0]);
-    }
-
-    #[test]
-    fn quad_bounds_handles_unordered_points() {
-        let (min, max) = quad_bounds(&[[4.0, 1.0], [2.0, 9.0], [7.0, 3.0], [5.0, -1.0]]);
-
-        assert_eq!(min, [2.0, -1.0]);
-        assert_eq!(max, [7.0, 9.0]);
-    }
-
-    #[test]
-    fn clip_rect_intersects_enabled_axes_only() {
-        let clip = ClipRect::viewport(100, 100);
-        let horizontal_only =
-            clip.intersect_axes(clay_ui::Rect::new(25.0, 30.0, 50.0, 10.0), true, false);
-
-        assert_eq!(
-            horizontal_only,
-            ClipRect {
-                min_x: 25.0,
-                min_y: 0.0,
-                max_x: 75.0,
-                max_y: 100.0,
-            }
-        );
-    }
-
-    #[test]
-    fn clipped_uv_preserves_sample_region_after_scissor() {
-        let original = clay_ui::Rect::new(100.0, 50.0, 200.0, 100.0);
-        let clipped = clay_ui::Rect::new(150.0, 75.0, 100.0, 50.0);
-
-        assert_eq!(clipped_uv(original, clipped), [0.25, 0.25, 0.75, 0.75]);
-    }
-}
+#[path = "ui_renderer_tests.rs"]
+mod tests;
