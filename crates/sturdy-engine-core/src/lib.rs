@@ -52,7 +52,10 @@ pub use binding::{
     CanonicalGroupLayout, CanonicalPipelineLayout, ResourceBinding, StageMask, UpdateRate,
 };
 pub use buffer::{BufferDesc, BufferUsage};
-pub use caps::{AmdShaderStageStats, Caps, CoopMatrixElementType, CoopMatrixProperty, CoopMatrixScope, ExecutableStat, PerfCounter, PerfCounterCategory};
+pub use caps::{
+    AmdShaderStageStats, Caps, CoopMatrixElementType, CoopMatrixProperty, CoopMatrixScope,
+    ExecutableStat, PassTimingReport, PerfCounter, PerfCounterCategory, PerfCounterHandle,
+};
 pub use device::{Device, DeviceDesc, DeviceFeature, Frame, enumerate_adapters};
 pub use error::{Error, ErrorCategory, Result};
 pub use external_resource::{
@@ -61,10 +64,10 @@ pub use external_resource::{
 };
 pub use gpu_capture::{GpuCaptureDesc, GpuCaptureTool};
 pub use handles::{
-    AccelerationStructureHandle, BindGroupHandle, BufferHandle, DeviceHandle, FrameHandle,
-    ImageHandle, IndirectCommandLayoutHandle, OpticalFlowSessionHandle, PassHandle, PipelineHandle,
-    PipelineLayoutHandle, SamplerHandle, ShaderHandle, SubmissionHandle, SurfaceHandle,
-    VideoSessionHandle, SemaphoreHandle,
+    AccelerationStructureHandle, BindGroupHandle, BufferHandle, DeviceHandle, FenceHandle,
+    FrameHandle, ImageHandle, IndirectCommandLayoutHandle, OpticalFlowSessionHandle, PassHandle,
+    PipelineHandle, PipelineLayoutHandle, SamplerHandle, SemaphoreHandle, ShaderHandle,
+    SubmissionHandle, SurfaceHandle, VideoSessionHandle,
 };
 pub use image::{
     Extent3d, Format, FormatCapabilities, ImageBuilder, ImageClearValue, ImageCompression,
@@ -96,13 +99,14 @@ pub use ray_tracing_pipeline::{
 };
 pub use render_graph::{
     AccelerationStructureBuildMode, Access, AliasPlan, Barrier, BlasBuildDesc, BlasGeometryDesc,
-    BufferBarrier, BufferStateKey, BufferUse, CompiledGraph, CopyBufferToImageDesc,
-    CopyImageToBufferDesc, DispatchDesc, DispatchIndirectDesc, DrawDesc, DrawIndirectCountDesc,
-    DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, ImageBarrier, ImageStateKey,
-    ImageUse, IndexBufferBinding, IndexFormat, PassDesc, PassWork, PushDescriptorBinding,
-    PushDescriptorSetDesc, QueueType, RecordBatch, RenderGraph, ResolveImageDesc, ResourceLifetime,
-    ResourceUse, RgState, ShaderBinding, ShaderBindingTable, ShaderBindingTableRegion, ShadingRate,
-    SubresourceRange, TlasBuildDesc, TraceRaysDesc, VertexBufferBinding,
+    BufferBarrier, BufferStateKey, BufferUse, ClusterAccelerationStructureBuildDesc, CompiledGraph,
+    CopyBufferToImageDesc, CopyImageToBufferDesc, DispatchDesc, DispatchIndirectDesc, DrawDesc,
+    DrawIndirectCountDesc, DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc,
+    ImageBarrier, ImageStateKey, ImageUse, IndexBufferBinding, IndexFormat, PassDesc, PassWork,
+    PushDescriptorBinding, PushDescriptorSetDesc, QueueType, RecordBatch, RenderGraph,
+    ResolveImageDesc, ResourceLifetime, ResourceUse, RgState, ShaderBinding, ShaderBindingTable,
+    ShaderBindingTableRegion, ShadingRate, SubresourceRange, TlasBuildDesc, TraceRaysDesc,
+    VertexBufferBinding,
 };
 pub use sampler::{
     AddressMode, BorderColor, CompareOp, FilterMode, MipmapMode, SamplerDesc, SamplerReductionMode,

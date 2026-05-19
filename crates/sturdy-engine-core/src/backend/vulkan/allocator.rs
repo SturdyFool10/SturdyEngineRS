@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
 
-use ash::{Device, vk};
 use ash::vk::TaggedStructure;
+use ash::{Device, vk};
 
 use crate::{Error, Result};
 
 // Block sizes for new VkDeviceMemory allocations.
 const DEVICE_LOCAL_BLOCK_SIZE: u64 = 256 * 1024 * 1024; // 256 MiB
+/// Reduced block size when device-local usage exceeds 80 % of the OS-reported budget.
+const DEVICE_LOCAL_BLOCK_SIZE_REDUCED: u64 = 32 * 1024 * 1024; // 32 MiB
 const HOST_VISIBLE_BLOCK_SIZE: u64 = 64 * 1024 * 1024; // 64 MiB
 
 /// Sentinel block ID indicating a dedicated `VkDeviceMemory` allocation (not sub-allocated).
@@ -205,6 +207,7 @@ impl TypePool {
         size: u64,
         alignment: u64,
         priority: Option<f32>,
+        new_block_size: u64,
     ) -> Result<Allocation> {
         // Try existing blocks first.
         for block in &mut self.blocks {
@@ -223,11 +226,7 @@ impl TypePool {
             }
         }
         // No existing block had room — create a new one.
-        let block_capacity = if self.host_visible {
-            HOST_VISIBLE_BLOCK_SIZE.max(size)
-        } else {
-            DEVICE_LOCAL_BLOCK_SIZE.max(size)
-        };
+        let block_capacity = new_block_size.max(size);
         let mut alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(block_capacity)
             .memory_type_index(self.memory_type);
@@ -347,6 +346,10 @@ pub struct GpuAllocator {
     pools: Vec<TypePool>,
     /// `VK_EXT_memory_priority` is available; chained into every allocation.
     pub memory_priority_enabled: bool,
+    /// Total device-local memory budget in bytes from `VK_EXT_memory_budget`; 0 = unconstrained.
+    /// When set, new device-local blocks are capped to `DEVICE_LOCAL_BLOCK_SIZE_REDUCED` once
+    /// current capacity reaches 80 % of this budget.
+    pub device_local_budget: u64,
 }
 
 // Safety: GpuAllocator is only accessed through Mutex<ResourceRegistry> in VulkanBackend.
@@ -361,6 +364,7 @@ impl GpuAllocator {
             memory_properties,
             pools: Vec::new(),
             memory_priority_enabled: false,
+            device_local_budget: 0,
         }
     }
 
@@ -384,6 +388,12 @@ impl GpuAllocator {
             None
         };
 
+        // Compute block size before taking the mutable pool borrow to satisfy the borrow checker.
+        let new_block_size = if host_visible {
+            HOST_VISIBLE_BLOCK_SIZE
+        } else {
+            self.device_local_new_block_size()
+        };
         let pool_index = match self.pools.iter().position(|p| p.memory_type == memory_type) {
             Some(index) => index,
             None => {
@@ -392,7 +402,34 @@ impl GpuAllocator {
             }
         };
         let pool = &mut self.pools[pool_index];
-        pool.alloc(device, requirements.size, requirements.alignment, priority)
+        pool.alloc(
+            device,
+            requirements.size,
+            requirements.alignment,
+            priority,
+            new_block_size,
+        )
+    }
+
+    /// GFX-1e: Choose block size for a new device-local block based on budget pressure.
+    fn device_local_new_block_size(&self) -> u64 {
+        if self.device_local_budget > 0 {
+            let current: u64 = self
+                .pools
+                .iter()
+                .filter(|p| !p.host_visible)
+                .map(|p| p.stats().capacity_bytes)
+                .sum();
+            if current >= self.device_local_budget * 4 / 5 {
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "[SturdyEngine] VRAM pressure: new device-local block capped to {} MiB",
+                    DEVICE_LOCAL_BLOCK_SIZE_REDUCED / (1024 * 1024)
+                );
+                return DEVICE_LOCAL_BLOCK_SIZE_REDUCED;
+            }
+        }
+        DEVICE_LOCAL_BLOCK_SIZE
     }
 
     pub fn dealloc(&mut self, device: &Device, alloc: Allocation) -> Result<()> {

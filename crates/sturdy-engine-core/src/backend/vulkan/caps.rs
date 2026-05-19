@@ -1,7 +1,7 @@
 use std::ffi::CStr;
 
-use ash::{Instance, vk};
 use ash::vk::TaggedStructure;
+use ash::{Instance, vk};
 
 use crate::{BackendFeatures, Caps, Format, FormatCapabilities, Limits};
 
@@ -165,7 +165,9 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     // GFX-7a: VK_EXT_descriptor_buffer — descriptors stored in app-managed GPU buffers.
     let descriptor_buffer = has(b"VK_EXT_descriptor_buffer\0");
     // GFX-7b: VK_EXT_descriptor_heap — D3D12-style resource + sampler descriptor heaps.
-    let descriptor_heap = has(b"VK_EXT_descriptor_heap\0");
+    // Gated on both extension presence and the feature bit (extension has a mandatory feature struct).
+    let descriptor_heap = has(b"VK_EXT_descriptor_heap\0")
+        && feature_chain.descriptor_heap.descriptor_heap == vk::TRUE;
     // GFX-7c: VK_AMDX_shader_enqueue — AMD work graphs (shader-enqueued dispatch).
     let work_graphs = has(b"VK_AMDX_shader_enqueue\0");
     // GFX-8: VK_EXT_shader_object — pipeline-free shader binding.
@@ -260,8 +262,7 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     let pipeline_creation_cache_control =
         properties.api_version >= vk_1_3 || has(b"VK_EXT_pipeline_creation_cache_control\0");
     // GFX-2k: image compression swapchain
-    let image_compression_control_swapchain =
-        has(b"VK_EXT_image_compression_control_swapchain\0");
+    let image_compression_control_swapchain = has(b"VK_EXT_image_compression_control_swapchain\0");
     // GFX-5: external memory export capability
     let external_memory_fd_export = has(b"VK_KHR_external_memory_fd\0");
 
@@ -735,6 +736,8 @@ pub struct AvailableFeatureChain<'a> {
         vk::PhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT<'a>,
     pub shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT<'a>,
     pub optical_flow: vk::PhysicalDeviceOpticalFlowFeaturesNV<'a>,
+    /// GFX-7b: VK_EXT_descriptor_heap feature detection.
+    pub descriptor_heap: vk::PhysicalDeviceDescriptorHeapFeaturesEXT<'a>,
 }
 
 pub fn available_feature_chain(
@@ -765,6 +768,7 @@ pub fn available_feature_chain(
             vk::PhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT::default(),
         shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT::default(),
         optical_flow: vk::PhysicalDeviceOpticalFlowFeaturesNV::default(),
+        descriptor_heap: vk::PhysicalDeviceDescriptorHeapFeaturesEXT::default(),
     };
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
         .push(&mut chain.descriptor_indexing)
@@ -788,7 +792,8 @@ pub fn available_feature_chain(
         .push(&mut chain.image_compression_control)
         .push(&mut chain.msaa_render_to_single_sampled)
         .push(&mut chain.shader_object)
-        .push(&mut chain.optical_flow);
+        .push(&mut chain.optical_flow)
+        .push(&mut chain.descriptor_heap);
     unsafe { instance.get_physical_device_features2(physical_device, &mut features2) };
     chain
 }

@@ -259,6 +259,7 @@ fn prefilter_specular_cpu(
         compression: Default::default(),
         min_lod_bits: None,
         msaa_resolve_to_single_sampled: false,
+        drm_format_modifier: None,
     })?;
 
     // Upload: one copy command per layer using a shared staging buffer.
@@ -319,7 +320,8 @@ fn prefilter_specular_cpu(
         push_descriptor_set: None,
         predicate: None,
         shader_binding: None,
-                    shading_rate_image: None,
+        shading_rate_image: None,
+        perf_counters: None,
     })?;
 
     frame.flush_with_reason(FrameSyncReason::CompatibilityShim)?;

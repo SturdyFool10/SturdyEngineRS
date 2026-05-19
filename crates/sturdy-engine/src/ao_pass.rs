@@ -255,6 +255,7 @@ impl AoPass {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         };
 
         let ao_raw = frame.image("gtao_raw", ao_desc("gtao_raw"))?;

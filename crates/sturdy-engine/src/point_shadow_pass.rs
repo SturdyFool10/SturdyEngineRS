@@ -256,6 +256,7 @@ fn dp_image_desc(resolution: u32, debug_name: &'static str) -> ImageDesc {
         compression: Default::default(),
         min_lod_bits: None,
         msaa_resolve_to_single_sampled: false,
+        drm_format_modifier: None,
     }
 }
 

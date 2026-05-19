@@ -827,6 +827,7 @@ impl Scene {
                 compression: Default::default(),
                 min_lod_bits: None,
                 msaa_resolve_to_single_sampled: false,
+                drm_format_modifier: None,
             },
         )?;
         self.draw_batches(&constants, view_proj, output, Some(&depth), frame, engine)

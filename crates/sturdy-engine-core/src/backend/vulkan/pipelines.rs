@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 
-use ash::{Device, vk};
 use ash::vk::TaggedStructure;
+use ash::{Device, vk};
 
 use crate::{
     ComputePipelineDesc, ConservativeRasterMode, CullMode, Error, FrontFace, GraphicsPipelineDesc,
@@ -14,83 +14,8 @@ use super::descriptors::DescriptorRegistry;
 use super::resources::vk_format;
 use super::shaders::{ShaderRegistry, shader_stage_flags};
 
-#[derive(Hash, PartialEq, Eq)]
-struct FramebufferKey {
-    render_pass: vk::RenderPass,
-    attachments: Vec<vk::ImageView>,
-    width: u32,
-    height: u32,
-    layers: u32,
-}
-
-#[derive(Default)]
-struct FramebufferCache {
-    entries: HashMap<FramebufferKey, vk::Framebuffer>,
-}
-
-impl FramebufferCache {
-    fn get_or_create(
-        &mut self,
-        device: &Device,
-        render_pass: vk::RenderPass,
-        attachments: &[vk::ImageView],
-        width: u32,
-        height: u32,
-        layers: u32,
-    ) -> Result<vk::Framebuffer> {
-        let key = FramebufferKey {
-            render_pass,
-            attachments: attachments.to_vec(),
-            width,
-            height,
-            layers,
-        };
-        if let Some(&fb) = self.entries.get(&key) {
-            return Ok(fb);
-        }
-        let info = vk::FramebufferCreateInfo::default()
-            .render_pass(render_pass)
-            .attachments(attachments)
-            .width(width)
-            .height(height)
-            .layers(layers);
-        let fb = unsafe {
-            device
-                .create_framebuffer(&info, None)
-                .map_err(|error| Error::Backend(format!("vkCreateFramebuffer failed: {error:?}")))?
-        };
-        self.entries.insert(key, fb);
-        Ok(fb)
-    }
-
-    fn invalidate_render_pass(&mut self, device: &Device, render_pass: vk::RenderPass) {
-        self.entries.retain(|key, fb| {
-            if key.render_pass == render_pass {
-                unsafe { device.destroy_framebuffer(*fb, None) };
-                false
-            } else {
-                true
-            }
-        });
-    }
-
-    fn invalidate_image_view(&mut self, device: &Device, view: vk::ImageView) {
-        self.entries.retain(|key, fb| {
-            if key.attachments.contains(&view) {
-                unsafe { device.destroy_framebuffer(*fb, None) };
-                false
-            } else {
-                true
-            }
-        });
-    }
-
-    fn clear_all(&mut self, device: &Device) {
-        for (_, fb) in self.entries.drain() {
-            unsafe { device.destroy_framebuffer(fb, None) };
-        }
-    }
-}
+// GFX-1b: FramebufferCache removed. Framebuffers are now created transiently per-pass
+// in CommandContext::record_draw_pass and destroyed after the frame fence fires.
 
 /// Save the pipeline cache after this many new pipelines have been created since
 /// the last save.  Keeps startup fast (no stale cache flush) while ensuring the
@@ -101,7 +26,6 @@ pub struct PipelineRegistry {
     pipeline_cache: vk::PipelineCache,
     pipelines: HashMap<PipelineHandle, VulkanPipeline>,
     graphics_states: HashMap<PipelineHandle, VulkanGraphicsPipelineState>,
-    framebuffer_cache: FramebufferCache,
     /// Pipelines created since the last incremental cache save.
     pipelines_since_checkpoint: u32,
     /// When true, graphics pipelines are created without a VkRenderPass,
@@ -118,6 +42,8 @@ pub struct PipelineRegistry {
     /// When true, VK_EXT_vertex_input_dynamic_state dynamic state is added and
     /// vertex input bindings/attributes are omitted from pipeline creation.
     pub vertex_input_dynamic_state_enabled: bool,
+    /// GFX-7b: When true, pipelines carry `VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT`.
+    pub descriptor_heap_enabled: bool,
 }
 
 impl PipelineRegistry {
@@ -135,7 +61,6 @@ impl PipelineRegistry {
             pipeline_cache,
             pipelines: HashMap::new(),
             graphics_states: HashMap::new(),
-            framebuffer_cache: FramebufferCache::default(),
             pipelines_since_checkpoint: 0,
             dynamic_rendering_enabled: false,
             vrs_pipeline_enabled: false,
@@ -143,6 +68,7 @@ impl PipelineRegistry {
             conservative_rasterization_underestimate_enabled: false,
             extended_dynamic_state3_enabled: false,
             vertex_input_dynamic_state_enabled: false,
+            descriptor_heap_enabled: false,
         })
     }
 
@@ -231,9 +157,16 @@ impl PipelineRegistry {
             .stage(shader_stage_flags(stage))
             .module(module)
             .name(&entry);
-        let info = vk::ComputePipelineCreateInfo::default()
+        let mut info = vk::ComputePipelineCreateInfo::default()
             .stage(stage_info)
             .layout(layout);
+        // GFX-7b: signal descriptor heap access.
+        let mut heap_flags_info;
+        if self.descriptor_heap_enabled {
+            heap_flags_info = vk::PipelineCreateFlags2CreateInfo::default()
+                .flags(vk::PipelineCreateFlags2::DESCRIPTOR_HEAP_EXT);
+            info = info.push(&mut heap_flags_info);
+        }
         let pipeline = unsafe {
             device
                 .create_compute_pipelines(self.pipeline_cache, &[info], None)
@@ -624,6 +557,13 @@ impl PipelineRegistry {
         if render_pass == vk::RenderPass::null() {
             info = info.push(&mut pipeline_rendering_info);
         }
+        // GFX-7b: signal that this pipeline accesses the descriptor heap.
+        let mut heap_flags_info;
+        if self.descriptor_heap_enabled {
+            heap_flags_info = vk::PipelineCreateFlags2CreateInfo::default()
+                .flags(vk::PipelineCreateFlags2::DESCRIPTOR_HEAP_EXT);
+            info = info.push(&mut heap_flags_info);
+        }
 
         let pipeline = unsafe {
             device
@@ -651,40 +591,9 @@ impl PipelineRegistry {
         Ok(())
     }
 
-    pub fn get_or_create_framebuffer(
-        &mut self,
-        device: &Device,
-        render_pass: vk::RenderPass,
-        attachments: &[vk::ImageView],
-        width: u32,
-        height: u32,
-        layers: u32,
-    ) -> Result<vk::Framebuffer> {
-        self.framebuffer_cache.get_or_create(
-            device,
-            render_pass,
-            attachments,
-            width,
-            height,
-            layers,
-        )
-    }
-
-    pub fn invalidate_framebuffers_for_view(&mut self, device: &Device, view: vk::ImageView) {
-        self.framebuffer_cache.invalidate_image_view(device, view);
-    }
-
-    pub fn clear_all_framebuffers(&mut self, device: &Device) {
-        self.framebuffer_cache.clear_all(device);
-    }
-
     pub fn destroy_pipeline(&mut self, device: &Device, handle: PipelineHandle) -> Result<()> {
         let pipeline = self.pipelines.remove(&handle).ok_or(Error::InvalidHandle)?;
         self.graphics_states.remove(&handle);
-        if pipeline.render_pass != vk::RenderPass::null() {
-            self.framebuffer_cache
-                .invalidate_render_pass(device, pipeline.render_pass);
-        }
         unsafe {
             device.destroy_pipeline(pipeline.pipeline, None);
             if pipeline.render_pass != vk::RenderPass::null() {
@@ -695,7 +604,6 @@ impl PipelineRegistry {
     }
 
     pub fn destroy_all(&mut self, device: &Device) {
-        self.framebuffer_cache.clear_all(device);
         self.graphics_states.clear();
         for (_, pipeline) in self.pipelines.drain() {
             unsafe {

@@ -254,6 +254,11 @@ pub struct ImageDesc {
     /// Requires `BackendFeatures::msaa_render_to_single_sampled` and `samples > 1`.
     /// On tile-based hardware this eliminates the MSAA allocation entirely.
     pub msaa_resolve_to_single_sampled: bool,
+    /// DRM format modifier for display-pipeline-compatible image tiling.
+    ///
+    /// When `Some`, chains `VkImageDrmFormatModifierExplicitCreateInfoEXT` into image creation.
+    /// Requires `BackendFeatures::drm_format_modifier`. Use `None` for standard tiling.
+    pub drm_format_modifier: Option<u64>,
 }
 
 impl Default for ImageDesc {
@@ -278,6 +283,7 @@ impl ImageDesc {
             compression: ImageCompression::Default,
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         }
     }
 
@@ -325,6 +331,7 @@ impl ImageDesc {
             compression: ImageCompression::Default,
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         }
     }
 

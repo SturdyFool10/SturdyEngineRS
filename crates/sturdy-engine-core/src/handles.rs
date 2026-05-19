@@ -79,3 +79,8 @@ impl HandleAllocator {
 #[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct SemaphoreHandle(pub u64);
 
+/// Handle for an externally-exportable Vulkan fence.
+/// Created by `Device::create_exportable_fence`. Requires `BackendFeatures::external_fence_fd`.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct FenceHandle(pub u64);

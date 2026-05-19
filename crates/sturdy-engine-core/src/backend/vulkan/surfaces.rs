@@ -72,7 +72,9 @@ impl SurfaceRegistry {
     ) -> Result<SurfaceInfo> {
         let surface = unsafe {
             ash_window::SurfaceFactory::new(entry, instance, desc.display_handle)
-                .map_err(|error| Error::Backend(format!("vkCreateSurfaceKHR (factory) failed: {error:?}")))?
+                .map_err(|error| {
+                    Error::Backend(format!("vkCreateSurfaceKHR (factory) failed: {error:?}"))
+                })?
                 .create_surface(desc.window_handle, None)
                 .map_err(|error| Error::Backend(format!("vkCreateSurfaceKHR failed: {error:?}")))?
         };

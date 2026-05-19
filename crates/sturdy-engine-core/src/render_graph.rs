@@ -454,6 +454,35 @@ pub struct ShaderBindingTable {
     pub callable: Option<ShaderBindingTableRegion>,
 }
 
+/// GFX-3c: Describes a cluster acceleration structure build (VK_NV_cluster_acceleration_structure).
+///
+/// All inputs and outputs are GPU virtual addresses; callers must create
+/// `SHADER_DEVICE_ADDRESS`-capable buffers and pass their device addresses.
+/// Requires `BackendFeatures::cluster_acceleration_structure`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ClusterAccelerationStructureBuildDesc {
+    /// Maximum number of cluster AS objects to build in this command.
+    pub max_as_count: u32,
+    /// Build flags (same `BuildAccelerationStructureFlags` as BLAS/TLAS).
+    pub build_flags: u32,
+    /// Operation type (build / update / move objects).
+    pub op_type: u32,
+    /// Operation mode (implicit / explicit / compute sizes).
+    pub op_mode: u32,
+    /// GPU address of the implicit-data destination, or 0.
+    pub dst_implicit_data_address: u64,
+    /// GPU address of the scratch buffer (from `cluster_as_build_sizes`).
+    pub scratch_address: u64,
+    /// Strided array of destination cluster AS addresses `{ address, size, stride }`.
+    pub dst_addresses: [u64; 3],
+    /// Strided array of destination size entries `{ address, size, stride }`.
+    pub dst_sizes: [u64; 3],
+    /// Strided array of source info structures `{ address, size, stride }`.
+    pub src_infos: [u64; 3],
+    /// GPU address of the source-info count (u32 on the GPU), or 0.
+    pub src_infos_count_address: u64,
+}
+
 /// Describes a ray dispatch (vkCmdTraceRaysKHR).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct TraceRaysDesc {
@@ -557,6 +586,11 @@ pub enum PassWork {
     /// `vkBindOpticalFlowSessionImageNV` and `vkCmdOpticalFlowExecuteNV` when
     /// `VK_NV_optical_flow` is enabled.
     EstimateOpticalFlow(OpticalFlowEstimateDesc),
+    /// GFX-3c: Build cluster acceleration structure(s) for NVIDIA Mega Geometry.
+    ///
+    /// Requires `BackendFeatures::cluster_acceleration_structure`. Records
+    /// `vkCmdBuildClusterAccelerationStructureIndirectNV`.
+    BuildClusterAccelerationStructure(ClusterAccelerationStructureBuildDesc),
 }
 
 /// Inline descriptor binding pushed into the command stream without a descriptor pool.
@@ -667,6 +701,13 @@ pub struct PassDesc {
     /// inside `cmd_begin_rendering`. Requires `BackendFeatures::vrs_attachment` and
     /// `BackendFeatures::dynamic_rendering`.
     pub shading_rate_image: Option<ImageHandle>,
+    /// Hardware performance counters to record for this pass.
+    ///
+    /// Each handle is an index from `Engine::enumerate_performance_counters`. When `Some`,
+    /// the backend wraps the pass's GPU work in a `VK_KHR_performance_query` begin/end pair.
+    /// Requires `BackendFeatures::performance_query`; ignored otherwise.
+    /// Results appear in `PassTimingReport::perf_counters` the following frame.
+    pub perf_counters: Option<Vec<crate::PerfCounterHandle>>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1654,6 +1695,7 @@ mod tests {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         }
     }
 
@@ -1755,7 +1797,8 @@ mod tests {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         }
     }
 
@@ -1937,6 +1980,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
 
@@ -1995,6 +2039,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap_err();
 
@@ -2055,6 +2100,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
 
@@ -2107,6 +2153,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -2147,6 +2194,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -2179,6 +2227,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -2209,6 +2258,7 @@ mod tests {
                     crate::shader_object::ShaderObjectHandle(1),
                 ])),
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
     }
@@ -2236,6 +2286,7 @@ mod tests {
                 predicate: None,
                 shader_binding: Some(ShaderBinding::ShaderObjects(Vec::new())),
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -2274,6 +2325,7 @@ mod tests {
                     crate::shader_object::ShaderObjectHandle(1),
                 ])),
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -2302,6 +2354,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap_err();
 
@@ -2336,6 +2389,7 @@ mod tests {
                 }),
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap_err();
 
@@ -2369,6 +2423,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap_err();
 
@@ -2430,6 +2485,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
@@ -2480,6 +2536,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
     }
@@ -2514,6 +2571,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap_err();
 
@@ -2559,6 +2617,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
 
@@ -2607,6 +2666,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
 
@@ -2658,6 +2718,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
 
@@ -2746,6 +2807,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
 
@@ -2793,6 +2855,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
         graph
@@ -2826,6 +2889,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
 
@@ -2885,6 +2949,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
         graph
@@ -2918,6 +2983,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
         graph
@@ -2945,6 +3011,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
 
@@ -3057,6 +3124,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
 
@@ -3108,6 +3176,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
 
@@ -3151,6 +3220,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
 
@@ -3202,6 +3272,7 @@ mod tests {
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
             .unwrap();
 

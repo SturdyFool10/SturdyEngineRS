@@ -152,6 +152,12 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// GFX-7b: Returns the byte size of a descriptor of the given `VkDescriptorType` ordinal.
+    /// Only valid when `BackendFeatures::descriptor_heap` is true.
+    fn descriptor_heap_type_size(&self, _descriptor_type: u32) -> Option<u64> {
+        None
+    }
+
     fn create_shader_object(
         &self,
         _handle: ShaderObjectHandle,
@@ -517,11 +523,7 @@ pub trait Backend: Send + Sync {
     ///
     /// The returned handle can be passed to `export_image_fd()`. Requires
     /// `BackendFeatures::external_memory_fd`.
-    fn create_exportable_image(
-        &self,
-        _handle: ImageHandle,
-        _desc: crate::ImageDesc,
-    ) -> Result<()> {
+    fn create_exportable_image(&self, _handle: ImageHandle, _desc: crate::ImageDesc) -> Result<()> {
         Err(crate::Error::Unsupported(
             "exportable images require VK_KHR_external_memory_fd",
         ))
@@ -565,6 +567,26 @@ pub trait Backend: Send + Sync {
     fn import_semaphore_fd(&self, _handle: crate::SemaphoreHandle, _fd: i32) -> Result<()> {
         Err(crate::Error::Unsupported(
             "semaphore fd import requires VK_KHR_external_semaphore_fd",
+        ))
+    }
+
+    // ── GFX-5b: External fence ────────────────────────────────────────────────
+
+    fn create_exportable_fence(&self, _handle: crate::FenceHandle) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "exportable fences require VK_KHR_external_fence_fd",
+        ))
+    }
+
+    fn export_fence_fd(&self, _handle: crate::FenceHandle) -> Result<i32> {
+        Err(crate::Error::Unsupported(
+            "fence fd export requires VK_KHR_external_fence_fd",
+        ))
+    }
+
+    fn import_fence_fd(&self, _handle: crate::FenceHandle, _fd: i32) -> Result<()> {
+        Err(crate::Error::Unsupported(
+            "fence fd import requires VK_KHR_external_fence_fd",
         ))
     }
 
@@ -683,10 +705,10 @@ pub trait Backend: Send + Sync {
     }
     /// Per-pass GPU timings from the most recently completed frame.
     ///
-    /// Returns `(pass_name, gpu_milliseconds)` pairs in submission order.
+    /// Returns per-pass GPU timings in submission order.
     /// Empty on backends that don't support timestamp queries, or before the
     /// second frame (timestamps are read back one frame in arrears).
-    fn pass_timings(&self) -> Vec<(String, f32)> {
+    fn pass_timings(&self) -> Vec<crate::PassTimingReport> {
         Vec::new()
     }
     fn present(&self) -> Result<()>;

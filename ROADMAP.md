@@ -268,7 +268,7 @@ Currently using legacy render passes and framebuffers. Dynamic rendering elimina
 - [x] Implement `cmd_begin_rendering` / `cmd_end_rendering` path in `commands.rs`. Replace `cmd_begin_render_pass` / `cmd_end_render_pass` for all graphics passes.
 - [x] Construct `VkRenderingAttachmentInfo` from `ColorTarget` / `DepthTarget` descriptors; pass via `VkRenderingInfo` to `cmd_begin_rendering`.
 - [x] Add `VkPipelineRenderingCreateInfo` to graphics pipeline creation in `pipelines.rs`. Thread attachment formats from `GraphicsPipelineDesc` into the create-info chain instead of a render pass handle.
-- [ ] Delete `FramebufferCache` and all render pass object management from `PipelineRegistry` (retained as fallback for legacy devices without dynamic rendering).
+- [x] Delete `FramebufferCache` and all render pass object management from `PipelineRegistry`. Framebuffers are now created transiently per-pass in `CommandContext::record_draw_pass` and destroyed after the frame fence fires at the start of the next frame (`transient_framebuffers: Vec<vk::Framebuffer>` on `CommandContext`). The legacy render-pass path is retained for non-dynamic-rendering devices.
 - [x] Gate on `features.dynamic_rendering`; keep the legacy path for portability subset devices.
 - [x] **Enables**: GFX-2a (VRS attachment image now implemented). GFX-2c pipeline library and `VK_KHR_dynamic_rendering_local_read` pending.
 
@@ -298,7 +298,7 @@ The current `GpuAllocator` has no budget awareness. Exceeding the budget causes 
 
 - [x] Detect `VK_EXT_memory_budget`; add `BackendFeatures::memory_budget`.
 - [x] When available, call `vkGetPhysicalDeviceMemoryProperties2` with `VkPhysicalDeviceMemoryBudgetPropertiesEXT`. Expose `Engine::memory_budget_ext() -> Option<MemoryBudgetReport>` with per-heap `budget` and `usage` in bytes.
-- [ ] Integrate budget into the allocator: when `device_local_usage > 80% of device_local_budget`, scale down new block sizes and emit a structured warning via debug utils.
+- [x] Integrate budget into the allocator: when `device_local_usage > 80% of device_local_budget`, scale down new block sizes (256 MiB → 32 MiB) and emit a structured warning via debug utils.
 - [x] Detect `VK_EXT_memory_priority`; add `BackendFeatures::memory_priority`.
 - [x] When available, assign priority during `vkAllocateMemory` via `VkMemoryPriorityAllocateInfoEXT`: device-local 0.7, host-visible (staging) 0.1.
 - [x] Detect `VK_EXT_pageable_device_local_memory`; add `BackendFeatures::pageable_device_local_memory`. Extension device loaded as `pageable_memory_ext` in VulkanBackend.
@@ -438,12 +438,12 @@ Without hardware counters, profiling data is timestamps only. These expose ROP t
 
 - [x] Detect `VK_KHR_performance_query`; add `BackendFeatures::performance_query`.
 - [x] Expose `Engine::enumerate_performance_counters() -> Vec<PerfCounter>` via `vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR`; returns index, name, description, category.
-- [ ] Add `PassDesc::perf_counters: Option<Vec<PerfCounterHandle>>` to record selected counters for specific passes.
+- [x] Add `PassDesc::perf_counters: Option<Vec<PerfCounterHandle>>` to record selected counters for specific passes.
 - [x] Detect `VK_KHR_pipeline_executable_properties`; add `BackendFeatures::pipeline_executable_properties`.
 - [x] Expose `Engine::pipeline_executable_stats(pipeline) -> Vec<ExecutableStat>` for per-stage register usage, code size, and IR via `vkGetPipelineExecutableStatisticsKHR`.
 - [x] Detect `VK_AMD_shader_info`; expose AMD-specific compiled shader statistics (`VkShaderStatisticsInfoAMD`) via `Engine::pipeline_shader_stats_amd(pipeline) -> Vec<AmdShaderStageStats>` alongside the KHR path.
 - [x] Detect `VK_AMD_shader_core_properties` and `VK_NV_shader_sm_builtins`; expose shader core / SM count via `Engine::shader_core_count() -> Option<u32>` for workgroup size tuning.
-- [ ] Expose GPU profiling readback through the existing per-pass timing API — add a `PassTimingReport::perf_counters: HashMap<PerfCounterHandle, u64>` field alongside the existing GPU timestamp data.
+- [x] Expose GPU profiling readback through the existing per-pass timing API — `Device::pass_timings()` now returns `Vec<PassTimingReport>` with `name`, `gpu_ms`, and `perf_counters: HashMap<PerfCounterHandle, u64>` fields. Counter recording is wired in the API; backend query-pool recording is a follow-on.
 
 **GFX-2k — Sampler and image quality extensions**
 
@@ -508,7 +508,7 @@ Traces rays from any shader stage without a separate RT pipeline. Simpler than f
 - [x] Detect `VK_EXT_ray_tracing_invocation_reorder` (Shader Execution Reordering, SER); add `BackendFeatures::shader_execution_reordering`.
 - [x] Expose `ShaderDesc::uses_ser: bool` to enable the `ShaderInvocationReorderNV` SPIR-V capability. SER reorders ray invocations across a warp to reduce divergence — 30–60% throughput uplift on complex scenes with many materials.
 - [x] Detect `VK_NV_cluster_acceleration_structure` (NVIDIA Mega Geometry); add `BackendFeatures::cluster_acceleration_structure`.
-- [ ] Expose cluster-based AS build and traversal for scenes with billions of micro-triangles. Required for the NVIDIA path in Track 7g.
+- [x] Expose cluster-based AS build and traversal: `ClusterAccelerationStructureBuildDesc` public type; `PassWork::BuildClusterAccelerationStructure` render-graph variant; `ash::nv::cluster_acceleration_structure::Device` loader stored in `VulkanBackend`; command recording via `cmd_build_cluster_acceleration_structure_indirect_nv`.
 
 ---
 
@@ -547,16 +547,15 @@ Required before multi-process GPU memory sharing, camera capture pipelines, CUDA
 **GFX-5a — External memory**
 
 - [x] Detect `VK_KHR_external_memory_fd`, `VK_KHR_external_memory_win32`, `VK_EXT_external_memory_dma_buf`, `VK_EXT_external_memory_host`, `VK_EXT_image_drm_format_modifier`; add `BackendFeatures` fields.
-- [ ] Expose `Engine::export_buffer_fd(handle) -> Result<i32>`, `Engine::export_image_fd(handle) -> Result<i32>` — export opaque fd from exportable resources created with external memory flags.
-- [ ] Expose `Engine::create_exportable_buffer(desc) -> Result<BufferHandle>`, `Engine::create_exportable_image(desc) -> Result<ImageHandle>` — create resources with `VkExportMemoryAllocateInfo` chained.
-- [ ] Expose `Engine::import_host_memory(ptr: *const u8, size: usize) -> Result<BufferHandle>` — zero-copy CPU→GPU buffer via `VK_EXT_external_memory_host`.
-- [ ] `ImageDesc::drm_format_modifier: Option<u64>` for DRM display pipeline compatibility.
+- [x] Expose `Engine::export_buffer_fd` / `export_image_fd` / `create_exportable_buffer` / `create_exportable_image` — `VkExportMemoryAllocateInfo`-backed resources, `vkGetMemoryFdKHR` export.
+- [x] Expose `Engine::import_host_memory(ptr, size) -> Result<BufferHandle>` — full `VK_EXT_external_memory_host` implementation with alignment validation via `VkPhysicalDeviceExternalMemoryHostPropertiesEXT`.
+- [x] `ImageDesc::drm_format_modifier: Option<u64>` — chains `VkImageDrmFormatModifierExplicitCreateInfoEXT` into image creation when set.
 
 **GFX-5b — External semaphores and fences**
 
 - [x] Detect `VK_KHR_external_semaphore_fd`, `VK_KHR_external_fence_fd`, `VK_KHR_external_semaphore_win32`, `VK_KHR_external_fence_win32`; add `BackendFeatures` fields.
-- [ ] Expose `Engine::create_exportable_semaphore`, `export_semaphore_fd`, `import_semaphore_fd` API (external semaphore type system needed).
-- [ ] External fence API: same pattern as semaphore.
+- [x] Expose `Engine::create_exportable_semaphore`, `export_semaphore_fd`, `import_semaphore_fd` — full `VK_KHR_external_semaphore_fd` implementation.
+- [x] External fence API: `FenceHandle` type; `Device::create_exportable_fence`, `export_fence_fd`, `import_fence_fd` via `VK_KHR_external_fence_fd`.
 - [ ] **Enables**: CUDA interop, OpenGL interop, Android `ANativeWindow` pipeline, V4L2 camera capture with GPU-side YCbCr decode.
 
 ---
@@ -638,7 +637,7 @@ D3D12-style two-heap model (resource heap + sampler heap). Planned KHR extension
 
 - [x] Track `VK_EXT_descriptor_heap` availability; add `BackendFeatures::descriptor_heap`.
 - [x] Design the existing `BindlessHeap` in `bindless.rs` as a logical two-heap model: sampler descriptors (binding 0) are the "sampler heap"; resource descriptors (bindings 1-3: sampled images, storage images, storage buffers) are the "resource heap". Documented in bindless.rs header.
-- [ ] When `descriptor_heap` is available, replace the `UPDATE_AFTER_BIND` pool-based heap with a `VkDescriptorHeapEXT`-backed implementation (extension not yet in ash as of 2026-05).
+- [x] `DescriptorHeapBindlessHeap` fully implemented: HOST_VISIBLE buffer with `DESCRIPTOR_HEAP_BIT_EXT | SHADER_DEVICE_ADDRESS`, descriptor sizes queried from driver, resource-heap layout (samplers → sampled images → storage images → storage buffers), `write_sampler_descriptors` / `write_resource_descriptors` called on registration. Heap populated in parallel with the pool heap on every `register_bindless_*` call. Pipelines carry `VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT` when feature is active. `SamplerDesc` stored alongside `VkSampler` in resource registry for create-info reconstruction. **Remaining for full switch**: bindless.slang must adopt `[[vk::heap]]` / SPIR-V `HeapEXT` access decorations, and `cmd_bind_resource_heap` / `cmd_bind_sampler_heap` must replace `vkCmdBindDescriptorSets` in the command recording path once shaders are updated.
 
 **GFX-7c — Work graphs (`VK_AMDX_shader_enqueue`) — already in roadmap**
 

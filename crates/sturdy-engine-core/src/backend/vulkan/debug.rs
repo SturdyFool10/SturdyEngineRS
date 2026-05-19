@@ -18,15 +18,11 @@ unsafe extern "system" fn address_binding_report_callback(
             while !p_next.is_null() {
                 let header = unsafe { &*p_next };
                 if header.s_type == vk::StructureType::DEVICE_ADDRESS_BINDING_CALLBACK_DATA_EXT {
-                    let binding = unsafe {
-                        &*(p_next as *const vk::DeviceAddressBindingCallbackDataEXT)
-                    };
+                    let binding =
+                        unsafe { &*(p_next as *const vk::DeviceAddressBindingCallbackDataEXT) };
                     eprintln!(
                         "[address-binding] address={:#x} size={}B type={:?} flags={:?}",
-                        binding.base_address,
-                        binding.size,
-                        binding.binding_type,
-                        binding.flags,
+                        binding.base_address, binding.size, binding.binding_type, binding.flags,
                     );
                     break;
                 }
@@ -65,14 +61,18 @@ impl AddressBindingMessenger {
                 )
                 .message_type(vk::DebugUtilsMessageTypeFlagsEXT::DEVICE_ADDRESS_BINDING)
                 .pfn_user_callback(Some(address_binding_report_callback));
-            let messenger = unsafe { loader.create_debug_utils_messenger(&create_info, None) }.ok()?;
+            let messenger =
+                unsafe { loader.create_debug_utils_messenger(&create_info, None) }.ok()?;
             Some(Self { loader, messenger })
         }
     }
 
     /// Destroy the messenger. Must be called before the instance is destroyed.
     pub fn destroy(&mut self) {
-        unsafe { self.loader.destroy_debug_utils_messenger(self.messenger, None) };
+        unsafe {
+            self.loader
+                .destroy_debug_utils_messenger(self.messenger, None)
+        };
     }
 }
 

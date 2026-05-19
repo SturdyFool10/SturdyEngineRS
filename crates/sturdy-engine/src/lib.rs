@@ -1787,7 +1787,8 @@ impl<'f> DrawPassBuilder<'f> {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         })
     }
 }
@@ -1953,7 +1954,8 @@ impl<'f> ComputePassBuilder<'f> {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         })
     }
 }
@@ -2029,7 +2031,8 @@ impl Frame {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         })
     }
 
@@ -2052,7 +2055,8 @@ impl Frame {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         })
     }
 
@@ -2125,7 +2129,8 @@ impl Frame {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         })
     }
 

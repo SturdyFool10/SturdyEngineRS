@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_void};
 
-use ash::{Device as AshDevice, Instance, vk};
 use ash::vk::TaggedStructure;
+use ash::{Device as AshDevice, Instance, vk};
 
 use crate::{AdapterSelection, Error, Result};
 

@@ -74,6 +74,7 @@ impl UiGraphPassBuilder {
                     predicate: None,
                     shader_binding: None,
                     shading_rate_image: None,
+                    perf_counters: None,
                 })
             })
             .collect()

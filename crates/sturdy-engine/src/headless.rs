@@ -150,6 +150,7 @@ pub fn render_to_rgba8_with_engine(
         compression: Default::default(),
         min_lod_bits: None,
         msaa_resolve_to_single_sampled: false,
+        drm_format_modifier: None,
     })?;
 
     let capture = ScreenshotCapture::new(engine, width, height, Format::Rgba8Unorm)?;

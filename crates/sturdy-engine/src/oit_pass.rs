@@ -269,6 +269,7 @@ impl OitPass {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         };
         let oit_depth = frame.image("oit_depth", depth_desc)?;
 

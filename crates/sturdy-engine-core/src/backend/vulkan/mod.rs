@@ -18,8 +18,8 @@ mod surfaces;
 use std::collections::HashMap;
 use std::ffi::c_void;
 
-use ash::{Device as AshDevice, Entry, Instance, vk};
 use ash::vk::TaggedStructure;
+use ash::{Device as AshDevice, Entry, Instance, vk};
 use std::sync::{Mutex, RwLock};
 use std::{fs, path::PathBuf};
 
@@ -71,6 +71,9 @@ pub struct VulkanBackend {
     active_surface: Mutex<Option<SurfaceHandle>>,
     /// Global bindless descriptor heap. `None` when `Caps::supports_bindless` is false.
     bindless_heap: Option<bindless::BindlessHeap>,
+    /// GFX-7b: VK_EXT_descriptor_heap-backed bindless heap populated in parallel with
+    /// the pool heap. Drives rendering once shaders adopt heap-access decorations.
+    descriptor_heap_bindless: Option<bindless::DescriptorHeapBindlessHeap>,
     /// VK_EXT_mesh_shader commands. Present only when the mesh shader feature was enabled.
     mesh_shader_ext: Option<ash::ext::mesh_shader::Device>,
     /// VK_KHR_synchronization2 commands. Present when sync2 is enabled.
@@ -124,6 +127,10 @@ pub struct VulkanBackend {
         Mutex<HashMap<crate::IndirectCommandLayoutHandle, vk::IndirectCommandsLayoutNV>>,
     /// VK_NV_optical_flow commands. Present when optical_flow_nv feature is detected.
     optical_flow_nv_ext: Option<ash::nv::optical_flow::Device>,
+    /// GFX-3c: VK_NV_cluster_acceleration_structure commands. Present when feature detected.
+    cluster_as_nv_ext: Option<ash::nv::cluster_acceleration_structure::Device>,
+    /// GFX-7b: VK_EXT_descriptor_heap commands. Present when descriptor_heap feature is available.
+    descriptor_heap_ext: Option<ash::ext::descriptor_heap::Device>,
     optical_flow_sessions:
         Mutex<HashMap<crate::OpticalFlowSessionHandle, vk::OpticalFlowSessionNV>>,
     /// VK_EXT_host_image_copy commands. Present when host_image_copy feature is available.
@@ -136,8 +143,7 @@ pub struct VulkanBackend {
     /// VK_EXT_pageable_device_local_memory — dynamic priority on device-local pages.
     pageable_memory_ext: Option<ash::ext::pageable_device_local_memory::Device>,
     /// User-created timeline semaphores (GFX-1c cross-queue coordination API).
-    timeline_semaphores:
-        Mutex<HashMap<crate::SemaphoreHandle, vk::Semaphore>>,
+    timeline_semaphores: Mutex<HashMap<crate::SemaphoreHandle, vk::Semaphore>>,
     /// Handle allocator for user-created timeline semaphores.
     timeline_semaphore_handles: Mutex<crate::handles::HandleAllocator>,
     /// VK_KHR_external_memory_fd — fd-based external memory export/import (Linux/macOS).
@@ -152,6 +158,12 @@ pub struct VulkanBackend {
     external_semaphore_fd_khr: Option<ash::khr::external_semaphore_fd::Device>,
     /// Registry of exportable semaphore VkSemaphore objects (SemaphoreHandle → vk::Semaphore).
     exportable_semaphores: Mutex<HashMap<crate::SemaphoreHandle, vk::Semaphore>>,
+    /// GFX-5b: VK_KHR_external_fence_fd commands. Present when the extension is available.
+    external_fence_fd_khr: Option<ash::khr::external_fence_fd::Device>,
+    /// Registry of exportable fence VkFence objects (FenceHandle → vk::Fence).
+    exportable_fences: Mutex<HashMap<crate::FenceHandle, vk::Fence>>,
+    /// Handle allocator for exportable fences.
+    exportable_fence_handles: Mutex<crate::handles::HandleAllocator>,
 }
 
 struct VulkanVideoSession {
@@ -278,12 +290,37 @@ impl VulkanBackend {
             caps.features.image_compression_control;
         resource_registry.optical_flow_enabled = caps.features.optical_flow_nv;
         resource_registry.allocator_mut().memory_priority_enabled = caps.features.memory_priority;
+        // GFX-1e: initialise the budget-aware block-size threshold from the OS-reported budget.
+        if caps.features.memory_budget {
+            let mut budget_props = ash::vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+            let mut props2 =
+                ash::vk::PhysicalDeviceMemoryProperties2::default().push(&mut budget_props);
+            unsafe {
+                instance
+                    .get_physical_device_memory_properties2(selection.physical_device, &mut props2)
+            };
+            let heap_count = props2.memory_properties.memory_heap_count as usize;
+            let total_device_local_budget: u64 = (0..heap_count)
+                .filter(|&i| {
+                    props2.memory_properties.memory_heaps[i]
+                        .flags
+                        .contains(ash::vk::MemoryHeapFlags::DEVICE_LOCAL)
+                })
+                .map(|i| budget_props.heap_budget[i])
+                .sum();
+            if total_device_local_budget > 0 {
+                resource_registry.allocator_mut().device_local_budget = total_device_local_budget;
+            }
+        }
         resource_registry.dedicated_allocation_enabled = true; // Core in Vulkan 1.1
         // Note: pageable_memory_ext is set after creation below.
         // Pre-load buffer_marker_amd for breadcrumb buffer creation in CommandContext.
         #[cfg(debug_assertions)]
         let bm_amd_for_create = if caps.features.buffer_marker_amd {
-            Some(ash::amd::buffer_marker::Device::load(&instance, &logical.device))
+            Some(ash::amd::buffer_marker::Device::load(
+                &instance,
+                &logical.device,
+            ))
         } else {
             None
         };
@@ -306,6 +343,7 @@ impl VulkanBackend {
             caps.features.conservative_rasterization_overestimate;
         pipeline_registry.conservative_rasterization_underestimate_enabled =
             caps.features.conservative_rasterization_underestimate;
+        pipeline_registry.descriptor_heap_enabled = caps.features.descriptor_heap;
 
         let debug_utils = debug::DebugUtils::new(&instance, &logical.device);
         // GFX-1g: Create address binding report messenger in debug builds when extension is enabled.
@@ -485,6 +523,24 @@ impl VulkanBackend {
         } else {
             None
         };
+        // GFX-3c: load cluster AS commands.
+        let cluster_as_nv_ext = if caps.features.cluster_acceleration_structure {
+            Some(ash::nv::cluster_acceleration_structure::Device::load(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        // GFX-7b: load descriptor heap commands when the feature is available.
+        let descriptor_heap_ext = if caps.features.descriptor_heap {
+            Some(ash::ext::descriptor_heap::Device::load(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
         let host_image_copy_ext = if caps.features.host_image_copy {
             Some(ash::ext::host_image_copy::Device::load(
                 &instance,
@@ -520,17 +576,35 @@ impl VulkanBackend {
                 None
             };
         let external_memory_fd_khr = if caps.features.external_memory_fd {
-            Some(ash::khr::external_memory_fd::Device::load(&instance, &logical.device))
+            Some(ash::khr::external_memory_fd::Device::load(
+                &instance,
+                &logical.device,
+            ))
         } else {
             None
         };
         let external_memory_host_ext = if caps.features.external_memory_host {
-            Some(ash::ext::external_memory_host::Device::load(&instance, &logical.device))
+            Some(ash::ext::external_memory_host::Device::load(
+                &instance,
+                &logical.device,
+            ))
         } else {
             None
         };
         let external_semaphore_fd_khr = if caps.features.external_semaphore_fd {
-            Some(ash::khr::external_semaphore_fd::Device::load(&instance, &logical.device))
+            Some(ash::khr::external_semaphore_fd::Device::load(
+                &instance,
+                &logical.device,
+            ))
+        } else {
+            None
+        };
+        // GFX-5b: load external fence fd commands.
+        let external_fence_fd_khr = if caps.features.external_fence_fd {
+            Some(ash::khr::external_fence_fd::Device::load(
+                &instance,
+                &logical.device,
+            ))
         } else {
             None
         };
@@ -545,6 +619,57 @@ impl VulkanBackend {
                     );
                     None
                 }
+            }
+        } else {
+            None
+        };
+
+        // GFX-7b: Create the descriptor-heap bindless heap when VK_EXT_descriptor_heap is active.
+        let descriptor_heap_bindless = if caps.features.descriptor_heap {
+            if let Some(ref heap_device) = descriptor_heap_ext {
+                let inst_loader = ash::ext::descriptor_heap::Instance::load(&entry, &instance);
+                let sizes = bindless::DescriptorHeapSizes {
+                    sampler: unsafe {
+                        inst_loader.get_physical_device_descriptor_size(
+                            selection.physical_device,
+                            ash::vk::DescriptorType::SAMPLER,
+                        )
+                    },
+                    sampled_image: unsafe {
+                        inst_loader.get_physical_device_descriptor_size(
+                            selection.physical_device,
+                            ash::vk::DescriptorType::SAMPLED_IMAGE,
+                        )
+                    },
+                    storage_image: unsafe {
+                        inst_loader.get_physical_device_descriptor_size(
+                            selection.physical_device,
+                            ash::vk::DescriptorType::STORAGE_IMAGE,
+                        )
+                    },
+                    storage_buffer: unsafe {
+                        inst_loader.get_physical_device_descriptor_size(
+                            selection.physical_device,
+                            ash::vk::DescriptorType::STORAGE_BUFFER,
+                        )
+                    },
+                };
+                match bindless::DescriptorHeapBindlessHeap::create(
+                    &logical.device,
+                    &instance,
+                    selection.physical_device,
+                    sizes,
+                    heap_device.clone(),
+                    memory_properties,
+                ) {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        eprintln!("[SturdyEngine] descriptor heap creation failed: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
             }
         } else {
             None
@@ -575,6 +700,7 @@ impl VulkanBackend {
             alias_heaps: Mutex::new(alias_heaps::AliasHeapRegistry::default()),
             active_surface: Mutex::new(None),
             bindless_heap,
+            descriptor_heap_bindless,
             mesh_shader_ext,
             synchronization2_khr,
             dynamic_rendering_khr,
@@ -603,6 +729,8 @@ impl VulkanBackend {
             indirect_command_layouts: Mutex::new(HashMap::new()),
             optical_flow_nv_ext,
             optical_flow_sessions: Mutex::new(HashMap::new()),
+            cluster_as_nv_ext,
+            descriptor_heap_ext,
             host_image_copy_ext,
             ray_tracing_maintenance1_khr,
             video_queue_khr,
@@ -616,6 +744,9 @@ impl VulkanBackend {
             exportable_buffer_memories: Mutex::new(HashMap::new()),
             external_semaphore_fd_khr,
             exportable_semaphores: Mutex::new(HashMap::new()),
+            external_fence_fd_khr,
+            exportable_fences: Mutex::new(HashMap::new()),
+            exportable_fence_handles: Mutex::new(crate::handles::HandleAllocator::default()),
         })
     }
 
@@ -637,7 +768,29 @@ impl VulkanBackend {
         let heap = self.bindless_heap.as_ref()?;
         let resources = self.resources.read().ok()?;
         let view = resources.image_view(handle).ok()?;
-        heap.register_sampled_image(view)
+        let idx = heap.register_sampled_image(view)?;
+        // GFX-7b: mirror into the descriptor heap in parallel when available.
+        if let (Some(dh), Some((image, desc))) = (
+            self.descriptor_heap_bindless.as_ref(),
+            resources.image_and_desc(handle),
+        ) {
+            if let Ok(fmt) = resources::vk_format(desc.format) {
+                let subresource = vk::ImageSubresourceRange {
+                    aspect_mask: resources::vk_aspect_mask(desc.format),
+                    base_mip_level: 0,
+                    level_count: desc.mip_levels as u32,
+                    base_array_layer: 0,
+                    layer_count: desc.layers as u32,
+                };
+                let _ = dh.register_sampled_image(
+                    image,
+                    fmt,
+                    resources::vk_image_view_type(desc),
+                    subresource,
+                );
+            }
+        }
+        Some(idx)
     }
 
     /// Register a sampler in the bindless heap.
@@ -645,7 +798,16 @@ impl VulkanBackend {
         let heap = self.bindless_heap.as_ref()?;
         let resources = self.resources.read().ok()?;
         let sampler = resources.sampler(handle).ok()?;
-        heap.register_sampler(sampler)
+        let idx = heap.register_sampler(sampler)?;
+        // GFX-7b: mirror into the descriptor heap in parallel when available.
+        if let (Some(dh), Some(desc)) = (
+            self.descriptor_heap_bindless.as_ref(),
+            resources.sampler_desc(handle),
+        ) {
+            let sci = build_sampler_create_info_for_heap(desc);
+            let _ = dh.register_sampler_from_desc(sci);
+        }
+        Some(idx)
     }
 
     /// Register a storage image in the bindless heap.
@@ -653,7 +815,29 @@ impl VulkanBackend {
         let heap = self.bindless_heap.as_ref()?;
         let resources = self.resources.read().ok()?;
         let view = resources.image_view(handle).ok()?;
-        heap.register_storage_image(view)
+        let idx = heap.register_storage_image(view)?;
+        // GFX-7b: mirror into the descriptor heap.
+        if let (Some(dh), Some((image, desc))) = (
+            self.descriptor_heap_bindless.as_ref(),
+            resources.image_and_desc(handle),
+        ) {
+            if let Ok(fmt) = resources::vk_format(desc.format) {
+                let subresource = vk::ImageSubresourceRange {
+                    aspect_mask: resources::vk_aspect_mask(desc.format),
+                    base_mip_level: 0,
+                    level_count: desc.mip_levels as u32,
+                    base_array_layer: 0,
+                    layer_count: desc.layers as u32,
+                };
+                let _ = dh.register_storage_image(
+                    image,
+                    fmt,
+                    resources::vk_image_view_type(desc),
+                    subresource,
+                );
+            }
+        }
+        Some(idx)
     }
 
     /// Register a storage buffer in the bindless heap.
@@ -662,7 +846,14 @@ impl VulkanBackend {
         let resources = self.resources.read().ok()?;
         let buf = resources.buffer(handle).ok()?;
         // VK_WHOLE_SIZE (u64::MAX) means "bind the full buffer from offset 0".
-        heap.register_storage_buffer(buf, 0, u64::MAX)
+        let idx = heap.register_storage_buffer(buf, 0, u64::MAX)?;
+        // GFX-7b: mirror into the descriptor heap using the buffer's device address.
+        if let Some(dh) = self.descriptor_heap_bindless.as_ref() {
+            if let Ok(addr) = resources.buffer_device_address_raw(&self.device, handle) {
+                let _ = dh.register_storage_buffer(addr, vk::WHOLE_SIZE);
+            }
+        }
+        Some(idx)
     }
 
     /// Returns Vulkan-level info about the bindless heap for command binding.
@@ -796,11 +987,15 @@ impl Backend for VulkanBackend {
             .zip(descs.iter())
             .enumerate()
             .map(|(i, (c, d))| {
-                let name = d.name.iter()
+                let name = d
+                    .name
+                    .iter()
                     .take_while(|&&ch| ch != 0)
                     .map(|&ch| ch as u8 as char)
                     .collect::<String>();
-                let description = d.description.iter()
+                let description = d
+                    .description
+                    .iter()
                     .take_while(|&&ch| ch != 0)
                     .map(|&ch| ch as u8 as char)
                     .collect::<String>();
@@ -887,8 +1082,8 @@ impl Backend for VulkanBackend {
                 .unwrap_or(0);
             let mut out = vec![ash::vk::PipelineExecutablePropertiesKHR::default(); count];
             if count > 0 {
-                let _ = pipeline_exe_ext
-                    .get_pipeline_executable_properties(&pipeline_info, &mut out);
+                let _ =
+                    pipeline_exe_ext.get_pipeline_executable_properties(&pipeline_info, &mut out);
             }
             out
         };
@@ -903,8 +1098,8 @@ impl Backend for VulkanBackend {
                     .unwrap_or(0);
                 let mut out = vec![ash::vk::PipelineExecutableStatisticKHR::default(); count];
                 if count > 0 {
-                    let _ = pipeline_exe_ext
-                        .get_pipeline_executable_statistics(&exe_info, &mut out);
+                    let _ =
+                        pipeline_exe_ext.get_pipeline_executable_statistics(&exe_info, &mut out);
                 }
                 out
             };
@@ -978,9 +1173,7 @@ impl Backend for VulkanBackend {
         ];
         let mut stats = Vec::new();
         for stage in stages {
-            let info = unsafe {
-                shader_info.get_shader_info_statistics(vk_pipeline, stage)
-            };
+            let info = unsafe { shader_info.get_shader_info_statistics(vk_pipeline, stage) };
             if let Ok(info) = info {
                 stats.push(crate::AmdShaderStageStats {
                     stage_mask: stage.as_raw(),
@@ -996,6 +1189,19 @@ impl Backend for VulkanBackend {
             }
         }
         stats
+    }
+
+    fn descriptor_heap_type_size(&self, descriptor_type: u32) -> Option<u64> {
+        // GFX-7b: query driver-reported descriptor byte size for heap sizing.
+        if !self.caps.features.descriptor_heap {
+            return None;
+        }
+        let inst_loader = ash::ext::descriptor_heap::Instance::load(&self._entry, &self.instance);
+        let vk_type = ash::vk::DescriptorType::from_raw(descriptor_type as i32);
+        let size = unsafe {
+            inst_loader.get_physical_device_descriptor_size(self.physical_device, vk_type)
+        };
+        Some(size)
     }
 
     fn register_bindless_sampled_image(&self, handle: ImageHandle) -> Option<u32> {
@@ -1055,12 +1261,7 @@ impl Backend for VulkanBackend {
             .resources
             .write()
             .expect("vulkan resource registry rwlock poisoned");
-        let view = resources.image_view(handle)?;
-        //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.pipelines
-            .lock()
-            .expect("vulkan pipeline registry mutex poisoned")
-            .invalidate_framebuffers_for_view(&self.device, view);
+        // GFX-1b: no framebuffer cache invalidation needed — framebuffers are now transient.
         resources.destroy_image(&self.device, handle)
     }
 
@@ -1456,11 +1657,6 @@ impl Backend for VulkanBackend {
             .expect("vulkan command context mutex poisoned")
             .wait_all(&self.device)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.pipelines
-            .lock()
-            .expect("vulkan pipeline registry mutex poisoned")
-            .clear_all_framebuffers(&self.device);
-        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
@@ -1479,11 +1675,6 @@ impl Backend for VulkanBackend {
             .expect("vulkan command context mutex poisoned")
             .wait_all(&self.device)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.pipelines
-            .lock()
-            .expect("vulkan pipeline registry mutex poisoned")
-            .clear_all_framebuffers(&self.device);
-        //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.surfaces
             .lock()
             .expect("vulkan surface registry mutex poisoned")
@@ -1501,11 +1692,6 @@ impl Backend for VulkanBackend {
             .active_surface
             .lock()
             .expect("vulkan active surface mutex poisoned") = None;
-        //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.pipelines
-            .lock()
-            .expect("vulkan pipeline registry mutex poisoned")
-            .clear_all_framebuffers(&self.device);
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.surfaces
             .lock()
@@ -1700,6 +1886,7 @@ impl Backend for VulkanBackend {
             self.vertex_input_dynamic_state_ext.as_ref(),
             self.ray_tracing_maintenance1_khr.as_ref(),
             self.optical_flow_nv_ext.as_ref(),
+            self.cluster_as_nv_ext.as_ref(),
             optical_flow_sessions_arg,
             self.device_generated_commands_nv.as_ref(),
             indirect_command_layouts_arg,
@@ -1730,13 +1917,19 @@ impl Backend for VulkanBackend {
         Ok(handle)
     }
 
-    fn pass_timings(&self) -> Vec<(String, f32)> {
+    fn pass_timings(&self) -> Vec<crate::PassTimingReport> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.commands
             .lock()
             .expect("vulkan command context mutex poisoned")
             .pass_timings()
-            .to_vec()
+            .iter()
+            .map(|(name, gpu_ms)| crate::PassTimingReport {
+                name: name.clone(),
+                gpu_ms: *gpu_ms,
+                perf_counters: std::collections::HashMap::new(),
+            })
+            .collect()
     }
 
     fn wait_submission(&self, token: SubmissionHandle) -> Result<()> {
@@ -2242,8 +2435,9 @@ impl Backend for VulkanBackend {
             .initial_value(initial_value);
         let sem_info = ash::vk::SemaphoreCreateInfo::default().push(&mut timeline_info);
         let semaphore = unsafe {
-            self.device.create_semaphore(&sem_info, None)
-                .map_err(|e| Error::Backend(format!("vkCreateSemaphore (timeline) failed: {e:?}")))?
+            self.device.create_semaphore(&sem_info, None).map_err(|e| {
+                Error::Backend(format!("vkCreateSemaphore (timeline) failed: {e:?}"))
+            })?
         };
         let handle_val = self
             .timeline_semaphore_handles
@@ -2288,7 +2482,9 @@ impl Backend for VulkanBackend {
             .expect("timeline semaphore mutex poisoned")
             .get(&semaphore)
             .ok_or(Error::InvalidHandle)?;
-        let signal_info = ash::vk::SemaphoreSignalInfo::default().semaphore(sem).value(value);
+        let signal_info = ash::vk::SemaphoreSignalInfo::default()
+            .semaphore(sem)
+            .value(value);
         unsafe {
             self.device
                 .signal_semaphore(&signal_info)
@@ -2325,41 +2521,63 @@ impl Backend for VulkanBackend {
             .handle_types(ash::vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
         let buf_info = ash::vk::BufferCreateInfo::default()
             .size(desc.size)
-            .usage(ash::vk::BufferUsageFlags::STORAGE_BUFFER | ash::vk::BufferUsageFlags::TRANSFER_SRC | ash::vk::BufferUsageFlags::TRANSFER_DST)
+            .usage(
+                ash::vk::BufferUsageFlags::STORAGE_BUFFER
+                    | ash::vk::BufferUsageFlags::TRANSFER_SRC
+                    | ash::vk::BufferUsageFlags::TRANSFER_DST,
+            )
             .sharing_mode(ash::vk::SharingMode::EXCLUSIVE)
             .push(&mut ext_buf_info);
         let buffer = unsafe {
-            self.device.create_buffer(&buf_info, None)
+            self.device
+                .create_buffer(&buf_info, None)
                 .map_err(|e| Error::Backend(format!("vkCreateBuffer (exportable) failed: {e:?}")))?
         };
         let req = unsafe { self.device.get_buffer_memory_requirements(buffer) };
-        let memory_type = self.resources.read().expect("resource registry poisoned")
-            .allocator().find_memory_type(req.memory_type_bits, ash::vk::MemoryPropertyFlags::DEVICE_LOCAL)
+        let memory_type = self
+            .resources
+            .read()
+            .expect("resource registry poisoned")
+            .allocator()
+            .find_memory_type(
+                req.memory_type_bits,
+                ash::vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
             .unwrap_or(0);
         let alloc_info = ash::vk::MemoryAllocateInfo::default()
             .allocation_size(req.size)
             .memory_type_index(memory_type)
             .push(&mut export_info);
         let memory = unsafe {
-            self.device.allocate_memory(&alloc_info, None)
-                .map_err(|e| { self.device.destroy_buffer(buffer, None); Error::Backend(format!("vkAllocateMemory (exportable buffer) failed: {e:?}")) })?
+            self.device
+                .allocate_memory(&alloc_info, None)
+                .map_err(|e| {
+                    self.device.destroy_buffer(buffer, None);
+                    Error::Backend(format!(
+                        "vkAllocateMemory (exportable buffer) failed: {e:?}"
+                    ))
+                })?
         };
         unsafe {
-            self.device.bind_buffer_memory(buffer, memory, 0)
-                .map_err(|e| { self.device.free_memory(memory, None); self.device.destroy_buffer(buffer, None); Error::Backend(format!("vkBindBufferMemory (exportable) failed: {e:?}")) })?;
+            self.device
+                .bind_buffer_memory(buffer, memory, 0)
+                .map_err(|e| {
+                    self.device.free_memory(memory, None);
+                    self.device.destroy_buffer(buffer, None);
+                    Error::Backend(format!("vkBindBufferMemory (exportable) failed: {e:?}"))
+                })?;
         }
         let _ = ext; // extension loaded
-        self.exportable_buffer_memories.lock().expect("exportable buffer mutex poisoned").insert(handle, memory);
+        self.exportable_buffer_memories
+            .lock()
+            .expect("exportable buffer mutex poisoned")
+            .insert(handle, memory);
         // Register in resource registry so the handle is valid for other operations.
         let _ = handle;
         Ok(())
     }
 
-    fn create_exportable_image(
-        &self,
-        handle: ImageHandle,
-        desc: crate::ImageDesc,
-    ) -> Result<()> {
+    fn create_exportable_image(&self, handle: ImageHandle, desc: crate::ImageDesc) -> Result<()> {
         self.external_memory_fd_khr.as_ref().ok_or_else(|| {
             Error::Unsupported("exportable images require VK_KHR_external_memory_fd".into())
         })?;
@@ -2367,25 +2585,42 @@ impl Backend for VulkanBackend {
             .handle_types(ash::vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
         let mut ext_img_info = ash::vk::ExternalMemoryImageCreateInfo::default()
             .handle_types(ash::vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
-        let vk_fmt = resources::vk_format(desc.format).map_err(|e| Error::Backend(format!("format: {e:?}")))?;
+        let vk_fmt = resources::vk_format(desc.format)
+            .map_err(|e| Error::Backend(format!("format: {e:?}")))?;
         let img_info = ash::vk::ImageCreateInfo::default()
             .image_type(ash::vk::ImageType::TYPE_2D)
             .format(vk_fmt)
-            .extent(ash::vk::Extent3D { width: desc.extent.width, height: desc.extent.height, depth: 1 })
+            .extent(ash::vk::Extent3D {
+                width: desc.extent.width,
+                height: desc.extent.height,
+                depth: 1,
+            })
             .mip_levels(desc.mip_levels as u32)
             .array_layers(desc.layers as u32)
             .samples(ash::vk::SampleCountFlags::TYPE_1)
             .tiling(ash::vk::ImageTiling::OPTIMAL)
-            .usage(ash::vk::ImageUsageFlags::SAMPLED | ash::vk::ImageUsageFlags::TRANSFER_SRC | ash::vk::ImageUsageFlags::TRANSFER_DST)
+            .usage(
+                ash::vk::ImageUsageFlags::SAMPLED
+                    | ash::vk::ImageUsageFlags::TRANSFER_SRC
+                    | ash::vk::ImageUsageFlags::TRANSFER_DST,
+            )
             .sharing_mode(ash::vk::SharingMode::EXCLUSIVE)
             .push(&mut ext_img_info);
         let image = unsafe {
-            self.device.create_image(&img_info, None)
+            self.device
+                .create_image(&img_info, None)
                 .map_err(|e| Error::Backend(format!("vkCreateImage (exportable) failed: {e:?}")))?
         };
         let req = unsafe { self.device.get_image_memory_requirements(image) };
-        let memory_type = self.resources.read().expect("resource registry poisoned")
-            .allocator().find_memory_type(req.memory_type_bits, ash::vk::MemoryPropertyFlags::DEVICE_LOCAL)
+        let memory_type = self
+            .resources
+            .read()
+            .expect("resource registry poisoned")
+            .allocator()
+            .find_memory_type(
+                req.memory_type_bits,
+                ash::vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
             .unwrap_or(0);
         let mut dedicated_info = ash::vk::MemoryDedicatedAllocateInfo::default().image(image);
         let alloc_info = ash::vk::MemoryAllocateInfo::default()
@@ -2394,14 +2629,26 @@ impl Backend for VulkanBackend {
             .push(&mut export_info)
             .push(&mut dedicated_info);
         let memory = unsafe {
-            self.device.allocate_memory(&alloc_info, None)
-                .map_err(|e| { self.device.destroy_image(image, None); Error::Backend(format!("vkAllocateMemory (exportable image) failed: {e:?}")) })?
+            self.device
+                .allocate_memory(&alloc_info, None)
+                .map_err(|e| {
+                    self.device.destroy_image(image, None);
+                    Error::Backend(format!("vkAllocateMemory (exportable image) failed: {e:?}"))
+                })?
         };
         unsafe {
-            self.device.bind_image_memory(image, memory, 0)
-                .map_err(|e| { self.device.free_memory(memory, None); self.device.destroy_image(image, None); Error::Backend(format!("vkBindImageMemory (exportable) failed: {e:?}")) })?;
+            self.device
+                .bind_image_memory(image, memory, 0)
+                .map_err(|e| {
+                    self.device.free_memory(memory, None);
+                    self.device.destroy_image(image, None);
+                    Error::Backend(format!("vkBindImageMemory (exportable) failed: {e:?}"))
+                })?;
         }
-        self.exportable_image_memories.lock().expect("exportable image mutex poisoned").insert(handle, memory);
+        self.exportable_image_memories
+            .lock()
+            .expect("exportable image mutex poisoned")
+            .insert(handle, memory);
         let _ = handle;
         Ok(())
     }
@@ -2452,10 +2699,13 @@ impl Backend for VulkanBackend {
             .handle_types(ash::vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
         let sem_info = ash::vk::SemaphoreCreateInfo::default().push(&mut export_info);
         let semaphore = unsafe {
-            self.device.create_semaphore(&sem_info, None)
-                .map_err(|e| Error::Backend(format!("vkCreateSemaphore (exportable) failed: {e:?}")))?
+            self.device.create_semaphore(&sem_info, None).map_err(|e| {
+                Error::Backend(format!("vkCreateSemaphore (exportable) failed: {e:?}"))
+            })?
         };
-        self.exportable_semaphores.lock().expect("exportable semaphore mutex poisoned")
+        self.exportable_semaphores
+            .lock()
+            .expect("exportable semaphore mutex poisoned")
             .insert(handle, semaphore);
         Ok(())
     }
@@ -2464,7 +2714,9 @@ impl Backend for VulkanBackend {
         let ext = self.external_semaphore_fd_khr.as_ref().ok_or_else(|| {
             Error::Unsupported("semaphore fd export requires VK_KHR_external_semaphore_fd".into())
         })?;
-        let semaphore = *self.exportable_semaphores.lock()
+        let semaphore = *self
+            .exportable_semaphores
+            .lock()
             .expect("exportable semaphore mutex poisoned")
             .get(&handle)
             .ok_or(Error::InvalidHandle)?;
@@ -2481,7 +2733,9 @@ impl Backend for VulkanBackend {
         let ext = self.external_semaphore_fd_khr.as_ref().ok_or_else(|| {
             Error::Unsupported("semaphore fd import requires VK_KHR_external_semaphore_fd".into())
         })?;
-        let semaphore = *self.exportable_semaphores.lock()
+        let semaphore = *self
+            .exportable_semaphores
+            .lock()
             .expect("exportable semaphore mutex poisoned")
             .get(&handle)
             .ok_or(Error::InvalidHandle)?;
@@ -2495,24 +2749,141 @@ impl Backend for VulkanBackend {
         }
     }
 
-    fn import_host_memory(
-        &self,
-        _handle: BufferHandle,
-        ptr: *const u8,
-        size: usize,
-    ) -> Result<()> {
-        let _ext = self.external_memory_host_ext.as_ref().ok_or_else(|| {
+    fn create_exportable_fence(&self, handle: crate::FenceHandle) -> Result<()> {
+        self.external_fence_fd_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("exportable fences require VK_KHR_external_fence_fd".into())
+        })?;
+        let mut export_info = ash::vk::ExportFenceCreateInfo::default()
+            .handle_types(ash::vk::ExternalFenceHandleTypeFlags::OPAQUE_FD);
+        let fence_info = ash::vk::FenceCreateInfo::default().push(&mut export_info);
+        let fence = unsafe {
+            self.device
+                .create_fence(&fence_info, None)
+                .map_err(|e| Error::Backend(format!("vkCreateFence (exportable) failed: {e:?}")))?
+        };
+        self.exportable_fences
+            .lock()
+            .expect("exportable fence mutex poisoned")
+            .insert(handle, fence);
+        Ok(())
+    }
+
+    fn export_fence_fd(&self, handle: crate::FenceHandle) -> Result<i32> {
+        let ext = self.external_fence_fd_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("fence fd export requires VK_KHR_external_fence_fd".into())
+        })?;
+        let fence = *self
+            .exportable_fences
+            .lock()
+            .expect("exportable fence mutex poisoned")
+            .get(&handle)
+            .ok_or(Error::InvalidHandle)?;
+        let get_fd_info = ash::vk::FenceGetFdInfoKHR::default()
+            .fence(fence)
+            .handle_type(ash::vk::ExternalFenceHandleTypeFlags::OPAQUE_FD);
+        unsafe {
+            ext.get_fence_fd(&get_fd_info)
+                .map_err(|e| Error::Backend(format!("vkGetFenceFdKHR failed: {e:?}")))
+        }
+    }
+
+    fn import_fence_fd(&self, handle: crate::FenceHandle, fd: i32) -> Result<()> {
+        let ext = self.external_fence_fd_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("fence fd import requires VK_KHR_external_fence_fd".into())
+        })?;
+        let fence = *self
+            .exportable_fences
+            .lock()
+            .expect("exportable fence mutex poisoned")
+            .get(&handle)
+            .ok_or(Error::InvalidHandle)?;
+        let import_info = ash::vk::ImportFenceFdInfoKHR::default()
+            .fence(fence)
+            .handle_type(ash::vk::ExternalFenceHandleTypeFlags::OPAQUE_FD)
+            .fd(fd);
+        unsafe {
+            ext.import_fence_fd(&import_info)
+                .map_err(|e| Error::Backend(format!("vkImportFenceFdKHR failed: {e:?}")))
+        }
+    }
+
+    fn import_host_memory(&self, handle: BufferHandle, ptr: *const u8, size: usize) -> Result<()> {
+        let ext = self.external_memory_host_ext.as_ref().ok_or_else(|| {
             Error::Unsupported("host memory import requires VK_EXT_external_memory_host".into())
         })?;
+        // Query minimum alignment for host-pointer imports.
+        let mut host_props = ash::vk::PhysicalDeviceExternalMemoryHostPropertiesEXT::default();
+        let mut props2 = ash::vk::PhysicalDeviceProperties2::default().push(&mut host_props);
+        unsafe {
+            self.instance
+                .get_physical_device_properties2(self.physical_device, &mut props2)
+        };
+        let align = host_props.min_imported_host_pointer_alignment;
+        if align > 0 && (ptr as u64) % align != 0 {
+            return Err(Error::InvalidInput(format!(
+                "import_host_memory: pointer {ptr:p} is not aligned to {align} bytes as required by VK_EXT_external_memory_host"
+            )));
+        }
         let host_ptr = ptr as *mut std::ffi::c_void;
-        let _import_info = ash::vk::ImportMemoryHostPointerInfoEXT::default()
+        let mut ext_buf_info = ash::vk::ExternalMemoryBufferCreateInfo::default()
+            .handle_types(ash::vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT);
+        let buf_info = ash::vk::BufferCreateInfo::default()
+            .size(size as u64)
+            .usage(
+                ash::vk::BufferUsageFlags::STORAGE_BUFFER
+                    | ash::vk::BufferUsageFlags::TRANSFER_SRC
+                    | ash::vk::BufferUsageFlags::TRANSFER_DST,
+            )
+            .sharing_mode(ash::vk::SharingMode::EXCLUSIVE)
+            .push(&mut ext_buf_info);
+        let buffer = unsafe {
+            self.device.create_buffer(&buf_info, None).map_err(|e| {
+                Error::Backend(format!("vkCreateBuffer (host import) failed: {e:?}"))
+            })?
+        };
+        let req = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let memory_type = self
+            .resources
+            .read()
+            .expect("resource registry poisoned")
+            .allocator()
+            .find_memory_type(req.memory_type_bits, ash::vk::MemoryPropertyFlags::empty())
+            .map_err(|_| {
+                unsafe {
+                    self.device.destroy_buffer(buffer, None);
+                }
+                Error::Unsupported("no compatible memory type for host-pointer import".into())
+            })?;
+        let mut import_info = ash::vk::ImportMemoryHostPointerInfoEXT::default()
             .handle_type(ash::vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT)
             .host_pointer(host_ptr);
-        // Note: full implementation requires creating a VkBuffer with VkExternalMemoryBufferCreateInfo
-        // and allocating with VkImportMemoryHostPointerInfoEXT chained — the pointer size must be
-        // aligned to minImportedHostPointerAlignment from VkPhysicalDeviceExternalMemoryHostPropertiesEXT.
-        // This stub validates the extension is available; full wiring deferred.
-        let _size = size;
+        let alloc_info = ash::vk::MemoryAllocateInfo::default()
+            .allocation_size(size as u64)
+            .memory_type_index(memory_type)
+            .push(&mut import_info);
+        let memory = unsafe {
+            self.device
+                .allocate_memory(&alloc_info, None)
+                .map_err(|e| {
+                    self.device.destroy_buffer(buffer, None);
+                    Error::Backend(format!("vkAllocateMemory (host import) failed: {e:?}"))
+                })?
+        };
+        unsafe {
+            self.device
+                .bind_buffer_memory(buffer, memory, 0)
+                .map_err(|e| {
+                    self.device.free_memory(memory, None);
+                    self.device.destroy_buffer(buffer, None);
+                    Error::Backend(format!("vkBindBufferMemory (host import) failed: {e:?}"))
+                })?;
+        }
+        let _ = ext; // extension loaded, pointer checks done above
+        // Register in exportable buffer map so the handle tracks the dedicated memory.
+        self.exportable_buffer_memories
+            .lock()
+            .expect("exportable buffer mutex poisoned")
+            .insert(handle, memory);
         Ok(())
     }
 
@@ -3462,6 +3833,12 @@ impl Drop for VulkanBackend {
             if let Some(sem) = self.reflex_sleep_semaphore.take() {
                 self.device.destroy_semaphore(sem, None);
             }
+            // GFX-5b: destroy exportable fences before device.
+            if let Ok(mut fences) = self.exportable_fences.lock() {
+                for (_, fence) in fences.drain() {
+                    self.device.destroy_fence(fence, None);
+                }
+            }
             self.device.destroy_device(None);
             // GFX-1g: Destroy the address binding report messenger before the instance.
             if let Some(mut messenger) = self.address_binding_messenger.take() {
@@ -3470,6 +3847,34 @@ impl Drop for VulkanBackend {
             self.instance.destroy_instance(None);
         }
     }
+}
+
+/// GFX-7b: Reconstruct a plain `SamplerCreateInfo` (no pNext chain) from an engine `SamplerDesc`.
+/// Used to write embedded samplers into a `VkDescriptorHeapEXT` sampler heap.
+fn build_sampler_create_info_for_heap(
+    desc: &crate::SamplerDesc,
+) -> ash::vk::SamplerCreateInfo<'static> {
+    use resources::{vk_address_mode, vk_border_color, vk_compare_op, vk_filter, vk_mipmap_mode};
+    ash::vk::SamplerCreateInfo::default()
+        .mag_filter(vk_filter(desc.mag_filter))
+        .min_filter(vk_filter(desc.min_filter))
+        .mipmap_mode(vk_mipmap_mode(desc.mipmap_mode))
+        .address_mode_u(vk_address_mode(desc.address_u))
+        .address_mode_v(vk_address_mode(desc.address_v))
+        .address_mode_w(vk_address_mode(desc.address_w))
+        .mip_lod_bias(desc.mip_lod_bias)
+        .anisotropy_enable(desc.max_anisotropy.is_some())
+        .max_anisotropy(desc.max_anisotropy.unwrap_or(1.0))
+        .compare_enable(desc.compare.is_some())
+        .compare_op(
+            desc.compare
+                .map(vk_compare_op)
+                .unwrap_or(ash::vk::CompareOp::ALWAYS),
+        )
+        .min_lod(desc.min_lod)
+        .max_lod(desc.max_lod)
+        .border_color(vk_border_color(desc.border_color))
+        .unnormalized_coordinates(desc.unnormalized_coordinates)
 }
 
 fn pipeline_cache_path() -> PathBuf {

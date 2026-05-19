@@ -521,12 +521,12 @@ impl<'a> AppRuntimeFrame<'a> {
             self.runtime.cpu_time_history.push(cpu_ms);
             let percentiles = self.runtime.cpu_time_history.percentiles();
             let pass_timings_raw = self.runtime.engine.device.pass_timings();
-            let gpu_total: f32 = pass_timings_raw.iter().map(|(_, ms)| ms).sum();
+            let gpu_total: f32 = pass_timings_raw.iter().map(|t| t.gpu_ms).sum();
             let pass_timings: Vec<RuntimePassTiming> = pass_timings_raw
                 .into_iter()
-                .map(|(name, ms)| RuntimePassTiming {
-                    name,
-                    gpu_time_ms: Some(ms),
+                .map(|t| RuntimePassTiming {
+                    name: t.name,
+                    gpu_time_ms: Some(t.gpu_ms),
                 })
                 .collect();
             let gpu_ms = if pass_timings.is_empty() {

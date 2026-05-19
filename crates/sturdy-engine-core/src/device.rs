@@ -257,6 +257,8 @@ struct DeviceInner {
     indirect_command_layout_handles: HandleAllocator,
     optical_flow_sessions: HashMap<crate::OpticalFlowSessionHandle, crate::OpticalFlowSessionDesc>,
     optical_flow_session_handles: HandleAllocator,
+    /// GFX-5b: exportable fence handle allocator.
+    fence_handles: HandleAllocator,
 }
 
 struct SurfaceState {
@@ -309,6 +311,7 @@ impl Device {
                 indirect_command_layout_handles: HandleAllocator::default(),
                 optical_flow_sessions: HashMap::new(),
                 optical_flow_session_handles: HandleAllocator::default(),
+                fence_handles: HandleAllocator::default(),
             })),
         })
     }
@@ -429,6 +432,19 @@ impl Device {
         inner.backend.descriptor_buffer_offset_alignment()
     }
 
+    /// GFX-7b: Query the driver-reported byte size of a descriptor of the given type.
+    ///
+    /// Required to size the resource/sampler heap buffers for `VK_EXT_descriptor_heap`.
+    /// Returns `None` when `BackendFeatures::descriptor_heap` is not available.
+    pub fn descriptor_heap_type_size(&self, descriptor_type: u32) -> Option<u64> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        if !inner.backend.caps().features.descriptor_heap {
+            return None;
+        }
+        inner.backend.descriptor_heap_type_size(descriptor_type)
+    }
+
     // ── Shader objects (GFX-8) ────────────────────────────────────────────────
 
     /// Create a standalone shader object that can be bound without a pipeline.
@@ -461,9 +477,9 @@ impl Device {
 
     /// Per-pass GPU timings from the most recently completed frame.
     ///
-    /// Returns `(pass_name, gpu_milliseconds)` pairs in submission order.
+    /// Returns per-pass GPU timings in submission order.
     /// Empty before the second frame or on backends without timestamp support.
-    pub fn pass_timings(&self) -> Vec<(String, f32)> {
+    pub fn pass_timings(&self) -> Vec<crate::PassTimingReport> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
@@ -1725,7 +1741,10 @@ impl Device {
                 "host memory import requires BackendFeatures::external_memory_host".into(),
             ));
         }
-        let desc = crate::BufferDesc { size: size as u64, usage };
+        let desc = crate::BufferDesc {
+            size: size as u64,
+            usage,
+        };
         let handle = crate::BufferHandle(inner.buffer_handles.alloc());
         inner.backend.import_host_memory(handle, ptr, size)?;
         inner.buffers.insert(handle, desc);
@@ -1753,13 +1772,56 @@ impl Device {
     /// Export a POSIX fd from an exportable semaphore. The caller must `close(fd)` when done.
     pub fn export_semaphore_fd(&self, handle: crate::SemaphoreHandle) -> Result<i32> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.inner.lock().expect("device mutex poisoned").backend.export_semaphore_fd(handle)
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .export_semaphore_fd(handle)
     }
 
     /// Import a POSIX fd into an exportable semaphore handle for cross-process signaling.
     pub fn import_semaphore_fd(&self, handle: crate::SemaphoreHandle, fd: i32) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.inner.lock().expect("device mutex poisoned").backend.import_semaphore_fd(handle, fd)
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .import_semaphore_fd(handle, fd)
+    }
+
+    /// GFX-5b: Create an exportable fence that can be shared cross-process via a file descriptor.
+    ///
+    /// Requires `BackendFeatures::external_fence_fd`.
+    pub fn create_exportable_fence(&self) -> Result<crate::FenceHandle> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        let handle = crate::FenceHandle(inner.fence_handles.alloc());
+        inner.backend.create_exportable_fence(handle)?;
+        Ok(handle)
+    }
+
+    /// GFX-5b: Export a fence as an opaque POSIX file descriptor.
+    ///
+    /// The receiver can import the fd via `import_fence_fd`. Requires `BackendFeatures::external_fence_fd`.
+    pub fn export_fence_fd(&self, handle: crate::FenceHandle) -> Result<i32> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .export_fence_fd(handle)
+    }
+
+    /// GFX-5b: Import a fence from a POSIX file descriptor obtained via `export_fence_fd`.
+    ///
+    /// Requires `BackendFeatures::external_fence_fd`.
+    pub fn import_fence_fd(&self, handle: crate::FenceHandle, fd: i32) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .import_fence_fd(handle, fd)
     }
 
     pub fn set_reflex_mode(&self, mode: ReflexMode) -> Result<()> {

@@ -96,6 +96,28 @@ pub struct ExecutableStat {
     pub value_bool: Option<bool>,
 }
 
+/// Stable index identifying a hardware performance counter from `Engine::enumerate_performance_counters`.
+///
+/// Matches `PerfCounter::index`. Pass one or more of these in
+/// `PassDesc::perf_counters` to record counter values for a specific render pass.
+pub type PerfCounterHandle = u32;
+
+/// Per-pass GPU timing and optional hardware performance counter readback.
+///
+/// Returned by `Device::pass_timings()`. Replaces the previous `Vec<(String, f32)>` return type.
+#[derive(Clone, Debug, Default)]
+pub struct PassTimingReport {
+    /// Name of the pass, matching `PassDesc::name`.
+    pub name: String,
+    /// GPU execution time in milliseconds (one-frame delay — reflects the previous frame).
+    pub gpu_ms: f32,
+    /// Hardware performance counter values recorded during this pass, keyed by `PerfCounterHandle`.
+    ///
+    /// Populated only for passes that set `PassDesc::perf_counters` and when
+    /// `BackendFeatures::performance_query` is active. Empty otherwise.
+    pub perf_counters: std::collections::HashMap<PerfCounterHandle, u64>,
+}
+
 /// Per-stage shader statistics returned by `Engine::pipeline_shader_stats_amd`.
 ///
 /// Requires `BackendFeatures::shader_info_amd`. Each entry corresponds to one active

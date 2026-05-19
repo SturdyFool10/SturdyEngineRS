@@ -351,6 +351,7 @@ mod tests {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         }
     }
 

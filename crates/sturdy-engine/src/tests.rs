@@ -51,6 +51,7 @@ fn create_sampled_image_sampler_bind_group(engine: &Engine) -> Result<BindGroup>
         compression: Default::default(),
         min_lod_bits: None,
         msaa_resolve_to_single_sampled: false,
+        drm_format_modifier: None,
     })?;
     let sampler = engine.create_sampler(SamplerDesc::default())?;
     let layout = engine
@@ -382,6 +383,7 @@ fn hiz_pass_records_depth_pyramid_contract() {
                 compression: Default::default(),
                 min_lod_bits: None,
                 msaa_resolve_to_single_sampled: false,
+                drm_format_modifier: None,
             },
         )
         .unwrap();
@@ -441,6 +443,7 @@ fn hiz_history_ping_pongs_previous_pyramid() {
                 compression: Default::default(),
                 min_lod_bits: None,
                 msaa_resolve_to_single_sampled: false,
+                drm_format_modifier: None,
             },
         )
         .unwrap();
@@ -488,6 +491,7 @@ fn hiz_history_resets_when_level_descriptor_changes() {
         compression: Default::default(),
         min_lod_bits: None,
         msaa_resolve_to_single_sampled: false,
+        drm_format_modifier: None,
     };
     let depth_a = frame.image("history_depth_a", depth_desc(16, 8)).unwrap();
     pass.execute_history_named(&frame, "resize_hiz", &depth_a, &mut history)
@@ -535,6 +539,7 @@ fn hiz_pyramid_registers_levels_for_later_shader_binding() {
                 compression: Default::default(),
                 min_lod_bits: None,
                 msaa_resolve_to_single_sampled: false,
+                drm_format_modifier: None,
             },
         )
         .unwrap();
@@ -2042,6 +2047,7 @@ fn small_image_desc() -> ImageDesc {
         compression: Default::default(),
         min_lod_bits: None,
         msaa_resolve_to_single_sampled: false,
+        drm_format_modifier: None,
     }
 }
 

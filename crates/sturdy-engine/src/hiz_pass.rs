@@ -379,6 +379,7 @@ fn hiz_level_desc(width: u32, height: u32, level: u32) -> ImageDesc {
         compression: Default::default(),
         min_lod_bits: None,
         msaa_resolve_to_single_sampled: false,
+        drm_format_modifier: None,
     }
 }
 

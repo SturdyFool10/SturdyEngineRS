@@ -84,6 +84,9 @@ pub struct CommandContext {
     /// Value incremented each frame by `batch_count - 1` to synchronize N-batch submissions.
     chain_timeline: Option<vk::Semaphore>,
     chain_value: u64,
+    /// GFX-1b: Framebuffers created during this frame's recording.
+    /// Destroyed at the start of the *next* frame, after the fence signals.
+    transient_framebuffers: Vec<vk::Framebuffer>,
 }
 
 impl CommandContext {
@@ -198,6 +201,7 @@ impl CommandContext {
             buffer_marker_amd: buffer_marker_amd.cloned(),
             chain_timeline,
             chain_value: 0,
+            transient_framebuffers: Vec::new(),
         })
     }
 
@@ -229,6 +233,7 @@ impl CommandContext {
         vertex_input_dynamic_state: Option<&ash::ext::vertex_input_dynamic_state::Device>,
         ray_tracing_maintenance1: Option<&ash::khr::ray_tracing_maintenance1::Device>,
         optical_flow_nv: Option<&ash::nv::optical_flow::Device>,
+        cluster_as_nv: Option<&ash::nv::cluster_acceleration_structure::Device>,
         optical_flow_sessions: Option<&HashMap<OpticalFlowSessionHandle, vk::OpticalFlowSessionNV>>,
         dgc_nv: Option<&ash::nv::device_generated_commands::Device>,
         indirect_command_layouts: Option<
@@ -288,6 +293,10 @@ impl CommandContext {
                 self.pending_pass_names.clear();
             }
 
+            // GFX-1b: destroy transient framebuffers from the previous frame.
+            for fb in self.transient_framebuffers.drain(..) {
+                unsafe { device.destroy_framebuffer(fb, None) };
+            }
             for semaphore in self.pending_semaphores.drain(..) {
                 unsafe {
                     device.destroy_semaphore(semaphore, None);
@@ -446,6 +455,7 @@ impl CommandContext {
                             vertex_input_dynamic_state,
                             ray_tracing_maintenance1,
                             optical_flow_nv,
+                            cluster_as_nv,
                             optical_flow_sessions,
                             dgc_nv,
                             indirect_command_layouts,
@@ -684,6 +694,9 @@ impl CommandContext {
             // device_wait_idle is called first in VulkanBackend::Drop.
             device.destroy_fence(self.frame_fence, None);
             device.destroy_query_pool(self.timestamp_pool, None);
+            for fb in &self.transient_framebuffers {
+                device.destroy_framebuffer(*fb, None);
+            }
             for semaphore in &self.pending_semaphores {
                 device.destroy_semaphore(*semaphore, None);
             }
@@ -736,6 +749,7 @@ impl CommandContext {
         vertex_input_dynamic_state: Option<&ash::ext::vertex_input_dynamic_state::Device>,
         ray_tracing_maintenance1: Option<&ash::khr::ray_tracing_maintenance1::Device>,
         optical_flow_nv: Option<&ash::nv::optical_flow::Device>,
+        cluster_as_nv: Option<&ash::nv::cluster_acceleration_structure::Device>,
         optical_flow_sessions: Option<&HashMap<OpticalFlowSessionHandle, vk::OpticalFlowSessionNV>>,
         dgc_nv: Option<&ash::nv::device_generated_commands::Device>,
         indirect_command_layouts: Option<
@@ -1999,6 +2013,52 @@ impl CommandContext {
                     optical_flow_sessions,
                 )?;
             }
+            PassWork::BuildClusterAccelerationStructure(desc) => {
+                let ext = cluster_as_nv.ok_or_else(|| {
+                    Error::Unsupported(
+                        "cluster AS build requires VK_NV_cluster_acceleration_structure",
+                    )
+                })?;
+                let input_info = ash::vk::ClusterAccelerationStructureInputInfoNV::default()
+                    .max_acceleration_structure_count(desc.max_as_count)
+                    .flags(ash::vk::BuildAccelerationStructureFlagsKHR::from_raw(
+                        desc.build_flags,
+                    ))
+                    .op_type(ash::vk::ClusterAccelerationStructureOpTypeNV::from_raw(
+                        desc.op_type as i32,
+                    ))
+                    .op_mode(ash::vk::ClusterAccelerationStructureOpModeNV::from_raw(
+                        desc.op_mode as i32,
+                    ));
+                let commands_info = ash::vk::ClusterAccelerationStructureCommandsInfoNV {
+                    input: input_info,
+                    dst_implicit_data: desc.dst_implicit_data_address,
+                    scratch_data: desc.scratch_address,
+                    dst_addresses_array: ash::vk::StridedDeviceAddressRegionKHR {
+                        device_address: desc.dst_addresses[0],
+                        size: desc.dst_addresses[1],
+                        stride: desc.dst_addresses[2],
+                    },
+                    dst_sizes_array: ash::vk::StridedDeviceAddressRegionKHR {
+                        device_address: desc.dst_sizes[0],
+                        size: desc.dst_sizes[1],
+                        stride: desc.dst_sizes[2],
+                    },
+                    src_infos_array: ash::vk::StridedDeviceAddressRegionKHR {
+                        device_address: desc.src_infos[0],
+                        size: desc.src_infos[1],
+                        stride: desc.src_infos[2],
+                    },
+                    src_infos_count: desc.src_infos_count_address,
+                    ..Default::default()
+                };
+                unsafe {
+                    ext.cmd_build_cluster_acceleration_structure_indirect(
+                        command_buffer,
+                        &commands_info,
+                    );
+                }
+            }
         }
         if let Some(conditional_rendering) =
             conditional_rendering.filter(|_| pass.predicate.is_some())
@@ -2011,13 +2071,13 @@ impl CommandContext {
     }
 
     fn record_draw_pass(
-        &self,
+        &mut self,
         device: &Device,
         command_buffer: vk::CommandBuffer,
         pass: &PassDesc,
         render_pass: vk::RenderPass,
         resources: &mut ResourceRegistry,
-        pipelines: &mut PipelineRegistry,
+        _pipelines: &mut PipelineRegistry,
         viewport_override: Option<[u32; 4]>,
         dynamic_rendering: Option<&ash::khr::dynamic_rendering::Device>,
         shader_object_ext: Option<&ash::ext::shader_object::Device>,
@@ -2203,14 +2263,20 @@ impl CommandContext {
             attachments.push(depth_view);
         }
 
-        let framebuffer = pipelines.get_or_create_framebuffer(
-            device,
-            render_pass,
-            &attachments,
-            first_extent.width,
-            first_extent.height,
-            framebuffer_layers,
-        )?;
+        // GFX-1b: create a transient framebuffer; it will be destroyed after
+        // the frame fence fires (at the start of the next frame's recording).
+        let fb_info = vk::FramebufferCreateInfo::default()
+            .render_pass(render_pass)
+            .attachments(&attachments)
+            .width(first_extent.width)
+            .height(first_extent.height)
+            .layers(framebuffer_layers);
+        let framebuffer = unsafe {
+            device
+                .create_framebuffer(&fb_info, None)
+                .map_err(|e| Error::Backend(format!("vkCreateFramebuffer failed: {e:?}")))?
+        };
+        self.transient_framebuffers.push(framebuffer);
 
         let mut clear_values: Vec<vk::ClearValue> = color_uses
             .iter()
@@ -3430,6 +3496,7 @@ impl FramedCommands {
         vertex_input_dynamic_state: Option<&ash::ext::vertex_input_dynamic_state::Device>,
         ray_tracing_maintenance1: Option<&ash::khr::ray_tracing_maintenance1::Device>,
         optical_flow_nv: Option<&ash::nv::optical_flow::Device>,
+        cluster_as_nv: Option<&ash::nv::cluster_acceleration_structure::Device>,
         optical_flow_sessions: Option<&HashMap<OpticalFlowSessionHandle, vk::OpticalFlowSessionNV>>,
         dgc_nv: Option<&ash::nv::device_generated_commands::Device>,
         indirect_command_layouts: Option<
@@ -3465,6 +3532,7 @@ impl FramedCommands {
             vertex_input_dynamic_state,
             ray_tracing_maintenance1,
             optical_flow_nv,
+            cluster_as_nv,
             optical_flow_sessions,
             dgc_nv,
             indirect_command_layouts,

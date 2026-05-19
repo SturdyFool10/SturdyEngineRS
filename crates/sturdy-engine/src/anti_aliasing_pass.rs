@@ -123,6 +123,7 @@ impl AntiAliasingPass {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         };
         frame.image("anti_aliasing_output", desc)
     }
@@ -152,6 +153,7 @@ impl AntiAliasingPass {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         };
         frame.image(format!("anti_aliasing_history_{index}"), desc)
     }

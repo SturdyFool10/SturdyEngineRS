@@ -123,6 +123,7 @@ impl CpuProceduralTexture2d {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         })?;
         let _ = image.set_debug_name(&format!("cpu-procedural-{name}"));
         Ok(Self {

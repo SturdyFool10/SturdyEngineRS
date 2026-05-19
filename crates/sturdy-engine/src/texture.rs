@@ -220,7 +220,8 @@ impl Frame {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         })
     }
 
@@ -287,7 +288,8 @@ impl Frame {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         })
     }
 
@@ -328,6 +330,7 @@ impl Frame {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         })?;
         let allocation = self.upload_arena.upload(&self.engine, data)?;
         let (staging_handle, staging_desc) = {
@@ -384,7 +387,8 @@ impl Frame {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         })?;
         self.add_pass(PassDesc {
             name: format!("{name}-shader-read"),
@@ -414,7 +418,8 @@ impl Frame {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         })?;
         Ok(image)
     }
@@ -494,7 +499,8 @@ impl Frame {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         })?;
         self.add_pass(PassDesc {
             name: format!("{name}-shader-read"),
@@ -524,7 +530,8 @@ impl Frame {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         })
     }
 }

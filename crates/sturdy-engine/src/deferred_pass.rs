@@ -195,6 +195,7 @@ impl DeferredPass {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         })?;
 
         let zero_sh9 = engine.create_buffer(crate::BufferDesc {
@@ -250,6 +251,7 @@ impl DeferredPass {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         })?;
 
         let e_avg_buf = compute_e_avg_lut(engine)?;
@@ -448,6 +450,7 @@ impl DeferredPass {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         };
         // Depth is both a depth-stencil attachment AND sampled by the lighting pass
         // for world position reconstruction.
@@ -469,6 +472,7 @@ impl DeferredPass {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         };
 
         let g0 = frame.image(

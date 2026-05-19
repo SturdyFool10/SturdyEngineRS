@@ -383,3 +383,333 @@ impl Drop for BindlessHeap {
 //   synchronized, but we have exactly one VkDevice per VulkanBackend)
 unsafe impl Send for BindlessHeap {}
 unsafe impl Sync for BindlessHeap {}
+
+// ── GFX-7b: VK_EXT_descriptor_heap alternative ──────────────────────────────
+//
+// `DescriptorHeapBindlessHeap` replaces the pool+set model with two GPU-visible,
+// CPU-writable buffers — one sampler heap and one resource heap.  Descriptors are
+// written directly into mapped host memory via `vkWriteSamplerDescriptorsEXT` and
+// `vkWriteResourceDescriptorsEXT` instead of through the pool allocation path.
+//
+// Index space is identical to `BindlessHeap` so handles are interchangeable.
+//
+// Shader-side:  shaders must be recompiled with heap-access decorations
+// (`[[vk::heap]]` in Slang / `HeapEXT` SPIR-V string decoration) and pipelines
+// must carry `VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT`.  Until those changes
+// land the pool heap continues to drive rendering while this heap is maintained
+// in parallel for validation and future switch-over.
+
+/// Per-type descriptor sizes queried from the driver.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DescriptorHeapSizes {
+    pub sampler: u64,
+    pub sampled_image: u64,
+    pub storage_image: u64,
+    pub storage_buffer: u64,
+}
+
+impl DescriptorHeapSizes {
+    /// Total resource heap size for the bindless capacities.
+    pub fn resource_heap_bytes(&self) -> u64 {
+        self.sampler * BINDLESS_SAMPLER_CAPACITY as u64
+            + self.sampled_image * BINDLESS_SAMPLED_IMAGE_CAPACITY as u64
+            + self.storage_image * BINDLESS_STORAGE_IMAGE_CAPACITY as u64
+            + self.storage_buffer * BINDLESS_STORAGE_BUFFER_CAPACITY as u64
+    }
+
+    pub fn sampler_offset(&self) -> u64 {
+        0
+    }
+    pub fn sampled_image_offset(&self) -> u64 {
+        self.sampler * BINDLESS_SAMPLER_CAPACITY as u64
+    }
+    pub fn storage_image_offset(&self) -> u64 {
+        self.sampled_image_offset() + self.sampled_image * BINDLESS_SAMPLED_IMAGE_CAPACITY as u64
+    }
+    pub fn storage_buffer_offset(&self) -> u64 {
+        self.storage_image_offset() + self.storage_image * BINDLESS_STORAGE_IMAGE_CAPACITY as u64
+    }
+}
+
+/// GPU-virtual address range of a heap buffer — passed to `cmd_bind_resource_heap` /
+/// `cmd_bind_sampler_heap`.
+#[derive(Clone, Copy, Debug)]
+pub struct DescriptorHeapRange {
+    /// GPU virtual address of the heap buffer base.
+    pub device_address: u64,
+    /// Total byte size of the heap.
+    pub size: u64,
+}
+
+/// `VK_EXT_descriptor_heap`-backed bindless resource storage.
+///
+/// All descriptors live in one CPU-writable, GPU-visible buffer.  The sampler
+/// heap is a separate buffer for embedded-sampler descriptors.
+pub struct DescriptorHeapBindlessHeap {
+    /// Resource heap: sampled images + storage images + storage buffers (+ embedded samplers).
+    resource_heap_buffer: vk::Buffer,
+    resource_heap_memory: vk::DeviceMemory,
+    /// CPU-mapped base pointer into the resource heap.
+    resource_heap_ptr: *mut u8,
+    resource_heap_device_address: u64,
+
+    /// Per-type descriptor byte sizes from the driver.
+    pub sizes: DescriptorHeapSizes,
+
+    next_sampler: AtomicU32,
+    next_sampled_image: AtomicU32,
+    next_storage_image: AtomicU32,
+    next_storage_buffer: AtomicU32,
+
+    device: Device,
+    heap_ext: ash::ext::descriptor_heap::Device,
+}
+
+impl DescriptorHeapBindlessHeap {
+    /// Create the heap buffer and map it for CPU writes.
+    ///
+    /// `sizes` must be pre-queried via `Device::descriptor_heap_type_size`.
+    pub fn create(
+        device: &Device,
+        _instance: &ash::Instance,
+        _physical_device: vk::PhysicalDevice,
+        sizes: DescriptorHeapSizes,
+        heap_ext: ash::ext::descriptor_heap::Device,
+        memory_properties: vk::PhysicalDeviceMemoryProperties,
+    ) -> Result<Self> {
+        let heap_bytes = sizes.resource_heap_bytes();
+        if heap_bytes == 0 {
+            return Err(Error::Backend(
+                "descriptor heap sizes are zero — driver did not report valid sizes".into(),
+            ));
+        }
+
+        // Buffer needs: DESCRIPTOR_HEAP_BIT_EXT (heap storage) +
+        //               SHADER_DEVICE_ADDRESS (for BindHeapInfoEXT device address) +
+        //               HOST_VISIBLE for CPU writes via vkWriteResourceDescriptorsEXT.
+        let buf_info = vk::BufferCreateInfo::default()
+            .size(heap_bytes)
+            .usage(
+                vk::BufferUsageFlags::DESCRIPTOR_HEAP_EXT
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            )
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let buffer = unsafe {
+            device.create_buffer(&buf_info, None).map_err(|e| {
+                Error::Backend(format!("descriptor heap buffer creation failed: {e:?}"))
+            })?
+        };
+
+        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+
+        // Find a host-visible + host-coherent memory type.
+        let memory_type = (0..memory_properties.memory_type_count)
+            .find(|&i| {
+                let supported = (requirements.memory_type_bits & (1 << i)) != 0;
+                let flags = memory_properties.memory_types[i as usize].property_flags;
+                supported
+                    && flags.contains(
+                        vk::MemoryPropertyFlags::HOST_VISIBLE
+                            | vk::MemoryPropertyFlags::HOST_COHERENT,
+                    )
+            })
+            .ok_or_else(|| {
+                Error::Backend("no host-visible memory type for descriptor heap".into())
+            })?;
+
+        let mut alloc_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(requirements.size)
+            .memory_type_index(memory_type);
+        // Chain SHADER_DEVICE_ADDRESS flag to get a device-addressable allocation.
+        let mut addr_info =
+            vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+        alloc_info = alloc_info.push(&mut addr_info);
+
+        let memory = unsafe {
+            device.allocate_memory(&alloc_info, None).map_err(|e| {
+                device.destroy_buffer(buffer, None);
+                Error::Backend(format!("descriptor heap memory allocation failed: {e:?}"))
+            })?
+        };
+
+        unsafe {
+            device.bind_buffer_memory(buffer, memory, 0).map_err(|e| {
+                device.free_memory(memory, None);
+                device.destroy_buffer(buffer, None);
+                Error::Backend(format!("descriptor heap bind_buffer_memory failed: {e:?}"))
+            })?;
+        }
+
+        let mapped_ptr = unsafe {
+            device
+                .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                .map_err(|e| {
+                    device.free_memory(memory, None);
+                    device.destroy_buffer(buffer, None);
+                    Error::Backend(format!("descriptor heap map_memory failed: {e:?}"))
+                })? as *mut u8
+        };
+
+        let device_address = unsafe {
+            device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
+        };
+
+        Ok(Self {
+            resource_heap_buffer: buffer,
+            resource_heap_memory: memory,
+            resource_heap_ptr: mapped_ptr,
+            resource_heap_device_address: device_address,
+            sizes,
+            next_sampler: AtomicU32::new(0),
+            next_sampled_image: AtomicU32::new(0),
+            next_storage_image: AtomicU32::new(0),
+            next_storage_buffer: AtomicU32::new(0),
+            device: device.clone(),
+            heap_ext,
+        })
+    }
+
+    // ── GPU address range for bind commands ───────────────────────────────────
+
+    /// Device address range covering the full resource heap — pass to `cmd_bind_resource_heap`.
+    pub fn resource_heap_range(&self) -> DescriptorHeapRange {
+        DescriptorHeapRange {
+            device_address: self.resource_heap_device_address,
+            size: self.sizes.resource_heap_bytes(),
+        }
+    }
+
+    // ── Registration ──────────────────────────────────────────────────────────
+
+    /// Write an embedded sampler into the sampler slot and return its index.
+    ///
+    /// `sampler_create_info` must be fully populated (no pNext chains are forwarded).
+    pub fn register_sampler_from_desc(
+        &self,
+        sampler_create_info: vk::SamplerCreateInfo<'_>,
+    ) -> Option<u32> {
+        let idx = self.next_sampler.fetch_add(1, Ordering::Relaxed);
+        if idx >= BINDLESS_SAMPLER_CAPACITY {
+            return None;
+        }
+        let offset = self.sizes.sampler_offset() + idx as u64 * self.sizes.sampler;
+        let slot_ptr = unsafe { self.resource_heap_ptr.add(offset as usize) };
+        let dest = [vk::HostAddressRangeEXT::default().address(unsafe {
+            std::slice::from_raw_parts_mut(slot_ptr, self.sizes.sampler as usize)
+        })];
+        let _ = unsafe {
+            self.heap_ext
+                .write_sampler_descriptors(&[sampler_create_info], &dest)
+        };
+        Some(idx)
+    }
+
+    /// Write a sampled-image descriptor and return its bindless index.
+    pub fn register_sampled_image(
+        &self,
+        image: vk::Image,
+        format: vk::Format,
+        view_type: vk::ImageViewType,
+        subresource: vk::ImageSubresourceRange,
+    ) -> Option<u32> {
+        let idx = self.next_sampled_image.fetch_add(1, Ordering::Relaxed);
+        if idx >= BINDLESS_SAMPLED_IMAGE_CAPACITY {
+            return None;
+        }
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(view_type)
+            .format(format)
+            .subresource_range(subresource);
+        let img_desc_info = vk::ImageDescriptorInfoEXT {
+            p_view: &view_info,
+            layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ..Default::default()
+        };
+        let res_info = [vk::ResourceDescriptorInfoEXT::default()
+            .ty(vk::DescriptorType::SAMPLED_IMAGE)
+            .data(vk::ResourceDescriptorDataEXT {
+                p_image: &img_desc_info,
+            })];
+        let offset = self.sizes.sampled_image_offset() + idx as u64 * self.sizes.sampled_image;
+        let slot_ptr = unsafe { self.resource_heap_ptr.add(offset as usize) };
+        let dest = [vk::HostAddressRangeEXT::default().address(unsafe {
+            std::slice::from_raw_parts_mut(slot_ptr, self.sizes.sampled_image as usize)
+        })];
+        let _ = unsafe { self.heap_ext.write_resource_descriptors(&res_info, &dest) };
+        Some(idx)
+    }
+
+    /// Write a storage-image descriptor and return its bindless index.
+    pub fn register_storage_image(
+        &self,
+        image: vk::Image,
+        format: vk::Format,
+        view_type: vk::ImageViewType,
+        subresource: vk::ImageSubresourceRange,
+    ) -> Option<u32> {
+        let idx = self.next_storage_image.fetch_add(1, Ordering::Relaxed);
+        if idx >= BINDLESS_STORAGE_IMAGE_CAPACITY {
+            return None;
+        }
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(view_type)
+            .format(format)
+            .subresource_range(subresource);
+        let img_desc_info = vk::ImageDescriptorInfoEXT {
+            p_view: &view_info,
+            layout: vk::ImageLayout::GENERAL,
+            ..Default::default()
+        };
+        let res_info = [vk::ResourceDescriptorInfoEXT::default()
+            .ty(vk::DescriptorType::STORAGE_IMAGE)
+            .data(vk::ResourceDescriptorDataEXT {
+                p_image: &img_desc_info,
+            })];
+        let offset = self.sizes.storage_image_offset() + idx as u64 * self.sizes.storage_image;
+        let slot_ptr = unsafe { self.resource_heap_ptr.add(offset as usize) };
+        let dest = [vk::HostAddressRangeEXT::default().address(unsafe {
+            std::slice::from_raw_parts_mut(slot_ptr, self.sizes.storage_image as usize)
+        })];
+        let _ = unsafe { self.heap_ext.write_resource_descriptors(&res_info, &dest) };
+        Some(idx)
+    }
+
+    /// Write a storage-buffer descriptor using the buffer's device address.
+    pub fn register_storage_buffer(&self, device_address: u64, range: u64) -> Option<u32> {
+        let idx = self.next_storage_buffer.fetch_add(1, Ordering::Relaxed);
+        if idx >= BINDLESS_STORAGE_BUFFER_CAPACITY {
+            return None;
+        }
+        let addr_range = vk::DeviceAddressRangeEXT {
+            address: device_address,
+            size: range,
+        };
+        let res_info = [vk::ResourceDescriptorInfoEXT::default()
+            .ty(vk::DescriptorType::STORAGE_BUFFER)
+            .data(vk::ResourceDescriptorDataEXT {
+                p_address_range: &addr_range,
+            })];
+        let offset = self.sizes.storage_buffer_offset() + idx as u64 * self.sizes.storage_buffer;
+        let slot_ptr = unsafe { self.resource_heap_ptr.add(offset as usize) };
+        let dest = [vk::HostAddressRangeEXT::default().address(unsafe {
+            std::slice::from_raw_parts_mut(slot_ptr, self.sizes.storage_buffer as usize)
+        })];
+        let _ = unsafe { self.heap_ext.write_resource_descriptors(&res_info, &dest) };
+        Some(idx)
+    }
+}
+
+impl Drop for DescriptorHeapBindlessHeap {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.unmap_memory(self.resource_heap_memory);
+            self.device.destroy_buffer(self.resource_heap_buffer, None);
+            self.device.free_memory(self.resource_heap_memory, None);
+        }
+    }
+}
+
+unsafe impl Send for DescriptorHeapBindlessHeap {}
+unsafe impl Sync for DescriptorHeapBindlessHeap {}

@@ -118,7 +118,8 @@ impl GraphFrame {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         })
     }
 
@@ -194,7 +195,8 @@ impl GraphFrame {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         })?;
 
         self.frame.add_pass(PassDesc {
@@ -236,7 +238,8 @@ impl GraphFrame {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         })?;
 
         self.owned_buffers.push(staging);
@@ -423,7 +426,8 @@ impl<'f> FullscreenPassBuilder<'f> {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         })
     }
 }

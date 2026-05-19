@@ -32,7 +32,8 @@ pub struct ResourceRegistry {
     images: HashMap<ImageHandle, VulkanImage>,
     image_views: Mutex<HashMap<ImageViewKey, vk::ImageView>>,
     buffers: HashMap<BufferHandle, VulkanBuffer>,
-    samplers: HashMap<SamplerHandle, vk::Sampler>,
+    /// GFX-7b: stores `SamplerDesc` alongside the handle so heap writes can reconstruct `SamplerCreateInfo`.
+    samplers: HashMap<SamplerHandle, (vk::Sampler, crate::SamplerDesc)>,
     acceleration_structures: HashMap<AccelerationStructureHandle, VulkanAccelerationStructure>,
     /// VK_EXT_shader_object handles, keyed by engine handle.
     shader_objects: HashMap<ShaderObjectHandle, VulkanShaderObject>,
@@ -133,6 +134,15 @@ impl ResourceRegistry {
             vk_optical_flow_image_info(optical_flow_usage, self.optical_flow_enabled, desc.usage)?;
         if let Some(info_ext) = optical_flow_info.as_mut() {
             info = info.push(info_ext);
+        }
+        // GFX-5a: DRM format modifier for display-pipeline-compatible tiling.
+        let drm_plane_layout = vk::SubresourceLayout::default();
+        let mut drm_modifier_info;
+        if let Some(modifier) = desc.drm_format_modifier {
+            drm_modifier_info = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
+                .drm_format_modifier(modifier)
+                .plane_layouts(std::slice::from_ref(&drm_plane_layout));
+            info = info.push(&mut drm_modifier_info);
         }
 
         let image = unsafe {
@@ -235,7 +245,7 @@ impl ResourceRegistry {
         }
         let mut view_info = vk::ImageViewCreateInfo::default()
             .image(image)
-            .view_type(vk_image_view_type(desc))
+            .view_type(vk_image_view_type(&desc))
             .format(vk_format(desc.format)?)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk_aspect_mask(desc.format),
@@ -325,6 +335,14 @@ impl ResourceRegistry {
         if let Some(info_ext) = optical_flow_info.as_mut() {
             info = info.push(info_ext);
         }
+        let drm_plane_layout2 = vk::SubresourceLayout::default();
+        let mut drm_modifier_info2;
+        if let Some(modifier) = desc.drm_format_modifier {
+            drm_modifier_info2 = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
+                .drm_format_modifier(modifier)
+                .plane_layouts(std::slice::from_ref(&drm_plane_layout2));
+            info = info.push(&mut drm_modifier_info2);
+        }
 
         let image = unsafe {
             device
@@ -333,7 +351,7 @@ impl ResourceRegistry {
         };
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
-            .view_type(vk_image_view_type(desc))
+            .view_type(vk_image_view_type(&desc))
             .format(vk_format(desc.format)?)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk_aspect_mask(desc.format),
@@ -606,12 +624,12 @@ impl ResourceRegistry {
                 .create_sampler(&info, None)
                 .map_err(|error| Error::Backend(format!("vkCreateSampler failed: {error:?}")))?
         };
-        self.samplers.insert(handle, sampler);
+        self.samplers.insert(handle, (sampler, desc));
         Ok(())
     }
 
     pub fn destroy_sampler(&mut self, device: &Device, handle: SamplerHandle) -> Result<()> {
-        let sampler = self.samplers.remove(&handle).ok_or(Error::InvalidHandle)?;
+        let (sampler, _) = self.samplers.remove(&handle).ok_or(Error::InvalidHandle)?;
         unsafe {
             device.destroy_sampler(sampler, None);
         }
@@ -708,7 +726,7 @@ impl ResourceRegistry {
                 }
             }
         }
-        for (_, sampler) in self.samplers.drain() {
+        for (_, (sampler, _)) in self.samplers.drain() {
             unsafe {
                 device.destroy_sampler(sampler, None);
             }
@@ -851,8 +869,20 @@ impl ResourceRegistry {
     pub fn sampler(&self, handle: SamplerHandle) -> Result<vk::Sampler> {
         self.samplers
             .get(&handle)
-            .copied()
+            .map(|(s, _)| *s)
             .ok_or(Error::InvalidHandle)
+    }
+
+    /// GFX-7b: Return the engine-level `SamplerDesc` stored alongside the sampler handle.
+    pub fn sampler_desc(&self, handle: SamplerHandle) -> Option<&crate::SamplerDesc> {
+        self.samplers.get(&handle).map(|(_, d)| d)
+    }
+
+    /// GFX-7b: Raw image + ImageDesc for a handle — used to reconstruct `ImageViewCreateInfo`
+    /// when writing sampled/storage image descriptors to a `VkDescriptorHeapEXT` resource heap.
+    pub fn image_and_desc(&self, handle: ImageHandle) -> Option<(vk::Image, &crate::ImageDesc)> {
+        let img = self.images.get(&handle)?;
+        Some((img.image, &img.desc))
     }
 
     /// Return the `VkDeviceAddress` of a buffer (base address, offset = 0).
@@ -1235,7 +1265,7 @@ fn vk_optical_flow_image_info(
     ))
 }
 
-fn vk_image_view_type(desc: ImageDesc) -> vk::ImageViewType {
+pub(super) fn vk_image_view_type(desc: &ImageDesc) -> vk::ImageViewType {
     match desc.dimension {
         crate::ImageDimension::D1 if desc.layers > 1 => vk::ImageViewType::TYPE_1D_ARRAY,
         crate::ImageDimension::D1 => vk::ImageViewType::TYPE_1D,
@@ -1283,7 +1313,7 @@ pub(super) fn vk_format(format: Format) -> Result<vk::Format> {
     }
 }
 
-fn vk_aspect_mask(format: Format) -> vk::ImageAspectFlags {
+pub(super) fn vk_aspect_mask(format: Format) -> vk::ImageAspectFlags {
     match format {
         Format::Depth32Float => vk::ImageAspectFlags::DEPTH,
         Format::Depth24Stencil8 => vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
@@ -1364,7 +1394,7 @@ fn vk_buffer_usage(usage: BufferUsage) -> vk::BufferUsageFlags {
     flags
 }
 
-fn vk_filter(filter: FilterMode) -> vk::Filter {
+pub(super) fn vk_filter(filter: FilterMode) -> vk::Filter {
     match filter {
         FilterMode::Nearest => vk::Filter::NEAREST,
         FilterMode::Linear => vk::Filter::LINEAR,
@@ -1372,14 +1402,14 @@ fn vk_filter(filter: FilterMode) -> vk::Filter {
     }
 }
 
-fn vk_mipmap_mode(mode: MipmapMode) -> vk::SamplerMipmapMode {
+pub(super) fn vk_mipmap_mode(mode: MipmapMode) -> vk::SamplerMipmapMode {
     match mode {
         MipmapMode::Nearest => vk::SamplerMipmapMode::NEAREST,
         MipmapMode::Linear => vk::SamplerMipmapMode::LINEAR,
     }
 }
 
-fn vk_address_mode(mode: AddressMode) -> vk::SamplerAddressMode {
+pub(super) fn vk_address_mode(mode: AddressMode) -> vk::SamplerAddressMode {
     match mode {
         AddressMode::Repeat => vk::SamplerAddressMode::REPEAT,
         AddressMode::MirroredRepeat => vk::SamplerAddressMode::MIRRORED_REPEAT,
@@ -1388,7 +1418,7 @@ fn vk_address_mode(mode: AddressMode) -> vk::SamplerAddressMode {
     }
 }
 
-fn vk_compare_op(compare: CompareOp) -> vk::CompareOp {
+pub(super) fn vk_compare_op(compare: CompareOp) -> vk::CompareOp {
     match compare {
         CompareOp::Never => vk::CompareOp::NEVER,
         CompareOp::Less => vk::CompareOp::LESS,
@@ -1401,7 +1431,7 @@ fn vk_compare_op(compare: CompareOp) -> vk::CompareOp {
     }
 }
 
-fn vk_border_color(color: BorderColor) -> vk::BorderColor {
+pub(super) fn vk_border_color(color: BorderColor) -> vk::BorderColor {
     match color {
         BorderColor::FloatTransparentBlack => vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
         BorderColor::IntTransparentBlack => vk::BorderColor::INT_TRANSPARENT_BLACK,

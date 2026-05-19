@@ -635,7 +635,8 @@ impl RenderFrame {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
-                    shading_rate_image: None,
+                shading_rate_image: None,
+                perf_counters: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -727,8 +728,8 @@ impl RenderFrame {
             .map(|rec| {
                 let gpu_time_ms = gpu_timings
                     .iter()
-                    .find(|(n, _)| n == &rec.name)
-                    .map(|(_, ms)| *ms);
+                    .find(|t| t.name == rec.name)
+                    .map(|t| t.gpu_ms);
                 GraphPassInfo {
                     name: rec.name.clone(),
                     kind: rec.kind,
@@ -1061,6 +1062,7 @@ impl RenderFrame {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         };
         self.image(name, desc)
     }
@@ -1151,7 +1153,8 @@ impl RenderFrame {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
-                    shading_rate_image: None,
+                shading_rate_image: None,
+                perf_counters: None,
             },
             deferred: None,
         });
@@ -1214,7 +1217,8 @@ impl RenderFrame {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
-                    shading_rate_image: None,
+                shading_rate_image: None,
+                perf_counters: None,
             },
             deferred: None,
         });
@@ -1279,6 +1283,7 @@ impl RenderFrame {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         };
         let name = name.into();
         let key = GraphImageCacheKey::new(name.clone(), desc, inner.swapchain_slot);
@@ -1331,6 +1336,7 @@ impl RenderFrame {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         };
         let name = name.into();
         let key = GraphImageCacheKey::new(name.clone(), desc, slot);
@@ -2050,7 +2056,8 @@ impl GraphImage {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
-                    shading_rate_image: None,
+                shading_rate_image: None,
+                perf_counters: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2254,7 +2261,8 @@ impl GraphImage {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
-                    shading_rate_image: None,
+                shading_rate_image: None,
+                perf_counters: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2457,7 +2465,8 @@ impl GraphImage {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
-                    shading_rate_image: None,
+                shading_rate_image: None,
+                perf_counters: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2634,7 +2643,8 @@ impl GraphImage {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
-                    shading_rate_image: None,
+                shading_rate_image: None,
+                perf_counters: None,
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -2771,7 +2781,8 @@ impl GraphImage {
                 push_descriptor_set: None,
                 predicate: None,
                 shader_binding: None,
-                    shading_rate_image: None,
+                shading_rate_image: None,
+                perf_counters: None,
             },
             deferred: None,
         });
@@ -2963,7 +2974,8 @@ fn record_fullscreen_shader_pass(
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         },
         deferred: Some(DeferredPassResolve {
             layout_handle: shader.pipeline_layout.handle(),
@@ -3053,7 +3065,8 @@ fn record_compute_shader_pass(
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         },
         deferred: Some(DeferredPassResolve {
             layout_handle: program.pipeline_layout.handle(),
@@ -3462,7 +3475,8 @@ mod tests {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         }
     }
 
@@ -3489,7 +3503,8 @@ mod tests {
             push_descriptor_set: None,
             predicate: None,
             shader_binding: None,
-                    shading_rate_image: None,
+            shading_rate_image: None,
+            perf_counters: None,
         }
     }
 
@@ -3613,6 +3628,7 @@ mod tests {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         };
 
         assert!(validate_subresource(desc, SubresourceRange::new(3, 1, 1, 1)).is_ok());

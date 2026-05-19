@@ -351,6 +351,7 @@ impl CsmPass {
             compression: Default::default(),
             min_lod_bits: None,
             msaa_resolve_to_single_sampled: false,
+            drm_format_modifier: None,
         };
         let shadow_atlas = frame.image("shadow_atlas", atlas_desc)?;
 
@@ -607,6 +608,7 @@ fn shadow_image_desc(resolution: u32, debug_name: &'static str) -> ImageDesc {
         compression: Default::default(),
         min_lod_bits: None,
         msaa_resolve_to_single_sampled: false,
+        drm_format_modifier: None,
     }
 }
 

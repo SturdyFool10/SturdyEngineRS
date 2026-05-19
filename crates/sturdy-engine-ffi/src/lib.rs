@@ -722,6 +722,7 @@ pub extern "C" fn gfx_frame_add_pass(
                 predicate: None,
                 shader_binding: None,
                 shading_rate_image: None,
+                perf_counters: None,
             })
         })
     })
