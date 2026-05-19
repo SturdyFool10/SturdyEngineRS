@@ -97,7 +97,7 @@ impl RenderWorld {
         let mut states = self
             .states
             .lock()
-            .expect("render-world state mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         for command in commands {
             match command {
@@ -207,7 +207,7 @@ impl RenderWorld {
     pub fn object(&self, object: GpuObjectId) -> Option<RenderObjectState> {
         self.states
             .lock()
-            .expect("render-world state mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&object)
             .cloned()
     }
@@ -217,7 +217,7 @@ impl RenderWorld {
         let mut snapshot: Vec<_> = self
             .states
             .lock()
-            .expect("render-world state mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .values()
             .cloned()
             .collect();
@@ -253,7 +253,7 @@ impl RenderWorld {
         let mut states = self
             .states
             .lock()
-            .expect("render-world state mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let snapshot: Vec<_> = states.values().cloned().collect();
         let entries = gpu_scene_entries_from_states(&snapshot, valid_mesh_count);
         let instances: Vec<_> = entries.iter().map(|(_, instance)| *instance).collect();
@@ -266,7 +266,7 @@ impl RenderWorld {
         let mut gpu_scene = self
             .gpu_scene
             .lock()
-            .expect("render-world GPU scene mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut reallocated = false;
         if instance_count > gpu_scene.capacity || gpu_scene.buffer.is_none() {
             let new_capacity = instance_count.next_power_of_two().max(4);
@@ -343,7 +343,7 @@ impl RenderWorld {
     pub fn gpu_scene_batch_range(&self, mesh_id: u32) -> Option<RenderWorldBatchRange> {
         self.gpu_scene
             .lock()
-            .expect("render-world GPU scene mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .ranges
             .get(&mesh_id)
             .copied()
@@ -353,7 +353,7 @@ impl RenderWorld {
         let gpu_scene = self
             .gpu_scene
             .lock()
-            .expect("render-world GPU scene mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         f(gpu_scene.buffer.as_ref())
     }
 
@@ -361,7 +361,7 @@ impl RenderWorld {
         let gpu_scene = self
             .gpu_scene
             .lock()
-            .expect("render-world GPU scene mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         f(gpu_scene.indirect_buffer.as_ref())
     }
 
@@ -370,7 +370,7 @@ impl RenderWorld {
         let mut states = self
             .states
             .lock()
-            .expect("render-world state mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut dirty = Vec::new();
         for state in states.values_mut() {
             if !state.dirty.is_empty() {

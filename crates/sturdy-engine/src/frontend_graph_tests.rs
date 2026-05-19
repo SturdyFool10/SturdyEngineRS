@@ -26,14 +26,6 @@ fn image_use_mip(image: u64, mip: u16, access: Access, state: RgState) -> crate:
 
 fn pass(name: &str, reads: &[u64], writes: &[u64]) -> PassDesc {
     PassDesc {
-        name: name.to_owned(),
-        queue: QueueType::Graphics,
-        shader: None,
-        pipeline: None,
-        bind_groups: Vec::new(),
-        push_constants: None,
-        pipeline_shading_rate: None,
-        work: PassWork::None,
         reads: reads
             .iter()
             .copied()
@@ -44,15 +36,7 @@ fn pass(name: &str, reads: &[u64], writes: &[u64]) -> PassDesc {
             .copied()
             .map(|image| image_use(image, Access::Write, RgState::RenderTarget))
             .collect(),
-        buffer_reads: Vec::new(),
-        buffer_writes: Vec::new(),
-        clear_colors: Vec::new(),
-        clear_depth: None,
-        push_descriptor_set: None,
-        predicate: None,
-        shader_binding: None,
-        shading_rate_image: None,
-        perf_counters: None,
+        ..PassDesc::default_graphics(name)
     }
 }
 
@@ -62,25 +46,9 @@ fn pass_with_uses(
     writes: Vec<crate::ImageUse>,
 ) -> PassDesc {
     PassDesc {
-        name: name.to_owned(),
-        queue: QueueType::Graphics,
-        shader: None,
-        pipeline: None,
-        bind_groups: Vec::new(),
-        push_constants: None,
-        pipeline_shading_rate: None,
-        work: PassWork::None,
         reads,
         writes,
-        buffer_reads: Vec::new(),
-        buffer_writes: Vec::new(),
-        clear_colors: Vec::new(),
-        clear_depth: None,
-        push_descriptor_set: None,
-        predicate: None,
-        shader_binding: None,
-        shading_rate_image: None,
-        perf_counters: None,
+        ..PassDesc::default_graphics(name)
     }
 }
 

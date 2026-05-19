@@ -107,4 +107,3 @@ pub use world_view::{ComponentReadGuard, ComponentWriteGuard, WorldView};
 
 #[cfg(test)]
 mod tests;
-

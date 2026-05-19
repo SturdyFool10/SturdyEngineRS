@@ -285,12 +285,12 @@ impl MeshProgram {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
-            .expect("mesh program pipeline mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines_mrt
             .lock()
-            .expect("mesh program MRT pipeline mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
         Ok(true)
     }
@@ -324,12 +324,12 @@ impl MeshProgram {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
-            .expect("mesh program pipeline mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines_mrt
             .lock()
-            .expect("mesh program MRT pipeline mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
         Ok(true)
     }
@@ -343,7 +343,7 @@ impl MeshProgram {
         let mut pipelines = self
             .pipelines
             .lock()
-            .expect("mesh program pipeline mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let key = (format, samples.max(1), self.uses_depth);
         if !pipelines.contains_key(&key) {
             let (vertex_stride, attributes) = match self.vertex_kind {
@@ -414,7 +414,7 @@ impl MeshProgram {
         let mut pipelines = self
             .pipelines_mrt
             .lock()
-            .expect("mesh program MRT pipeline mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let key = (color_formats.to_vec(), samples.max(1), self.uses_depth);
         if !pipelines.contains_key(&key) {
             let (vertex_stride, attributes) = match self.vertex_kind {

@@ -70,7 +70,7 @@ impl SceneCommands {
         //panic allowed, reason = "poisoned internal scene command queue is unrecoverable"
         self.queue
             .lock()
-            .expect("scene commands mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(Box::new(cmd));
     }
 
@@ -101,7 +101,10 @@ impl SceneCommands {
     /// the `SceneCommands`.
     pub(super) fn take_all(&self) -> Vec<CommandFn> {
         //panic allowed, reason = "poisoned internal scene command queue is unrecoverable"
-        let mut lock = self.queue.lock().expect("scene commands mutex poisoned");
+        let mut lock = self
+            .queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::mem::take(&mut *lock)
     }
 

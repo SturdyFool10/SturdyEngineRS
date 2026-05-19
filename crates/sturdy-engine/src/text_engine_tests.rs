@@ -71,8 +71,7 @@ fn snaps_screen_space_text_placement_to_pixels() {
         },
         ..TextLayoutOutput::default()
     });
-    let desc =
-        TextDrawDesc::new("snap").placement(TextPlacement::Screen2d { x: 10.49, y: 20.51 });
+    let desc = TextDrawDesc::new("snap").placement(TextPlacement::Screen2d { x: 10.49, y: 20.51 });
     let mut engine = TextEngine::new(renderer);
 
     let frame = engine.prepare_frame(&[desc], 800, 600);

@@ -223,7 +223,7 @@ impl Default for SpriteBatch {
 /// // Each frame:
 /// let mut batch = SpriteBatch::new();
 /// batch.push(Sprite { position: [100.0, 200.0], size: [64.0, 64.0], ..Default::default() });
-/// let mesh = batch.build(&engine)?.unwrap();
+/// let mesh = batch.build(&engine)?.ok_or_else(|| anyhow::anyhow!("empty sprite batch"))?;
 /// frame.bind_image("sprite_texture", &my_texture);
 /// renderer.draw_mesh(&mesh, &output, &frame)?;
 /// ```

@@ -50,11 +50,10 @@ fn text_layout_measurement_is_cached() {
     let element = Element::text(ElementId::new("cached-text"), "hello", TextStyle::default());
     let mut cache = LayoutCache::default();
     let mut calls = 0usize;
-    let mut measurer =
-        |_id: &ElementId, _text: &str, _style: &TextStyle, _width: Option<f32>| {
-            calls += 1;
-            Size::new(80.0, 20.0)
-        };
+    let mut measurer = |_id: &ElementId, _text: &str, _style: &TextStyle, _width: Option<f32>| {
+        calls += 1;
+        Size::new(80.0, 20.0)
+    };
 
     LayoutTree::compute_with_text_measurer(
         &element,
@@ -89,12 +88,11 @@ fn wrapped_text_uses_exact_width_for_correct_reservation() {
     let mut cache = LayoutCache::default();
     let mut calls = 0usize;
     let mut measured_widths = Vec::new();
-    let mut measurer =
-        |_id: &ElementId, _text: &str, _style: &TextStyle, width: Option<f32>| {
-            calls += 1;
-            measured_widths.push(width);
-            Size::new(80.0, 20.0)
-        };
+    let mut measurer = |_id: &ElementId, _text: &str, _style: &TextStyle, width: Option<f32>| {
+        calls += 1;
+        measured_widths.push(width);
+        Size::new(80.0, 20.0)
+    };
 
     LayoutTree::compute_with_text_measurer(
         &element,
@@ -123,12 +121,11 @@ fn nowrap_labels_ignore_width_for_resize_cache_stability() {
     let mut cache = LayoutCache::default();
     let mut calls = 0usize;
     let mut measured_widths = Vec::new();
-    let mut measurer =
-        |_id: &ElementId, _text: &str, _style: &TextStyle, width: Option<f32>| {
-            calls += 1;
-            measured_widths.push(width);
-            Size::new(80.0, 20.0)
-        };
+    let mut measurer = |_id: &ElementId, _text: &str, _style: &TextStyle, width: Option<f32>| {
+        calls += 1;
+        measured_widths.push(width);
+        Size::new(80.0, 20.0)
+    };
 
     LayoutTree::compute_with_text_measurer(
         &element,
@@ -189,10 +186,9 @@ fn fit_container_reserves_child_text_plus_padding() {
         TextStyle::default(),
     ));
     let mut cache = LayoutCache::default();
-    let mut measurer =
-        |_id: &ElementId, _text: &str, _style: &TextStyle, _width: Option<f32>| {
-            Size::new(78.0, 18.0)
-        };
+    let mut measurer = |_id: &ElementId, _text: &str, _style: &TextStyle, _width: Option<f32>| {
+        Size::new(78.0, 18.0)
+    };
 
     let layout = LayoutTree::compute_with_text_measurer(
         &badge,
@@ -241,8 +237,7 @@ fn positioned_children_do_not_contribute_to_parent_fit_size() {
     root.children.push(absolute);
 
     let layout =
-        LayoutTree::compute(&root, Size::new(300.0, 200.0), &mut LayoutCache::default())
-            .unwrap();
+        LayoutTree::compute(&root, Size::new(300.0, 200.0), &mut LayoutCache::default()).unwrap();
 
     assert_eq!(
         layout.by_id(&root.id).unwrap().rect.size,
@@ -275,8 +270,7 @@ fn child_translation_moves_descendants_with_parent() {
     root.children.push(child);
 
     let layout =
-        LayoutTree::compute(&root, Size::new(200.0, 100.0), &mut LayoutCache::default())
-            .unwrap();
+        LayoutTree::compute(&root, Size::new(200.0, 100.0), &mut LayoutCache::default()).unwrap();
 
     assert_eq!(
         layout.by_id(&child_id).unwrap().rect.origin,

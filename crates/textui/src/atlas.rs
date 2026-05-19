@@ -1401,7 +1401,7 @@ fn rasterize_field_glyph(
                 GlyphContentMode::Msdf => {
                     encode_msdf_sample(sample, inside, &outline.segments, field_range_px)
                 }
-                GlyphContentMode::AlphaMask => unreachable!(),
+                GlyphContentMode::AlphaMask => [255, 255, 255, if inside { 255 } else { 0 }],
             };
             glyph_image.pixels[y * glyph_width + x] =
                 Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]);

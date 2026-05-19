@@ -29,16 +29,15 @@ fn caps_fp16() -> Caps {
 #[test]
 fn prefer_hdr_selects_sc_rgb_when_available() {
     let desc =
-        HdrPipelineDesc::select(&hdr_caps_both(), &caps_fp16(), HdrPreference::PreferHdr)
-            .unwrap();
+        HdrPipelineDesc::select(&hdr_caps_both(), &caps_fp16(), HdrPreference::PreferHdr).unwrap();
     assert_eq!(desc.mode, HdrMode::ScRgb);
     assert!(desc.mode.is_hdr());
 }
 
 #[test]
 fn force_sdr_ignores_display_caps() {
-    let desc = HdrPipelineDesc::select(&hdr_caps_both(), &caps_fp16(), HdrPreference::ForceSdr)
-        .unwrap();
+    let desc =
+        HdrPipelineDesc::select(&hdr_caps_both(), &caps_fp16(), HdrPreference::ForceSdr).unwrap();
     assert_eq!(desc.mode, HdrMode::Sdr);
     assert!(!desc.mode.is_hdr());
 }
@@ -71,8 +70,7 @@ fn hdr_mode_render_format_is_fp16_for_hdr() {
 #[test]
 fn hdr_pipeline_uses_linear_tone_mapping_in_hdr_mode() {
     let desc =
-        HdrPipelineDesc::select(&hdr_caps_both(), &caps_fp16(), HdrPreference::PreferHdr)
-            .unwrap();
+        HdrPipelineDesc::select(&hdr_caps_both(), &caps_fp16(), HdrPreference::PreferHdr).unwrap();
     assert_eq!(desc.tone_mapping, ToneMappingOp::Linear);
 }
 

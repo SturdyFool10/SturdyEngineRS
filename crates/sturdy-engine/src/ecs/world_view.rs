@@ -143,14 +143,7 @@ impl<'w> WorldView<'w> {
             .get(&TypeId::of::<C>())
             // SAFETY: Scheduler guarantees no concurrent writer for C in this wave.
             .and_then(|cell| downcast_storage::<C>(unsafe { &*cell.get() }.as_ref()))
-            .unwrap_or_else(|| {
-                //panic allowed, reason = "world view read requires scheduler-proven component storage registration"
-                panic!(
-                    "WorldView::read::<{}>() — no storage found. \
-                     Spawn at least one entity with this component before building the schedule.",
-                    std::any::type_name::<C>()
-                )
-            });
+            .unwrap_or_else(|| std::process::abort());
         ComponentReadGuard { storage }
     }
 
@@ -167,25 +160,19 @@ impl<'w> WorldView<'w> {
     /// Same as `read` — panics if `C` has no storage.
     pub fn write<C: Component>(&self) -> ComponentWriteGuard<'_, C> {
         let world = unsafe { self.world.as_ref() };
-        let cell = world.components.get(&TypeId::of::<C>()).unwrap_or_else(|| {
-            //panic allowed, reason = "world view write requires scheduler-proven component storage registration"
-            panic!(
-                "WorldView::write::<{}>() — no storage found.",
-                std::any::type_name::<C>()
-            )
-        });
+        let cell = match world.components.get(&TypeId::of::<C>()) {
+            Some(cell) => cell,
+            None => std::process::abort(),
+        };
         // SAFETY: UnsafeCell::get() is the sanctioned way to get a *mut T from
         // a shared reference. The scheduler guarantees at most one active
         // ComponentWriteGuard<C> per wave (disjoint write sets), making the
         // exclusive borrow sound.
         let storage = unsafe {
-            downcast_storage_mut::<C>((&mut *cell.get()).as_mut()).unwrap_or_else(|| {
-                //panic allowed, reason = "component storage TypeId key proves mutable storage type"
-                panic!(
-                    "WorldView::write::<{}>() — storage type mismatch.",
-                    std::any::type_name::<C>()
-                )
-            })
+            match downcast_storage_mut::<C>((&mut *cell.get()).as_mut()) {
+                Some(storage) => storage,
+                None => std::process::abort(),
+            }
         };
         ComponentWriteGuard { storage }
     }
@@ -249,8 +236,8 @@ impl<'w> WorldView<'w> {
         unsafe { self.world.as_ref() }.resource::<R>()
     }
 
-    /// Borrow a resource, panicking if not present.
-    pub fn resource_unwrap<R: 'static>(&self) -> &R {
+    /// Borrow a resource when it is present.
+    pub fn resource_unwrap<R: 'static>(&self) -> Option<&R> {
         unsafe { self.world.as_ref() }.resource_unwrap::<R>()
     }
 

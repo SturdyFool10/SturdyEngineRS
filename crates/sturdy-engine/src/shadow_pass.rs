@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use glam::{Mat4, Vec3, Vec4};
 
 use crate::{
-    Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, ImageDesc, ImageDimension,
+    Buffer, BufferDesc, BufferUsage, Engine, Error, Format, GraphImage, ImageDesc, ImageDimension,
     ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind, RenderFrame, Result, ShaderDesc,
     ShaderSource, ShaderStage, push_constants, scene::Scene,
 };
@@ -414,10 +414,11 @@ impl CsmPass {
         // Upload to the persistent GPU buffer.
         self.csm_buffer.write(0, bytemuck::bytes_of(&gpu_data))?;
 
-        let shadow_atlas = frame
-            .find_image_by_name("shadow_atlas")
-            //panic allowed, reason = "draw_shadow_batches_viewport creates shadow_atlas before lookup"
-            .expect("shadow_atlas must exist after draw_shadow_batches_viewport");
+        let shadow_atlas = frame.find_image_by_name("shadow_atlas").ok_or_else(|| {
+            Error::ResourceStateCorruption(
+                "shadow_atlas was not registered after shadow batch rendering".into(),
+            )
+        })?;
 
         Ok(CsmOutput {
             shadow_atlas,

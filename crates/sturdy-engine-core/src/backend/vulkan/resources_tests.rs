@@ -61,8 +61,7 @@ fn image_compression_control_is_only_chained_when_enabled_and_explicit() {
         .is_none()
     );
     assert!(
-        vk_image_compression_control(ImageCompression::Default, true, &mut fixed_rate)
-            .is_none()
+        vk_image_compression_control(ImageCompression::Default, true, &mut fixed_rate).is_none()
     );
 
     let fixed = vk_image_compression_control(

@@ -30,8 +30,11 @@ impl Scene {
                 .join("cull_compute.slang");
             self.culling_program = Some(ComputeProgram::load(engine, path)?);
         }
-        //panic allowed, reason = "culling_program was initialized when absent immediately above"
-        let program = self.culling_program.as_ref().unwrap();
+        let Some(program) = self.culling_program.as_ref() else {
+            return Err(crate::Error::ResourceStateCorruption(
+                "GPU culling program was not available after initialization".into(),
+            ));
+        };
 
         let frustum = Frustum::from_view_proj(view_proj);
         let planes: [[f32; 4]; 6] = {

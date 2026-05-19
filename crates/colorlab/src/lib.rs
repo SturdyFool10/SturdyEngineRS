@@ -21,4 +21,3 @@ pub use colorspaces::xyz::Xyz;
 
 #[cfg(test)]
 mod tests;
-

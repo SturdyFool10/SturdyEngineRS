@@ -1,7 +1,7 @@
 use crate::{
     Access, Buffer, CopyBufferToImageDesc, CopyImageToBufferDesc, Error, Extent3d, Format, Frame,
-    Image, ImageDesc, ImageRef, ImageUsage, ImageUse, PassDesc, PassWork, QueueType, Result,
-    RgState, SubresourceRange,
+    Image, ImageDesc, ImageRef, ImageUsage, ImageUse, PassDesc, PassWork, Result, RgState,
+    SubresourceRange,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -191,13 +191,6 @@ impl Frame {
             .map_err(|_| Error::InvalidInput("copy region layer_count exceeds u16 range".into()))?;
 
         self.add_pass(PassDesc {
-            name: name.into(),
-            queue: QueueType::Transfer,
-            shader: None,
-            pipeline: None,
-            bind_groups: Vec::new(),
-            push_constants: None,
-            pipeline_shading_rate: None,
             work: PassWork::CopyBufferToImage(CopyBufferToImageDesc {
                 buffer: buffer.handle(),
                 image: image.image_handle(),
@@ -209,7 +202,6 @@ impl Frame {
                 height: region.height,
                 depth: region.depth,
             }),
-            reads: Vec::new(),
             writes: vec![ImageUse {
                 image: image.image_handle(),
                 access: Access::Write,
@@ -228,14 +220,7 @@ impl Frame {
                 offset: region.buffer_offset,
                 size: 0,
             }],
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
-            push_descriptor_set: None,
-            predicate: None,
-            shader_binding: None,
-            shading_rate_image: None,
-            perf_counters: None,
+            ..PassDesc::default_transfer(name)
         })
     }
 
@@ -259,13 +244,6 @@ impl Frame {
             .map_err(|_| Error::InvalidInput("copy region layer_count exceeds u16 range".into()))?;
 
         self.add_pass(PassDesc {
-            name: name.into(),
-            queue: QueueType::Transfer,
-            shader: None,
-            pipeline: None,
-            bind_groups: Vec::new(),
-            push_constants: None,
-            pipeline_shading_rate: None,
             work: PassWork::CopyImageToBuffer(CopyImageToBufferDesc {
                 image: image.image_handle(),
                 buffer: buffer.handle(),
@@ -288,8 +266,6 @@ impl Frame {
                     layer_count,
                 },
             }],
-            writes: Vec::new(),
-            buffer_reads: Vec::new(),
             buffer_writes: vec![crate::BufferUse {
                 buffer: buffer.handle(),
                 access: Access::Write,
@@ -297,13 +273,7 @@ impl Frame {
                 offset: region.buffer_offset,
                 size: 0,
             }],
-            clear_colors: Vec::new(),
-            clear_depth: None,
-            push_descriptor_set: None,
-            predicate: None,
-            shader_binding: None,
-            shading_rate_image: None,
-            perf_counters: None,
+            ..PassDesc::default_transfer(name)
         })
     }
 
@@ -358,13 +328,6 @@ impl Frame {
         self.inner
             .graph_mut(|g| g.import_image(image.handle(), image.desc()))?;
         self.add_pass(PassDesc {
-            name: format!("{name}-copy"),
-            queue: QueueType::Transfer,
-            shader: None,
-            pipeline: None,
-            bind_groups: Vec::new(),
-            push_constants: None,
-            pipeline_shading_rate: None,
             work: PassWork::CopyBufferToImage(CopyBufferToImageDesc {
                 buffer: staging_handle,
                 image: image.handle(),
@@ -376,7 +339,6 @@ impl Frame {
                 height: desc.height,
                 depth: 1,
             }),
-            reads: Vec::new(),
             writes: vec![ImageUse {
                 image: image.handle(),
                 access: Access::Write,
@@ -395,24 +357,9 @@ impl Frame {
                 offset: allocation.offset(),
                 size: expected_len,
             }],
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
-            push_descriptor_set: None,
-            predicate: None,
-            shader_binding: None,
-            shading_rate_image: None,
-            perf_counters: None,
+            ..PassDesc::default_transfer(format!("{name}-copy"))
         })?;
         self.add_pass(PassDesc {
-            name: format!("{name}-shader-read"),
-            queue: QueueType::Graphics,
-            shader: None,
-            pipeline: None,
-            bind_groups: Vec::new(),
-            push_constants: None,
-            pipeline_shading_rate: None,
-            work: PassWork::None,
             reads: vec![ImageUse {
                 image: image.handle(),
                 access: Access::Read,
@@ -424,16 +371,7 @@ impl Frame {
                     layer_count: 1,
                 },
             }],
-            writes: Vec::new(),
-            buffer_reads: Vec::new(),
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
-            push_descriptor_set: None,
-            predicate: None,
-            shader_binding: None,
-            shading_rate_image: None,
-            perf_counters: None,
+            ..PassDesc::default_graphics(format!("{name}-shader-read"))
         })?;
         Ok(image)
     }
@@ -471,13 +409,6 @@ impl Frame {
         self.inner
             .graph_mut(|g| g.import_image(image.handle(), image.desc()))?;
         self.add_pass(PassDesc {
-            name: format!("{name}-copy"),
-            queue: QueueType::Transfer,
-            shader: None,
-            pipeline: None,
-            bind_groups: Vec::new(),
-            push_constants: None,
-            pipeline_shading_rate: None,
             work: PassWork::CopyBufferToImage(CopyBufferToImageDesc {
                 buffer: staging_handle,
                 image: image.handle(),
@@ -489,7 +420,6 @@ impl Frame {
                 height: desc.extent.height,
                 depth: 1,
             }),
-            reads: Vec::new(),
             writes: vec![ImageUse {
                 image: image.handle(),
                 access: Access::Write,
@@ -508,24 +438,9 @@ impl Frame {
                 offset: allocation.offset(),
                 size: expected_len,
             }],
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
-            push_descriptor_set: None,
-            predicate: None,
-            shader_binding: None,
-            shading_rate_image: None,
-            perf_counters: None,
+            ..PassDesc::default_transfer(format!("{name}-copy"))
         })?;
         self.add_pass(PassDesc {
-            name: format!("{name}-shader-read"),
-            queue: QueueType::Graphics,
-            shader: None,
-            pipeline: None,
-            bind_groups: Vec::new(),
-            push_constants: None,
-            pipeline_shading_rate: None,
-            work: PassWork::None,
             reads: vec![ImageUse {
                 image: image.handle(),
                 access: Access::Read,
@@ -537,16 +452,7 @@ impl Frame {
                     layer_count: 1,
                 },
             }],
-            writes: Vec::new(),
-            buffer_reads: Vec::new(),
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
-            push_descriptor_set: None,
-            predicate: None,
-            shader_binding: None,
-            shading_rate_image: None,
-            perf_counters: None,
+            ..PassDesc::default_graphics(format!("{name}-shader-read"))
         })
     }
 }
@@ -584,7 +490,11 @@ pub(crate) fn texture_upload_byte_count(desc: TextureUploadDesc) -> Result<u64> 
         | Format::Bc5Unorm
         | Format::Bc7Unorm
         | Format::Bc7UnormSrgb
-        | Format::Bc6hUfloat => unreachable!(),
+        | Format::Bc6hUfloat => {
+            return Err(Error::InvalidInput(
+                "BC-compressed upload byte counts must be computed from 4x4 blocks".into(),
+            ));
+        }
     };
     [desc.width as u64, desc.height as u64, texel_size]
         .into_iter()

@@ -227,7 +227,7 @@ impl ShaderProgram {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
-            .expect("shader program pipeline mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
         Ok(true)
     }
@@ -260,7 +260,7 @@ impl ShaderProgram {
         let mut pipelines = self
             .pipelines
             .lock()
-            .expect("shader program pipeline mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let key = (format, samples.max(1));
         if !pipelines.contains_key(&key) {
             let pipeline = self.engine.create_graphics_pipeline(GraphicsPipelineDesc {

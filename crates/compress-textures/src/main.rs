@@ -55,7 +55,8 @@ fn main() {
         }
         visit_dir(&base, extensions, &mut |path: &Path| {
             total += 1;
-            let name = path.file_stem()
+            let name = path
+                .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown");
 
@@ -75,9 +76,13 @@ fn main() {
 
             match compress_texture(&pixels, w, h, channels, name, Some(path), true) {
                 Some(_) => {
-                    println!("  compressed: {} ({}×{}, {})",
-                        path.display(), w, h,
-                        TextureKind::detect(name, channels).gpu_format_name());
+                    println!(
+                        "  compressed: {} ({}×{}, {})",
+                        path.display(),
+                        w,
+                        h,
+                        TextureKind::detect(name, channels).gpu_format_name()
+                    );
                     compressed += 1;
                 }
                 None => {
@@ -90,14 +95,18 @@ fn main() {
 
     let elapsed = t0.elapsed().as_secs_f32();
     println!();
-    println!("Done in {elapsed:.1}s — {total} files scanned, {compressed} compressed, {skipped} cached/skipped, {errors} errors");
+    println!(
+        "Done in {elapsed:.1}s — {total} files scanned, {compressed} compressed, {skipped} cached/skipped, {errors} errors"
+    );
     if errors > 0 {
         std::process::exit(1);
     }
 }
 
 fn visit_dir(dir: &Path, extensions: &[&str], callback: &mut impl FnMut(&Path)) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {

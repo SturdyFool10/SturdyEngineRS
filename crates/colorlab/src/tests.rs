@@ -208,8 +208,7 @@ fn blend_in_oklch_stays_saturated_through_midpoint() {
     // Oklch midpoint should be more saturated (higher chroma) than linear
     let linear_oklab = Oklab::from_color(&linear_mid);
     let oklch_oklab = Oklab::from_color(&oklch_mid);
-    let linear_chroma =
-        (linear_oklab.a * linear_oklab.a + linear_oklab.b * linear_oklab.b).sqrt();
+    let linear_chroma = (linear_oklab.a * linear_oklab.a + linear_oklab.b * linear_oklab.b).sqrt();
     let oklch_chroma = (oklch_oklab.a * oklch_oklab.a + oklch_oklab.b * oklch_oklab.b).sqrt();
     assert!(
         oklch_chroma > linear_chroma,

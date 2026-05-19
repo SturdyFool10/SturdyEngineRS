@@ -35,7 +35,7 @@ use helpers::{engine_shader, extract_near_far};
 
 use crate::scene::CameraConstants;
 use crate::{
-    Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, ImageDesc, ImageDimension,
+    Buffer, BufferDesc, BufferUsage, Engine, Error, Format, GraphImage, ImageDesc, ImageDimension,
     ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind, RenderFrame, Result, ShaderDesc,
     ShaderProgram, ShaderSource, ShaderStage,
     ao_pass::AoPass,
@@ -684,8 +684,12 @@ impl DeferredPass {
         }
 
         let (bvh_buf, bvh_root) = if !self.light_bvh.nodes.is_empty() {
-            //panic allowed, reason = "light BVH upload proved gpu_buffer exists before non-empty use"
-            (self.light_bvh.gpu_buffer.as_ref().unwrap(), 0u32)
+            let bvh_buf = self.light_bvh.gpu_buffer.as_ref().ok_or_else(|| {
+                Error::ResourceStateCorruption(
+                    "light BVH has nodes but no GPU buffer after rebuild".into(),
+                )
+            })?;
+            (bvh_buf, 0u32)
         } else {
             (&self.empty_bvh_buf, crate::light_bvh::BVH_EMPTY)
         };

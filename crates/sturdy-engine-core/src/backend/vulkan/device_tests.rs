@@ -22,13 +22,9 @@ fn global_queue_priority_assigns_split_queue_tiers() {
         dma: 2,
     };
 
-    assert!(
-        queue_global_priority(families, families.graphics) == vk::QueueGlobalPriorityKHR::HIGH
-    );
+    assert!(queue_global_priority(families, families.graphics) == vk::QueueGlobalPriorityKHR::HIGH);
     assert!(
         queue_global_priority(families, families.compute) == vk::QueueGlobalPriorityKHR::MEDIUM
     );
-    assert!(
-        queue_global_priority(families, families.transfer) == vk::QueueGlobalPriorityKHR::LOW
-    );
+    assert!(queue_global_priority(families, families.transfer) == vk::QueueGlobalPriorityKHR::LOW);
 }

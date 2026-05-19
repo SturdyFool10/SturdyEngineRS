@@ -324,7 +324,7 @@ fn format_texel_size(format: Format) -> u64 {
         | Format::Bc5Unorm
         | Format::Bc7Unorm
         | Format::Bc7UnormSrgb
-        | Format::Bc6hUfloat => unreachable!("BC formats are sized by image_size"),
+        | Format::Bc6hUfloat => format.bc_block_bytes(),
     }
 }
 

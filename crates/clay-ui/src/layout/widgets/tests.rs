@@ -5,8 +5,8 @@ use super::*;
 use crate::{
     ColorSpaceKind, Cx, ElementKind, FloatingAlign, FloatingAttachError, FloatingOptions,
     FloatingPlacement, InputSimulator, LayoutCache, LayoutTree, MosaicConfig, MosaicTileMode,
-    MosaicTileSpec, Size, UiAntialiasing, UiImageFit, UiImageSampling, UiLayer,
-    VirtualGridConfig, VirtualListConfig, VirtualTableConfig, VirtualTreeConfig,
+    MosaicTileSpec, Size, UiAntialiasing, UiImageFit, UiImageSampling, UiLayer, VirtualGridConfig,
+    VirtualListConfig, VirtualTableConfig, VirtualTreeConfig,
 };
 
 /// Create a no-interaction Cx for widget structure tests.
@@ -418,8 +418,7 @@ fn tooltip_layer_attaches_to_anchor_in_top_layer() {
     anchor.layout.height = LayoutSizing::Fixed(20.0);
     root.children.push(anchor);
     let layout =
-        LayoutTree::compute(&root, Size::new(240.0, 120.0), &mut LayoutCache::default())
-            .unwrap();
+        LayoutTree::compute(&root, Size::new(240.0, 120.0), &mut LayoutCache::default()).unwrap();
     let tooltip_id = ElementId::new("tooltip-layer");
     let config = TooltipConfig::new(
         Size::new(240.0, 120.0),
@@ -515,8 +514,7 @@ fn widget_builders_produce_layoutable_trees() {
     );
 
     let layout =
-        LayoutTree::compute(&root, Size::new(200.0, 40.0), &mut LayoutCache::default())
-            .unwrap();
+        LayoutTree::compute(&root, Size::new(200.0, 40.0), &mut LayoutCache::default()).unwrap();
 
     assert!(layout.by_id(&root.id).is_some());
 }
@@ -924,8 +922,7 @@ fn scroll_container_with_scrollbars_adds_viewport_and_bars() {
         id,
         LayoutSizing::Fixed(100.0),
         LayoutSizing::Fixed(80.0),
-        ScrollConfig::new(Vec2::new(100.0, 80.0), Vec2::new(220.0, 240.0))
-            .axis(ScrollAxis::Both),
+        ScrollConfig::new(Vec2::new(100.0, 80.0), Vec2::new(220.0, 240.0)).axis(ScrollAxis::Both),
         Vec2::new(30.0, 40.0),
         [child],
     );
@@ -1470,8 +1467,7 @@ fn notification_accent_bar_and_message_present() {
 #[test]
 fn notification_with_action_has_three_children() {
     let id = ElementId::new("notif");
-    let spec =
-        NotificationSpec::new(id, "Update available", BadgeVariant::Info).action("Install");
+    let spec = NotificationSpec::new(id, "Update available", BadgeVariant::Info).action("Install");
     let (sim, palette) = test_cx_and_sim();
     let cx = Cx::new(&sim, palette);
     let el = notification(spec, &cx);

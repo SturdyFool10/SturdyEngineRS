@@ -225,8 +225,9 @@ pub fn create_logical_device(
             "VK_EXT_device_address_binding_report",
         ] {
             if available_exts.contains(ext_name) {
-                let c_name =
-                    CString::new(ext_name).expect("static extension name has no nul bytes");
+                let Ok(c_name) = CString::new(ext_name) else {
+                    continue;
+                };
                 if !er.names.iter().any(|n| n == &c_name) {
                     er.names.push(c_name);
                 }
@@ -1219,12 +1220,7 @@ fn push_unique(values: &mut Vec<String>, value: String) {
 fn required_device_extensions() -> Vec<&'static CStr> {
     #[cfg(target_os = "macos")]
     {
-        vec![ash::khr::swapchain::NAME, {
-            //panic allowed, reason = "static extension name constant cannot contain NUL bytes"
-            let ext = CStr::from_bytes_with_nul(b"VK_KHR_portability_subset\0")
-                .expect("static extension name has nul terminator");
-            ext
-        }]
+        vec![ash::khr::swapchain::NAME, c"VK_KHR_portability_subset"]
     }
     #[cfg(not(target_os = "macos"))]
     {

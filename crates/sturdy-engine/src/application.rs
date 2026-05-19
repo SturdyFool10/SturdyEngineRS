@@ -1022,7 +1022,8 @@ where
     let app_state = App::init(&engine, &surface)
         .map_err(|error| format!("failed to initialize application: {error:?}"))?;
 
-    let mut runtime = AppRuntime::new(engine, surface);
+    let mut runtime = AppRuntime::new(engine, surface)
+        .map_err(|error| format!("failed to initialize runtime: {error}"))?;
     seed_window_settings(runtime.controller_mut(), &config)
         .map_err(|error| format!("failed to seed runtime window settings: {error}"))?;
     runtime.controller().update_diagnostics(|diagnostics| {

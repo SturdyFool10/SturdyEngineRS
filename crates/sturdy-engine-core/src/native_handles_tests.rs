@@ -16,8 +16,7 @@ fn vulkan_native_handle_policy_exposes_borrowed_exports_and_resource_imports() {
         capabilities
             .handles
             .iter()
-            .all(|capability| capability.export_ownership
-                == Some(NativeHandleOwnership::Borrowed))
+            .all(|capability| capability.export_ownership == Some(NativeHandleOwnership::Borrowed))
     );
 }
 

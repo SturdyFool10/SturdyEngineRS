@@ -524,13 +524,16 @@ impl VirtualMesh {
         use meshopt::{VertexDataAdapter, build_meshlets as mo_build, compute_meshlet_bounds};
 
         let positions: Vec<[f32; 3]> = self.vertices.iter().map(|v| v.position).collect();
-        let adapter = VertexDataAdapter::new(
+        let Ok(adapter) = VertexDataAdapter::new(
             bytemuck::cast_slice(&positions),
             std::mem::size_of::<[f32; 3]>(),
             0,
-        )
-        //panic allowed, reason = "adapter input uses contiguous [f32; 3] data with matching stride and zero offset"
-        .expect("vertex adapter");
+        ) else {
+            self.meshlets.clear();
+            self.meshlet_vertices.clear();
+            self.meshlet_triangles.clear();
+            return;
+        };
 
         let result = mo_build(
             &self.indices,
@@ -594,13 +597,14 @@ impl VirtualMesh {
         use meshopt::{SimplifyOptions, VertexDataAdapter, simplify};
 
         let positions: Vec<[f32; 3]> = self.vertices.iter().map(|v| v.position).collect();
-        let adapter = VertexDataAdapter::new(
+        let Ok(adapter) = VertexDataAdapter::new(
             bytemuck::cast_slice(&positions),
             std::mem::size_of::<[f32; 3]>(),
             0,
-        )
-        //panic allowed, reason = "adapter input uses contiguous [f32; 3] data with matching stride and zero offset"
-        .expect("vertex adapter");
+        ) else {
+            self.rt_proxy = None;
+            return (0, 0.0);
+        };
 
         let target_count = ((self.indices.len() as f32 * target_ratio) as usize / 3 * 3).max(3);
         let mut actual_error = 0.0f32;

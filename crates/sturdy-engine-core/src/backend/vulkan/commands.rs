@@ -1757,9 +1757,11 @@ impl CommandContext {
                             AccelerationStructureBuildMode::Update => {
                                 vk::BuildAccelerationStructureModeKHR::UPDATE
                             }
-                            AccelerationStructureBuildMode::Compact => unreachable!(
-                                "compact BLAS builds are handled by cmd_copy_acceleration_structure"
-                            ),
+                            AccelerationStructureBuildMode::Compact => {
+                                return Err(Error::ResourceStateCorruption(
+                                    "compact BLAS build reached direct build path".into(),
+                                ));
+                            }
                         })
                         .src_acceleration_structure(
                             src_as.unwrap_or(vk::AccelerationStructureKHR::null()),
@@ -1841,9 +1843,11 @@ impl CommandContext {
                             AccelerationStructureBuildMode::Update => {
                                 vk::BuildAccelerationStructureModeKHR::UPDATE
                             }
-                            AccelerationStructureBuildMode::Compact => unreachable!(
-                                "compact TLAS builds are handled by cmd_copy_acceleration_structure"
-                            ),
+                            AccelerationStructureBuildMode::Compact => {
+                                return Err(Error::ResourceStateCorruption(
+                                    "compact TLAS build reached direct build path".into(),
+                                ));
+                            }
                         })
                         .src_acceleration_structure(
                             src_as.unwrap_or(vk::AccelerationStructureKHR::null()),
@@ -2126,8 +2130,11 @@ impl CommandContext {
             let layers = subresource_layer_count(first_desc.layers, color_uses[0].subresource);
             (ext, layers)
         } else {
-            //panic allowed, reason = "empty color target path is entered only after depth_use was proven Some"
-            let du = depth_use.unwrap(); // safe: checked above
+            let du = depth_use.ok_or_else(|| {
+                Error::ResourceStateCorruption(
+                    "draw pass has no color targets and lost its depth attachment".into(),
+                )
+            })?;
             let desc = resources.image_desc(du.image)?;
             let ext = mip_extent(desc.extent, du.subresource.base_mip);
             let layers = subresource_layer_count(desc.layers, du.subresource);

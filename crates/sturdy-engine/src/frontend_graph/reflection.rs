@@ -150,15 +150,10 @@ pub(super) fn build_reflected_bind_group(
                     });
                 }
                 BindingKind::StorageBuffer | BindingKind::UniformBuffer => {
-                    if let Some((handle, _)) = eager_buffers
+                    if let Some((handle, desc)) = eager_buffers
                         .get(&binding.path)
                         .or_else(|| buffers_by_name.get(&binding.path))
                     {
-                        let (_, desc) = eager_buffers
-                            .get(&binding.path)
-                            .or_else(|| buffers_by_name.get(&binding.path))
-                            //panic allowed, reason = "same lookup was proven Some immediately above"
-                            .expect("buffer desc present with buffer handle");
                         validate_reflected_buffer_usage(&binding.path, binding.kind, *desc)?;
                         entries.push(BindGroupEntry {
                             path: binding.path.clone(),

@@ -11,7 +11,7 @@
 // // Register once at load time:
 // let albedo_idx: BindlessHandle<Image> = engine
 //     .register_bindless_image(&my_image)
-//     .expect("bindless not supported");
+//     ?;
 //
 // // Pass to a shader via push constants:
 // frame

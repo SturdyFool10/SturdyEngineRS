@@ -435,7 +435,7 @@ impl ResourceRegistry {
             &mut self
                 .image_views
                 .lock()
-                .expect("vulkan image view cache mutex poisoned"),
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
             handle,
         );
         if !image.imported {
@@ -700,7 +700,7 @@ impl ResourceRegistry {
         for (_, view) in self
             .image_views
             .lock()
-            .expect("vulkan image view cache mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .drain()
         {
             unsafe {
@@ -820,7 +820,7 @@ impl ResourceRegistry {
         if let Some(view) = self
             .image_views
             .lock()
-            .expect("vulkan image view cache mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&key)
             .copied()
         {
@@ -847,7 +847,7 @@ impl ResourceRegistry {
         let _prev = self
             .image_views
             .lock()
-            .expect("vulkan image view cache mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(key, view);
         Ok(view)
     }

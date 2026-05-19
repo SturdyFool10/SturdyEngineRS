@@ -351,8 +351,11 @@ impl DescriptorRegistry {
             },
         );
         // Pre-register the pool slab so it's ready on first bind-group creation.
-        //panic allowed, reason = "layout was inserted into layouts map immediately above"
-        let layout = self.layouts.get(&handle).unwrap();
+        let layout = self.layouts.get(&handle).ok_or_else(|| {
+            Error::ResourceStateCorruption(
+                "pipeline layout registry insert did not persist the new layout".into(),
+            )
+        })?;
         self.pool_slabs.insert(
             handle,
             LayoutPoolSlab::new(
@@ -451,7 +454,8 @@ impl DescriptorRegistry {
             if let Some(first) = first_set {
                 if first != group_first_set {
                     return Err(crate::Error::InvalidInput(
-                        "a pass cannot bind groups from layouts with different first set indices".into(),
+                        "a pass cannot bind groups from layouts with different first set indices"
+                            .into(),
                     ));
                 }
             } else {
@@ -487,9 +491,13 @@ impl DescriptorRegistry {
 
     /// GFX-7a: true when all bind groups in the list have descriptor buffer backing.
     pub fn all_have_descriptor_buffer(&self, handles: &[BindGroupHandle]) -> bool {
-        !handles.is_empty() && handles.iter().all(|h| {
-            self.bind_groups.get(h).and_then(|bg| bg.db_backing.as_ref()).is_some()
-        })
+        !handles.is_empty()
+            && handles.iter().all(|h| {
+                self.bind_groups
+                    .get(h)
+                    .and_then(|bg| bg.db_backing.as_ref())
+                    .is_some()
+            })
     }
 
     pub fn destroy_all(&mut self, device: &Device) {
@@ -549,13 +557,26 @@ impl DescriptorRegistry {
         // also create a buffer-backed copy of the descriptors.
         let db_backing = if let Some(db_ext) = &self.descriptor_buffer_ext {
             if !layout.uses_bindless && self.buffer_device_address_enabled {
-                let set_layout = layout.bind_group_set_layouts.first().copied().unwrap_or(vk::DescriptorSetLayout::null());
+                let set_layout = layout
+                    .bind_group_set_layouts
+                    .first()
+                    .copied()
+                    .unwrap_or(vk::DescriptorSetLayout::null());
                 if set_layout != vk::DescriptorSetLayout::null() {
-                    match create_descriptor_buffer_backing(device, db_ext, set_layout, desc, &layout.bindings, resources) {
+                    match create_descriptor_buffer_backing(
+                        device,
+                        db_ext,
+                        set_layout,
+                        desc,
+                        &layout.bindings,
+                        resources,
+                    ) {
                         Ok(backing) => Some(backing),
                         Err(e) => {
                             // Non-fatal: fall back to pool-based path silently.
-                            eprintln!("[SturdyEngine] descriptor buffer backing creation failed (using pool fallback): {e}");
+                            eprintln!(
+                                "[SturdyEngine] descriptor buffer backing creation failed (using pool fallback): {e}"
+                            );
                             None
                         }
                     }
@@ -1075,7 +1096,9 @@ fn create_descriptor_buffer_backing(
 ) -> crate::Result<DescriptorBufferBacking> {
     let size = unsafe { db_ext.get_descriptor_set_layout_size(set_layout) };
     if size == 0 {
-        return Err(crate::Error::Backend("descriptor set layout size is 0".into()));
+        return Err(crate::Error::Backend(
+            "descriptor set layout size is 0".into(),
+        ));
     }
 
     // Create a HOST_VISIBLE + HOST_COHERENT buffer with RESOURCE_DESCRIPTOR_BUFFER + SHADER_DEVICE_ADDRESS.
@@ -1088,8 +1111,9 @@ fn create_descriptor_buffer_backing(
         )
         .sharing_mode(vk::SharingMode::EXCLUSIVE);
     let buffer = unsafe {
-        device.create_buffer(&buf_info, None)
-            .map_err(|e| crate::Error::Backend(format!("descriptor buffer creation failed: {e:?}")))?
+        device.create_buffer(&buf_info, None).map_err(|e| {
+            crate::Error::Backend(format!("descriptor buffer creation failed: {e:?}"))
+        })?
     };
 
     let req = unsafe { device.get_buffer_memory_requirements(buffer) };
@@ -1104,11 +1128,13 @@ fn create_descriptor_buffer_backing(
     }
     if memory_type == u32::MAX {
         unsafe { device.destroy_buffer(buffer, None) };
-        return Err(crate::Error::Backend("no compatible memory type for descriptor buffer".into()));
+        return Err(crate::Error::Backend(
+            "no compatible memory type for descriptor buffer".into(),
+        ));
     }
 
-    let mut alloc_flags_info = vk::MemoryAllocateFlagsInfo::default()
-        .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+    let mut alloc_flags_info =
+        vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
     let alloc_info = vk::MemoryAllocateInfo::default()
         .allocation_size(req.size)
         .memory_type_index(memory_type)
@@ -1127,11 +1153,13 @@ fn create_descriptor_buffer_backing(
         })?;
     }
     let mapped_ptr = unsafe {
-        device.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).map_err(|e| {
-            device.free_memory(memory, None);
-            device.destroy_buffer(buffer, None);
-            crate::Error::Backend(format!("descriptor buffer map_memory failed: {e:?}"))
-        })? as *mut u8
+        device
+            .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+            .map_err(|e| {
+                device.free_memory(memory, None);
+                device.destroy_buffer(buffer, None);
+                crate::Error::Backend(format!("descriptor buffer map_memory failed: {e:?}"))
+            })? as *mut u8
     };
     let device_address = unsafe {
         device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
@@ -1153,7 +1181,13 @@ fn create_descriptor_buffer_backing(
         write_descriptor_to_buffer(device, db_ext, dst, *binding, entry.resource, resources);
     }
 
-    Ok(DescriptorBufferBacking { buffer, memory, mapped_ptr, device_address, size })
+    Ok(DescriptorBufferBacking {
+        buffer,
+        memory,
+        mapped_ptr,
+        device_address,
+        size,
+    })
 }
 
 /// GFX-7a: Write a single resource descriptor into mapped host memory via `vkGetDescriptorEXT`.
@@ -1177,9 +1211,15 @@ fn write_descriptor_to_buffer(
                 Err(_) => return,
             };
             let addr_info = vk::DescriptorAddressInfoEXT::default()
-                .address(unsafe { device.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buf)) })
+                .address(unsafe {
+                    device.get_buffer_device_address(
+                        &vk::BufferDeviceAddressInfo::default().buffer(buf),
+                    )
+                })
                 .range(vk::WHOLE_SIZE);
-            let data = vk::DescriptorDataEXT { p_storage_buffer: &addr_info };
+            let data = vk::DescriptorDataEXT {
+                p_storage_buffer: &addr_info,
+            };
             let info = vk::DescriptorGetInfoEXT::default()
                 .ty(binding.descriptor_type)
                 .data(data);
@@ -1194,9 +1234,13 @@ fn write_descriptor_to_buffer(
                 .image_view(view)
                 .image_layout(image_descriptor_layout(binding.descriptor_type));
             let data = if binding.descriptor_type == vk::DescriptorType::STORAGE_IMAGE {
-                vk::DescriptorDataEXT { p_storage_image: &image_info }
+                vk::DescriptorDataEXT {
+                    p_storage_image: &image_info,
+                }
             } else {
-                vk::DescriptorDataEXT { p_sampled_image: &image_info }
+                vk::DescriptorDataEXT {
+                    p_sampled_image: &image_info,
+                }
             };
             let info = vk::DescriptorGetInfoEXT::default()
                 .ty(binding.descriptor_type)
@@ -1208,7 +1252,9 @@ fn write_descriptor_to_buffer(
                 Ok(s) => s,
                 Err(_) => return,
             };
-            let data = vk::DescriptorDataEXT { p_sampler: &sampler };
+            let data = vk::DescriptorDataEXT {
+                p_sampler: &sampler,
+            };
             let info = vk::DescriptorGetInfoEXT::default()
                 .ty(vk::DescriptorType::SAMPLER)
                 .data(data);

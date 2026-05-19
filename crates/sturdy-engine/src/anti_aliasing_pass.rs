@@ -164,7 +164,10 @@ impl AntiAliasingPass {
             format: desc.format,
         };
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut history = self.history.lock().expect("AA history mutex poisoned");
+        let mut history = self
+            .history
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if history.key != Some(key) {
             history.key = Some(key);
             history.frame_index = 0;

@@ -326,7 +326,7 @@ pub extern "C" fn gfx_create_device(out: *mut gfx_device_t) -> gfx_result_t {
         })?;
         let handle = registry()
             .lock()
-            .expect("ffi registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert_device(device);
         unsafe {
             *out = handle;
@@ -338,7 +338,9 @@ pub extern "C" fn gfx_create_device(out: *mut gfx_device_t) -> gfx_result_t {
 #[unsafe(no_mangle)]
 pub extern "C" fn gfx_destroy_device(dev: gfx_device_t) -> gfx_result_t {
     no_panic(|| {
-        let mut registry = registry().lock().expect("ffi registry mutex poisoned");
+        let mut registry = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         registry.images.retain(|_, image| image.device != dev.h);
         registry.buffers.retain(|_, buffer| buffer.device != dev.h);
         registry.shaders.retain(|_, shader| shader.device != dev.h);
@@ -358,7 +360,9 @@ pub extern "C" fn gfx_get_caps(dev: gfx_device_t, out_caps: *mut gfx_caps_t) -> 
                 "out caps pointer is null".into(),
             ));
         }
-        let registry = registry().lock().expect("ffi registry mutex poisoned");
+        let registry = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let device = registry
             .devices
             .get(&dev.h)
@@ -390,7 +394,9 @@ pub extern "C" fn gfx_create_image(
             ));
         }
         let desc = unsafe { *desc };
-        let mut registry = registry().lock().expect("ffi registry mutex poisoned");
+        let mut registry = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let device = registry
             .devices
             .get(&dev.h)
@@ -430,7 +436,9 @@ pub extern "C" fn gfx_create_image(
 #[unsafe(no_mangle)]
 pub extern "C" fn gfx_destroy_image(dev: gfx_device_t, image: gfx_image_t) -> gfx_result_t {
     no_panic(|| {
-        let mut registry = registry().lock().expect("ffi registry mutex poisoned");
+        let mut registry = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let registered = *registry
             .images
             .get(&image.h)
@@ -461,7 +469,9 @@ pub extern "C" fn gfx_create_buffer(
             ));
         }
         let desc = unsafe { *desc };
-        let mut registry = registry().lock().expect("ffi registry mutex poisoned");
+        let mut registry = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let device = registry
             .devices
             .get(&dev.h)
@@ -488,7 +498,9 @@ pub extern "C" fn gfx_create_buffer(
 #[unsafe(no_mangle)]
 pub extern "C" fn gfx_destroy_buffer(dev: gfx_device_t, buffer: gfx_buffer_t) -> gfx_result_t {
     no_panic(|| {
-        let mut registry = registry().lock().expect("ffi registry mutex poisoned");
+        let mut registry = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let registered = *registry
             .buffers
             .get(&buffer.h)
@@ -536,7 +548,9 @@ pub extern "C" fn gfx_create_shader(
             sturdy_engine_core::Error::InvalidInput("shader entry point is required".into())
         })?;
 
-        let mut registry = registry().lock().expect("ffi registry mutex poisoned");
+        let mut registry = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let device = registry
             .devices
             .get(&dev.h)
@@ -567,7 +581,9 @@ pub extern "C" fn gfx_create_shader(
 #[unsafe(no_mangle)]
 pub extern "C" fn gfx_destroy_shader(dev: gfx_device_t, shader: gfx_shader_t) -> gfx_result_t {
     no_panic(|| {
-        let mut registry = registry().lock().expect("ffi registry mutex poisoned");
+        let mut registry = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let registered = *registry
             .shaders
             .get(&shader.h)
@@ -594,7 +610,9 @@ pub extern "C" fn gfx_begin_frame(dev: gfx_device_t, out: *mut gfx_frame_t) -> g
             ));
         }
 
-        let mut registry = registry().lock().expect("ffi registry mutex poisoned");
+        let mut registry = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let device = registry
             .devices
             .get(&dev.h)
@@ -613,7 +631,7 @@ pub extern "C" fn gfx_destroy_frame(frame: gfx_frame_t) -> gfx_result_t {
     no_panic(|| {
         registry()
             .lock()
-            .expect("ffi registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .frames
             .remove(&frame.h)
             .map(|_| ())
@@ -624,7 +642,9 @@ pub extern "C" fn gfx_destroy_frame(frame: gfx_frame_t) -> gfx_result_t {
 #[unsafe(no_mangle)]
 pub extern "C" fn gfx_frame_import_image(frame: gfx_frame_t, image: gfx_image_t) -> gfx_result_t {
     no_panic(|| {
-        let mut registry = registry().lock().expect("ffi registry mutex poisoned");
+        let mut registry = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let registered = *registry
             .images
             .get(&image.h)
@@ -648,7 +668,9 @@ pub extern "C" fn gfx_frame_import_buffer(
     buffer: gfx_buffer_t,
 ) -> gfx_result_t {
     no_panic(|| {
-        let mut registry = registry().lock().expect("ffi registry mutex poisoned");
+        let mut registry = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let registered = *registry
             .buffers
             .get(&buffer.h)
@@ -681,7 +703,9 @@ pub extern "C" fn gfx_frame_add_pass(
         let name = cstr_to_string(desc.name_utf8).ok_or_else(|| {
             sturdy_engine_core::Error::InvalidInput("pass name is required".into())
         })?;
-        let mut registry = registry().lock().expect("ffi registry mutex poisoned");
+        let mut registry = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let reads = ffi_resource_uses(&registry, desc.reads, desc.read_count)?;
         let writes = ffi_resource_uses(&registry, desc.writes, desc.write_count)?;
         let buffer_reads = ffi_buffer_uses(&registry, desc.buffer_reads, desc.buffer_read_count)?;
@@ -731,7 +755,9 @@ pub extern "C" fn gfx_frame_add_pass(
 #[unsafe(no_mangle)]
 pub extern "C" fn gfx_frame_flush(frame: gfx_frame_t) -> gfx_result_t {
     no_panic(|| {
-        let mut registry = registry().lock().expect("ffi registry mutex poisoned");
+        let mut registry = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let frame = registry
             .frames
             .get_mut(&frame.h)
@@ -743,7 +769,9 @@ pub extern "C" fn gfx_frame_flush(frame: gfx_frame_t) -> gfx_result_t {
 #[unsafe(no_mangle)]
 pub extern "C" fn gfx_frame_present(frame: gfx_frame_t) -> gfx_result_t {
     no_panic(|| {
-        let mut registry = registry().lock().expect("ffi registry mutex poisoned");
+        let mut registry = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let frame = registry
             .frames
             .get_mut(&frame.h)
@@ -755,7 +783,9 @@ pub extern "C" fn gfx_frame_present(frame: gfx_frame_t) -> gfx_result_t {
 #[unsafe(no_mangle)]
 pub extern "C" fn gfx_frame_wait(frame: gfx_frame_t) -> gfx_result_t {
     no_panic(|| {
-        let registry = registry().lock().expect("ffi registry mutex poisoned");
+        let registry = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let frame = registry
             .frames
             .get(&frame.h)

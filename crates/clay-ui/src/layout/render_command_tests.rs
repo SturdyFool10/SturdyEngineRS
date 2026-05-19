@@ -45,8 +45,7 @@ fn render_commands_sort_by_layer_before_z_index() {
     root.children.push(overlay);
     root.children.push(base);
     let layout =
-        LayoutTree::compute(&root, Size::new(100.0, 40.0), &mut LayoutCache::default())
-            .unwrap();
+        LayoutTree::compute(&root, Size::new(100.0, 40.0), &mut LayoutCache::default()).unwrap();
     let commands = RenderCommandList::from_element_tree(&root, &layout);
     let rectangles = commands
         .commands
@@ -247,8 +246,7 @@ fn image_commands_carry_sampling_fit_and_edge_aa() {
             .edge_antialiasing(UiAntialiasing::supersampled(4));
     }
     let layout =
-        LayoutTree::compute(&element, Size::new(32.0, 32.0), &mut LayoutCache::default())
-            .unwrap();
+        LayoutTree::compute(&element, Size::new(32.0, 32.0), &mut LayoutCache::default()).unwrap();
     let commands = RenderCommandList::from_element_tree(&element, &layout);
 
     let data = commands

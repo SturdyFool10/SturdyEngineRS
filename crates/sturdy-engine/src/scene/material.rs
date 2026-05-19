@@ -14,17 +14,9 @@
 // Roadmap: Track 6.
 
 use std::collections::HashSet;
-use std::sync::OnceLock;
 
 fn material_gbuffer_template() -> &'static str {
-    static TEMPLATE: OnceLock<String> = OnceLock::new();
-    TEMPLATE.get_or_init(|| {
-        std::fs::read_to_string(
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("shaders/material_gbuffer_template.slang"),
-        )
-        .expect("material G-Buffer shader template should be readable")
-    })
+    include_str!("../../shaders/material_gbuffer_template.slang")
 }
 
 // ── Rendering state ───────────────────────────────────────────────────────────

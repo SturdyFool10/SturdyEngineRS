@@ -13,9 +13,9 @@
 use std::path::PathBuf;
 
 use crate::{
-    Buffer, BufferDesc, BufferUsage, Engine, Format, GraphImage, Image, ImageDesc, ImageDimension,
-    ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind, RenderFrame, Result, ShaderDesc,
-    ShaderProgram, ShaderSource, ShaderStage, push_constants, scene::Scene,
+    Buffer, BufferDesc, BufferUsage, Engine, Error, Format, GraphImage, Image, ImageDesc,
+    ImageDimension, ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind, RenderFrame, Result,
+    ShaderDesc, ShaderProgram, ShaderSource, ShaderStage, push_constants, scene::Scene,
 };
 use glam::Mat4;
 use sturdy_engine_core::Extent3d;
@@ -219,12 +219,21 @@ impl OitPass {
         self.ensure_buffers(engine, w, h)?;
         self.reset_buffers()?;
 
-        //panic allowed, reason = "ensure_buffers proves OIT head buffer exists"
-        let head_buf = self.head_buf.as_ref().unwrap();
-        //panic allowed, reason = "ensure_buffers proves OIT fragment pool exists"
-        let frag_pool = self.frag_pool.as_ref().unwrap();
-        //panic allowed, reason = "ensure_buffers proves OIT counter buffer exists"
-        let counter = self.counter.as_ref().unwrap();
+        let head_buf = self.head_buf.as_ref().ok_or_else(|| {
+            Error::ResourceStateCorruption(
+                "OIT head buffer was not available after buffer initialization".into(),
+            )
+        })?;
+        let frag_pool = self.frag_pool.as_ref().ok_or_else(|| {
+            Error::ResourceStateCorruption(
+                "OIT fragment pool was not available after buffer initialization".into(),
+            )
+        })?;
+        let counter = self.counter.as_ref().ok_or_else(|| {
+            Error::ResourceStateCorruption(
+                "OIT counter buffer was not available after buffer initialization".into(),
+            )
+        })?;
         let pool_size = (w as u64 * h as u64 * self.config.average_layers as u64) as u32;
 
         // ── 1. Depth-only prepass to populate Z (reuse the opaque depth if bound) ──

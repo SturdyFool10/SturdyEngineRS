@@ -29,7 +29,7 @@ impl GpuObjectAllocator {
         if let Some(id) = self
             .free
             .lock()
-            .expect("gpu object free-list mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .pop()
         {
             return id;
@@ -55,7 +55,7 @@ impl GpuObjectAllocator {
         let mut free = self
             .free
             .lock()
-            .expect("gpu object free-list mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !free.contains(&id) {
             free.push(id);
         }

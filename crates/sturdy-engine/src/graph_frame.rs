@@ -3,7 +3,7 @@ use sturdy_engine_core as core;
 use crate::{
     Access, BindGroup, Buffer, BufferDesc, BufferUse, DrawDesc, Engine, Error, Format, Frame,
     Image, ImageDesc, ImageHandle, ImageRef, ImageUse, PassDesc, PassWork, Pipeline, PushConstants,
-    QueueType, Result, RgState, StageMask, SubresourceRange, SurfaceImage,
+    Result, RgState, StageMask, SubresourceRange, SurfaceImage,
 };
 
 /// An image operand for [`GraphFrame`] operations.
@@ -96,30 +96,14 @@ impl GraphFrame {
             layer_count: 1,
         };
         self.frame.add_pass(PassDesc {
-            name: format!("clear-{}", image.handle().0),
-            queue: QueueType::Graphics,
-            shader: None,
-            pipeline: None,
-            bind_groups: Vec::new(),
-            push_constants: None,
-            pipeline_shading_rate: None,
-            work: PassWork::None,
-            reads: Vec::new(),
             writes: vec![ImageUse {
                 image: image.handle(),
                 access: Access::Write,
                 state: RgState::RenderTarget,
                 subresource,
             }],
-            buffer_reads: Vec::new(),
-            buffer_writes: Vec::new(),
             clear_colors: vec![(image.handle(), color.map(f32::to_bits))],
-            clear_depth: None,
-            push_descriptor_set: None,
-            predicate: None,
-            shader_binding: None,
-            shading_rate_image: None,
-            perf_counters: None,
+            ..PassDesc::default_graphics(format!("clear-{}", image.handle().0))
         })
     }
 
@@ -157,13 +141,6 @@ impl GraphFrame {
         let dst_sub = SubresourceRange::WHOLE;
 
         self.frame.add_pass(PassDesc {
-            name: "copy-image-to-staging".into(),
-            queue: QueueType::Transfer,
-            shader: None,
-            pipeline: None,
-            bind_groups: Vec::new(),
-            push_constants: None,
-            pipeline_shading_rate: None,
             work: PassWork::CopyImageToBuffer(crate::CopyImageToBufferDesc {
                 image: src.handle(),
                 buffer: staging_handle,
@@ -181,8 +158,6 @@ impl GraphFrame {
                 state: RgState::CopySrc,
                 subresource: src_sub,
             }],
-            writes: Vec::new(),
-            buffer_reads: Vec::new(),
             buffer_writes: vec![BufferUse {
                 buffer: staging_handle,
                 access: Access::Write,
@@ -190,23 +165,10 @@ impl GraphFrame {
                 offset: 0,
                 size: stride,
             }],
-            clear_colors: Vec::new(),
-            clear_depth: None,
-            push_descriptor_set: None,
-            predicate: None,
-            shader_binding: None,
-            shading_rate_image: None,
-            perf_counters: None,
+            ..PassDesc::default_transfer("copy-image-to-staging")
         })?;
 
         self.frame.add_pass(PassDesc {
-            name: "copy-staging-to-image".into(),
-            queue: QueueType::Transfer,
-            shader: None,
-            pipeline: None,
-            bind_groups: Vec::new(),
-            push_constants: None,
-            pipeline_shading_rate: None,
             work: PassWork::CopyBufferToImage(crate::CopyBufferToImageDesc {
                 buffer: staging_handle,
                 image: dst.handle(),
@@ -218,7 +180,6 @@ impl GraphFrame {
                 height: copy_height,
                 depth: 1,
             }),
-            reads: Vec::new(),
             writes: vec![ImageUse {
                 image: dst.handle(),
                 access: Access::Write,
@@ -232,14 +193,7 @@ impl GraphFrame {
                 offset: 0,
                 size: stride,
             }],
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
-            push_descriptor_set: None,
-            predicate: None,
-            shader_binding: None,
-            shading_rate_image: None,
-            perf_counters: None,
+            ..PassDesc::default_transfer("copy-staging-to-image")
         })?;
 
         self.owned_buffers.push(staging);
@@ -396,13 +350,9 @@ impl<'f> FullscreenPassBuilder<'f> {
             .collect();
 
         frame.add_pass(PassDesc {
-            name,
-            queue: QueueType::Graphics,
-            shader: None,
             pipeline,
             bind_groups,
             push_constants,
-            pipeline_shading_rate: None,
             work: PassWork::Draw(DrawDesc {
                 vertex_count: 3,
                 instance_count: 1,
@@ -419,15 +369,7 @@ impl<'f> FullscreenPassBuilder<'f> {
                 state: RgState::RenderTarget,
                 subresource,
             }],
-            buffer_reads: Vec::new(),
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
-            push_descriptor_set: None,
-            predicate: None,
-            shader_binding: None,
-            shading_rate_image: None,
-            perf_counters: None,
+            ..PassDesc::default_graphics(name)
         })
     }
 }
@@ -459,6 +401,10 @@ fn format_bytes_per_texel(format: Format) -> Result<u32> {
         | Format::Bc5Unorm
         | Format::Bc7Unorm
         | Format::Bc7UnormSrgb
-        | Format::Bc6hUfloat => unreachable!("BC formats handled above"),
+        | Format::Bc6hUfloat => {
+            return Err(Error::InvalidInput(
+                "BC-compressed graph frame byte counts must be computed from 4x4 blocks".into(),
+            ));
+        }
     })
 }

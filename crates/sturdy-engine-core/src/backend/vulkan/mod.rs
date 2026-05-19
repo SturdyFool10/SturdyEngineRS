@@ -927,7 +927,7 @@ impl Backend for VulkanBackend {
         let stats = self
             .resources
             .read()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .allocator_stats();
         Some(crate::GpuMemoryBudget {
             device_local_used_bytes: stats.device_local_used_bytes,
@@ -1100,7 +1100,7 @@ impl Backend for VulkanBackend {
         let pipelines = self
             .pipelines
             .lock()
-            .expect("vulkan pipeline registry mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let vk_pipeline = match pipelines.vk_pipeline(pipeline) {
             Ok(p) => p,
             Err(_) => return Vec::new(),
@@ -1188,7 +1188,7 @@ impl Backend for VulkanBackend {
         let pipelines = self
             .pipelines
             .lock()
-            .expect("vulkan pipeline registry mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let vk_pipeline = match pipelines.vk_pipeline(pipeline) {
             Ok(p) => p,
             Err(_) => return Vec::new(),
@@ -1272,7 +1272,7 @@ impl Backend for VulkanBackend {
         let pipelines = self
             .pipelines
             .lock()
-            .expect("vulkan pipeline registry mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Pre-warm VertexInput libraries for the most common vertex formats.
         // These are the engine's standard vertex layouts — new layouts are cached lazily.
@@ -1387,7 +1387,7 @@ impl Backend for VulkanBackend {
         let mut commands = self
             .commands
             .lock()
-            .expect("vulkan command context mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let ctx = commands.current_context_mut();
         let pool = ctx.transient_buffer_pool.as_mut()?;
         let alloc = pool.alloc(size, alignment)?;
@@ -1422,7 +1422,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .create_image(&self.device, handle, desc)
     }
 
@@ -1436,7 +1436,7 @@ impl Backend for VulkanBackend {
             ExternalImageHandle::Vulkan(external) => self
                 .resources
                 .write()
-                .expect("vulkan resource registry rwlock poisoned")
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .import_external_image(handle, external, desc.desc),
         }
     }
@@ -1445,7 +1445,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .create_image_unbound(&self.device, handle, desc)
     }
 
@@ -1454,7 +1454,7 @@ impl Backend for VulkanBackend {
         let mut resources = self
             .resources
             .write()
-            .expect("vulkan resource registry rwlock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // GFX-1b: no framebuffer cache invalidation needed — framebuffers are now transient.
         resources.destroy_image(&self.device, handle)
     }
@@ -1463,7 +1463,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .create_buffer(&self.device, handle, desc)
     }
 
@@ -1471,7 +1471,7 @@ impl Backend for VulkanBackend {
         let resources = self
             .resources
             .read()
-            .expect("vulkan resource registry rwlock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         Ok(Some(
             resources.buffer_device_address_raw(&self.device, handle)?,
         ))
@@ -1487,7 +1487,7 @@ impl Backend for VulkanBackend {
             ExternalBufferHandle::Vulkan(external) => self
                 .resources
                 .write()
-                .expect("vulkan resource registry rwlock poisoned")
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .import_external_buffer(handle, external),
         }
     }
@@ -1496,7 +1496,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .destroy_buffer(&self.device, handle)
     }
 
@@ -1516,7 +1516,7 @@ impl Backend for VulkanBackend {
         };
         self.resources
             .write()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .create_acceleration_structure(&self.device, handle, desc.size, as_ext, ty)
     }
 
@@ -1526,7 +1526,7 @@ impl Backend for VulkanBackend {
         })?;
         self.resources
             .write()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .destroy_acceleration_structure(&self.device, handle, as_ext)
     }
 
@@ -1541,7 +1541,7 @@ impl Backend for VulkanBackend {
             let resources = self
                 .resources
                 .read()
-                .expect("vulkan resource registry rwlock poisoned");
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let (kind, size) = resources.acceleration_structure_metadata(src)?;
             return compact_acceleration_structure_build_sizes(
                 kind,
@@ -1563,7 +1563,7 @@ impl Backend for VulkanBackend {
             let resources = self
                 .resources
                 .read()
-                .expect("vulkan resource registry rwlock poisoned");
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let (kind, size) = resources.acceleration_structure_metadata(src)?;
             return compact_acceleration_structure_build_sizes(
                 kind,
@@ -1599,7 +1599,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .create_sampler(&self.device, handle, desc)
     }
 
@@ -1607,7 +1607,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .destroy_sampler(&self.device, handle)
     }
 
@@ -1615,7 +1615,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .write_buffer(handle, offset, data)
     }
 
@@ -1623,7 +1623,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .read()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .read_buffer(handle, offset, out)
     }
 
@@ -1631,7 +1631,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shaders
             .lock()
-            .expect("vulkan shader registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .create_shader(&self.device, handle, desc)
     }
 
@@ -1639,7 +1639,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shaders
             .lock()
-            .expect("vulkan shader registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .destroy_shader(&self.device, handle)
     }
 
@@ -1651,7 +1651,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.descriptors
             .write()
-            .expect("vulkan descriptor registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .create_pipeline_layout(
                 &self.device,
                 handle,
@@ -1665,7 +1665,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.descriptors
             .write()
-            .expect("vulkan descriptor registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .destroy_pipeline_layout(&self.device, handle)
     }
 
@@ -1674,11 +1674,11 @@ impl Backend for VulkanBackend {
         let resources = self
             .resources
             .read()
-            .expect("vulkan resource registry rwlock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.descriptors
             .write()
-            .expect("vulkan descriptor registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .create_bind_group(&self.device, handle, desc, &resources)
     }
 
@@ -1686,7 +1686,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.descriptors
             .write()
-            .expect("vulkan descriptor registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .destroy_bind_group(&self.device, handle)
     }
 
@@ -1699,16 +1699,16 @@ impl Backend for VulkanBackend {
         let shaders = self
             .shaders
             .lock()
-            .expect("vulkan shader registry mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let descriptors = self
             .descriptors
             .read()
-            .expect("vulkan descriptor registry rwlock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
-            .expect("vulkan pipeline registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .create_compute_pipeline(&self.device, handle, desc, &shaders, &descriptors)
     }
 
@@ -1721,16 +1721,16 @@ impl Backend for VulkanBackend {
         let shaders = self
             .shaders
             .lock()
-            .expect("vulkan shader registry mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let descriptors = self
             .descriptors
             .read()
-            .expect("vulkan descriptor registry rwlock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
-            .expect("vulkan pipeline registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .create_graphics_pipeline(&self.device, handle, desc, &shaders, &descriptors)
     }
 
@@ -1738,7 +1738,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.pipelines
             .lock()
-            .expect("vulkan pipeline registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .destroy_pipeline(&self.device, handle)
     }
 
@@ -1754,17 +1754,17 @@ impl Backend for VulkanBackend {
         let mut pipelines = self
             .pipelines
             .lock()
-            .expect("vulkan pipeline registry mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let shaders = self
             .shaders
             .lock()
-            .expect("vulkan shader registry mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let descriptors = self
             .descriptors
             .read()
-            .expect("vulkan descriptor registry rwlock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         pipelines.create_ray_tracing_pipeline(
             &self.device,
             handle,
@@ -1793,7 +1793,7 @@ impl Backend for VulkanBackend {
         let pipeline = self
             .pipelines
             .lock()
-            .expect("vulkan pipeline registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .pipeline(pipeline)?;
         if pipeline.bind_point != vk::PipelineBindPoint::RAY_TRACING_KHR {
             return Err(Error::InvalidInput(
@@ -1830,7 +1830,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.surfaces
             .lock()
-            .expect("vulkan surface registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .create_surface(
                 &self._entry,
                 &self.instance,
@@ -1848,12 +1848,12 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.commands
             .lock()
-            .expect("vulkan command context mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .wait_all(&self.device)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.surfaces
             .lock()
-            .expect("vulkan surface registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .resize_surface(&self.device, self.physical_device, handle, size)
     }
 
@@ -1866,12 +1866,12 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.commands
             .lock()
-            .expect("vulkan command context mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .wait_all(&self.device)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.surfaces
             .lock()
-            .expect("vulkan surface registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .recreate_surface(&self.device, self.physical_device, handle, desc)
     }
 
@@ -1879,17 +1879,17 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.commands
             .lock()
-            .expect("vulkan command context mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .wait_all(&self.device)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         *self
             .active_surface
             .lock()
-            .expect("vulkan active surface mutex poisoned") = None;
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.surfaces
             .lock()
-            .expect("vulkan surface registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .destroy_surface(&self.device, handle)?;
         Ok(())
     }
@@ -1898,7 +1898,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.surfaces
             .lock()
-            .expect("vulkan surface registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .query_surface_capabilities(
                 self.physical_device,
                 handle,
@@ -1911,7 +1911,7 @@ impl Backend for VulkanBackend {
         if let Ok(image) = self
             .resources
             .read()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .image(handle)
         {
             self.debug.set_name(&self.device, image, name);
@@ -1923,7 +1923,7 @@ impl Backend for VulkanBackend {
         if let Ok(buffer) = self
             .resources
             .read()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .buffer(handle)
         {
             self.debug.set_name(&self.device, buffer, name);
@@ -1935,7 +1935,7 @@ impl Backend for VulkanBackend {
         if let Ok(pipeline) = self
             .pipelines
             .lock()
-            .expect("vulkan pipeline registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .pipeline(handle)
         {
             self.debug.set_name(&self.device, pipeline.pipeline, name);
@@ -1951,18 +1951,18 @@ impl Backend for VulkanBackend {
         let acquired = self
             .surfaces
             .lock()
-            .expect("vulkan surface registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .acquire_image(surface)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .import_image(image, acquired.image, acquired.image_view, acquired.desc)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         *self
             .active_surface
             .lock()
-            .expect("vulkan active surface mutex poisoned") = Some(surface);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(surface);
         Ok((acquired.desc, acquired.image_index as u64))
     }
 
@@ -1971,13 +1971,13 @@ impl Backend for VulkanBackend {
         let result = self
             .surfaces
             .lock()
-            .expect("vulkan surface registry mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .present(self.queues.graphics, surface);
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         *self
             .active_surface
             .lock()
-            .expect("vulkan active surface mutex poisoned") = None;
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         result
     }
 
@@ -1988,13 +1988,13 @@ impl Backend for VulkanBackend {
             let active = *self
                 .active_surface
                 .lock()
-                .expect("vulkan active surface mutex poisoned");
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(sh) = active {
                 //panic allowed, reason = "poisoned mutex is unrecoverable"
                 let sems = self
                     .surfaces
                     .lock()
-                    .expect("vulkan surface registry mutex poisoned")
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .frame_semaphores(sh)?;
                 (Some(sems.0), Some(sems.1))
             } else {
@@ -2011,11 +2011,11 @@ impl Backend for VulkanBackend {
             &mut self
                 .resources
                 .write()
-                .expect("vulkan resource registry rwlock poisoned"),
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
             &mut self
                 .alias_heaps
                 .lock()
-                .expect("vulkan alias heap registry mutex poisoned"),
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
             graph,
         )?;
 
@@ -2023,26 +2023,26 @@ impl Backend for VulkanBackend {
         let mut resources = self
             .resources
             .write()
-            .expect("vulkan resource registry rwlock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let descriptors = self
             .descriptors
             .read()
-            .expect("vulkan descriptor registry rwlock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut pipelines = self
             .pipelines
             .lock()
-            .expect("vulkan pipeline registry mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut commands = self
             .commands
             .lock()
-            .expect("vulkan command context mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let optical_flow_sessions = self
             .optical_flow_sessions
             .lock()
-            .expect("vulkan optical flow session mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let optical_flow_sessions_arg = self
             .optical_flow_nv_ext
             .as_ref()
@@ -2050,7 +2050,7 @@ impl Backend for VulkanBackend {
         let indirect_command_layouts = self
             .indirect_command_layouts
             .lock()
-            .expect("vulkan indirect command layout mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let indirect_command_layouts_arg = self
             .device_generated_commands_nv
             .as_ref()
@@ -2115,7 +2115,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.commands
             .lock()
-            .expect("vulkan command context mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .pass_timings()
             .iter()
             .map(|(name, gpu_ms)| crate::PassTimingReport {
@@ -2130,7 +2130,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.commands
             .lock()
-            .expect("vulkan command context mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .wait_for_submission(&self.device, token)
     }
 
@@ -2256,7 +2256,7 @@ impl Backend for VulkanBackend {
         let mut sessions = self
             .video_sessions
             .lock()
-            .expect("vulkan video session mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(previous) = sessions.insert(handle, VulkanVideoSession { session, memories }) {
             destroy_video_session_entry(&self.device, video, previous);
         }
@@ -2271,7 +2271,7 @@ impl Backend for VulkanBackend {
         if let Some(session) = self
             .video_sessions
             .lock()
-            .expect("vulkan video session mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&handle)
         {
             destroy_video_session_entry(&self.device, video, session);
@@ -2352,7 +2352,7 @@ impl Backend for VulkanBackend {
         let previous = self
             .indirect_command_layouts
             .lock()
-            .expect("vulkan indirect command layout mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(handle, layout);
         if let Some(previous) = previous {
             unsafe {
@@ -2378,7 +2378,7 @@ impl Backend for VulkanBackend {
         if let Some(layout) = self
             .indirect_command_layouts
             .lock()
-            .expect("vulkan indirect command layout mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&handle)
         {
             unsafe {
@@ -2431,7 +2431,7 @@ impl Backend for VulkanBackend {
         let previous = self
             .optical_flow_sessions
             .lock()
-            .expect("vulkan optical flow session mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(handle, session);
         if let Some(previous) = previous {
             unsafe {
@@ -2453,7 +2453,7 @@ impl Backend for VulkanBackend {
         if let Some(session) = self
             .optical_flow_sessions
             .lock()
-            .expect("vulkan optical flow session mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&handle)
         {
             unsafe {
@@ -2484,7 +2484,7 @@ impl Backend for VulkanBackend {
         let resources = self
             .resources
             .read()
-            .expect("vulkan resource registry rwlock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let vk_image = resources.image(handle)?;
         let desc = resources.image_desc(handle)?;
         let region = ash::vk::MemoryToImageCopyEXT::default()
@@ -2527,7 +2527,7 @@ impl Backend for VulkanBackend {
         let resources = self
             .resources
             .read()
-            .expect("vulkan resource registry rwlock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let vk_image = resources.image(handle)?;
         let desc = resources.image_desc(handle)?;
         let vk_new_layout = match new_layout {
@@ -2591,7 +2591,7 @@ impl Backend for VulkanBackend {
         let surfaces = self
             .surfaces
             .lock()
-            .expect("vulkan surface registry mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for swapchain in surfaces.all_swapchain_handles() {
             unsafe {
                 let _ = reflex.set_latency_sleep_mode(swapchain, Some(&sleep_mode_info));
@@ -2641,12 +2641,12 @@ impl Backend for VulkanBackend {
         let handle_val = self
             .timeline_semaphore_handles
             .lock()
-            .expect("timeline semaphore handle allocator poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .alloc();
         let handle = crate::SemaphoreHandle(handle_val);
         self.timeline_semaphores
             .lock()
-            .expect("timeline semaphore mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(handle, semaphore);
         Ok(handle)
     }
@@ -2660,7 +2660,7 @@ impl Backend for VulkanBackend {
         let sem = *self
             .timeline_semaphores
             .lock()
-            .expect("timeline semaphore mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&semaphore)
             .ok_or(Error::InvalidHandle)?;
         let wait_info = ash::vk::SemaphoreWaitInfo::default()
@@ -2678,7 +2678,7 @@ impl Backend for VulkanBackend {
         let sem = *self
             .timeline_semaphores
             .lock()
-            .expect("timeline semaphore mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&semaphore)
             .ok_or(Error::InvalidHandle)?;
         let signal_info = ash::vk::SemaphoreSignalInfo::default()
@@ -2696,7 +2696,7 @@ impl Backend for VulkanBackend {
         if let Some(sem) = self
             .timeline_semaphores
             .lock()
-            .expect("timeline semaphore mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&semaphore)
         {
             unsafe { self.device.destroy_semaphore(sem, None) };
@@ -2736,7 +2736,7 @@ impl Backend for VulkanBackend {
         let memory_type = self
             .resources
             .read()
-            .expect("resource registry poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .allocator()
             .find_memory_type(
                 req.memory_type_bits,
@@ -2769,7 +2769,7 @@ impl Backend for VulkanBackend {
         let _ = ext; // extension loaded
         self.exportable_buffer_memories
             .lock()
-            .expect("exportable buffer mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(handle, memory);
         // Register in resource registry so the handle is valid for other operations.
         let _ = handle;
@@ -2814,7 +2814,7 @@ impl Backend for VulkanBackend {
         let memory_type = self
             .resources
             .read()
-            .expect("resource registry poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .allocator()
             .find_memory_type(
                 req.memory_type_bits,
@@ -2846,7 +2846,7 @@ impl Backend for VulkanBackend {
         }
         self.exportable_image_memories
             .lock()
-            .expect("exportable image mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(handle, memory);
         let _ = handle;
         Ok(())
@@ -2859,7 +2859,7 @@ impl Backend for VulkanBackend {
         let memory = *self
             .exportable_buffer_memories
             .lock()
-            .expect("exportable buffer mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&handle)
             .ok_or(Error::InvalidHandle)?;
         let get_fd_info = ash::vk::MemoryGetFdInfoKHR::default()
@@ -2878,7 +2878,7 @@ impl Backend for VulkanBackend {
         let memory = *self
             .exportable_image_memories
             .lock()
-            .expect("exportable image mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&handle)
             .ok_or(Error::InvalidHandle)?;
         let get_fd_info = ash::vk::MemoryGetFdInfoKHR::default()
@@ -2904,7 +2904,7 @@ impl Backend for VulkanBackend {
         };
         self.exportable_semaphores
             .lock()
-            .expect("exportable semaphore mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(handle, semaphore);
         Ok(())
     }
@@ -2916,7 +2916,7 @@ impl Backend for VulkanBackend {
         let semaphore = *self
             .exportable_semaphores
             .lock()
-            .expect("exportable semaphore mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&handle)
             .ok_or(Error::InvalidHandle)?;
         let get_fd_info = ash::vk::SemaphoreGetFdInfoKHR::default()
@@ -2935,7 +2935,7 @@ impl Backend for VulkanBackend {
         let semaphore = *self
             .exportable_semaphores
             .lock()
-            .expect("exportable semaphore mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&handle)
             .ok_or(Error::InvalidHandle)?;
         let import_info = ash::vk::ImportSemaphoreFdInfoKHR::default()
@@ -2962,7 +2962,7 @@ impl Backend for VulkanBackend {
         };
         self.exportable_fences
             .lock()
-            .expect("exportable fence mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(handle, fence);
         Ok(())
     }
@@ -2974,7 +2974,7 @@ impl Backend for VulkanBackend {
         let fence = *self
             .exportable_fences
             .lock()
-            .expect("exportable fence mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&handle)
             .ok_or(Error::InvalidHandle)?;
         let get_fd_info = ash::vk::FenceGetFdInfoKHR::default()
@@ -2993,7 +2993,7 @@ impl Backend for VulkanBackend {
         let fence = *self
             .exportable_fences
             .lock()
-            .expect("exportable fence mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&handle)
             .ok_or(Error::InvalidHandle)?;
         let import_info = ash::vk::ImportFenceFdInfoKHR::default()
@@ -3044,7 +3044,7 @@ impl Backend for VulkanBackend {
         let memory_type = self
             .resources
             .read()
-            .expect("resource registry poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .allocator()
             .find_memory_type(req.memory_type_bits, ash::vk::MemoryPropertyFlags::empty())
             .map_err(|_| {
@@ -3081,7 +3081,7 @@ impl Backend for VulkanBackend {
         // Register in exportable buffer map so the handle tracks the dedicated memory.
         self.exportable_buffer_memories
             .lock()
-            .expect("exportable buffer mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(handle, memory);
         Ok(())
     }
@@ -3147,7 +3147,7 @@ impl Backend for VulkanBackend {
         }
         self.exportable_buffer_memories
             .lock()
-            .expect("exportable buffer mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(handle, memory);
         Ok(())
     }
@@ -3158,7 +3158,7 @@ impl Backend for VulkanBackend {
         let resources = self
             .resources
             .read()
-            .expect("resource registry rwlock poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let buf = resources.buffer(handle)?;
         let requirements = unsafe { self.device.get_buffer_memory_requirements(buf) };
         let _ = requirements; // size info used for validation
@@ -3166,7 +3166,7 @@ impl Backend for VulkanBackend {
         let memory = self
             .exportable_buffer_memories
             .lock()
-            .expect("exportable buffer mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&handle)
             .copied();
         if let Some(mem) = memory {
@@ -3200,7 +3200,7 @@ impl Backend for VulkanBackend {
             //panic allowed, reason = "poisoned mutex is unrecoverable"
             self.surfaces
                 .lock()
-                .expect("vulkan surface registry mutex poisoned")
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .swapchain_handle(surface)?
         };
         let sleep_info = ash::vk::LatencySleepInfoNV::default()
@@ -3266,7 +3266,7 @@ impl Backend for VulkanBackend {
         let shaders = self
             .shaders
             .lock()
-            .expect("vulkan shader registry mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let stage = shaders.stage(desc.shader)?;
         let spirv_words = shaders.spirv_words(desc.shader)?;
         let spirv_bytes = unsafe {
@@ -3282,7 +3282,7 @@ impl Backend for VulkanBackend {
             //panic allowed, reason = "poisoned mutex is unrecoverable"
             self.descriptors
                 .read()
-                .expect("vulkan descriptor registry rwlock poisoned")
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .shader_object_layout_info(layout)?
         } else {
             (Vec::new(), Vec::new())
@@ -3303,7 +3303,7 @@ impl Backend for VulkanBackend {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.resources
             .write()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .register_shader_object(
                 handle,
                 resources::VulkanShaderObject {
@@ -3340,7 +3340,7 @@ impl Backend for VulkanBackend {
         let surfaces = self
             .surfaces
             .lock()
-            .expect("surface registry mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let swapchain = surfaces.swapchain_handle(surface)?;
         let primaries = metadata.display_primaries;
         let vk_meta = ash::vk::HdrMetadataEXT::default()
@@ -3517,7 +3517,7 @@ fn allocate_and_bind_video_session_memory(
     for requirement in &requirements {
         let memory_type_index = resources
             .read()
-            .expect("vulkan resource registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .allocator()
             .find_memory_type(
                 requirement.memory_requirements.memory_type_bits,

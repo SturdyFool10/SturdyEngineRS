@@ -1,5 +1,5 @@
 use super::{instance_metadata::SceneInstanceMetadata, object::InstanceData};
-use crate::{Buffer, BufferDesc, BufferUsage, DrawIndexedIndirectCommand, Engine, Result};
+use crate::{Buffer, BufferDesc, BufferUsage, DrawIndexedIndirectCommand, Engine, Error, Result};
 
 /// Accumulated instance data for a single mesh, split into static and dynamic halves.
 ///
@@ -105,8 +105,12 @@ impl InstanceBatch {
             self.static_dirty = true;
         }
 
-        //panic allowed, reason = "guaranteed Some above"
-        let buf = self.gpu_buffer.as_ref().unwrap();
+        let buf = self.gpu_buffer.as_ref().ok_or_else(|| {
+            Error::ResourceStateCorruption(
+                "scene instance batch has instances but no GPU buffer after prepare allocation"
+                    .into(),
+            )
+        })?;
 
         if self.static_dirty && !self.static_instances.is_empty() {
             buf.write(0, bytemuck::cast_slice(&self.static_instances))?;

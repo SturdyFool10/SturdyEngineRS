@@ -588,20 +588,15 @@ impl RenderFrame {
         });
         inner.pending_passes.push(PendingPass {
             desc: PassDesc {
-                name: pass_name.clone(),
-                queue: crate::QueueType::Compute,
                 shader: Some(program.shader.handle()),
                 pipeline: Some(program.pipeline.handle()),
-                bind_groups: Vec::new(),
                 push_constants: push,
-                pipeline_shading_rate: None,
                 work: PassWork::Dispatch(DispatchDesc {
                     x: groups[0],
                     y: groups[1],
                     z: groups[2],
                 }),
                 reads: eager_uses,
-                writes: Vec::new(),
                 buffer_reads: buf_read_names
                     .iter()
                     .filter_map(|n| {
@@ -630,13 +625,7 @@ impl RenderFrame {
                             })
                     })
                     .collect(),
-                clear_colors: Vec::new(),
-                clear_depth: None,
-                push_descriptor_set: None,
-                predicate: None,
-                shader_binding: None,
-                shading_rate_image: None,
-                perf_counters: None,
+                ..PassDesc::default_compute(pass_name.clone())
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -1131,30 +1120,13 @@ impl RenderFrame {
             .graph_mut(|g| g.import_image(image.handle(), image.desc()))?;
         inner.pending_passes.push(PendingPass {
             desc: PassDesc {
-                name: "present".to_owned(),
-                queue: QueueType::Graphics,
-                shader: None,
-                pipeline: None,
-                bind_groups: Vec::new(),
-                push_constants: None,
-                pipeline_shading_rate: None,
-                work: PassWork::None,
                 reads: vec![crate::ImageUse {
                     image: image.handle(),
                     access: Access::Read,
                     state: RgState::Present,
                     subresource: single_subresource(),
                 }],
-                writes: Vec::new(),
-                buffer_reads: Vec::new(),
-                buffer_writes: Vec::new(),
-                clear_colors: Vec::new(),
-                clear_depth: None,
-                push_descriptor_set: None,
-                predicate: None,
-                shader_binding: None,
-                shading_rate_image: None,
-                perf_counters: None,
+                ..PassDesc::default_graphics("present")
             },
             deferred: None,
         });
@@ -1179,13 +1151,6 @@ impl RenderFrame {
         let buffer_handle: core::BufferHandle = buffer.handle();
         inner.pending_passes.push(PendingPass {
             desc: PassDesc {
-                name: name.into(),
-                queue: QueueType::Graphics,
-                shader: None,
-                pipeline: None,
-                bind_groups: Vec::new(),
-                push_constants: None,
-                pipeline_shading_rate: None,
                 work: PassWork::CopyImageToBuffer(CopyImageToBufferDesc {
                     image: image_handle,
                     buffer: buffer_handle,
@@ -1203,8 +1168,6 @@ impl RenderFrame {
                     state: RgState::CopySrc,
                     subresource: single_subresource(),
                 }],
-                writes: Vec::new(),
-                buffer_reads: Vec::new(),
                 buffer_writes: vec![BufferUse {
                     buffer: buffer_handle,
                     access: Access::Write,
@@ -1212,13 +1175,7 @@ impl RenderFrame {
                     offset: 0,
                     size: buffer.desc().size,
                 }],
-                clear_colors: Vec::new(),
-                clear_depth: None,
-                push_descriptor_set: None,
-                predicate: None,
-                shader_binding: None,
-                shading_rate_image: None,
-                perf_counters: None,
+                ..PassDesc::default_graphics(name)
             },
             deferred: None,
         });
@@ -2031,13 +1988,9 @@ impl GraphImage {
 
         inner.pending_passes.push(PendingPass {
             desc: PassDesc {
-                name: pass_name,
-                queue: crate::QueueType::Graphics,
                 shader: Some(program.vertex.handle()),
                 pipeline: Some(pipeline),
-                bind_groups: Vec::new(),
                 push_constants,
-                pipeline_shading_rate: None,
                 work: PassWork::Draw(DrawDesc {
                     vertex_count: draw_count,
                     instance_count,
@@ -2050,14 +2003,8 @@ impl GraphImage {
                 reads: eager_uses,
                 writes,
                 buffer_reads,
-                buffer_writes: Vec::new(),
-                clear_colors: Vec::new(),
                 clear_depth,
-                push_descriptor_set: None,
-                predicate: None,
-                shader_binding: None,
-                shading_rate_image: None,
-                perf_counters: None,
+                ..PassDesc::default_graphics(pass_name)
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -3435,10 +3382,16 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
     // Phase 3: submit in scheduled order (Option::take avoids needing Clone on PassDesc).
     let mut slots: Vec<Option<PassDesc>> = resolved.into_iter().map(Some).collect();
     for idx in order {
-        //panic allowed, reason = "scheduler invariant: each slot index appears exactly once in the schedule"
-        let pass = slots[idx]
-            .take()
-            .expect("scheduler produced duplicate index");
+        let slot = slots.get_mut(idx).ok_or_else(|| {
+            crate::Error::ResourceStateCorruption(
+                "scheduler produced an out-of-range pass index".into(),
+            )
+        })?;
+        let pass = slot.take().ok_or_else(|| {
+            crate::Error::ResourceStateCorruption(
+                "scheduler produced a duplicate pass index".into(),
+            )
+        })?;
         inner.frame.add_pass(pass)?;
     }
     Ok(())

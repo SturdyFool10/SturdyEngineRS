@@ -156,10 +156,11 @@ impl PipelineRegistry {
     ) -> Result<()> {
         let module = shaders.module(desc.shader)?;
         let stage = shaders.stage(desc.shader)?;
-        //panic allowed, reason = "layout is resolved by the caller before the backend; absence is a caller defect"
-        let layout_handle = desc
-            .layout
-            .expect("compute pipeline layout must be resolved before backend call");
+        let layout_handle = desc.layout.ok_or_else(|| {
+            Error::InvalidInput(
+                "compute pipeline layout must be resolved before backend call".into(),
+            )
+        })?;
         let layout = descriptors.pipeline_layout(layout_handle)?;
         let uses_bindless = descriptors.pipeline_uses_bindless(layout_handle)?;
         let push_constants_bytes = descriptors.push_constants_bytes(layout_handle)?;
@@ -219,10 +220,9 @@ impl PipelineRegistry {
         descriptors: &DescriptorRegistry,
         rt_ext: &ash::khr::ray_tracing_pipeline::Device,
     ) -> Result<()> {
-        //panic allowed, reason = "layout is resolved by the caller before the backend; absence is a caller defect"
-        let layout_handle = desc
-            .layout
-            .expect("RT pipeline layout must be resolved before backend call");
+        let layout_handle = desc.layout.ok_or_else(|| {
+            Error::InvalidInput("RT pipeline layout must be resolved before backend call".into())
+        })?;
         let layout = descriptors.pipeline_layout(layout_handle)?;
         let uses_bindless = descriptors.pipeline_uses_bindless(layout_handle)?;
         let push_constants_bytes = descriptors.push_constants_bytes(layout_handle)?;
@@ -319,10 +319,11 @@ impl PipelineRegistry {
         shaders: &ShaderRegistry,
         descriptors: &DescriptorRegistry,
     ) -> Result<()> {
-        //panic allowed, reason = "layout is resolved by the caller before the backend; absence is a caller defect"
-        let layout_handle = desc
-            .layout
-            .expect("graphics pipeline layout must be resolved before backend call");
+        let layout_handle = desc.layout.ok_or_else(|| {
+            Error::InvalidInput(
+                "graphics pipeline layout must be resolved before backend call".into(),
+            )
+        })?;
         let layout = descriptors.pipeline_layout(layout_handle)?;
         let uses_bindless = descriptors.pipeline_uses_bindless(layout_handle)?;
         let push_constants_bytes = descriptors.push_constants_bytes(layout_handle)?;
@@ -395,13 +396,17 @@ impl PipelineRegistry {
         } else {
             None
         };
-        //panic allowed, reason = "fragment_entry is Some whenever desc.fragment_shader is Some; enforced by the outer if-let"
         let fragment_stage = if let Some(shader) = desc.fragment_shader {
+            let Some(fragment_entry) = fragment_entry.as_ref() else {
+                return Err(Error::ResourceStateCorruption(
+                    "fragment shader entry string was not created".into(),
+                ));
+            };
             Some(
                 vk::PipelineShaderStageCreateInfo::default()
                     .stage(shader_stage_flags(shaders.stage(shader)?))
                     .module(shaders.module(shader)?)
-                    .name(fragment_entry.as_ref().expect("fragment entry exists")),
+                    .name(fragment_entry),
             )
         } else {
             None
@@ -705,9 +710,13 @@ impl PipelineRegistry {
                 .dynamic_state(dynamic_state)
                 .push(&mut lib_stage_info);
             let lib = unsafe {
-                device.create_graphics_pipelines(self.pipeline_cache, &[vi_info], None)
-                    .map_err(|(_, e)| Error::Backend(format!("VertexInput library failed: {e:?}")))?
-            }.remove(0);
+                device
+                    .create_graphics_pipelines(self.pipeline_cache, &[vi_info], None)
+                    .map_err(|(_, e)| {
+                        Error::Backend(format!("VertexInput library failed: {e:?}"))
+                    })?
+            }
+            .remove(0);
             self.vertex_input_libs.insert(vi_key, lib);
             lib
         };
@@ -717,7 +726,9 @@ impl PipelineRegistry {
             let mut h = DefaultHasher::new();
             color_formats.iter().for_each(|f| f.as_raw().hash(&mut h));
             depth_vk_format.as_raw().hash(&mut h);
-            desc.color_targets.iter().for_each(|t| (t.blend as u32).hash(&mut h));
+            desc.color_targets
+                .iter()
+                .for_each(|t| (t.blend as u32).hash(&mut h));
             (desc.samples as u32).hash(&mut h);
             h.finish()
         };
@@ -734,15 +745,23 @@ impl PipelineRegistry {
                 .push(&mut lib_stage_info)
                 .push(pipeline_rendering_info);
             let lib = unsafe {
-                device.create_graphics_pipelines(self.pipeline_cache, &[fo_info], None)
-                    .map_err(|(_, e)| Error::Backend(format!("FragmentOutput library failed: {e:?}")))?
-            }.remove(0);
+                device
+                    .create_graphics_pipelines(self.pipeline_cache, &[fo_info], None)
+                    .map_err(|(_, e)| {
+                        Error::Backend(format!("FragmentOutput library failed: {e:?}"))
+                    })?
+            }
+            .remove(0);
             self.fragment_output_libs.insert(fo_key, lib);
             lib
         };
 
         // ── 3. PreRasterization library (VS + rasterization; per-material) ────
-        let vs_stages: Vec<_> = stages.iter().filter(|s| s.stage.contains(vk::ShaderStageFlags::VERTEX)).copied().collect();
+        let vs_stages: Vec<_> = stages
+            .iter()
+            .filter(|s| s.stage.contains(vk::ShaderStageFlags::VERTEX))
+            .copied()
+            .collect();
         let mut pre_raster_lib_info = vk::GraphicsPipelineLibraryCreateInfoEXT::default()
             .flags(vk::GraphicsPipelineLibraryFlagsEXT::PRE_RASTERIZATION_SHADERS);
         let pre_raster_info = vk::GraphicsPipelineCreateInfo::default()
@@ -757,12 +776,20 @@ impl PipelineRegistry {
             .push(&mut pre_raster_lib_info)
             .push(pipeline_rendering_info);
         let pre_raster_lib = unsafe {
-            device.create_graphics_pipelines(self.pipeline_cache, &[pre_raster_info], None)
-                .map_err(|(_, e)| Error::Backend(format!("PreRasterization library failed: {e:?}")))?
-        }.remove(0);
+            device
+                .create_graphics_pipelines(self.pipeline_cache, &[pre_raster_info], None)
+                .map_err(|(_, e)| {
+                    Error::Backend(format!("PreRasterization library failed: {e:?}"))
+                })?
+        }
+        .remove(0);
 
         // ── 4. FragmentShader library (FS; per-material) ─────────────────────
-        let fs_stages: Vec<_> = stages.iter().filter(|s| s.stage.contains(vk::ShaderStageFlags::FRAGMENT)).copied().collect();
+        let fs_stages: Vec<_> = stages
+            .iter()
+            .filter(|s| s.stage.contains(vk::ShaderStageFlags::FRAGMENT))
+            .copied()
+            .collect();
         let frag_lib = if !fs_stages.is_empty() {
             let mut frag_lib_info = vk::GraphicsPipelineLibraryCreateInfoEXT::default()
                 .flags(vk::GraphicsPipelineLibraryFlagsEXT::FRAGMENT_SHADER);
@@ -775,12 +802,14 @@ impl PipelineRegistry {
                 .push(&mut frag_lib_info)
                 .push(pipeline_rendering_info);
             let lib = unsafe {
-                device.create_graphics_pipelines(self.pipeline_cache, &[frag_info], None)
+                device
+                    .create_graphics_pipelines(self.pipeline_cache, &[frag_info], None)
                     .map_err(|(_, e)| {
                         device.destroy_pipeline(pre_raster_lib, None);
                         Error::Backend(format!("FragmentShader library failed: {e:?}"))
                     })?
-            }.remove(0);
+            }
+            .remove(0);
             Some(lib)
         } else {
             None
@@ -796,9 +825,8 @@ impl PipelineRegistry {
             .flags(vk::PipelineCreateFlags::LINK_TIME_OPTIMIZATION_EXT)
             .layout(layout)
             .push(&mut lib_create_info);
-        let linked = unsafe {
-            device.create_graphics_pipelines(self.pipeline_cache, &[link_info], None)
-        };
+        let linked =
+            unsafe { device.create_graphics_pipelines(self.pipeline_cache, &[link_info], None) };
 
         // Destroy the per-material intermediate libs (vi + fo stay in the cache).
         unsafe { device.destroy_pipeline(pre_raster_lib, None) };
@@ -806,18 +834,22 @@ impl PipelineRegistry {
             unsafe { device.destroy_pipeline(fl, None) };
         }
 
-        let pipeline = linked.map_err(|(_, e)| Error::Backend(format!("pipeline library link failed: {e:?}")))?
+        let pipeline = linked
+            .map_err(|(_, e)| Error::Backend(format!("pipeline library link failed: {e:?}")))?
             .remove(0);
 
-        self.pipelines.insert(handle, VulkanPipeline {
-            pipeline,
-            layout,
-            bind_point: vk::PipelineBindPoint::GRAPHICS,
-            render_pass: vk::RenderPass::null(),
-            push_constants_bytes,
-            push_constant_stages,
-            uses_bindless,
-        });
+        self.pipelines.insert(
+            handle,
+            VulkanPipeline {
+                pipeline,
+                layout,
+                bind_point: vk::PipelineBindPoint::GRAPHICS,
+                render_pass: vk::RenderPass::null(),
+                push_constants_bytes,
+                push_constant_stages,
+                uses_bindless,
+            },
+        );
         self.graphics_states.insert(handle, graphics_state);
         self.note_pipeline_created();
         Ok(true)

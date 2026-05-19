@@ -412,7 +412,10 @@ fn hiz_pass_records_depth_pyramid_contract() {
     assert_eq!(pyramid.base().name(), "test_hiz_mip_0");
     assert_eq!(pyramid.mip(1).desc().extent.width, 3);
     assert_eq!(pyramid.mip(1).desc().extent.height, 2);
-    assert_eq!(pyramid.coarsest().name(), "test_hiz_mip_2");
+    assert_eq!(
+        pyramid.coarsest().map(GraphImage::name),
+        Some("test_hiz_mip_2")
+    );
 
     let report = frame.describe();
     let pass0 = report
@@ -1143,7 +1146,7 @@ fn app_runtime_frame_auto_presents_on_drop() {
             },
         ))
         .unwrap();
-    let mut runtime = AppRuntime::new(engine, surface);
+    let mut runtime = AppRuntime::new(engine, surface).unwrap();
 
     // acquire_frame may fail on the null backend if swapchain acquire is unsupported.
     let frame = match runtime.acquire_frame() {
@@ -1810,7 +1813,7 @@ fn app_runtime_applies_surface_runtime_settings_as_structured_report() {
             },
         ))
         .unwrap();
-    let mut runtime = AppRuntime::new(engine, surface);
+    let mut runtime = AppRuntime::new(engine, surface).unwrap();
 
     let starting_revision = runtime.controller().apply_notifications_revision();
     runtime

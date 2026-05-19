@@ -292,8 +292,11 @@ impl LightBvhBuilder {
         }
 
         if !self.nodes.is_empty() {
-            //panic allowed, reason = "non-empty BVH upload path proves gpu_buffer exists immediately above"
-            let buf = self.gpu_buffer.as_ref().unwrap();
+            let buf = self.gpu_buffer.as_ref().ok_or_else(|| {
+                crate::Error::ResourceStateCorruption(
+                    "light BVH has nodes but no GPU buffer after allocation".into(),
+                )
+            })?;
             buf.write(0, bytemuck::cast_slice(&self.nodes))?;
         }
 

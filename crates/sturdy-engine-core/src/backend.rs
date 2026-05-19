@@ -433,7 +433,9 @@ pub trait Backend: Send + Sync {
         _height: u32,
         _codec: crate::VideoCodec,
     ) -> Result<()> {
-        Err(crate::Error::Unsupported("video decode sessions require VK_KHR_video_decode_queue"))
+        Err(crate::Error::Unsupported(
+            "video decode sessions require VK_KHR_video_decode_queue",
+        ))
     }
 
     /// GFX-4b: Create a HOST_VISIBLE buffer for encode output that can be CPU-mapped for readback.
@@ -442,7 +444,9 @@ pub trait Backend: Send + Sync {
         _handle: crate::BufferHandle,
         _desc: crate::BufferDesc,
     ) -> Result<()> {
-        Err(crate::Error::Unsupported("video encode output buffers require VK_KHR_video_encode_queue"))
+        Err(crate::Error::Unsupported(
+            "video encode output buffers require VK_KHR_video_encode_queue",
+        ))
     }
 
     /// GFX-4b: Create a high-level video encode session with internal bitstream buffer.
@@ -452,12 +456,20 @@ pub trait Backend: Send + Sync {
         _output_buffer: crate::BufferHandle,
         _config: crate::VideoEncodeConfig,
     ) -> Result<()> {
-        Err(crate::Error::Unsupported("video encode sessions require VK_KHR_video_encode_queue"))
+        Err(crate::Error::Unsupported(
+            "video encode sessions require VK_KHR_video_encode_queue",
+        ))
     }
 
     /// GFX-4b: Copy the encoded bitstream from the output buffer to a Vec<u8>.
-    fn read_encode_bitstream(&self, _handle: crate::BufferHandle, _max_bytes: u64) -> Result<Vec<u8>> {
-        Err(crate::Error::Unsupported("video encode sessions require VK_KHR_video_encode_queue"))
+    fn read_encode_bitstream(
+        &self,
+        _handle: crate::BufferHandle,
+        _max_bytes: u64,
+    ) -> Result<Vec<u8>> {
+        Err(crate::Error::Unsupported(
+            "video encode sessions require VK_KHR_video_encode_queue",
+        ))
     }
 
     // ── GFX-6b: Latency reduction ─────────────────────────────────────────────

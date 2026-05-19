@@ -52,10 +52,8 @@ pub struct AppRuntime {
 
 impl AppRuntime {
     /// Create a runtime shell from an engine and surface.
-    pub fn new(engine: Engine, surface: Surface) -> Self {
-        //panic allowed, reason = "motion vector debug shader is built-in and should compile during runtime initialization"
-        let motion_debug_pass = MotionVectorDebugPass::new(&engine)
-            .expect("failed to compile motion vector debug shader");
+    pub fn new(engine: Engine, surface: Surface) -> Result<Self> {
+        let motion_debug_pass = MotionVectorDebugPass::new(&engine)?;
         let runtime = Self {
             default_scene_target: DefaultSceneTargetConfig::new(&engine),
             debug_images: DebugImageRegistry::default(),
@@ -86,7 +84,7 @@ impl AppRuntime {
             surface,
         };
         runtime.refresh_controller_state();
-        runtime
+        Ok(runtime)
     }
 
     /// Access the engine owned by the runtime.
@@ -133,8 +131,11 @@ impl AppRuntime {
         if self.ui_renderer.is_none() {
             self.ui_renderer = Some(crate::ui_renderer::UiRenderer::new(&self.engine)?);
         }
-        //panic allowed, reason = "just initialised above"
-        Ok(self.ui_renderer.as_ref().unwrap())
+        self.ui_renderer.as_ref().ok_or_else(|| {
+            crate::Error::ResourceStateCorruption(
+                "UI renderer was not available after initialization".into(),
+            )
+        })
     }
 
     pub fn frame_clock(&self) -> &FrameClock {
@@ -604,7 +605,7 @@ impl RuntimeController {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .settings
             .clone()
     }
@@ -630,7 +631,10 @@ impl RuntimeController {
         }
 
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut shared = self.shared.lock().expect("runtime controller poisoned");
+        let mut shared = self
+            .shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if shared.setting_entries.contains_key(&id) {
             return Err(Error::InvalidInput(format!(
                 "runtime setting `{}` is already registered",
@@ -680,7 +684,7 @@ impl RuntimeController {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .setting_entries
             .get(&id.into())
             .cloned()
@@ -692,7 +696,7 @@ impl RuntimeController {
         let mut entries = self
             .shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .setting_entries
             .values()
             .cloned()
@@ -709,7 +713,7 @@ impl RuntimeController {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .setting_entries
             .get(&id.into())
             .map(|entry| entry.support.clone())
@@ -721,7 +725,7 @@ impl RuntimeController {
         let mut supports = self
             .shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .setting_entries
             .iter()
             .map(|(id, entry)| (id.clone(), entry.support.clone()))
@@ -735,7 +739,7 @@ impl RuntimeController {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .settings_revision
     }
 
@@ -744,7 +748,7 @@ impl RuntimeController {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .change_log
             .iter()
             .filter(|change| change.revision > revision)
@@ -757,7 +761,7 @@ impl RuntimeController {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .apply_notifications_revision
     }
 
@@ -769,7 +773,7 @@ impl RuntimeController {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .apply_notifications
             .iter()
             .filter(|notification| notification.revision > revision)
@@ -782,7 +786,7 @@ impl RuntimeController {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .last_apply_report
             .clone()
     }
@@ -793,7 +797,10 @@ impl RuntimeController {
     /// diagnostics reported via `report_shader_compile_error` / `report_asset_state`.
     pub fn diagnostics(&self) -> RuntimeDiagnostics {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let shared = self.shared.lock().expect("runtime controller poisoned");
+        let shared = self
+            .shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut diag = shared.diagnostics.clone();
         diag.shader_compile_errors = shared
             .shader_compile_errors
@@ -830,7 +837,7 @@ impl RuntimeController {
         let _ = self
             .shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .shader_compile_errors
             .insert(path.into(), message.into());
     }
@@ -841,7 +848,7 @@ impl RuntimeController {
         let _ = self
             .shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .shader_compile_errors
             .remove(&path.into());
     }
@@ -851,7 +858,7 @@ impl RuntimeController {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .shader_compile_errors
             .clear();
     }
@@ -865,7 +872,7 @@ impl RuntimeController {
         let _ = self
             .shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .asset_states
             .insert(path.into(), state);
     }
@@ -897,7 +904,7 @@ impl RuntimeController {
         let _ = self
             .shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .asset_states
             .remove(&path.into());
     }
@@ -1008,14 +1015,17 @@ impl RuntimeController {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .overlay_lines
             .clone()
     }
 
     pub(crate) fn set_settings(&self, settings: RuntimeSettingsSnapshot) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut shared = self.shared.lock().expect("runtime controller poisoned");
+        let mut shared = self
+            .shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         shared.sync_engine_snapshot(&settings);
         shared.settings = settings;
     }
@@ -1028,13 +1038,16 @@ impl RuntimeController {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .sync_engine_capabilities(hdr_caps, surface_caps.as_ref());
     }
 
     pub(crate) fn update_diagnostics(&self, f: impl FnOnce(&mut RuntimeDiagnostics)) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut shared = self.shared.lock().expect("runtime controller poisoned");
+        let mut shared = self
+            .shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         f(&mut shared.diagnostics);
     }
 
@@ -1042,7 +1055,7 @@ impl RuntimeController {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .overlay_lines = lines;
     }
 
@@ -1050,7 +1063,7 @@ impl RuntimeController {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .overlay_lines
             .clear();
     }
@@ -1062,7 +1075,7 @@ impl RuntimeController {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.shared
             .lock()
-            .expect("runtime controller poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .record_apply_report(report);
     }
 }
@@ -1775,7 +1788,7 @@ impl DebugImageRegistry {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.names
             .lock()
-            .expect("debug image registry poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
     }
 
@@ -1783,7 +1796,10 @@ impl DebugImageRegistry {
         let name = name.into();
         image.register_as(name.clone());
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut names = self.names.lock().expect("debug image registry poisoned");
+        let mut names = self
+            .names
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !names.iter().any(|existing| existing == &name) {
             names.push(name);
         }
@@ -1793,7 +1809,7 @@ impl DebugImageRegistry {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.names
             .lock()
-            .expect("debug image registry poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
 }
@@ -2385,7 +2401,7 @@ impl<'a> RuntimeSettingsTransaction<'a> {
             .controller
             .shared
             .lock()
-            .expect("runtime controller poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut report = RuntimeApplyReport::default();
         for pending in self.pending {
             let result = match pending {

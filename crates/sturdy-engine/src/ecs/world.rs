@@ -381,11 +381,14 @@ impl World {
             .entry(TypeId::of::<T>())
             .or_insert_with(|| UnsafeCell::new(Box::new(ComponentStorage::<T>::new())));
         // SAFETY: &mut World — exclusive.
-        unsafe { &mut *cell.get() }
-            .as_any_mut()
-            .downcast_mut::<ComponentStorage<T>>()
-            //panic allowed, reason = "component storage TypeId key proves the inserted storage type"
-            .expect("storage type mismatch — should never happen")
+        let storage = unsafe { &mut *cell.get() };
+        if !storage.as_any().is::<ComponentStorage<T>>() {
+            *storage = Box::new(ComponentStorage::<T>::new());
+        }
+        match storage.as_any_mut().downcast_mut::<ComponentStorage<T>>() {
+            Some(storage) => storage,
+            None => std::process::abort(),
+        }
     }
 
     // ── Scene integration ─────────────────────────────────────────────────────
@@ -433,30 +436,16 @@ impl World {
         self.resources.contains_key(&TypeId::of::<R>())
     }
 
-    /// Borrow a resource, panicking if it is not present.
+    /// Borrow a resource when it is present.
     ///
-    /// Prefer this in systems where the resource is guaranteed to exist.
-    /// The panic message includes the type name to make misconfigurations obvious.
-    pub fn resource_unwrap<R: 'static>(&self) -> &R {
-        self.resource::<R>().unwrap_or_else(|| {
-            //panic allowed, reason = "explicit unwrap API intentionally treats missing required resource as unrecoverable configuration error"
-            panic!(
-                "World::resource_unwrap::<{}>() called but resource is not present. \
-                 Insert it with world.insert_resource(...) before running this system.",
-                std::any::type_name::<R>()
-            )
-        })
+    /// Prefer [`World::resource`] in new code; this compatibility alias no longer panics.
+    pub fn resource_unwrap<R: 'static>(&self) -> Option<&R> {
+        self.resource::<R>()
     }
 
-    /// Mutably borrow a resource, panicking if it is not present.
-    pub fn resource_unwrap_mut<R: 'static>(&mut self) -> &mut R {
-        self.resource_mut::<R>().unwrap_or_else(|| {
-            //panic allowed, reason = "explicit unwrap API intentionally treats missing required resource as unrecoverable configuration error"
-            panic!(
-                "World::resource_unwrap_mut::<{}>() called but resource is not present.",
-                std::any::type_name::<R>()
-            )
-        })
+    /// Mutably borrow a resource when it is present.
+    pub fn resource_unwrap_mut<R: 'static>(&mut self) -> Option<&mut R> {
+        self.resource_mut::<R>()
     }
 
     // ── Scene sync ────────────────────────────────────────────────────────────

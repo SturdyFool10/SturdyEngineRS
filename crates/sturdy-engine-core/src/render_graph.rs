@@ -716,6 +716,51 @@ pub struct PassDesc {
     pub perf_counters: Option<Vec<crate::PerfCounterHandle>>,
 }
 
+impl PassDesc {
+    /// Create a pass descriptor with the common optional fields initialized to defaults.
+    pub fn new(name: impl Into<String>, queue: QueueType) -> Self {
+        Self {
+            name: name.into(),
+            queue,
+            shader: None,
+            pipeline: None,
+            bind_groups: Vec::new(),
+            push_constants: None,
+            pipeline_shading_rate: None,
+            work: PassWork::None,
+            reads: Vec::new(),
+            writes: Vec::new(),
+            buffer_reads: Vec::new(),
+            buffer_writes: Vec::new(),
+            clear_colors: Vec::new(),
+            clear_depth: None,
+            push_descriptor_set: None,
+            predicate: None,
+            shader_binding: None,
+            shading_rate_image: None,
+            perf_counters: None,
+        }
+    }
+
+    pub fn default_graphics(name: impl Into<String>) -> Self {
+        Self::new(name, QueueType::Graphics)
+    }
+
+    pub fn default_compute(name: impl Into<String>) -> Self {
+        Self::new(name, QueueType::Compute)
+    }
+
+    pub fn default_transfer(name: impl Into<String>) -> Self {
+        Self::new(name, QueueType::Transfer)
+    }
+}
+
+impl Default for PassDesc {
+    fn default() -> Self {
+        Self::default_graphics(String::new())
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Barrier {
     pub image: ImageHandle,
@@ -1662,7 +1707,11 @@ fn format_texel_size(desc: ImageDesc) -> Result<u64> {
         Format::Rgba16Float => 8,
         Format::Rgba32Float => 16,
         Format::Depth32Float | Format::Depth24Stencil8 => 4,
-        Format::Unknown => unreachable!("checked above"),
+        Format::Unknown => {
+            return Err(Error::InvalidInput(
+                "copy image format must be specified".into(),
+            ));
+        }
         // YCbCr planar: 1 byte/texel (luma only for copy sizing; chroma plane handled separately).
         Format::G8_B8R8_2PLANE_420_UNORM => 1,
         Format::Bc3Unorm
@@ -1671,7 +1720,11 @@ fn format_texel_size(desc: ImageDesc) -> Result<u64> {
         | Format::Bc5Unorm
         | Format::Bc7Unorm
         | Format::Bc7UnormSrgb
-        | Format::Bc6hUfloat => unreachable!("BC handled above"),
+        | Format::Bc6hUfloat => {
+            return Err(Error::InvalidInput(
+                "BC-compressed copy byte counts must be computed from 4x4 blocks".into(),
+            ));
+        }
     };
     Ok(size)
 }
@@ -1682,4 +1735,3 @@ fn mip_extent(base: u32, mip_level: u32) -> u32 {
 
 #[cfg(test)]
 mod tests;
-

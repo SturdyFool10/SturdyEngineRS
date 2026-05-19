@@ -67,12 +67,12 @@ pub fn push_constants(_attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// ```ignore
 /// //panic allowed, reason = "poisoned mutex is unrecoverable"
-/// let guard = self.inner.lock().expect("device mutex poisoned");
+/// let guard = self.inner.lock().map_err(|_| Error::Backend("device mutex poisoned".into()))?;
 ///
 /// //panic allowed, reason = "poisoned mutex is unrecoverable"
 /// let guard = self.inner
 ///     .lock()
-///     .expect("device mutex poisoned");
+///     .map_err(|_| Error::Backend("device mutex poisoned".into()))?;
 /// ```
 #[proc_macro_attribute]
 pub fn allow_panic(_attr: TokenStream, item: TokenStream) -> TokenStream {

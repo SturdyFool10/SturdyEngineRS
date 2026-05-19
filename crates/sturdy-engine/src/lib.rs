@@ -318,7 +318,7 @@ fn frame_timing_cell() -> &'static std::sync::Mutex<Option<crate::FrameTimingRep
 pub(crate) fn set_global_frame_timing(report: crate::FrameTimingReport) {
     *frame_timing_cell()
         .lock()
-        .expect("frame timing mutex poisoned") = Some(report);
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(report);
 }
 
 // Compile-time proof that Engine is safe to share across threads.
@@ -429,23 +429,18 @@ impl Engine {
     /// Returns a `&'static Engine` with zero overhead — no locking, no
     /// allocation, no indirection beyond what `Engine` already pays.
     ///
-    /// # Panics
-    /// Panics if called before any shell entry point has run. In normal usage
-    /// this never happens: the global is set before the first `init` or
-    /// `render` callback.
-    ///
     /// # Example
     /// ```ignore
     /// // From any system, any thread, at any time:
-    /// let budget = Engine::global().memory_budget();
-    /// let buf    = Engine::global().create_buffer(desc)?;
+    /// let budget = Engine::global()?.memory_budget();
+    /// let buf    = Engine::global()?.create_buffer(desc)?;
     /// ```
-    pub fn global() -> &'static Engine {
-        //panic allowed, reason = "explicit global-engine accessor requires shell initialization by contract"
-        GLOBAL_ENGINE.get().expect(
-            "Engine::global() called before the engine was initialised — \
-             ensure you are inside a GameApp, HeadlessApp, or EngineApp callback.",
-        )
+    pub fn global() -> Result<&'static Engine> {
+        GLOBAL_ENGINE.get().ok_or_else(|| {
+            Error::InvalidInput(
+                "Engine::global() called before the engine was initialised — ensure you are inside a GameApp, HeadlessApp, or EngineApp callback.".into(),
+            )
+        })
     }
 
     /// Access the global engine, returning `None` if not yet initialised.
@@ -692,7 +687,7 @@ impl Engine {
         let mut cache = self
             .graph_image_cache
             .lock()
-            .expect("graph image cache mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(image) = cache.get(&key) {
             return Ok((image.handle(), image.desc()));
         }
@@ -864,7 +859,7 @@ impl Engine {
             let cache = self
                 .texture_cache
                 .lock()
-                .expect("texture_cache mutex poisoned");
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(handle) = cache.get(&key) {
                 return handle.clone();
             }
@@ -873,7 +868,7 @@ impl Engine {
         //panic allowed, reason = "poisoned internal texture cache is unrecoverable"
         self.texture_cache
             .lock()
-            .expect("texture_cache mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(key, handle.clone());
         handle
     }
@@ -932,7 +927,7 @@ impl Engine {
             let mut lock = self
                 .pending_uploads
                 .lock()
-                .expect("pending_uploads mutex poisoned");
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             std::mem::take(&mut *lock)
         };
         if uploads.is_empty() {
@@ -1035,7 +1030,8 @@ impl Engine {
     /// (uncontended in normal use: the runtime only writes once per frame).
     ///
     /// ```ignore
-    /// if let Some(t) = Engine::global().frame_timing() {
+    /// if let Ok(engine) = Engine::global() {
+    /// if let Some(t) = engine.frame_timing() {
     ///     if t.is_jittery() {
     ///         eprintln!("jitter! p99={:.1}ms mean={:.1}ms", t.p99_cpu_ms, t.mean_cpu_ms);
     ///     }
@@ -1044,7 +1040,7 @@ impl Engine {
     pub fn frame_timing(&self) -> Option<crate::FrameTimingReport> {
         frame_timing_cell()
             .lock()
-            .expect("frame timing mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
 
@@ -1771,9 +1767,6 @@ impl<'f> DrawPassBuilder<'f> {
         });
 
         frame.add_pass(PassDesc {
-            name,
-            queue: QueueType::Graphics,
-            shader: None,
             pipeline,
             bind_groups,
             push_constants,
@@ -1790,14 +1783,9 @@ impl<'f> DrawPassBuilder<'f> {
             reads,
             writes,
             buffer_reads,
-            buffer_writes: Vec::new(),
             clear_colors,
             clear_depth,
-            push_descriptor_set: None,
-            predicate: None,
-            shader_binding: None,
-            shading_rate_image: None,
-            perf_counters: None,
+            ..PassDesc::default_graphics(name)
         })
     }
 }
@@ -1946,25 +1934,15 @@ impl<'f> ComputePassBuilder<'f> {
             .collect();
 
         frame.add_pass(PassDesc {
-            name,
-            queue: QueueType::Compute,
-            shader: None,
             pipeline,
             bind_groups,
             push_constants,
-            pipeline_shading_rate: None,
             work: PassWork::Dispatch(dispatch),
             reads,
             writes,
             buffer_reads: buf_reads,
             buffer_writes: buf_writes,
-            clear_colors: Vec::new(),
-            clear_depth: None,
-            push_descriptor_set: None,
-            predicate: None,
-            shader_binding: None,
-            shading_rate_image: None,
-            perf_counters: None,
+            ..PassDesc::default_compute(name)
         })
     }
 }
@@ -2017,56 +1995,19 @@ impl Frame {
     pub fn generate_mipmaps(&mut self, image: &Image) -> Result<()> {
         self.import_image(image)?;
         self.add_pass(PassDesc {
-            name: format!(
-                "generate_mipmaps({})",
-                image.desc().debug_name.unwrap_or("image")
-            ),
-            queue: QueueType::Graphics,
-            shader: None,
-            pipeline: None,
-            bind_groups: Vec::new(),
-            push_constants: None,
-            pipeline_shading_rate: None,
             work: PassWork::GenerateMipmaps {
                 image: image.handle(),
                 mip_count: image.desc().mip_levels as u32,
             },
-            reads: Vec::new(),
-            writes: Vec::new(),
-            buffer_reads: Vec::new(),
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
-            push_descriptor_set: None,
-            predicate: None,
-            shader_binding: None,
-            shading_rate_image: None,
-            perf_counters: None,
+            ..PassDesc::default_graphics(format!(
+                "generate_mipmaps({})",
+                image.desc().debug_name.unwrap_or("image")
+            ))
         })
     }
 
     pub fn debug_marker(&mut self, name: impl Into<String>) -> Result<()> {
-        self.add_pass(PassDesc {
-            name: name.into(),
-            queue: QueueType::Graphics,
-            shader: None,
-            pipeline: None,
-            bind_groups: Vec::new(),
-            push_constants: None,
-            pipeline_shading_rate: None,
-            work: PassWork::None,
-            reads: Vec::new(),
-            writes: Vec::new(),
-            buffer_reads: Vec::new(),
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
-            push_descriptor_set: None,
-            predicate: None,
-            shader_binding: None,
-            shading_rate_image: None,
-            perf_counters: None,
-        })
+        self.add_pass(PassDesc::default_graphics(name))
     }
 
     pub fn draw_pass(&mut self, name: impl Into<String>) -> DrawPassBuilder<'_> {
@@ -2111,14 +2052,6 @@ impl Frame {
         self.inner
             .graph_mut(|g| g.import_image(image.image_handle(), image.image_desc()))?;
         self.add_pass(PassDesc {
-            name: "present".to_owned(),
-            queue: QueueType::Graphics,
-            shader: None,
-            pipeline: None,
-            bind_groups: Vec::new(),
-            push_constants: None,
-            pipeline_shading_rate: None,
-            work: PassWork::None,
             reads: vec![ImageUse {
                 image: image.image_handle(),
                 access: Access::Read,
@@ -2130,16 +2063,7 @@ impl Frame {
                     layer_count: 1,
                 },
             }],
-            writes: Vec::new(),
-            buffer_reads: Vec::new(),
-            buffer_writes: Vec::new(),
-            clear_colors: Vec::new(),
-            clear_depth: None,
-            push_descriptor_set: None,
-            predicate: None,
-            shader_binding: None,
-            shading_rate_image: None,
-            perf_counters: None,
+            ..PassDesc::default_graphics("present")
         })
     }
 

@@ -44,7 +44,7 @@ use crate::{
 ///     }
 /// }
 ///
-/// fn main() { run_headless::<MyCompute>().unwrap(); }
+/// fn main() { run_headless::<MyCompute>()?; }
 /// ```
 pub trait HeadlessApp: Sized {
     type Error: std::error::Error + Send + Sync + 'static;

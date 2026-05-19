@@ -81,7 +81,7 @@ struct WatchEntry {
 /// ```ignore
 /// watcher.watch_with_callback("assets/rock.png", move |engine, path| {
 ///     let new_tex = engine.load_texture_2d(path)?;
-///     *my_texture.lock().unwrap() = Some(new_tex);
+///     *my_texture.lock()? = Some(new_tex);
 ///     Ok(())
 /// });
 /// ```
@@ -90,7 +90,7 @@ struct WatchEntry {
 /// ```ignore
 /// let slot = Arc::new(Mutex::new(Some(engine.load_texture_2d("assets/rock.png")?)));
 /// watcher.watch_texture("assets/rock.png", slot.clone(), &engine);
-/// // Each frame: render with slot.lock().unwrap().as_ref().unwrap()
+/// // Each frame: render with `if let Some(texture) = slot.lock()?.as_ref() { ... }`
 /// ```
 pub struct AssetWatcher {
     entries: Vec<WatchEntry>,
@@ -138,7 +138,7 @@ impl AssetWatcher {
     /// watcher.watch_texture("rock_albedo.png", Arc::clone(&slot), &engine);
     ///
     /// // Each frame:
-    /// if let Some(tex) = slot.lock().unwrap().as_ref() {
+    /// if let Some(tex) = slot.lock()?.as_ref() {
     ///     frame.bind_image("albedo", tex);
     /// }
     /// ```

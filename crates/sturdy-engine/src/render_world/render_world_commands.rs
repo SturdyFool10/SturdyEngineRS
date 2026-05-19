@@ -27,7 +27,7 @@ impl RenderWorldCommands {
     pub fn push(&self, command: RenderWorldCommand) {
         self.queue
             .lock()
-            .expect("render-world command queue mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(command);
     }
 
@@ -71,7 +71,7 @@ impl RenderWorldCommands {
         let mut queue = self
             .queue
             .lock()
-            .expect("render-world command queue mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::mem::take(&mut *queue)
     }
 }

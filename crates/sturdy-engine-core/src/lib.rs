@@ -131,7 +131,7 @@ pub use surface::{
     SurfaceSize,
 };
 pub use video::{
-    BitRateControl, DecodeFrameDesc, EncodeFrameDesc, QualityPreset, VideoCodec, VideoDecodeSession,
-    VideoEncodeConfig, VideoEncodeSession, VideoSessionDesc, VideoSessionKind,
+    BitRateControl, DecodeFrameDesc, EncodeFrameDesc, QualityPreset, VideoCodec,
+    VideoDecodeSession, VideoEncodeConfig, VideoEncodeSession, VideoSessionDesc, VideoSessionKind,
 };
 pub use vulkan_version::VulkanApiVersion;

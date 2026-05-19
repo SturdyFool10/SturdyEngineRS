@@ -107,25 +107,8 @@ fn register_transient_buffer(graph: &mut RenderGraph, handle: BufferHandle, desc
 
 fn pass_with_work(work: PassWork) -> PassDesc {
     PassDesc {
-        name: "test-pass".into(),
-        queue: QueueType::Graphics,
-        shader: None,
-        pipeline: None,
-        bind_groups: Vec::new(),
-        push_constants: None,
-        pipeline_shading_rate: None,
         work,
-        reads: Vec::new(),
-        writes: Vec::new(),
-        buffer_reads: Vec::new(),
-        buffer_writes: Vec::new(),
-        clear_colors: Vec::new(),
-        clear_depth: None,
-        push_descriptor_set: None,
-        predicate: None,
-        shader_binding: None,
-        shading_rate_image: None,
-        perf_counters: None,
+        ..PassDesc::default_graphics("test-pass")
     }
 }
 

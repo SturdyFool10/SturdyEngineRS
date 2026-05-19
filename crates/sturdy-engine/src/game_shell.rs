@@ -234,7 +234,9 @@ where
         // Upload any textures that background workers finished decoding since
         // the last frame. Errors are recorded on individual handles; a single
         // failed texture does not abort the frame.
-        let _ = crate::Engine::global().drain_pending_uploads();
+        if let Ok(engine) = crate::Engine::global() {
+            let _ = engine.drain_pending_uploads();
+        }
 
         let delta = frame.frame_time().delta;
         let (fixed_alpha, step_count, pacing_error) = self.advance_fixed_steps(delta);

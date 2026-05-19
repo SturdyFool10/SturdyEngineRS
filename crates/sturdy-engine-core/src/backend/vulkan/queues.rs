@@ -55,7 +55,6 @@ impl QueueFamilyMap {
         graphics
     }
 
-
     /// Find the best dedicated async compute queue family (COMPUTE, no GRAPHICS).
     pub fn select_async_compute(families: &[vk::QueueFamilyProperties], compute: u32) -> u32 {
         for (i, f) in families.iter().enumerate() {
@@ -69,13 +68,9 @@ impl QueueFamilyMap {
         compute
     }
 
-
     /// Select the best queue family for video decode operations.
     /// Prefers a dedicated video decode queue; falls back to graphics.
-    pub fn select_video_decode(
-        families: &[vk::QueueFamilyProperties],
-        graphics: u32,
-    ) -> u32 {
+    pub fn select_video_decode(families: &[vk::QueueFamilyProperties], graphics: u32) -> u32 {
         // Prefer a queue that supports VIDEO_DECODE but not GRAPHICS (dedicated decode).
         for (i, f) in families.iter().enumerate() {
             if f.queue_count > 0
@@ -95,10 +90,7 @@ impl QueueFamilyMap {
     }
 
     /// Select the best queue family for video encode operations.
-    pub fn select_video_encode(
-        families: &[vk::QueueFamilyProperties],
-        graphics: u32,
-    ) -> u32 {
+    pub fn select_video_encode(families: &[vk::QueueFamilyProperties], graphics: u32) -> u32 {
         for (i, f) in families.iter().enumerate() {
             if f.queue_count > 0
                 && f.queue_flags.contains(vk::QueueFlags::VIDEO_ENCODE_KHR)
@@ -114,7 +106,6 @@ impl QueueFamilyMap {
         }
         graphics
     }
-
 
     pub fn family(self, queue: QueueType) -> u32 {
         match queue {

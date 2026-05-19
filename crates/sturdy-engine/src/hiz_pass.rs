@@ -136,9 +136,8 @@ impl HizPyramid {
     }
 
     /// The coarsest, smallest level.
-    pub fn coarsest(&self) -> &GraphImage {
-        //panic allowed, reason = "non-empty by construction: at least one mip level is always present"
-        self.levels.last().expect("Hi-Z pyramid is never empty")
+    pub fn coarsest(&self) -> Option<&GraphImage> {
+        self.levels.last()
     }
 
     /// Register all levels under `"{prefix}_mip_{level}"` for reflected shader
@@ -154,7 +153,9 @@ impl HizPyramid {
     /// This is useful for conservative coarse tests before a feature is wired to
     /// all pyramid levels.
     pub fn register_coarsest_as(&self, name: impl Into<String>) {
-        self.coarsest().register_as(name);
+        if let Some(coarsest) = self.coarsest() {
+            coarsest.register_as(name);
+        }
     }
 }
 

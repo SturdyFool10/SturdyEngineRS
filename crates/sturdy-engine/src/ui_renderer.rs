@@ -33,8 +33,8 @@ use std::sync::{Arc, RwLock};
 use clay_ui::{GpuWorkQueue, RenderCommandKind, RenderData};
 
 use crate::{
-    Engine, GraphImage, Image, Mesh, MeshProgram, MeshProgramDesc, MeshVertexKind, QuadBatch,
-    RenderFrame, Result, ShaderDesc, ShaderSource, ShaderStage, TextureUploadDesc,
+    Engine, Error, GraphImage, Image, Mesh, MeshProgram, MeshProgramDesc, MeshVertexKind,
+    QuadBatch, RenderFrame, Result, ShaderDesc, ShaderSource, ShaderStage, TextureUploadDesc,
 };
 
 fn shader_path(name: &str) -> PathBuf {
@@ -117,7 +117,7 @@ impl UiRenderer {
     pub fn set_image(&self, image_key: impl Into<String>, image: Arc<Image>) {
         self.images
             .write()
-            .expect("ui image registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(image_key.into(), image);
     }
 
@@ -125,7 +125,7 @@ impl UiRenderer {
     pub fn remove_image(&self, image_key: &str) -> Option<Arc<Image>> {
         self.images
             .write()
-            .expect("ui image registry rwlock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(image_key)
     }
 
@@ -148,9 +148,11 @@ impl UiRenderer {
         let engine = &self.program.engine;
         let mut clip_stack = vec![ClipRect::viewport(width, height)];
         for command in &queue.commands {
-            let active_clip = *clip_stack
-                .last()
-                .expect("ui clip stack always has viewport root");
+            let Some(active_clip) = clip_stack.last().copied() else {
+                return Err(Error::ResourceStateCorruption(
+                    "UI clip stack lost its viewport root".into(),
+                ));
+            };
             match command.kind {
                 RenderCommandKind::Rectangle => {
                     if let RenderData::Rectangle(data) = &command.data {
@@ -208,7 +210,7 @@ impl UiRenderer {
                             let images = self
                                 .images
                                 .read()
-                                .expect("ui image registry rwlock poisoned");
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
                             images.get(&data.image_key).cloned()
                         };
                         let Some(image) = image else {
@@ -392,7 +394,9 @@ pub fn draw_ui_text(
     use std::sync::Mutex;
     static TEXT_PROGRAM: Mutex<Option<MeshProgram>> = Mutex::new(None);
 
-    let program_guard = TEXT_PROGRAM.lock().expect("text program mutex poisoned");
+    let program_guard = TEXT_PROGRAM
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if program_guard.is_none() {
         drop(program_guard);
         let prog = MeshProgram::new(
@@ -412,9 +416,13 @@ pub fn draw_ui_text(
                 uses_depth: false,
             },
         )?;
-        *TEXT_PROGRAM.lock().expect("text program mutex poisoned") = Some(prog);
+        *TEXT_PROGRAM
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(prog);
     }
-    let program_guard = TEXT_PROGRAM.lock().expect("text program mutex poisoned");
+    let program_guard = TEXT_PROGRAM
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let program = match program_guard.as_ref() {
         Some(p) => p,
         None => return Ok(()),

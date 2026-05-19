@@ -177,7 +177,7 @@ impl GltfSkin {
 /// // Game loop:
 /// player.advance(ctx.dt());
 /// player.upload(&engine)?;
-/// frame.bind_buffer("bone_matrices", player.bone_buffer().unwrap());
+/// frame.bind_buffer("bone_matrices", player.bone_buffer().ok_or_else(|| anyhow::anyhow!("missing bone buffer"))?);
 /// // then draw the skinned mesh normally.
 /// ```
 pub struct AnimationPlayer {

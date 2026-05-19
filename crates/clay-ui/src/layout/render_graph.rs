@@ -1,6 +1,6 @@
 use sturdy_engine_core::{
-    Access, BufferUse, DrawDesc, ImageHandle, ImageUse, PassDesc, PassWork, PushConstants,
-    QueueType, RgState, StageMask, SubresourceRange,
+    Access, BufferUse, DrawDesc, ImageHandle, ImageUse, PassDesc, PassWork, PushConstants, RgState,
+    StageMask, SubresourceRange,
 };
 
 use crate::{
@@ -43,13 +43,9 @@ impl UiGraphPassBuilder {
                     shader_resource_uses(queue, &batch.command_indices, &mut resolve_named_image);
                 let push_constants = shader_push_constants(queue, &batch.command_indices);
                 Some(PassDesc {
-                    name: format!("ui:{}:batch:{index}", queue.tree_name),
-                    queue: QueueType::Graphics,
                     shader: batch.kind.shader,
                     pipeline: Some(pipeline),
-                    bind_groups: Vec::new(),
                     push_constants,
-                    pipeline_shading_rate: None,
                     work: PassWork::Draw(DrawDesc {
                         vertex_count: 4,
                         instance_count: batch.command_indices.len() as u32,
@@ -67,14 +63,7 @@ impl UiGraphPassBuilder {
                         subresource: SubresourceRange::WHOLE,
                     }],
                     buffer_reads,
-                    buffer_writes: Vec::new(),
-                    clear_colors: Vec::new(),
-                    clear_depth: None,
-                    push_descriptor_set: None,
-                    predicate: None,
-                    shader_binding: None,
-                    shading_rate_image: None,
-                    perf_counters: None,
+                    ..PassDesc::default_graphics(format!("ui:{}:batch:{index}", queue.tree_name))
                 })
             })
             .collect()

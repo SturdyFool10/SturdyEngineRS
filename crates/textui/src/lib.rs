@@ -828,7 +828,7 @@ fn render_outline_field_glyph(
                 TextAtlasContentMode::Msdf => {
                     encode_msdf_sample(sample, inside, &outline.segments, field_range_px)
                 }
-                TextAtlasContentMode::AlphaMask => unreachable!(),
+                TextAtlasContentMode::AlphaMask => [255, 255, 255, if inside { 255 } else { 0 }],
             };
             let base = (y * glyph_width + x) * 4;
             rgba[base..base + 4].copy_from_slice(&encoded);

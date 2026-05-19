@@ -125,8 +125,7 @@ fn attach_config_resolves_anchor_from_layout_tree() {
     anchor.layout.height = LayoutSizing::Fixed(24.0);
     root.children.push(anchor);
     let layout =
-        LayoutTree::compute(&root, Size::new(240.0, 120.0), &mut LayoutCache::default())
-            .unwrap();
+        LayoutTree::compute(&root, Size::new(240.0, 120.0), &mut LayoutCache::default()).unwrap();
     let config =
         FloatingAttachConfig::new(Size::new(240.0, 120.0), anchor_id, Size::new(120.0, 40.0))
             .z_index(9)
@@ -166,8 +165,7 @@ fn attached_floating_layer_positions_from_layout_anchor() {
     anchor.layout.height = LayoutSizing::Fixed(20.0);
     root.children.push(anchor);
     let layout =
-        LayoutTree::compute(&root, Size::new(300.0, 180.0), &mut LayoutCache::default())
-            .unwrap();
+        LayoutTree::compute(&root, Size::new(300.0, 180.0), &mut LayoutCache::default()).unwrap();
     let content = Element::new(ElementId::new("menu"));
     let config =
         FloatingAttachConfig::new(Size::new(300.0, 180.0), anchor_id, Size::new(160.0, 90.0))

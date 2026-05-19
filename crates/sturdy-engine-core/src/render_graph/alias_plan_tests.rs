@@ -124,8 +124,7 @@ fn pack_lifetimes_all_overlapping_gets_unique_slots() {
 
 #[test]
 fn pack_lifetimes_empty_produces_zero_slots() {
-    let (lifetimes, slot_count) =
-        pack_lifetimes(std::iter::empty::<(ImageHandle, u32, u32)>(), 0);
+    let (lifetimes, slot_count) = pack_lifetimes(std::iter::empty::<(ImageHandle, u32, u32)>(), 0);
     assert_eq!(slot_count, 0);
     assert!(lifetimes.is_empty());
 }

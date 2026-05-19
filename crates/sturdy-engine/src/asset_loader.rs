@@ -113,7 +113,7 @@ pub(crate) fn load_texture_2d_async(
             //panic allowed, reason = "poisoned internal pending upload queue is unrecoverable"
             pending
                 .lock()
-                .expect("pending_uploads mutex poisoned")
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(upload);
         }
         Err(e) => {
@@ -296,7 +296,9 @@ impl<T> AssetHandle<T> {
 
     fn lock(&self) -> MutexGuard<'_, LoadState<T>> {
         //panic allowed, reason = "poisoned asset handle mutex is unrecoverable"
-        self.inner.lock().expect("asset handle mutex poisoned")
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -630,7 +632,7 @@ pub(crate) fn load_hdr_texture_async(
             //panic allowed, reason = "poisoned internal pending upload queue is unrecoverable"
             pending
                 .lock()
-                .expect("pending_uploads mutex poisoned")
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(upload);
         }
         Err(e) => {

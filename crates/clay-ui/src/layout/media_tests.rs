@@ -55,8 +55,7 @@ fn decodes_png_to_rgba8() {
 
 #[test]
 fn svg_rasterization_exposes_supersampling_dials() {
-    let svg =
-        br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 8 8">
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8" viewBox="0 0 8 8">
         <circle cx="4" cy="4" r="3" fill="white"/>
     </svg>"#;
     let document = SvgDocument::parse(svg).unwrap();
