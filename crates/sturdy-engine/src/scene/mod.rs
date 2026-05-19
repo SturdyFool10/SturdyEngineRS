@@ -28,3 +28,6 @@ pub use object::{InstanceData, MeshId, ObjectId, ObjectKind};
 pub use orbit_camera::OrbitCamera;
 pub use render_target::RenderTarget;
 pub use scene::Scene;
+
+#[cfg(test)]
+mod tests;

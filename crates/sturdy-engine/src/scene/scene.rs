@@ -1,5 +1,5 @@
 use glam::{Mat4, Vec3, Vec4};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::{
@@ -18,6 +18,7 @@ use crate::{
     Buffer, BufferDesc, BufferUsage, ComputeProgram, DrawIndexedIndirectCommand, Engine, Error,
     Format, Frustum, GeometryBackend, GraphImage, ImageDesc, ImageDimension, ImageUsage, Mesh,
     MeshProgram, RenderFrame, Result,
+    render_world::{GpuObjectId, RenderWorld, VisibilityFlags},
 };
 use sturdy_engine_core::Extent3d;
 
@@ -57,6 +58,8 @@ pub struct Scene {
     next_mesh_id: AtomicU32,
     /// Thread-safe queue for structural mutations posted from worker threads.
     commands: SceneCommands,
+    /// Compatibility map from persistent render-world objects to legacy scene slots.
+    pub(super) render_world_objects: HashMap<GpuObjectId, ObjectId>,
     /// Directional light applied to all rendering passes.
     pub directional_light: DirectionalLight,
     /// Point lights included in the deferred lighting pass.
@@ -105,6 +108,7 @@ impl Scene {
             next_object_id: AtomicU32::new(0),
             next_mesh_id: AtomicU32::new(0),
             commands: SceneCommands::new(),
+            render_world_objects: HashMap::new(),
             directional_light: DirectionalLight::default(),
             point_lights: Vec::new(),
             spot_lights: Vec::new(),
@@ -288,6 +292,90 @@ impl Scene {
         if let Some(obj) = self.objects.get(id.0 as usize) {
             obj.set_transform_atomic(transform);
         }
+    }
+
+    /// Mirror a [`RenderWorld`] snapshot into this legacy `Scene`.
+    ///
+    /// This is the compatibility bridge while rendering transitions from
+    /// object-oriented `Scene` authoring to ECS-authored persistent render-world
+    /// data. It drains pending render-world commands, creates or updates scene
+    /// objects for visible render-world objects, and marks no-longer-live or
+    /// hidden objects as removed in the legacy scene.
+    ///
+    /// Returns the number of visible render-world objects synced into scene
+    /// object slots.
+    pub fn sync_render_world(&mut self, render_world: &RenderWorld) -> usize {
+        render_world.apply_pending();
+
+        let snapshot = render_world.snapshot();
+        let mut synced = 0;
+        let mut visible_objects = HashSet::new();
+
+        for state in snapshot {
+            let visible = state.visibility.flags.contains(VisibilityFlags::VISIBLE);
+            let Some(mesh) = state.mesh else {
+                if let Some(scene_object) = self.render_world_objects.remove(&state.object) {
+                    self.remove_object_deferred(scene_object);
+                }
+                continue;
+            };
+
+            let mesh_valid = mesh.mesh.index() < self.meshes.len();
+            if !visible || !mesh_valid {
+                if let Some(scene_object) = self.render_world_objects.remove(&state.object) {
+                    self.remove_object_deferred(scene_object);
+                }
+                continue;
+            }
+
+            visible_objects.insert(state.object);
+            let transform = state
+                .transform
+                .as_ref()
+                .map(|transform| transform.to_mat4())
+                .unwrap_or(Mat4::IDENTITY);
+            let kind = if state.visibility.flags.contains(VisibilityFlags::STATIC)
+                && !state.visibility.flags.contains(VisibilityFlags::DYNAMIC)
+            {
+                ObjectKind::Static
+            } else {
+                ObjectKind::Dynamic
+            };
+
+            let scene_object = match self.render_world_objects.get(&state.object).copied() {
+                Some(id) if id.index() < self.objects.len() => id,
+                _ => {
+                    let id = self.add_object_at(mesh.mesh, transform, kind);
+                    self.render_world_objects.insert(state.object, id);
+                    id
+                }
+            };
+
+            if let Some(object) = self.objects.get_mut(scene_object.index()) {
+                if object.mesh_id != mesh.mesh || object.kind != kind {
+                    object.mesh_id = mesh.mesh;
+                    object.kind = kind;
+                    object.static_dirty.store(true, Ordering::Release);
+                }
+                object.set_transform_atomic(transform);
+            }
+
+            synced += 1;
+        }
+
+        let stale: Vec<_> = self
+            .render_world_objects
+            .keys()
+            .copied()
+            .filter(|object| !visible_objects.contains(object))
+            .collect();
+        for object in stale {
+            if let Some(scene_object) = self.render_world_objects.remove(&object) {
+                self.remove_object_deferred(scene_object);
+            }
+        }
+
+        synced
     }
 
     // ── Thread-safe structural mutation API ───────────────────────────────────

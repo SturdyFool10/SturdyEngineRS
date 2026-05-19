@@ -7,9 +7,43 @@ use super::atomic_transform::AtomicMat4;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct MeshId(pub(super) u32);
 
+impl MeshId {
+    /// Construct from a raw scene mesh slot.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Return the raw scene mesh slot.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Return the raw scene mesh slot as a `usize`.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// Stable handle to an object instance within a [`Scene`](super::Scene).
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ObjectId(pub(super) u32);
+
+impl ObjectId {
+    /// Construct from a raw scene object slot.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Return the raw scene object slot.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Return the raw scene object slot as a `usize`.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 /// Whether an object moves every frame or stays fixed.
 ///
