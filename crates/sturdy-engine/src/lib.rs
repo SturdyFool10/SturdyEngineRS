@@ -939,6 +939,7 @@ impl Engine {
                 height: u.height,
                 format: u.format,
                 usage: ImageUsage::SAMPLED,
+                prefer_compressed: true,
             };
             results.push(frame.upload_texture_2d(&u.name, desc, &u.data));
         }

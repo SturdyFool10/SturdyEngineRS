@@ -87,6 +87,9 @@ pub struct CommandContext {
     /// GFX-1b: Framebuffers created during this frame's recording.
     /// Destroyed at the start of the *next* frame, after the fence signals.
     transient_framebuffers: Vec<vk::Framebuffer>,
+    /// Track 11a: Per-frame transient buffer pool for uniforms and small staging copies.
+    /// Reset to offset 0 each frame after the fence fires.
+    pub transient_buffer_pool: Option<super::buffer_pool::BufferPool>,
 }
 
 impl CommandContext {
@@ -202,7 +205,14 @@ impl CommandContext {
             chain_timeline,
             chain_value: 0,
             transient_framebuffers: Vec::new(),
+            transient_buffer_pool: None,
         })
+    }
+
+    /// Track 11a: Install a pre-created `BufferPool` into this context.
+    /// Called once at device creation after the pool is allocated.
+    pub fn set_buffer_pool(&mut self, pool: super::buffer_pool::BufferPool) {
+        self.transient_buffer_pool = Some(pool);
     }
 
     /// Record and submit one command buffer per graph batch, then return
@@ -296,6 +306,10 @@ impl CommandContext {
             // GFX-1b: destroy transient framebuffers from the previous frame.
             for fb in self.transient_framebuffers.drain(..) {
                 unsafe { device.destroy_framebuffer(fb, None) };
+            }
+            // Track 11a: reset transient buffer pool — all previous-frame allocations are safe to reuse.
+            if let Some(pool) = &mut self.transient_buffer_pool {
+                pool.reset();
             }
             for semaphore in self.pending_semaphores.drain(..) {
                 unsafe {
@@ -694,6 +708,9 @@ impl CommandContext {
             // device_wait_idle is called first in VulkanBackend::Drop.
             device.destroy_fence(self.frame_fence, None);
             device.destroy_query_pool(self.timestamp_pool, None);
+            if let Some(pool) = &self.transient_buffer_pool {
+                pool.destroy();
+            }
             for fb in &self.transient_framebuffers {
                 device.destroy_framebuffer(*fb, None);
             }
@@ -1930,8 +1947,12 @@ impl CommandContext {
             }
 
             PassWork::DecodeVideoFrame(_) | PassWork::EncodeVideoFrame(_) => {
+                // GFX-4: recording requires per-frame codec-specific parameters
+                // (H.264/H.265 slice offsets, picture info, reference DPB slots) that
+                // are not yet exposed in DecodeFrameDesc / EncodeFrameDesc. Use the
+                // high-level VideoDecodeSession / VideoEncodeSession API instead.
                 return Err(Error::Unsupported(
-                    "Vulkan video encode/decode command recording is not yet implemented".into(),
+                    "video pass recording requires codec-specific per-frame parameters; use VideoDecodeSession/VideoEncodeSession high-level API".into(),
                 ));
             }
 
@@ -3560,6 +3581,16 @@ impl FramedCommands {
     /// Wait on every slot that has submitted but not yet been waited on.
     /// Used before surface recreation or shutdown to drain the GPU safely
     /// without resorting to `vkDeviceWaitIdle`.
+    /// Return mutable access to all contexts — used during setup (e.g. installing buffer pools).
+    pub fn contexts_mut(&mut self) -> &mut [CommandContext] {
+        &mut self.contexts
+    }
+
+    /// Return mutable access to the context that will be used on the NEXT submission.
+    pub fn current_context_mut(&mut self) -> &mut CommandContext {
+        &mut self.contexts[self.next_slot]
+    }
+
     pub fn wait_all(&self, device: &Device) -> Result<()> {
         let fences: Vec<vk::Fence> = self
             .contexts

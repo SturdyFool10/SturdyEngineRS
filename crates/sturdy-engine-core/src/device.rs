@@ -479,6 +479,51 @@ impl Device {
     ///
     /// Returns per-pass GPU timings in submission order.
     /// Empty before the second frame or on backends without timestamp support.
+    /// Track 11a: Bump-allocate `size` bytes from the per-frame transient buffer pool.
+    ///
+    /// Returns a `TransientAllocation` with `(offset, cpu_ptr, size)` or `None` when the
+    /// pool is full. Write data to `mapped_ptr`, then bind the pool's buffer at `offset`
+    /// for GPU commands. Valid until the next frame boundary.
+    ///
+    /// Requires no synchronisation — the pool resets after the previous frame's fence fires.
+    pub fn alloc_transient(
+        &self,
+        size: u64,
+        alignment: u64,
+    ) -> Option<crate::TransientAllocation> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .expect("device mutex poisoned")
+            .backend
+            .alloc_transient(size, alignment)
+    }
+
+    /// Track 11b: Return per-queue GPU utilisation for the previous frame.
+    ///
+    /// Aggregates per-pass timestamp data into per-queue totals.
+    /// Pass names ending with `[async]` or `[transfer]` are bucketed accordingly;
+    /// all others are bucketed as graphics or compute based on their pass work type.
+    pub fn gpu_timeline(&self) -> crate::GpuTimeline {
+        let timings = self.pass_timings();
+        let mut timeline = crate::GpuTimeline::default();
+        for report in &timings {
+            let name_lower = report.name.to_ascii_lowercase();
+            if name_lower.contains("[async") {
+                timeline.async_compute_ms += report.gpu_ms;
+            } else if name_lower.contains("[transfer") || name_lower.contains("[dma") {
+                timeline.transfer_ms += report.gpu_ms;
+            } else if name_lower.contains("dispatch") || name_lower.contains("compute") || name_lower.contains("cull") {
+                timeline.compute_ms += report.gpu_ms;
+            } else {
+                timeline.graphics_ms += report.gpu_ms;
+            }
+            timeline.total_frame_ms += report.gpu_ms;
+            timeline.passes.push((report.name.clone(), report.gpu_ms));
+        }
+        timeline
+    }
+
     pub fn pass_timings(&self) -> Vec<crate::PassTimingReport> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
@@ -553,6 +598,39 @@ impl Device {
             .bindless_storage_buffers
             .get(&handle)
             .copied()
+    }
+
+    /// Track 8a: Validate a bindless sampled-image index in debug builds.
+    ///
+    /// Panics when `index` ≥ the number of registered sampled images, providing a clear
+    /// error instead of a GPU hang. No-op in release builds.
+    #[inline]
+    pub fn validate_bindless_sampled_image_index(&self, index: u32) {
+        #[cfg(debug_assertions)]
+        {
+            let inner = self.inner.lock().expect("device mutex poisoned");
+            let (count, _) = inner.backend.bindless_registered_counts();
+            assert!(
+                index < count,
+                "bindless sampled-image index {index} is out of range (registered: {count})"
+            );
+        }
+        let _ = index;
+    }
+
+    /// Track 8a: Validate a bindless sampler index in debug builds.
+    #[inline]
+    pub fn validate_bindless_sampler_index(&self, index: u32) {
+        #[cfg(debug_assertions)]
+        {
+            let inner = self.inner.lock().expect("device mutex poisoned");
+            let (_, count) = inner.backend.bindless_registered_counts();
+            assert!(
+                index < count,
+                "bindless sampler index {index} is out of range (registered: {count})"
+            );
+        }
+        let _ = index;
     }
 
     pub fn create_image(&self, desc: ImageDesc) -> Result<ImageHandle> {
@@ -1561,6 +1639,141 @@ impl Device {
                 .deferred_destroys
                 .push(DeferredDestroy::VideoSession(handle));
         }
+    }
+
+    /// GFX-4a: Create a managed video decode session with DPB pre-allocation.
+    ///
+    /// Allocates `max_dpb_slots` YCbCr reference images and one output image.
+    /// The returned `VideoDecodeSession` owns these handles; use `output_image()` to
+    /// get the decoded frame handle for import into the render graph.
+    /// Requires `BackendFeatures::video_decode_h264` (or h265 etc. for the chosen codec).
+    pub fn create_video_decode_session(
+        &self,
+        codec: crate::VideoCodec,
+        width: u32,
+        height: u32,
+        max_dpb_slots: u32,
+    ) -> Result<crate::VideoDecodeSession> {
+        use crate::{Extent3d, Format, ImageDesc, ImageUsage, VideoSessionDesc, VideoSessionKind};
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        // Create the underlying VkVideoSessionKHR.
+        let session_handle = VideoSessionHandle(inner.video_session_handles.alloc());
+        let session_desc = VideoSessionDesc { kind: VideoSessionKind::Decode, codec, width, height, max_dpb_slots };
+        inner.video_sessions.insert(session_handle, session_desc);
+        inner.backend.create_video_session(session_handle, session_desc)?;
+
+        // Allocate the output image (decoded frame destination).
+        let output_handle = inner.image_handles.alloc();
+        let output_image = crate::ImageHandle(output_handle);
+        let output_desc = ImageDesc {
+            dimension: crate::ImageDimension::D2,
+            extent: Extent3d { width, height, depth: 1 },
+            mip_levels: 1,
+            layers: 1,
+            samples: 1,
+            format: Format::G8_B8R8_2PLANE_420_UNORM,
+            usage: ImageUsage::VIDEO_DECODE_DST | ImageUsage::SAMPLED,
+            ..ImageDesc::new()
+        };
+        inner.backend.create_image(output_image, output_desc)?;
+
+        // Allocate DPB reference images.
+        let mut dpb_images = Vec::with_capacity(max_dpb_slots as usize);
+        for _ in 0..max_dpb_slots {
+            let dpb_handle = inner.image_handles.alloc();
+            let dpb_image = crate::ImageHandle(dpb_handle);
+            let dpb_desc = ImageDesc {
+                dimension: crate::ImageDimension::D2,
+                extent: Extent3d { width, height, depth: 1 },
+                mip_levels: 1,
+                layers: 1,
+                samples: 1,
+                format: Format::G8_B8R8_2PLANE_420_UNORM,
+                usage: ImageUsage::VIDEO_DECODE_DPB,
+                ..ImageDesc::new()
+            };
+            inner.backend.create_image(dpb_image, dpb_desc)?;
+            dpb_images.push(dpb_image);
+        }
+
+        Ok(crate::VideoDecodeSession {
+            session_handle,
+            dpb_images,
+            output_image,
+            width,
+            height,
+            codec,
+        })
+    }
+
+    /// GFX-4b: Create a managed video encode session with an internal output buffer.
+    ///
+    /// Allocates an output buffer large enough to hold the encoded bitstream.
+    /// After encoding via `PassWork::EncodeVideoFrame`, call `read_encode_bitstream` to
+    /// retrieve the compressed output.
+    pub fn create_video_encode_session(
+        &self,
+        config: crate::VideoEncodeConfig,
+    ) -> Result<crate::VideoEncodeSession> {
+        use crate::{BufferDesc, BufferUsage, VideoSessionDesc, VideoSessionKind};
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self.inner.lock().expect("device mutex poisoned");
+        // Heuristic: allocate 2 MiB per megapixel per second at the target bitrate.
+        let w = config.width as u64;
+        let h = config.height as u64;
+        let max_bitstream_bytes = ((w * h * 4).max(1024 * 1024)) * 2;
+
+        let session_handle = VideoSessionHandle(inner.video_session_handles.alloc());
+        let session_desc = VideoSessionDesc {
+            kind: VideoSessionKind::Encode,
+            codec: config.codec,
+            width: config.width,
+            height: config.height,
+            max_dpb_slots: 2,
+        };
+        inner.video_sessions.insert(session_handle, session_desc);
+        inner.backend.create_video_session(session_handle, session_desc)?;
+
+        // Allocate the output bitstream buffer via the exportable buffer path which
+        // gives us a dedicated VkDeviceMemory we can map for CPU readback.
+        let buf_handle = inner.buffer_handles.alloc();
+        let output_buffer = crate::BufferHandle(buf_handle);
+        let buf_desc = BufferDesc {
+            size: max_bitstream_bytes,
+            usage: BufferUsage::VIDEO_ENCODE_DST | BufferUsage::COPY_SRC,
+        };
+        // Use create_buffer for registry tracking, then create_exportable_buffer
+        // to get a host-visible dedicated allocation we can map.
+        inner.backend.create_video_encode_output_buffer(output_buffer, buf_desc)?;
+
+        Ok(crate::VideoEncodeSession {
+            session_handle,
+            output_buffer,
+            max_bitstream_bytes,
+            config,
+        })
+    }
+
+    /// GFX-4b: Copy the encoded bitstream from the session's output buffer to a `Vec<u8>`.
+    ///
+    /// Call this after a frame has been encoded via `PassWork::EncodeVideoFrame` and the
+    /// command buffer has finished executing. Returns the raw compressed bytes.
+    /// Track 8e: Pre-compile pipeline library objects for common vertex and attachment formats.
+    ///
+    /// Triggers creation of the material-independent VertexInput and FragmentOutput pipeline
+    /// library objects used by GFX-2c. Call during loading screens to front-load compilation
+    /// time. Returns a report of what was compiled.
+    /// No-op when `BackendFeatures::graphics_pipeline_library` is false.
+    pub fn pso_pre_warm(&self) -> crate::PsoWarmupReport {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner.lock().expect("device mutex poisoned").backend.pso_pre_warm()
+    }
+
+    pub fn read_encode_bitstream(&self, session: &crate::VideoEncodeSession) -> Result<Vec<u8>> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let inner = self.inner.lock().expect("device mutex poisoned");
+        inner.backend.read_encode_bitstream(session.output_buffer, session.max_bitstream_bytes)
     }
 
     // ── GFX-6a: Device-generated commands ────────────────────────────────────

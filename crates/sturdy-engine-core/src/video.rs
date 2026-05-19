@@ -1,5 +1,52 @@
 use crate::{BufferHandle, ImageHandle, VideoSessionHandle};
 
+/// GFX-4a: A managed video decode session with pre-allocated DPB reference images.
+///
+/// Created by `Device::create_video_decode_session`. The session owns:
+/// - An underlying `VkVideoSessionKHR` via its `VideoSessionHandle`
+/// - Pre-allocated DPB (Decoded Picture Buffer) images for reference frames
+/// - An output image into which the current frame is decoded
+///
+/// After decoding a frame, `output_image()` can be imported into the render graph
+/// as `RgState::ShaderRead` for use in post-processing or display passes.
+pub struct VideoDecodeSession {
+    /// Underlying Vulkan video session handle.
+    pub session_handle: VideoSessionHandle,
+    /// Pre-allocated DPB reference frame images (YCbCr, VIDEO_DECODE_DPB usage).
+    pub dpb_images: Vec<ImageHandle>,
+    /// The image into which the current frame is decoded (VIDEO_DECODE_DST usage).
+    pub output_image: ImageHandle,
+    pub width: u32,
+    pub height: u32,
+    pub codec: VideoCodec,
+}
+
+impl VideoDecodeSession {
+    /// The decoded output image, ready for `frame.graph_mut(|g| g.import_image(session.output_image(), ...))`
+    /// followed by use in a render pass as `RgState::ShaderRead`.
+    pub fn output_image(&self) -> ImageHandle {
+        self.output_image
+    }
+}
+
+/// GFX-4b: A managed video encode session with an internal output bitstream buffer.
+///
+/// Created by `Device::create_video_encode_session`. The session owns:
+/// - An underlying `VkVideoSessionKHR`
+/// - An output buffer for the compressed bitstream
+///
+/// After encoding a frame via `PassWork::EncodeVideoFrame`, call `read_bitstream()`
+/// on `Device` to copy the compressed output to a `Vec<u8>`.
+pub struct VideoEncodeSession {
+    /// Underlying Vulkan video session handle.
+    pub session_handle: VideoSessionHandle,
+    /// Buffer that receives the compressed bitstream output.
+    pub output_buffer: BufferHandle,
+    /// Maximum bitstream size in bytes (the output_buffer's size).
+    pub max_bitstream_bytes: u64,
+    pub config: VideoEncodeConfig,
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum VideoCodec {
     H264,

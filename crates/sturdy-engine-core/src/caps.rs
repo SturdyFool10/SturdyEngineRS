@@ -118,6 +118,72 @@ pub struct PassTimingReport {
     pub perf_counters: std::collections::HashMap<PerfCounterHandle, u64>,
 }
 
+/// Track 11b: Per-queue GPU utilisation summary derived from per-pass timestamp data.
+///
+/// Returned by `Device::gpu_timeline()`. Gives a coarse view of how busy each
+/// hardware queue was during the previous frame.
+#[derive(Clone, Debug, Default)]
+pub struct GpuTimeline {
+    /// Total GPU time spent on graphics passes in the previous frame (milliseconds).
+    pub graphics_ms: f32,
+    /// Total GPU time spent on compute passes in the previous frame (milliseconds).
+    pub compute_ms: f32,
+    /// Total GPU time spent on transfer passes in the previous frame (milliseconds).
+    pub transfer_ms: f32,
+    /// Total GPU time spent on async compute passes (milliseconds).
+    pub async_compute_ms: f32,
+    /// Wall-clock time between the first pass start and the last pass end (milliseconds).
+    /// Approximates total frame GPU duration when passes are submitted serially.
+    pub total_frame_ms: f32,
+    /// Pass-level breakdown: `(pass_name, gpu_ms)` pairs in submission order.
+    pub passes: Vec<(String, f32)>,
+}
+
+/// Track 11a: A bump-allocated region from the per-frame transient `BufferPool`.
+///
+/// Valid only until the next frame boundary (i.e. `Device::flush()` for the current frame).
+/// The backing buffer is accessed via `Device::transient_buffer()`.
+#[derive(Copy, Clone, Debug)]
+pub struct TransientAllocation {
+    /// Byte offset of this allocation within the pool's backing buffer.
+    pub offset: u64,
+    /// CPU-mapped pointer to the start of this allocation — write data here.
+    pub mapped_ptr: *mut u8,
+    /// Size of this allocation in bytes.
+    pub size: u64,
+}
+
+// SAFETY: the mapped pointer is valid for the frame lifetime and only accessed through
+// the commands mutex or while exclusively owned by the caller after alloc.
+unsafe impl Send for TransientAllocation {}
+unsafe impl Sync for TransientAllocation {}
+
+impl TransientAllocation {
+    /// Write a value into the allocation's mapped memory.
+    ///
+    /// # Safety
+    /// The caller must not write beyond `size` bytes, and must ensure
+    /// no concurrent GPU reads while writing.
+    pub unsafe fn write<T: Copy>(&self, value: &T) {
+        debug_assert!(std::mem::size_of::<T>() <= self.size as usize);
+        unsafe { std::ptr::copy_nonoverlapping(value as *const T, self.mapped_ptr as *mut T, 1) };
+    }
+}
+
+/// Track 8e: Result of `Device::pso_pre_warm()` — reports what the pre-warm compiled.
+#[derive(Clone, Debug, Default)]
+pub struct PsoWarmupReport {
+    /// Number of VertexInput pipeline library objects compiled and cached.
+    pub vertex_input_libs_compiled: u32,
+    /// Number of FragmentOutput pipeline library objects compiled and cached.
+    pub fragment_output_libs_compiled: u32,
+    /// Wall-clock time for all compilations combined, in milliseconds.
+    pub total_compile_ms: f32,
+    /// Whether the device supports pipeline libraries (GFX-2c).
+    /// When false, the pre-warm is a no-op and these counts stay at 0.
+    pub pipeline_library_supported: bool,
+}
+
 /// Per-stage shader statistics returned by `Engine::pipeline_shader_stats_amd`.
 ///
 /// Requires `BackendFeatures::shader_info_amd`. Each entry corresponds to one active

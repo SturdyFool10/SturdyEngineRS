@@ -35,6 +35,10 @@ pub struct TextureUploadDesc {
     pub height: u32,
     pub format: Format,
     pub usage: ImageUsage,
+    /// Track 11d: when `true` (default), asset loading may transcode the texture to a
+    /// block-compressed format (BC3/BC4/BC5) before GPU upload. Set to `false` for
+    /// render targets, UAVs, and any image that must stay uncompressed.
+    pub prefer_compressed: bool,
 }
 
 impl TextureUploadDesc {
@@ -44,6 +48,7 @@ impl TextureUploadDesc {
             height,
             format: Format::Rgba8Unorm,
             usage: ImageUsage::SAMPLED,
+            prefer_compressed: true,
         }
     }
 
@@ -55,6 +60,7 @@ impl TextureUploadDesc {
             height,
             format: Format::Rgba16Float,
             usage: ImageUsage::SAMPLED,
+            prefer_compressed: true,
         }
     }
 
@@ -66,6 +72,7 @@ impl TextureUploadDesc {
             height,
             format: Format::Rgba32Float,
             usage: ImageUsage::SAMPLED,
+            prefer_compressed: true,
         }
     }
 
@@ -78,6 +85,7 @@ impl TextureUploadDesc {
             height,
             format: Format::Bc4Unorm,
             usage: ImageUsage::SAMPLED,
+            prefer_compressed: true,
         }
     }
 
@@ -91,6 +99,7 @@ impl TextureUploadDesc {
             height,
             format: Format::Bc5Unorm,
             usage: ImageUsage::SAMPLED,
+            prefer_compressed: true,
         }
     }
 
@@ -103,6 +112,7 @@ impl TextureUploadDesc {
             height,
             format: Format::Bc3Unorm,
             usage: ImageUsage::SAMPLED,
+            prefer_compressed: true,
         }
     }
 
@@ -115,6 +125,7 @@ impl TextureUploadDesc {
             height,
             format: Format::Bc3UnormSrgb,
             usage: ImageUsage::SAMPLED,
+            prefer_compressed: true,
         }
     }
 
@@ -127,6 +138,7 @@ impl TextureUploadDesc {
             height,
             format: Format::Bc7Unorm,
             usage: ImageUsage::SAMPLED,
+            prefer_compressed: true,
         }
     }
 
@@ -140,6 +152,7 @@ impl TextureUploadDesc {
             height,
             format: Format::Bc7UnormSrgb,
             usage: ImageUsage::SAMPLED,
+            prefer_compressed: true,
         }
     }
 
@@ -152,6 +165,7 @@ impl TextureUploadDesc {
             height,
             format: Format::Bc6hUfloat,
             usage: ImageUsage::SAMPLED,
+            prefer_compressed: true,
         }
     }
 }
@@ -436,6 +450,7 @@ impl Frame {
             height: desc.extent.height,
             format: desc.format,
             usage: desc.usage,
+            prefer_compressed: false,
         })?;
         if data.len() as u64 != expected_len {
             return Err(Error::InvalidInput(format!(
@@ -561,6 +576,7 @@ pub(crate) fn texture_upload_byte_count(desc: TextureUploadDesc) -> Result<u64> 
         Format::Rgba16Float => 8,
         Format::Rgba32Float => 16,
         Format::Depth32Float | Format::Depth24Stencil8 => 4,
+        Format::G8_B8R8_2PLANE_420_UNORM => 1,
         // BC formats handled above.
         Format::Bc3Unorm
         | Format::Bc3UnormSrgb

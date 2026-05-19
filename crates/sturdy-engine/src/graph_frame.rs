@@ -452,6 +452,7 @@ fn format_bytes_per_texel(format: Format) -> Result<u32> {
                 "cannot copy image with unknown format".into(),
             ));
         }
+        Format::G8_B8R8_2PLANE_420_UNORM => 1,
         Format::Bc3Unorm
         | Format::Bc3UnormSrgb
         | Format::Bc4Unorm

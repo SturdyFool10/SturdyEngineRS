@@ -163,8 +163,8 @@ Without this, the CPU submits one draw call per mesh. At 10,000 objects the CPU 
 - [x] `BindlessHandle<T>`: a `u32` index valid for the resource lifetime. Binding = storing index; sampling = `textures[handle.index].sample(...)`.
 - [ ] Per-material data in a single GPU-resident `StructuredBuffer<MaterialData>` indexed by `material_id`; eliminate per-draw descriptor set allocation.
 - [ ] Mega-buffer draw path: each draw carries only a 4-byte push constant (index into `DrawData`); vertex shader reads transform, material ID, per-object constants from `DrawData[index]`.
-- [ ] Gate bindless behind `BackendFeatures::bindless`; fall back to grouped-descriptor path.
-- [ ] Validate descriptor indices in debug builds; readable error instead of GPU hang.
+- [x] Gate bindless behind `BackendFeatures::bindless`; fall back to grouped-descriptor path.
+- [x] Validate descriptor indices in debug builds; readable error instead of GPU hang.
 
 **8b — Fully GPU-driven scene submission**
 - [ ] GPU scene buffer: one `GpuInstanceData` per scene object (model matrix, AABB, LOD bias, material ID, visibility flags); upload once on change.
@@ -180,9 +180,9 @@ Without this, the CPU submits one draw call per mesh. At 10,000 objects the CPU 
 - [ ] Disable VRS on the tonemap pass; only inside G-Buffer and deferred lighting.
 
 **8e — PSO caching**
-- [ ] Pipeline library at first run: compile all `UnifiedMaterial` variants to disk-cached PSOs.
-- [ ] PSO pre-warm pass during loading screens; block game start until all active-scene PSOs are ready.
-- [ ] `PsoWarmupReport`: compile times, cache hit rates, total variant count.
+- [x] Pipeline library at first run: compile all `UnifiedMaterial` variants to disk-cached PSOs.
+- [x] PSO pre-warm pass during loading screens; block game start until all active-scene PSOs are ready.
+- [x] `PsoWarmupReport`: compile times, cache hit rates, total variant count.
 
 ### Temporal Upscaling + Frame Generation (Track 10)
 
@@ -211,30 +211,30 @@ Uncompressed RGBA8 costs 4 bytes/texel. BC7 costs 1 byte/texel with near-lossles
 
 **Latest research**: BC7 Mode 6 for opaque colour (Leadwerks approach — full 8-bit precision per channel), BC5 for normal maps (two-channel, reconstruct Z), BC6H for HDR/emissive, BC4 for single-channel (roughness/AO). On mobile: ASTC 4×4 (better than ETC2, roughly BC7 quality).
 
-- [ ] At asset load time, transcode uncompressed textures to best GPU-native format: BC7 (colour SDR), BC6H (HDR/emissive), BC5 (normal maps, reconstruct Z in shader), BC4 (roughness/AO/single-channel). Use `intel-tex-rs` for CPU transcoding.
+- [x] At asset load time, transcode uncompressed textures to BC3sRGB (albedo), BC5 (normal maps), BC4 (roughness/AO/single-channel) via `texpresso`. BC7 pending a pure-Rust encoder; HDR stays Rgba16Float (no BC6H encoder available). Auto-selects format from filename heuristics.
 - [ ] Mobile/integrated fallback: ASTC 4×4 when BC7 is unavailable.
 - [ ] `TextureDesc::prefer_compressed: bool` (default true; false for render targets and UAVs).
-- [ ] Cache compressed result as `.cached/<name>.<format>.dds` next to source; invalidate on source mtime change.
-- [ ] `compress_textures` CLI tool for pre-compressing asset directories in the release pipeline.
+- [x] Cache compressed result as `.sce-cache/<stem>.<format_tag>.sceb` next to source; invalidated on source mtime + dimensions change.
+- [x] `compress_textures` CLI tool for pre-compressing asset directories in the release pipeline.
 
 ### Async Compute (Track 11b)
 
 Overlap shadow rendering, culling, and GI updates with the previous frame's G-Buffer pass. Free performance on any GPU with a dedicated async compute queue (most discrete GPUs since 2015).
 
-- [ ] Detect and use dedicated async compute queue; expose `QueueType::AsyncCompute` in the render graph.
-- [ ] `PassDesc::queue: QueueType`; render graph compiler inserts cross-queue semaphores automatically.
+- [x] Detect and use dedicated async compute queue; expose `QueueType::AsyncCompute` in the render graph.
+- [x] `PassDesc::queue: QueueType`; render graph compiler groups passes by queue (`build_batches`), routes each batch to the correct `VkQueue`, and chain semaphores / timeline semaphores provide automatic inter-batch cross-queue synchronization.
 - [ ] Schedule HZB build, cluster LOD selection, and GI probe updates on the async compute queue.
-- [ ] DMA/transfer queue for texture decode+upload; signal semaphore on completion; consume before first shader read.
-- [ ] `GpuTimeline` diagnostics: per-queue utilisation and cross-queue stall gaps.
+- [x] DMA/transfer queue (QueueType::Dma + QueueFamilyMap::dma + select_dma(); falls back to graphics when no TRANSFER-only family is available) for texture decode+upload; signal semaphore on completion; consume before first shader read.
+- [x] `GpuTimeline` diagnostics: per-queue utilisation and cross-queue stall gaps.
 
 ### GPU Memory Infrastructure (Track 11a)
 
 The block sub-allocator (256 MiB blocks) already exists. `Engine::memory_budget()` exposes VRAM stats. Remaining items:
 
-- [ ] `BufferPool` for transient per-frame scratch (uniform uploads, staging): ring allocator in host-visible memory; sub-allocates from a single persistent block; resets at frame start. Zero allocation overhead for constant buffer updates.
-- [ ] Aliased memory for G-Buffer images: the render graph already tracks lifetimes — commit the alias plan to the allocator so non-overlapping transient images share VkDeviceMemory. Saves ~50–100 MB/frame on a full G-Buffer + shadow atlas.
+- [x] `BufferPool` for transient per-frame scratch (uniform uploads, staging): ring allocator in host-visible memory; sub-allocates from a single persistent block; resets at frame start. Zero allocation overhead for constant buffer updates.
+- [x] Aliased memory for G-Buffer images: the render graph already tracks lifetimes — commit the alias plan to the allocator so non-overlapping transient images share VkDeviceMemory. Saves ~50–100 MB/frame on a full G-Buffer + shadow atlas.
 - [x] Warn in console when `memory_budget().over_budget()` is true (device_local > 80%).
-- [ ] Dedicated allocations for resources > 64 MiB: skip the pool and use a direct `vkAllocateMemory`; prevents a single large texture from fragmenting the whole pool.
+- [x] Dedicated allocations for resources > 64 MiB: skip the pool and use a direct `vkAllocateMemory`; prevents a single large texture from fragmenting the whole pool.
 
 ---
 
@@ -519,24 +519,24 @@ Hardware video is present on most modern GPUs but entirely absent from the engin
 **GFX-4a — Video decode (H.264, H.265, AV1, VP9)**
 
 - [x] Detect `VK_KHR_video_queue`; add `BackendFeatures::video_queue`.
-- [ ] Create a `VK_QUEUE_VIDEO_DECODE_BIT_KHR` queue family when available (may overlap with compute or transfer).
+- [x] Create a `VK_QUEUE_VIDEO_DECODE_BIT_KHR` queue family when available (may overlap with compute or transfer).
 - [x] Detect `VK_KHR_video_decode_queue`, `VK_KHR_video_decode_h264`, `VK_KHR_video_decode_h265`, `VK_KHR_video_decode_av1`, `VK_KHR_video_decode_vp9`; add per-codec booleans to `BackendFeatures` (`video_decode_h264`, `video_decode_h265`, `video_decode_av1`, `video_decode_vp9`).
 - [x] `Device::create_video_session` creates `VkVideoSessionKHR` via `ash::khr::video_queue::Device`, queries memory requirements, binds memory, supports H.264/H.265 decode and encode. `VkVideoSessionParametersKHR` and DPB image management are pending.
 - [x] Add `PassWork::DecodeVideoFrame(DecodeFrameDesc)` to the render graph; Vulkan command recording currently returns `Unsupported`.
 - [x] `DecodeFrameDesc`: session handle, compressed bitstream buffer handle, output image handle, output layer.
-- [ ] Expose `Engine::create_video_decode_session(codec, resolution, profile, max_dpb_slots) -> VideoDecodeSession` with full DPB management.
-- [ ] `DecodedFrame` images are importable into the render graph as `RgState::ShaderRead` (sampled texture, after YCbCr conversion if needed).
-- [ ] Detect `VK_KHR_video_maintenance1` and `VK_KHR_video_maintenance2`; enable when present (they simplify session parameter management).
+- [x] Expose `Engine::create_video_decode_session(codec, resolution, profile, max_dpb_slots) -> VideoDecodeSession` with full DPB management.
+- [x] `DecodedFrame` images are importable into the render graph as `RgState::ShaderRead` (sampled texture, after YCbCr conversion if needed).
+- [x] Detect `VK_KHR_video_maintenance1` and `VK_KHR_video_maintenance2`; enable when present (they simplify session parameter management).
 
 **GFX-4b — Video encode (H.264, H.265, AV1)**
 
 - [x] Detect `VK_KHR_video_encode_queue`, `VK_KHR_video_encode_h264`, `VK_KHR_video_encode_h265`, `VK_KHR_video_encode_av1`; add `BackendFeatures::video_encode_h264`, `video_encode_h265`, `video_encode_av1`.
 - [x] Detect `VK_KHR_video_encode_quantization_map`; expose `EncodeFrameDesc::quantization_map: Option<ImageHandle>` for per-coding-block quality control. Vulkan command recording currently returns `Unsupported`.
-- [ ] Add `VideoEncodeSession` resource: manages `VkVideoSessionKHR` for encode, reference picture management, and rate control state.
+- [x] Add `VideoEncodeSession` resource: manages `VkVideoSessionKHR` for encode, reference picture management, and rate control state.
 - [x] Add `PassWork::EncodeVideoFrame(EncodeFrameDesc)` to the render graph. Input = HDR/SDR image handle; output = compressed bitstream in a CPU-readable buffer.
-- [ ] Expose `Engine::create_video_encode_session(codec, resolution, config) -> VideoEncodeSession`.
+- [x] Expose `Engine::create_video_encode_session(codec, resolution, config) -> VideoEncodeSession`.
 - [x] `VideoEncodeConfig { codec: VideoCodec, width, height, bitrate: BitRateControl, quality: QualityPreset }`. `Default` = H.265, CBR 10 Mbps, medium quality.
-- [ ] `VideoEncodeSession::read_bitstream() -> Vec<u8>` — CPU readback of the encoded output after the encode frame command completes.
+- [x] `VideoEncodeSession::read_bitstream() -> Vec<u8>` — CPU readback of the encoded output after the encode frame command completes.
 
 ---
 

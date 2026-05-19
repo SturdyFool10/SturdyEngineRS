@@ -47,6 +47,11 @@ pub enum Format {
     /// and environment maps with values outside [0, 1]. Each 4×4 block = 16 bytes.
     Bc6hUfloat = 17,
 
+    // ── YCbCr (video) ─────────────────────────────────────────────────────────
+    /// 8-bit planar YCbCr 4:2:0 (G8_B8R8_2PLANE) — standard decode output format.
+    #[allow(non_camel_case_types)]
+    G8_B8R8_2PLANE_420_UNORM = 50,
+
     // ── Depth ─────────────────────────────────────────────────────────────────
     Depth32Float = 100,
     Depth24Stencil8 = 101,
@@ -111,6 +116,14 @@ impl ImageUsage {
     pub const OPTICAL_FLOW_OUTPUT: Self = Self(1 << 8);
     /// Image can provide external motion-vector hints to `VK_NV_optical_flow`.
     pub const OPTICAL_FLOW_HINT: Self = Self(1 << 9);
+    /// GFX-4a: destination for `vkCmdDecodeVideoKHR` (decoded output picture).
+    pub const VIDEO_DECODE_DST: Self = Self(1 << 10);
+    /// GFX-4a: decoded picture buffer (DPB) reference frame storage.
+    pub const VIDEO_DECODE_DPB: Self = Self(1 << 11);
+    /// GFX-4b: source input for `vkCmdEncodeVideoKHR` (uncompressed input picture).
+    pub const VIDEO_ENCODE_SRC: Self = Self(1 << 12);
+    /// GFX-4b: DPB reference frame storage for encode.
+    pub const VIDEO_ENCODE_DPB: Self = Self(1 << 13);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -466,92 +479,5 @@ impl ImageBuilder {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests;
 
-    fn desc() -> ImageDesc {
-        ImageDesc {
-            dimension: ImageDimension::D2,
-            extent: Extent3d {
-                width: 16,
-                height: 16,
-                depth: 1,
-            },
-            mip_levels: 1,
-            layers: 1,
-            samples: 1,
-            format: Format::Rgba8Unorm,
-            usage: ImageUsage::SAMPLED | ImageUsage::COPY_DST,
-            transient: false,
-            clear_value: Some(ImageClearValue::color_f32([0.0, 0.0, 0.0, 1.0])),
-            debug_name: Some("image-desc-test"),
-            ..ImageDesc::new()
-        }
-    }
-
-    #[test]
-    fn image_desc_accepts_expanded_fields() {
-        desc().validate().unwrap();
-    }
-
-    #[test]
-    fn image_desc_rejects_invalid_dimension_extent() {
-        let invalid = ImageDesc {
-            dimension: ImageDimension::D2,
-            extent: Extent3d {
-                width: 16,
-                height: 16,
-                depth: 4,
-            },
-            ..desc()
-        };
-
-        assert!(matches!(invalid.validate(), Err(Error::InvalidInput(_))));
-    }
-
-    #[test]
-    fn image_builder_produces_valid_desc() {
-        let desc = ImageBuilder::new_2d(Format::Rgba16Float, 1920, 1080)
-            .role(ImageRole::ColorAttachment)
-            .mip_levels(1)
-            .debug_name("hdr-color-buffer")
-            .build()
-            .unwrap();
-
-        assert_eq!(desc.format, Format::Rgba16Float);
-        assert_eq!(desc.extent.width, 1920);
-        assert_eq!(desc.extent.height, 1080);
-        assert!(desc.usage.contains(ImageUsage::RENDER_TARGET));
-        assert_eq!(desc.debug_name, Some("hdr-color-buffer"));
-    }
-
-    #[test]
-    fn image_builder_rejects_zero_extent() {
-        let result = ImageBuilder::new_2d(Format::Rgba8Unorm, 0, 1080).build();
-        assert!(matches!(result, Err(Error::InvalidInput(_))));
-    }
-
-    #[test]
-    fn image_role_default_usage_covers_expected_flags() {
-        assert!(
-            ImageRole::ColorAttachment
-                .default_usage()
-                .contains(ImageUsage::RENDER_TARGET)
-        );
-        assert!(
-            ImageRole::DepthAttachment
-                .default_usage()
-                .contains(ImageUsage::DEPTH_STENCIL)
-        );
-        assert!(
-            ImageRole::Storage
-                .default_usage()
-                .contains(ImageUsage::STORAGE)
-        );
-        assert!(
-            ImageRole::Presentable
-                .default_usage()
-                .contains(ImageUsage::PRESENT)
-        );
-    }
-}

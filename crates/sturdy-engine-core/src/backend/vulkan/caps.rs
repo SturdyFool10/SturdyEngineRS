@@ -205,8 +205,8 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     let video_encode_quantization_map =
         video_queue && has(b"VK_KHR_video_encode_quantization_map\0");
     // GFX-4: video maintenance extensions (simplify session parameter management).
-    let _video_maintenance1 = video_queue && has(b"VK_KHR_video_maintenance1\0");
-    let _video_maintenance2 = video_queue && has(b"VK_KHR_video_maintenance2\0");
+    let video_maintenance1 = video_queue && has(b"VK_KHR_video_maintenance1\0");
+    let video_maintenance2 = video_queue && has(b"VK_KHR_video_maintenance2\0");
 
     // GFX-5: External resource interop
     let external_memory_fd = has(b"VK_KHR_external_memory_fd\0");
@@ -328,6 +328,8 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         shader_object,
         // GFX-4: video
         video_queue,
+        video_maintenance1,
+        video_maintenance2,
         video_decode_h264,
         video_decode_h265,
         video_decode_av1,
@@ -510,6 +512,7 @@ fn vk_format(format: Format) -> Result<vk::Format, ()> {
         Format::Bc7Unorm => Ok(vk::Format::BC7_UNORM_BLOCK),
         Format::Bc7UnormSrgb => Ok(vk::Format::BC7_SRGB_BLOCK),
         Format::Bc6hUfloat => Ok(vk::Format::BC6H_UFLOAT_BLOCK),
+        Format::G8_B8R8_2PLANE_420_UNORM => Ok(vk::Format::G8_B8R8_2PLANE_420_UNORM),
         Format::Depth32Float => Ok(vk::Format::D32_SFLOAT),
         Format::Depth24Stencil8 => Ok(vk::Format::D24_UNORM_S8_UINT),
     }

@@ -438,6 +438,7 @@ fn load_and_upload(engine: &Engine, path: &Path, name: &str) -> Result<Image> {
             height: compressed.height,
             format: compressed.format,
             usage: crate::ImageUsage::SAMPLED,
+            prefer_compressed: true,
         };
         let mut frame = engine.begin_frame()?;
         let image = frame.upload_texture_2d(name, desc, &compressed.data)?;

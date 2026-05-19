@@ -13,6 +13,8 @@ impl BufferUsage {
     pub const INDIRECT: Self = Self(1 << 6);
     pub const ACCELERATION_STRUCTURE: Self = Self(1 << 7);
     pub const SHADER_DEVICE_ADDRESS: Self = Self(1 << 8);
+    /// GFX-4b: output buffer for `vkCmdEncodeVideoKHR` compressed bitstream.
+    pub const VIDEO_ENCODE_DST: Self = Self(1 << 9);
 
     pub const fn empty() -> Self {
         Self(0)

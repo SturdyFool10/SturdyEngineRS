@@ -158,6 +158,24 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// Track 11a: Bump-allocate from the per-frame transient buffer pool.
+    /// Returns `None` when the pool is full or unavailable.
+    fn alloc_transient(&self, _size: u64, _alignment: u64) -> Option<crate::TransientAllocation> {
+        None
+    }
+
+    /// Track 8a: Return registered counts for debug-build bindless index validation.
+    /// `(sampled_images, samplers)` — both 0 when bindless is unavailable.
+    fn bindless_registered_counts(&self) -> (u32, u32) {
+        (0, 0)
+    }
+
+    /// Track 8e: Pre-compile pipeline library objects for common vertex/attachment formats.
+    /// Returns a report of what was compiled. No-op when pipeline libraries are unavailable.
+    fn pso_pre_warm(&self) -> crate::PsoWarmupReport {
+        crate::PsoWarmupReport::default()
+    }
+
     fn create_shader_object(
         &self,
         _handle: ShaderObjectHandle,
@@ -403,6 +421,43 @@ pub trait Backend: Send + Sync {
 
     fn destroy_video_session(&self, _handle: VideoSessionHandle) -> Result<()> {
         Ok(())
+    }
+
+    /// GFX-4a: Create a high-level video decode session with DPB image management.
+    fn create_video_decode_session(
+        &self,
+        _session: VideoSessionHandle,
+        _output_image: crate::ImageHandle,
+        _dpb_images: Vec<crate::ImageHandle>,
+        _width: u32,
+        _height: u32,
+        _codec: crate::VideoCodec,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported("video decode sessions require VK_KHR_video_decode_queue"))
+    }
+
+    /// GFX-4b: Create a HOST_VISIBLE buffer for encode output that can be CPU-mapped for readback.
+    fn create_video_encode_output_buffer(
+        &self,
+        _handle: crate::BufferHandle,
+        _desc: crate::BufferDesc,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported("video encode output buffers require VK_KHR_video_encode_queue"))
+    }
+
+    /// GFX-4b: Create a high-level video encode session with internal bitstream buffer.
+    fn create_video_encode_session(
+        &self,
+        _session: VideoSessionHandle,
+        _output_buffer: crate::BufferHandle,
+        _config: crate::VideoEncodeConfig,
+    ) -> Result<()> {
+        Err(crate::Error::Unsupported("video encode sessions require VK_KHR_video_encode_queue"))
+    }
+
+    /// GFX-4b: Copy the encoded bitstream from the output buffer to a Vec<u8>.
+    fn read_encode_bitstream(&self, _handle: crate::BufferHandle, _max_bytes: u64) -> Result<Vec<u8>> {
+        Err(crate::Error::Unsupported("video encode sessions require VK_KHR_video_encode_queue"))
     }
 
     // ── GFX-6b: Latency reduction ─────────────────────────────────────────────

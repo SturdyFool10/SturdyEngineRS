@@ -54,7 +54,8 @@ pub use binding::{
 pub use buffer::{BufferDesc, BufferUsage};
 pub use caps::{
     AmdShaderStageStats, Caps, CoopMatrixElementType, CoopMatrixProperty, CoopMatrixScope,
-    ExecutableStat, PassTimingReport, PerfCounter, PerfCounterCategory, PerfCounterHandle,
+    ExecutableStat, GpuTimeline, PassTimingReport, PerfCounter, PerfCounterCategory,
+    PerfCounterHandle, PsoWarmupReport, TransientAllocation,
 };
 pub use device::{Device, DeviceDesc, DeviceFeature, Frame, enumerate_adapters};
 pub use error::{Error, ErrorCategory, Result};
@@ -130,7 +131,7 @@ pub use surface::{
     SurfaceSize,
 };
 pub use video::{
-    BitRateControl, DecodeFrameDesc, EncodeFrameDesc, QualityPreset, VideoCodec, VideoEncodeConfig,
-    VideoSessionDesc, VideoSessionKind,
+    BitRateControl, DecodeFrameDesc, EncodeFrameDesc, QualityPreset, VideoCodec, VideoDecodeSession,
+    VideoEncodeConfig, VideoEncodeSession, VideoSessionDesc, VideoSessionKind,
 };
 pub use vulkan_version::VulkanApiVersion;

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/compress-textures",
     "crates/sturdy-engine-core",
     "crates/sturdy-engine-platform",
     "crates/sturdy-engine-ffi",

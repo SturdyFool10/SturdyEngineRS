@@ -1308,6 +1308,7 @@ pub(super) fn vk_format(format: Format) -> Result<vk::Format> {
         Format::Bc7Unorm => Ok(vk::Format::BC7_UNORM_BLOCK),
         Format::Bc7UnormSrgb => Ok(vk::Format::BC7_SRGB_BLOCK),
         Format::Bc6hUfloat => Ok(vk::Format::BC6H_UFLOAT_BLOCK),
+        Format::G8_B8R8_2PLANE_420_UNORM => Ok(vk::Format::G8_B8R8_2PLANE_420_UNORM),
         Format::Depth32Float => Ok(vk::Format::D32_SFLOAT),
         Format::Depth24Stencil8 => Ok(vk::Format::D24_UNORM_S8_UINT),
     }
@@ -1359,10 +1360,23 @@ fn vk_image_usage(usage: ImageUsage) -> vk::ImageUsageFlags {
     if usage.contains(ImageUsage::COPY_DST) {
         flags |= vk::ImageUsageFlags::TRANSFER_DST;
     }
+    // GFX-4: video decode/encode usage flags.
+    if usage.contains(ImageUsage::VIDEO_DECODE_DST) {
+        flags |= vk::ImageUsageFlags::VIDEO_DECODE_DST_KHR;
+    }
+    if usage.contains(ImageUsage::VIDEO_DECODE_DPB) {
+        flags |= vk::ImageUsageFlags::VIDEO_DECODE_DPB_KHR;
+    }
+    if usage.contains(ImageUsage::VIDEO_ENCODE_SRC) {
+        flags |= vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR;
+    }
+    if usage.contains(ImageUsage::VIDEO_ENCODE_DPB) {
+        flags |= vk::ImageUsageFlags::VIDEO_ENCODE_DPB_KHR;
+    }
     flags
 }
 
-fn vk_buffer_usage(usage: BufferUsage) -> vk::BufferUsageFlags {
+pub(super) fn vk_buffer_usage(usage: BufferUsage) -> vk::BufferUsageFlags {
     let mut flags = vk::BufferUsageFlags::empty();
     if usage.contains(BufferUsage::COPY_SRC) {
         flags |= vk::BufferUsageFlags::TRANSFER_SRC;
@@ -1390,6 +1404,9 @@ fn vk_buffer_usage(usage: BufferUsage) -> vk::BufferUsageFlags {
     }
     if usage.contains(BufferUsage::SHADER_DEVICE_ADDRESS) {
         flags |= vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+    }
+    if usage.contains(BufferUsage::VIDEO_ENCODE_DST) {
+        flags |= vk::BufferUsageFlags::VIDEO_ENCODE_DST_KHR;
     }
     flags
 }
@@ -1465,122 +1482,5 @@ fn vk_sampler_reduction_mode(mode: SamplerReductionMode) -> vk::SamplerReduction
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests;
 
-    #[test]
-    fn image_compression_fixed_rate_maps_bits_to_vk_flags() {
-        assert_eq!(
-            vk_image_compression_fixed_rate_flags(ImageCompression::Fixed {
-                bits_per_component: 1,
-            })
-            .unwrap()[0]
-                .as_raw(),
-            vk::ImageCompressionFixedRateFlagsEXT::TYPE_1BPC.as_raw()
-        );
-        assert_eq!(
-            vk_image_compression_fixed_rate_flags(ImageCompression::Fixed {
-                bits_per_component: 8,
-            })
-            .unwrap()[0]
-                .as_raw(),
-            vk::ImageCompressionFixedRateFlagsEXT::TYPE_8BPC.as_raw()
-        );
-        assert_eq!(
-            vk_image_compression_fixed_rate_flags(ImageCompression::Fixed {
-                bits_per_component: 24,
-            })
-            .unwrap()[0]
-                .as_raw(),
-            vk::ImageCompressionFixedRateFlagsEXT::TYPE_24BPC.as_raw()
-        );
-    }
-
-    #[test]
-    fn image_compression_fixed_rate_rejects_invalid_bit_counts() {
-        assert!(matches!(
-            vk_image_compression_fixed_rate_flags(ImageCompression::Fixed {
-                bits_per_component: 0,
-            }),
-            Err(Error::InvalidInput(_))
-        ));
-        assert!(matches!(
-            vk_image_compression_fixed_rate_flags(ImageCompression::Fixed {
-                bits_per_component: 25,
-            }),
-            Err(Error::InvalidInput(_))
-        ));
-    }
-
-    #[test]
-    fn image_compression_control_is_only_chained_when_enabled_and_explicit() {
-        let mut fixed_rate = [vk::ImageCompressionFixedRateFlagsEXT::TYPE_8BPC];
-        assert!(
-            vk_image_compression_control(
-                ImageCompression::Fixed {
-                    bits_per_component: 8,
-                },
-                false,
-                &mut fixed_rate,
-            )
-            .is_none()
-        );
-        assert!(
-            vk_image_compression_control(ImageCompression::Default, true, &mut fixed_rate)
-                .is_none()
-        );
-
-        let fixed = vk_image_compression_control(
-            ImageCompression::Fixed {
-                bits_per_component: 8,
-            },
-            true,
-            &mut fixed_rate,
-        )
-        .unwrap();
-        assert_eq!(
-            fixed.flags.as_raw(),
-            vk::ImageCompressionFlagsEXT::FIXED_RATE_EXPLICIT.as_raw()
-        );
-        assert_eq!(fixed.compression_control_plane_count, 1);
-
-        let mut unused = [vk::ImageCompressionFixedRateFlagsEXT::NONE];
-        let disabled =
-            vk_image_compression_control(ImageCompression::Disabled, true, &mut unused).unwrap();
-        assert_eq!(
-            disabled.flags.as_raw(),
-            vk::ImageCompressionFlagsEXT::DISABLED.as_raw()
-        );
-        assert_eq!(disabled.compression_control_plane_count, 0);
-    }
-
-    #[test]
-    fn optical_flow_image_info_requires_feature_when_usage_requested() {
-        let usage = ImageUsage::OPTICAL_FLOW_INPUT | ImageUsage::SAMPLED;
-        let flags = vk_optical_flow_image_usage(usage).unwrap();
-
-        assert!(matches!(
-            vk_optical_flow_image_info(flags, false, usage),
-            Err(Error::Unsupported(_))
-        ));
-
-        let info = vk_optical_flow_image_info(flags, true, usage)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            info.usage.as_raw(),
-            vk::OpticalFlowUsageFlagsNV::INPUT.as_raw()
-        );
-    }
-
-    #[test]
-    fn optical_flow_image_info_rejects_input_output_overlap() {
-        let usage = ImageUsage::OPTICAL_FLOW_INPUT | ImageUsage::OPTICAL_FLOW_OUTPUT;
-        let flags = vk_optical_flow_image_usage(usage).unwrap();
-
-        assert!(matches!(
-            vk_optical_flow_image_info(flags, true, usage),
-            Err(Error::InvalidInput(_))
-        ));
-    }
-}

@@ -51,9 +51,9 @@ pub struct PipelineRegistry {
     pub graphics_pipeline_library_enabled: bool,
     /// GFX-2c: Cached VertexInput libraries keyed by (vertex format + topology) hash.
     /// These are material-independent and rarely change.
-    vertex_input_libs: HashMap<u64, vk::Pipeline>,
+    pub vertex_input_libs: HashMap<u64, vk::Pipeline>,
     /// GFX-2c: Cached FragmentOutput libraries keyed by (attachment formats + blend + samples) hash.
-    fragment_output_libs: HashMap<u64, vk::Pipeline>,
+    pub fragment_output_libs: HashMap<u64, vk::Pipeline>,
 }
 
 impl PipelineRegistry {

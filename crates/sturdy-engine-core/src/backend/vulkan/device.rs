@@ -84,9 +84,21 @@ impl DeviceSelection {
             .ok_or(Error::Unsupported(
                 "selected Vulkan physical device has no graphics queue",
             ))?;
+        let video_decode = QueueFamilyMap::select_video_decode(&families, graphics);
+        let video_encode = QueueFamilyMap::select_video_encode(&families, graphics);
+        let async_compute = QueueFamilyMap::select_async_compute(&families, graphics);
+        let dma = QueueFamilyMap::select_dma(&families, graphics);
         Ok(Self {
             physical_device,
-            queue_families: QueueFamilyMap::unified(graphics),
+            queue_families: QueueFamilyMap {
+                graphics,
+                compute: graphics,
+                transfer: graphics,
+                video_decode,
+                video_encode,
+                async_compute,
+                dma,
+            },
         })
     }
 }
@@ -288,6 +300,8 @@ pub fn create_logical_device(
             graphics: device.get_device_queue(selection.queue_families.graphics, 0),
             compute: device.get_device_queue(selection.queue_families.compute, 0),
             transfer: device.get_device_queue(selection.queue_families.transfer, 0),
+            async_compute: device.get_device_queue(selection.queue_families.async_compute, 0),
+            dma: device.get_device_queue(selection.queue_families.dma, 0),
         }
     };
 
@@ -1233,6 +1247,10 @@ mod tests {
             graphics: 0,
             compute: 1,
             transfer: 2,
+            video_decode: todo!(),
+            video_encode: todo!(),
+            async_compute: todo!(),
+            dma: todo!(),
         };
 
         assert!(
