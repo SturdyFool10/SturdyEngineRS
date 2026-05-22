@@ -247,7 +247,11 @@ struct DeferredLightingConstants {
     float    sky_sun_size;       // cos(sun_disc_radius) — dot threshold for sun disc
     float    _pad;
 };
-uniform DeferredLightingConstants push;
+// Explicit Vulkan push-constant block.  [[vk::push_constant]] emits the same
+// SPIR-V OpVariable in PushConstant storage class that module-level `uniform`
+// does, but is correctly reflected as push constants by Slang's layout query.
+[[vk::push_constant]]
+DeferredLightingConstants push;
 
 // ── Vertex ────────────────────────────────────────────────────────────────────
 
@@ -263,6 +267,22 @@ float pcf3x3(Texture2D<float> smap, float2 uv, float ref_depth) {
     [unroll] for (int dx = -1; dx <= 1; ++dx)
     [unroll] for (int dy = -1; dy <= 1; ++dy) {
         float d = smap.SampleLevel(shadow_sampler, uv + float2(dx,dy)*texel, 0);
+        sum += (ref_depth <= d) ? 1.0 : 0.0;
+    }
+    return sum / 9.0;
+}
+
+/// PCF 3×3 with explicit tile-boundary clamping for atlas shadow maps.
+/// Prevents samples from bleeding into adjacent cascade tiles.
+float pcf3x3_atlas(Texture2D<float> smap, float2 uv, float ref_depth, float4 tile_bounds) {
+    uint w, h;
+    smap.GetDimensions(w, h);
+    float2 texel = 1.0 / float2(w, h);
+    float  sum   = 0.0;
+    [unroll] for (int dx = -1; dx <= 1; ++dx)
+    [unroll] for (int dy = -1; dy <= 1; ++dy) {
+        float2 s = clamp(uv + float2(dx, dy) * texel, tile_bounds.xy, tile_bounds.zw);
+        float d = smap.SampleLevel(shadow_sampler, s, 0);
         sum += (ref_depth <= d) ? 1.0 : 0.0;
     }
     return sum / 9.0;
@@ -365,7 +385,7 @@ float sample_cascade(uint cas, float3 world_pos, float bias) {
         float light_size = csm_data[0].pcss_light_size_uv[cas];
         return sample_cascade_pcss(atlas_uv, ref, light_size, tile);
     }
-    return pcf3x3(shadow_atlas, atlas_uv, ref);
+    return pcf3x3_atlas(shadow_atlas, atlas_uv, ref, tile);
 }
 
 /// Select cascade and evaluate shadow with optional blend at boundaries.
@@ -382,9 +402,13 @@ float evaluate_csm_shadow(float3 world_pos) {
     float shadow = sample_cascade(cas, world_pos, csm.depth_bias);
 
     // Blend into the next cascade near the far edge of this cascade.
+    // blend_range is a fraction of the *cascade width*, not of split_far,
+    // so the blend zone stays proportional across all cascades.
     if (cas + 1 < csm.cascade_count) {
+        float split_near = csm.split_distances[cas];
         float split_far  = csm.split_distances[cas + 1];
-        float blend_start = split_far * (1.0 - csm.blend_range);
+        float cascade_width = split_far - split_near;
+        float blend_start   = split_far - csm.blend_range * cascade_width;
         if (dist > blend_start) {
             float t = (dist - blend_start) / (split_far - blend_start);
             float next_shadow = sample_cascade(cas + 1, world_pos, csm.depth_bias);

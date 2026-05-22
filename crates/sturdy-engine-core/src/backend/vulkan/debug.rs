@@ -1,4 +1,4 @@
-use std::ffi::{CString, c_void};
+use std::ffi::{CStr, CString, c_void};
 
 use ash::{ext, vk};
 
@@ -20,9 +20,13 @@ unsafe extern "system" fn address_binding_report_callback(
                 if header.s_type == vk::StructureType::DEVICE_ADDRESS_BINDING_CALLBACK_DATA_EXT {
                     let binding =
                         unsafe { &*(p_next as *const vk::DeviceAddressBindingCallbackDataEXT) };
-                    eprintln!(
-                        "[address-binding] address={:#x} size={}B type={:?} flags={:?}",
-                        binding.base_address, binding.size, binding.binding_type, binding.flags,
+                    tracing::debug!(
+                        target: "vulkan::address_binding",
+                        address = binding.base_address,
+                        size_bytes = binding.size,
+                        binding_type = ?binding.binding_type,
+                        flags = ?binding.flags,
+                        "GPU address binding event"
                     );
                     break;
                 }
@@ -32,6 +36,130 @@ unsafe extern "system" fn address_binding_report_callback(
     }
     vk::FALSE
 }
+
+// ── Validation messenger ──────────────────────────────────────────────────────
+
+unsafe extern "system" fn validation_callback(
+    severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    type_flags: vk::DebugUtilsMessageTypeFlagsEXT,
+    data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
+    _user_data: *mut c_void,
+) -> vk::Bool32 {
+    let Some(data) = (unsafe { data.as_ref() }) else {
+        return vk::FALSE;
+    };
+
+    let type_tag = if type_flags.contains(vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION) {
+        "VALIDATION"
+    } else if type_flags.contains(vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE) {
+        "PERFORMANCE"
+    } else {
+        "GENERAL"
+    };
+
+    let msg_id = if data.p_message_id_name.is_null() {
+        "<unknown>"
+    } else {
+        unsafe { CStr::from_ptr(data.p_message_id_name) }
+            .to_str()
+            .unwrap_or("<invalid utf8>")
+    };
+
+    let msg = if data.p_message.is_null() {
+        "<no message>"
+    } else {
+        unsafe { CStr::from_ptr(data.p_message) }
+            .to_str()
+            .unwrap_or("<invalid utf8>")
+    };
+
+    // Build object detail string for structured logging.
+    let obj_count = data.object_count as usize;
+    let objects = unsafe { std::slice::from_raw_parts(data.p_objects, obj_count) };
+    let mut object_detail = String::new();
+    for obj in objects {
+        let name = if obj.p_object_name.is_null() {
+            None
+        } else {
+            unsafe { CStr::from_ptr(obj.p_object_name) }.to_str().ok()
+        };
+        object_detail.push_str(&format!(
+            "\n  object: type={:?} handle={:#x}{}",
+            obj.object_type,
+            obj.object_handle,
+            name.map(|n| format!(" name={n}")).unwrap_or_default()
+        ));
+    }
+
+    match severity {
+        s if s.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) => {
+            tracing::error!(target: "vulkan", "[{type_tag}] {msg_id}: {msg}{object_detail}");
+        }
+        s if s.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) => {
+            tracing::warn!(target: "vulkan", "[{type_tag}] {msg_id}: {msg}{object_detail}");
+        }
+        s if s.contains(vk::DebugUtilsMessageSeverityFlagsEXT::INFO) => {
+            tracing::info!(target: "vulkan", "[{type_tag}] {msg_id}: {msg}");
+        }
+        _ => {
+            tracing::debug!(target: "vulkan", "[{type_tag}] {msg_id}: {msg}");
+        }
+    }
+
+    // Abort on errors so the call-stack is visible in the debugger / backtrace.
+    if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
+        tracing::error!(target: "vulkan", "aborting on validation error — set RUST_BACKTRACE=1");
+        std::process::abort();
+    }
+
+    vk::FALSE
+}
+
+/// Validation-layer messenger: captures all severity levels and message types
+/// from `VK_LAYER_KHRONOS_validation`.  Only active in debug builds when the
+/// layer and `VK_EXT_debug_utils` are both available.
+pub struct ValidationMessenger {
+    loader: ext::debug_utils::Instance,
+    messenger: vk::DebugUtilsMessengerEXT,
+}
+
+impl ValidationMessenger {
+    pub fn create(entry: &ash::Entry, instance: &ash::Instance) -> Option<Self> {
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = (entry, instance);
+            return None;
+        }
+        #[cfg(debug_assertions)]
+        {
+            let loader = ext::debug_utils::Instance::load(entry, instance);
+            let create_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+                .message_severity(
+                    vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+                        | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
+                        | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
+                )
+                .message_type(
+                    vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                        | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                        | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+                )
+                .pfn_user_callback(Some(validation_callback));
+            let messenger =
+                unsafe { loader.create_debug_utils_messenger(&create_info, None) }.ok()?;
+            Some(Self { loader, messenger })
+        }
+    }
+
+    pub fn destroy(&mut self) {
+        unsafe {
+            self.loader
+                .destroy_debug_utils_messenger(self.messenger, None)
+        };
+    }
+}
+
+// ── Address-binding messenger ─────────────────────────────────────────────────
 
 /// GFX-1g: Instance-level debug messenger that receives `VK_EXT_device_address_binding_report`
 /// events and logs GPU VA binding/unbinding in debug builds.

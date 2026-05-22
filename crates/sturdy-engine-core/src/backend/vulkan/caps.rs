@@ -105,6 +105,18 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         && feature_chain
             .descriptor_indexing
             .descriptor_binding_partially_bound
+            == vk::TRUE
+        && feature_chain
+            .descriptor_indexing
+            .descriptor_binding_sampled_image_update_after_bind
+            == vk::TRUE
+        && feature_chain
+            .descriptor_indexing
+            .descriptor_binding_storage_image_update_after_bind
+            == vk::TRUE
+        && feature_chain
+            .descriptor_indexing
+            .descriptor_binding_storage_buffer_update_after_bind
             == vk::TRUE;
     let shader_fp16 = feature_chain.shader_float16_int8.shader_float16 == vk::TRUE;
     let shader_fp64 = core_features.shader_float64 == vk::TRUE;
@@ -258,7 +270,11 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     let performance_query = has(b"VK_KHR_performance_query\0");
     let pipeline_executable_properties = has(b"VK_KHR_pipeline_executable_properties\0");
     let shader_info_amd = has(b"VK_AMD_shader_info\0");
-    let graphics_pipeline_library = has(b"VK_EXT_graphics_pipeline_library\0");
+    let graphics_pipeline_library = has(b"VK_EXT_graphics_pipeline_library\0")
+        && feature_chain
+            .graphics_pipeline_library
+            .graphics_pipeline_library
+            == vk::TRUE;
     let pipeline_creation_cache_control =
         properties.api_version >= vk_1_3 || has(b"VK_EXT_pipeline_creation_cache_control\0");
     // GFX-2k: image compression swapchain
@@ -602,6 +618,16 @@ pub fn available_feature_names(
         .collect::<std::collections::HashSet<_>>();
     let has_ext = |name: &str| extensions.contains(name);
 
+    if chain.vulkan11.shader_draw_parameters == vk::TRUE {
+        names.push("shader_draw_parameters".into());
+    }
+
+    if chain.graphics_pipeline_library.graphics_pipeline_library == vk::TRUE
+        && has_ext("VK_EXT_graphics_pipeline_library")
+    {
+        names.push("graphics_pipeline_library".into());
+    }
+
     if chain.timeline.timeline_semaphore == vk::TRUE {
         names.push("timeline_semaphore".into());
         names.push("timeline_semaphores".into());
@@ -716,6 +742,7 @@ pub fn available_feature_names(
 
 #[derive(Clone, Copy)]
 pub struct AvailableFeatureChain<'a> {
+    pub vulkan11: vk::PhysicalDeviceVulkan11Features<'a>,
     pub descriptor_indexing: vk::PhysicalDeviceDescriptorIndexingFeatures<'a>,
     pub timeline: vk::PhysicalDeviceTimelineSemaphoreFeatures<'a>,
     pub dynamic_rendering: vk::PhysicalDeviceDynamicRenderingFeatures<'a>,
@@ -739,6 +766,7 @@ pub struct AvailableFeatureChain<'a> {
         vk::PhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT<'a>,
     pub shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT<'a>,
     pub optical_flow: vk::PhysicalDeviceOpticalFlowFeaturesNV<'a>,
+    pub graphics_pipeline_library: vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT<'a>,
     /// GFX-7b: VK_EXT_descriptor_heap feature detection.
     pub descriptor_heap: vk::PhysicalDeviceDescriptorHeapFeaturesEXT<'a>,
 }
@@ -748,6 +776,7 @@ pub fn available_feature_chain(
     physical_device: vk::PhysicalDevice,
 ) -> AvailableFeatureChain<'static> {
     let mut chain = AvailableFeatureChain {
+        vulkan11: vk::PhysicalDeviceVulkan11Features::default(),
         descriptor_indexing: vk::PhysicalDeviceDescriptorIndexingFeatures::default(),
         timeline: vk::PhysicalDeviceTimelineSemaphoreFeatures::default(),
         dynamic_rendering: vk::PhysicalDeviceDynamicRenderingFeatures::default(),
@@ -771,9 +800,11 @@ pub fn available_feature_chain(
             vk::PhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT::default(),
         shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT::default(),
         optical_flow: vk::PhysicalDeviceOpticalFlowFeaturesNV::default(),
+        graphics_pipeline_library: vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT::default(),
         descriptor_heap: vk::PhysicalDeviceDescriptorHeapFeaturesEXT::default(),
     };
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
+        .push(&mut chain.vulkan11)
         .push(&mut chain.descriptor_indexing)
         .push(&mut chain.timeline)
         .push(&mut chain.dynamic_rendering)
@@ -796,6 +827,7 @@ pub fn available_feature_chain(
         .push(&mut chain.msaa_render_to_single_sampled)
         .push(&mut chain.shader_object)
         .push(&mut chain.optical_flow)
+        .push(&mut chain.graphics_pipeline_library)
         .push(&mut chain.descriptor_heap);
     unsafe { instance.get_physical_device_features2(physical_device, &mut features2) };
     chain

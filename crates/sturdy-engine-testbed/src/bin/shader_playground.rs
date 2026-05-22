@@ -1,10 +1,10 @@
 use std::{path::PathBuf, time::Instant};
 
 use sturdy_engine::{
-    AntiAliasingMode, AntiAliasingPass, CpuProceduralTexture2d, DebugOverlay, DebugOverlayRenderer,
-    DebugViewPicker, Engine, EngineApp, HdrPipelineDesc, HdrPreference, ProceduralTextureRecipe,
-    ProceduralTextureUpdatePolicy, Result, RuntimeController, RuntimePostProcessDesc,
-    ShaderProgram, ShellFrame, Surface, SurfaceImage, WindowConfig, push_constants,
+    AntiAliasingMode, AntiAliasingPass, AppRuntime, AppRuntimeFrame, CpuProceduralTexture2d,
+    DebugOverlay, DebugOverlayRenderer, DebugViewPicker, HdrPipelineDesc, HdrPreference,
+    ProceduralTextureRecipe, ProceduralTextureUpdatePolicy, Result, RuntimeApp, RuntimeController,
+    RuntimePostProcessDesc, ShaderProgram, WindowConfig, push_constants, run_with_runtime,
 };
 
 #[push_constants]
@@ -50,11 +50,12 @@ struct ShaderPlayground {
     last_frame_started: Instant,
 }
 
-impl EngineApp for ShaderPlayground {
+impl RuntimeApp for ShaderPlayground {
     type Error = sturdy_engine::Error;
 
-    fn init(engine: &Engine, surface: &Surface) -> Result<Self> {
-        let hdr_caps = surface.hdr_caps()?;
+    fn init(runtime: &mut AppRuntime) -> Result<Self> {
+        let engine = runtime.engine();
+        let hdr_caps = runtime.surface().hdr_caps()?;
         let _hdr_desc =
             HdrPipelineDesc::select(&hdr_caps, &engine.caps(), HdrPreference::PreferHdr)?;
 
@@ -71,14 +72,18 @@ impl EngineApp for ShaderPlayground {
             },
         )?;
 
+        let debug_view_picker = DebugViewPicker::new(engine)?;
+        let controller = runtime.controller().clone();
+        debug_view_picker.register(&controller)?;
+
         Ok(Self {
             scene_program: engine.load_shader(shader_path("shader_playground_fragment.slang"))?,
             tonemap_program: engine.load_shader(shader_path("tonemap.slang"))?,
             aa_pass: AntiAliasingPass::new(engine)?,
             procedural_mask,
             overlay: DebugOverlayRenderer::new(engine)?,
-            debug_view_picker: DebugViewPicker::new(engine)?,
-            runtime_controller: None,
+            debug_view_picker,
+            runtime_controller: Some(controller),
             playhead_time: 0.0,
             paused: false,
             pending_step_frames: 0,
@@ -88,12 +93,10 @@ impl EngineApp for ShaderPlayground {
         })
     }
 
-    fn render(&mut self, frame: &mut ShellFrame<'_>, surface_image: &SurfaceImage) -> Result<()> {
-        let controller = frame.runtime_controller();
-        if self.runtime_controller.is_none() {
-            self.debug_view_picker.register(&controller)?;
-            self.runtime_controller = Some(controller.clone());
-        }
+    fn update(&mut self, appframe: &mut AppRuntimeFrame<'_>) -> Result<()> {
+        let shell_frame = appframe.shell_frame();
+        let surface_image = appframe.surface_image();
+        let controller = shell_frame.runtime_controller();
 
         let now = Instant::now();
         let delta = (now - self.last_frame_started).as_secs_f32();
@@ -111,11 +114,11 @@ impl EngineApp for ShaderPlayground {
         }
 
         let ext = surface_image.desc().extent;
-        let swapchain = frame.inner().swapchain_image(surface_image)?;
-        let scene_target = frame.default_hdr_scene_target("playground_scene", 1)?;
+        let swapchain = shell_frame.inner().swapchain_image(surface_image)?;
+        let scene_target = shell_frame.default_hdr_scene_target("playground_scene", 1)?;
         let scene_color =
-            frame.resolve_default_hdr_scene_target(&scene_target, "playground_scene")?;
-        let render_frame = frame.inner();
+            shell_frame.resolve_default_hdr_scene_target(&scene_target, "playground_scene")?;
+        let render_frame = shell_frame.inner();
 
         self.procedural_mask.prepare(render_frame)?;
 
@@ -130,7 +133,7 @@ impl EngineApp for ShaderPlayground {
             },
         )?;
 
-        let _ = frame.run_default_post_process(RuntimePostProcessDesc {
+        let _ = shell_frame.run_default_post_process(RuntimePostProcessDesc {
             scene_color: &scene_color,
             motion_vectors: None,
             bloom_pass: None,
@@ -157,8 +160,10 @@ impl EngineApp for ShaderPlayground {
                 linear_white: 1.25,
             },
         })?;
-        frame.publish_runtime_diagnostics("Off", 1, false, false);
-        let _ = self.debug_view_picker.present_selected(frame, &swapchain)?;
+        shell_frame.publish_runtime_diagnostics("Off", 1, false, false);
+        let _ = self
+            .debug_view_picker
+            .present_selected(&shell_frame, &swapchain)?;
 
         let mut overlay = DebugOverlay::new();
         overlay.rounded_rectangle_outline_screen(
@@ -194,7 +199,7 @@ impl EngineApp for ShaderPlayground {
             24.0,
             106.0,
         );
-        frame.run_camera_locked_pass(
+        shell_frame.run_camera_locked_pass(
             "playground_overlay",
             &swapchain,
             |render_frame, target| {
@@ -208,11 +213,7 @@ impl EngineApp for ShaderPlayground {
         Ok(())
     }
 
-    fn resize(&mut self, _width: u32, _height: u32) -> Result<()> {
-        Ok(())
-    }
-
-    fn key_pressed(&mut self, key: &str, _surface: &mut Surface) -> Result<()> {
+    fn key_pressed(&mut self, key: &str) -> Result<()> {
         match key {
             "P" | "p" => {
                 self.paused = !self.paused;
@@ -254,7 +255,7 @@ fn shader_path(name: &str) -> PathBuf {
 }
 
 fn main() {
-    sturdy_engine::run::<ShaderPlayground>(
+    run_with_runtime::<ShaderPlayground>(
         WindowConfig::new("SturdyEngine Shader Playground", 1280, 720).with_resizable(true),
     );
 }

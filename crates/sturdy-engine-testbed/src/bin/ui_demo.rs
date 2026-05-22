@@ -8,14 +8,14 @@ use clay_ui::{
     ElementStyle, LayoutCache, LayoutDirection, LayoutInput, LayoutSizing, LayoutTree,
     ListItemSpec, PendingRegistrations, ScrollConfig, Size, SliderConfig, StatusBarSectionSpec,
     TabSpec, TextWrap, ToggleAnimConfig, UiColor, UiTree, VirtualListConfig, WidgetBehavior,
-    WidgetPalette, WidgetState, WindowLogicalPx, button, checkbox, label, list_item, radio, slider,
+    WidgetPalette, WidgetState, button, checkbox, label, list_item, radio, slider,
     status_bar_with_palette, tab_bar, toggle, virtual_list,
 };
 use glam::Vec2;
 use std::time::Instant;
 use sturdy_engine::{
-    DebugOverlay, DebugOverlayRenderer, Engine, EngineApp, InputHub, KeyInput, Result, ShellFrame,
-    Surface, SurfaceImage, TextDrawDesc, TextPlacement, TextTypography, WindowConfig,
+    AppRuntime, AppRuntimeFrame, DebugOverlay, DebugOverlayRenderer, InputHub, Result, RuntimeApp,
+    TextDrawDesc, TextPlacement, TextTypography, WindowConfig, run_with_runtime,
 };
 
 // ── Stable element IDs ────────────────────────────────────────────────────────
@@ -86,10 +86,11 @@ const LIST_ITEMS: &[(&str, &str)] = &[
     ("water_surface", "Water surface"),
 ];
 
-impl EngineApp for UiDemo {
+impl RuntimeApp for UiDemo {
     type Error = sturdy_engine::Error;
 
-    fn init(engine: &Engine, _surface: &Surface) -> Result<Self> {
+    fn init(runtime: &mut AppRuntime) -> Result<Self> {
+        let engine = runtime.engine();
         let mut hub = InputHub::new();
         {
             let sim = hub.simulator_mut();
@@ -120,47 +121,21 @@ impl EngineApp for UiDemo {
         })
     }
 
-    fn pointer_moved(&mut self, pos: WindowLogicalPx, _surface: &mut Surface) -> Result<()> {
-        self.hub.on_pointer_moved(pos);
-        Ok(())
+    fn input_hub(&mut self) -> Option<&mut InputHub> {
+        Some(&mut self.hub)
     }
 
-    fn pointer_button(
-        &mut self,
-        pos: WindowLogicalPx,
-        button: u8,
-        pressed: bool,
-        _surface: &mut Surface,
-    ) -> Result<()> {
-        self.hub.on_pointer_button(pos, button, pressed);
-        Ok(())
-    }
-
-    fn pointer_scroll(
-        &mut self,
-        _pos: WindowLogicalPx,
-        delta_x: f32,
-        delta_y: f32,
-        _surface: &mut Surface,
-    ) -> Result<()> {
-        self.hub.on_pointer_scroll(delta_x, delta_y);
-        Ok(())
-    }
-
-    fn key_input(&mut self, input: &KeyInput, _surface: &mut Surface) -> Result<()> {
-        self.hub.on_key_input(input);
-        Ok(())
-    }
-
-    fn render(&mut self, frame: &mut ShellFrame<'_>, surface_image: &SurfaceImage) -> Result<()> {
+    fn update(&mut self, appframe: &mut AppRuntimeFrame<'_>) -> Result<()> {
+        let shell_frame = appframe.shell_frame();
+        let surface_image = appframe.surface_image();
         let now = Instant::now();
         self.frame_delta = (now - self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
 
         let ext = surface_image.desc().extent;
-        let logical_size = frame.window_logical_size().unwrap_or([
-            ext.width as f32 / frame.window_scale_factor(),
-            ext.height as f32 / frame.window_scale_factor(),
+        let logical_size = appframe.window_logical_size().unwrap_or([
+            ext.width as f32 / appframe.window_scale_factor(),
+            ext.height as f32 / appframe.window_scale_factor(),
         ]);
         let viewport = Size::new(logical_size[0].max(1.0), logical_size[1].max(1.0));
         let scale_x = ext.width as f32 / viewport.width.max(1.0);
@@ -223,7 +198,7 @@ impl EngineApp for UiDemo {
                 .map_err(|e| sturdy_engine::Error::InvalidInput(format!("layout: {e:?}")))?;
 
         // ── Draw ──────────────────────────────────────────────────────────────
-        let swapchain = frame.inner().swapchain_image(surface_image)?;
+        let swapchain = shell_frame.inner().swapchain_image(surface_image)?;
         let mut overlay = DebugOverlay::new();
 
         // Background.
@@ -272,13 +247,10 @@ impl EngineApp for UiDemo {
             col,
         );
 
+        let render_frame = shell_frame.inner();
         self.overlay
-            .draw(frame.inner(), &swapchain, ext.width, ext.height, &overlay)?;
-        frame.inner().present_image(&swapchain)?;
-        Ok(())
-    }
-
-    fn resize(&mut self, _w: u32, _h: u32) -> Result<()> {
+            .draw(render_frame, &swapchain, ext.width, ext.height, &overlay)?;
+        render_frame.present_image(&swapchain)?;
         Ok(())
     }
 }
@@ -818,7 +790,7 @@ fn spacer(id: ElementId, h: f32) -> Element {
 }
 
 fn main() {
-    sturdy_engine::run::<UiDemo>(
+    run_with_runtime::<UiDemo>(
         WindowConfig::new("SturdyEngine — Mouse Input Demo", 900, 700).with_resizable(true),
     );
 }

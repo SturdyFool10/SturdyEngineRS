@@ -34,6 +34,12 @@ fn testbed_shader(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn engine_shader(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/sturdy-engine/shaders")
+        .join(name)
+}
+
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn reflect_compute_shader_binding() {
@@ -119,6 +125,28 @@ fn reflect_binding_indices_are_preserved() {
 
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
+fn compiled_spirv_uses_reflected_entry_point_name_for_ray_tracing() {
+    for (source_entry, stage) in [
+        ("raygen", ShaderStage::RayGeneration),
+        ("miss", ShaderStage::Miss),
+        ("closest_hit", ShaderStage::ClosestHit),
+    ] {
+        let desc = ShaderDesc {
+            source: ShaderSource::File(testbed_shader("cornell_rt.slang")),
+            entry_point: source_entry.into(),
+            stage,
+            requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
+        };
+        let (compiled, _) = compile_and_reflect(&desc, ShaderTarget::Spirv)
+            .expect("ray tracing shader should compile");
+        assert_eq!(compiled.entry_point, "main");
+    }
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
 fn reflect_vertex_shader_no_bindings() {
     let desc = ShaderDesc {
         source: ShaderSource::File(testbed_shader("triangle_vertex.slang")),
@@ -160,6 +188,25 @@ fn reflect_push_constant_size_and_stage() {
     assert_eq!(parameter.stage_mask, StageMask::VERTEX);
     assert_eq!(parameter.access, ShaderResourceAccess::Read);
     assert_eq!(parameter.size_bytes, Some(32));
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn reflect_deferred_lighting_push_constants() {
+    let desc = ShaderDesc {
+        source: ShaderSource::File(engine_shader("deferred_lighting.slang")),
+        entry_point: "main".into(),
+        stage: ShaderStage::Fragment,
+        requires_ray_query: false,
+        requires_cooperative_matrix: false,
+        uses_ser: false,
+    };
+    let reflection = reflect_pipeline_layout(&desc).expect("reflection should succeed");
+    assert_eq!(reflection.layout.push_constants_bytes, 128);
+    assert_eq!(
+        reflection.layout.push_constants_stage_mask,
+        StageMask::FRAGMENT
+    );
 }
 
 #[test]

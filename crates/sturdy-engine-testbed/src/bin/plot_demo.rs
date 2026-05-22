@@ -1,6 +1,6 @@
 use sturdy_engine::{
-    DebugOverlay, DebugOverlayRenderer, Engine, EngineApp, Plot2d, PlotBar, PlotInspection,
-    PlotRange, PlotView, Result, ShellFrame, Surface, SurfaceImage, WindowConfig,
+    AppRuntime, AppRuntimeFrame, DebugOverlay, DebugOverlayRenderer, Plot2d, PlotBar,
+    PlotInspection, PlotRange, PlotView, Result, RuntimeApp, WindowConfig, run_with_runtime,
 };
 
 struct PlotDemo {
@@ -8,10 +8,11 @@ struct PlotDemo {
     plot: Plot2d,
 }
 
-impl EngineApp for PlotDemo {
+impl RuntimeApp for PlotDemo {
     type Error = sturdy_engine::Error;
 
-    fn init(engine: &Engine, _surface: &Surface) -> Result<Self> {
+    fn init(runtime: &mut AppRuntime) -> Result<Self> {
+        let engine = runtime.engine();
         let mut plot = Plot2d::new(PlotView::new(
             PlotRange::new(0.0, 6.0),
             PlotRange::new(0.0, 10.0),
@@ -56,9 +57,12 @@ impl EngineApp for PlotDemo {
         })
     }
 
-    fn render(&mut self, frame: &mut ShellFrame<'_>, surface_image: &SurfaceImage) -> Result<()> {
+    fn update(&mut self, appframe: &mut AppRuntimeFrame<'_>) -> Result<()> {
+        let shell_frame = appframe.shell_frame();
+        let surface_image = appframe.surface_image();
         let ext = surface_image.desc().extent;
-        let swapchain = frame.inner().swapchain_image(surface_image)?;
+        let swapchain = shell_frame.inner().swapchain_image(surface_image)?;
+        let frame = shell_frame.inner();
         let mut overlay = DebugOverlay::new();
         let inspection_point = self.plot.nearest_point([2.4, 4.2]).unwrap_or([0.0, 0.0]);
         self.plot.render(
@@ -73,18 +77,14 @@ impl EngineApp for PlotDemo {
             }),
         );
         self.overlay
-            .draw(frame.inner(), &swapchain, ext.width, ext.height, &overlay)?;
-        frame.inner().present_image(&swapchain)?;
-        Ok(())
-    }
-
-    fn resize(&mut self, _width: u32, _height: u32) -> Result<()> {
+            .draw(frame, &swapchain, ext.width, ext.height, &overlay)?;
+        frame.present_image(&swapchain)?;
         Ok(())
     }
 }
 
 fn main() {
-    sturdy_engine::run::<PlotDemo>(
+    run_with_runtime::<PlotDemo>(
         WindowConfig::new("SturdyEngine Plot Demo", 1024, 720).with_resizable(true),
     );
 }

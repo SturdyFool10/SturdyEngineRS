@@ -57,6 +57,9 @@ pub struct VulkanBackend {
     caps: Caps,
     enabled_extension_names: Vec<String>,
     debug: debug::DebugUtils,
+    /// Validation-layer messenger: prints errors/warnings from VK_LAYER_KHRONOS_validation.
+    /// Active in debug builds when the layer and VK_EXT_debug_utils are available.
+    validation_messenger: Option<debug::ValidationMessenger>,
     /// GFX-1g: Instance-level debug messenger for VK_EXT_device_address_binding_report events.
     /// Active in debug builds only when the extension is enabled.
     address_binding_messenger: Option<debug::AddressBindingMessenger>,
@@ -259,11 +262,19 @@ impl VulkanBackend {
             && caps.features.extended_dynamic_state3_color_blend;
         caps.features.vertex_input_dynamic_state = logical.vertex_input_dynamic_state_enabled;
         caps.features.shader_object = logical.shader_object_enabled && caps.features.shader_object;
-        // GFX-7a descriptor buffers require both the extension and its feature struct
-        // to be enabled on the logical device. Feature-chain enablement is not wired
-        // yet, so keep runtime descriptor-buffer paths disabled and use descriptor
-        // set pools instead of loading unusable extension entry points.
+        caps.features.graphics_pipeline_library = logical.graphics_pipeline_library_enabled;
+        caps.features.device_fault =
+            enabled_extension(&logical.enabled_extension_names, "VK_EXT_device_fault");
+        caps.features.device_diagnostic_checkpoints_nv = enabled_extension(
+            &logical.enabled_extension_names,
+            "VK_NV_device_diagnostic_checkpoints",
+        );
+        // GFX-7 descriptor-buffer/descriptor-heap paths require both extension
+        // presence and logical-device feature enablement. Feature-chain enablement
+        // for these experimental paths is not wired yet, so keep executable use
+        // disabled and continue using descriptor set pools.
         caps.features.descriptor_buffer = false;
+        caps.features.descriptor_heap = false;
         let video_queue_enabled =
             enabled_extension(&logical.enabled_extension_names, "VK_KHR_video_queue");
         // Raw codec extensions are exposed through `raw_extension_names`, but
@@ -350,8 +361,8 @@ impl VulkanBackend {
                 TRANSIENT_POOL_BYTES,
             ) {
                 Ok(pool) => ctx.set_buffer_pool(pool),
-                Err(e) => eprintln!(
-                    "[SturdyEngine] transient buffer pool creation failed (no-op fallback): {e}"
+                Err(e) => tracing::warn!(
+                    "transient buffer pool creation failed, using no-op fallback: {e}"
                 ),
             }
         }
@@ -368,7 +379,7 @@ impl VulkanBackend {
         pipeline_registry.descriptor_buffer_enabled =
             caps.features.descriptor_buffer && caps.features.buffer_device_address;
         pipeline_registry.graphics_pipeline_library_enabled =
-            caps.features.graphics_pipeline_library;
+            logical.graphics_pipeline_library_enabled;
         // GFX-7a: set up descriptor buffer backing BEFORE caps/instance/device are moved into Self.
         let mut descriptors_reg = descriptors::DescriptorRegistry::default();
         if caps.features.descriptor_buffer && caps.features.buffer_device_address {
@@ -378,6 +389,9 @@ impl VulkanBackend {
         }
 
         let debug_utils = debug::DebugUtils::new(&instance, &logical.device);
+        // Validation messenger: routes VK_LAYER_KHRONOS_validation output to stderr.
+        // Active in debug builds; a no-op in release builds or when the layer is absent.
+        let validation_messenger = debug::ValidationMessenger::create(&entry, &instance);
         // GFX-1g: Create address binding report messenger in debug builds when extension is enabled.
         let address_binding_messenger = if caps.features.device_address_binding_report {
             debug::AddressBindingMessenger::create(&entry, &instance)
@@ -408,14 +422,15 @@ impl VulkanBackend {
         } else {
             None
         };
-        let device_fault_ext = if caps.features.device_fault {
-            Some(ash::ext::device_fault::Device::load(
-                &instance,
-                &logical.device,
-            ))
-        } else {
-            None
-        };
+        let device_fault_ext =
+            if enabled_extension(&logical.enabled_extension_names, "VK_EXT_device_fault") {
+                Some(ash::ext::device_fault::Device::load(
+                    &instance,
+                    &logical.device,
+                ))
+            } else {
+                None
+            };
         #[cfg(debug_assertions)]
         let diagnostic_checkpoints_nv = if caps.features.device_diagnostic_checkpoints_nv {
             Some(ash::nv::device_diagnostic_checkpoints::Device::load(
@@ -646,8 +661,8 @@ impl VulkanBackend {
             match bindless::BindlessHeap::create(&logical.device) {
                 Ok(heap) => Some(heap),
                 Err(e) => {
-                    eprintln!(
-                        "[SturdyEngine] bindless heap creation failed (grouped-descriptor fallback): {e}"
+                    tracing::warn!(
+                        "bindless heap creation failed, falling back to grouped descriptors: {e}"
                     );
                     None
                 }
@@ -696,7 +711,7 @@ impl VulkanBackend {
                 ) {
                     Ok(h) => Some(h),
                     Err(e) => {
-                        eprintln!("[SturdyEngine] descriptor heap creation failed: {e}");
+                        tracing::warn!("descriptor heap creation failed: {e}");
                         None
                     }
                 }
@@ -722,6 +737,7 @@ impl VulkanBackend {
             caps,
             enabled_extension_names: logical.enabled_extension_names,
             debug: debug_utils,
+            validation_messenger,
             address_binding_messenger,
             commands: Mutex::new(commands),
             descriptors: RwLock::new(descriptors_reg),
@@ -962,20 +978,34 @@ impl Backend for VulkanBackend {
             })
             .collect();
 
-        // GFX-1e: Warn when any device-local heap exceeds 80% of its OS-reported budget.
+        // Warn relative to total physical device-local memory, not the OS-reported
+        // current budget. The latter can be temporarily small on shared-memory systems
+        // and caused noisy "over 80%" logs even when total device memory was healthy.
+        let mut total_device_local_usage = 0u64;
+        let mut total_device_local_memory = 0u64;
+        let mut total_device_local_budget = 0u64;
         for (i, heap) in heaps.iter().enumerate() {
-            let is_device_local = memory_heaps[i]
+            if memory_heaps[i]
                 .flags
-                .contains(ash::vk::MemoryHeapFlags::DEVICE_LOCAL);
-            if is_device_local && heap.budget > 0 && heap.usage > heap.budget * 4 / 5 {
-                let pct = (heap.usage * 100) / heap.budget;
-                eprintln!(
-                    "[SturdyEngine] VRAM budget warning: heap[{i}] {pct}% used ({}/{} MiB) — \
-                     consider reducing texture streaming or render target resolution",
-                    heap.usage / (1024 * 1024),
-                    heap.budget / (1024 * 1024),
-                );
+                .contains(ash::vk::MemoryHeapFlags::DEVICE_LOCAL)
+            {
+                total_device_local_usage = total_device_local_usage.saturating_add(heap.usage);
+                total_device_local_memory =
+                    total_device_local_memory.saturating_add(memory_heaps[i].size);
+                total_device_local_budget = total_device_local_budget.saturating_add(heap.budget);
             }
+        }
+        if total_device_local_memory > 0
+            && total_device_local_usage > total_device_local_memory * 4 / 5
+        {
+            let pct = (total_device_local_usage * 100) / total_device_local_memory;
+            tracing::warn!(
+                used_mib = total_device_local_usage / (1024 * 1024),
+                total_mib = total_device_local_memory / (1024 * 1024),
+                budget_mib = total_device_local_budget / (1024 * 1024),
+                pct,
+                "VRAM usage high — consider reducing texture streaming or render target resolution"
+            );
         }
 
         Some(crate::MemoryBudgetReport { heaps })
@@ -1530,6 +1560,19 @@ impl Backend for VulkanBackend {
             .destroy_acceleration_structure(&self.device, handle, as_ext)
     }
 
+    fn acceleration_structure_device_address(
+        &self,
+        handle: AccelerationStructureHandle,
+    ) -> Result<u64> {
+        let as_ext = self.acceleration_structure_khr.as_ref().ok_or_else(|| {
+            Error::Unsupported("VK_KHR_acceleration_structure is not enabled".into())
+        })?;
+        self.resources
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .acceleration_structure_device_address(&self.device, handle, as_ext)
+    }
+
     fn blas_build_sizes(&self, desc: &BlasBuildDesc) -> Result<AccelerationStructureBuildSizes> {
         let as_ext = self.acceleration_structure_khr.as_ref().ok_or_else(|| {
             Error::Unsupported("VK_KHR_acceleration_structure is not enabled".into())
@@ -1549,7 +1592,7 @@ impl Backend for VulkanBackend {
                 AccelerationStructureKind::BottomLevel,
             );
         }
-        query_blas_build_sizes(as_ext, desc)
+        query_blas_build_sizes(as_ext, desc, self.caps.features.ray_tracing_position_fetch)
     }
 
     fn tlas_build_sizes(&self, desc: &TlasBuildDesc) -> Result<AccelerationStructureBuildSizes> {
@@ -1839,7 +1882,10 @@ impl Backend for VulkanBackend {
                 self.queue_families.graphics,
                 handle,
                 desc,
-                self.caps.features.timeline_semaphores,
+                // vkQueuePresentKHR waits on binary semaphores; keep swapchain
+                // render-finished signaling binary even when timeline semaphores
+                // are enabled for internal submission chains.
+                false,
             )
     }
 
@@ -1995,7 +2041,13 @@ impl Backend for VulkanBackend {
                     .surfaces
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .frame_semaphores(sh)?;
+                    .frame_semaphores(sh)
+                    .map_err(|error| {
+                        Error::ResourceStateCorruption(format!(
+                            "vulkan flush failed while resolving frame semaphores for surface {:?}: {error:?}",
+                            sh
+                        ))
+                    })?;
                 (Some(sems.0), Some(sems.1))
             } else {
                 (None, None)
@@ -2017,7 +2069,12 @@ impl Backend for VulkanBackend {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             graph,
-        )?;
+        )
+        .map_err(|error| {
+            Error::ResourceStateCorruption(format!(
+                "vulkan flush failed while binding transient alias heaps: {error:?}"
+            ))
+        })?;
 
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut resources = self
@@ -2097,7 +2154,11 @@ impl Backend for VulkanBackend {
                 }
                 return Err(Error::DeviceLost(msg));
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                return Err(Error::ResourceStateCorruption(format!(
+                    "vulkan command submission failed: {e:?}"
+                )));
+            }
         };
 
         // Incrementally save the pipeline cache after enough new pipelines have
@@ -3374,6 +3435,7 @@ impl Backend for VulkanBackend {
 fn query_blas_build_sizes(
     as_ext: &ash::khr::acceleration_structure::Device,
     desc: &BlasBuildDesc,
+    ray_tracing_position_fetch: bool,
 ) -> Result<AccelerationStructureBuildSizes> {
     let geometries = desc
         .geometries
@@ -3409,7 +3471,7 @@ fn query_blas_build_sizes(
 
     let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
         .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
-        .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+        .flags(vk_blas_build_size_flags(ray_tracing_position_fetch))
         .mode(vk_build_mode(desc.mode))
         .geometries(&geometries);
     let mut sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
@@ -3422,6 +3484,16 @@ fn query_blas_build_sizes(
         )
     };
     Ok(vk_build_sizes(sizes))
+}
+
+fn vk_blas_build_size_flags(
+    ray_tracing_position_fetch: bool,
+) -> vk::BuildAccelerationStructureFlagsKHR {
+    let mut flags = vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE;
+    if ray_tracing_position_fetch {
+        flags |= vk::BuildAccelerationStructureFlagsKHR::ALLOW_DATA_ACCESS;
+    }
+    flags
 }
 
 fn query_tlas_build_sizes(
@@ -4002,7 +4074,10 @@ impl Drop for VulkanBackend {
                 }
             }
             self.device.destroy_device(None);
-            // GFX-1g: Destroy the address binding report messenger before the instance.
+            // Destroy debug messengers before the instance.
+            if let Some(mut messenger) = self.validation_messenger.take() {
+                messenger.destroy();
+            }
             if let Some(mut messenger) = self.address_binding_messenger.take() {
                 messenger.destroy();
             }

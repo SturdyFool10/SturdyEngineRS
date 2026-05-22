@@ -7,7 +7,6 @@ struct CameraConstants {
     float    time;
     float3   _pad;
 };
-uniform CameraConstants cam;
 
 struct VSInput {
     float3 position : POSITION;
@@ -25,7 +24,7 @@ struct VSOut {
     float4 tangent    : TANGENT;
 };
 
-VSOut main(VSInput input, uint instance_id : SV_InstanceID) {
+VSOut main(VSInput input, uint instance_id : SV_InstanceID, uniform CameraConstants cam) {
     float4x4 model  = instances[instance_id].model;
     float4   world  = mul(model, float4(input.position, 1.0));
     float3x3 model3 = (float3x3)model;

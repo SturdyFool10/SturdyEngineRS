@@ -281,19 +281,31 @@ impl PipelineRegistry {
             .max_pipeline_ray_recursion_depth(desc.max_recursion_depth)
             .layout(layout);
 
+        // RT pipelines must not share the on-disk graphics pipeline cache.
+        // The graphics cache contains type-specific blobs; passing it to the RT
+        // compiler causes it to deserialize graphics blobs as RT blobs and crash.
+        // Null disables caching for this call — this is correct Vulkan behaviour.
+        tracing::debug!(
+            stages = desc.stages.len(),
+            groups = desc.groups.len(),
+            max_recursion = desc.max_recursion_depth,
+            "compiling RT pipeline (no shared cache — RT uses its own cache space)"
+        );
         let pipeline = unsafe {
             rt_ext
                 .create_ray_tracing_pipelines(
                     vk::DeferredOperationKHR::null(),
-                    self.pipeline_cache,
+                    vk::PipelineCache::null(),
                     &[create_info],
                     None,
                 )
                 .map_err(|(_, e)| {
+                    tracing::error!("vkCreateRayTracingPipelinesKHR failed: {e:?}");
                     Error::Backend(format!("vkCreateRayTracingPipelinesKHR failed: {e:?}"))
                 })?
         }
         .remove(0);
+        tracing::debug!("RT pipeline compiled successfully");
 
         self.pipelines.insert(
             handle,
@@ -499,6 +511,12 @@ impl PipelineRegistry {
         }
         let multisample = vk::PipelineMultisampleStateCreateInfo::default()
             .rasterization_samples(vk_samples(desc.samples)?);
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(desc.depth_format.is_some())
+            .depth_write_enable(desc.depth_format.is_some())
+            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(false);
         let color_blend_attachments = desc
             .color_targets
             .iter()
@@ -530,8 +548,6 @@ impl PipelineRegistry {
             dynamic_states.push(vk::DynamicState::POLYGON_MODE_EXT);
             dynamic_states.push(vk::DynamicState::DEPTH_CLAMP_ENABLE_EXT);
         }
-        // Rasterizer discard is settable dynamically via core Vulkan 1.3 / EXT_extended_dynamic_state.
-        dynamic_states.push(vk::DynamicState::RASTERIZER_DISCARD_ENABLE);
         if self.vertex_input_dynamic_state_enabled {
             // Vertex input layout is set dynamically per-draw.
             dynamic_states.push(vk::DynamicState::VERTEX_INPUT_EXT);
@@ -547,6 +563,7 @@ impl PipelineRegistry {
             .rasterization_state(&rasterization)
             .multisample_state(&multisample)
             .color_blend_state(&color_blend)
+            .depth_stencil_state(&depth_stencil)
             .dynamic_state(&dynamic_state)
             .layout(layout)
             .render_pass(render_pass)
@@ -757,6 +774,8 @@ impl PipelineRegistry {
         };
 
         // ── 3. PreRasterization library (VS + rasterization; per-material) ────
+        // Spec: PRE_RASTERIZATION_SHADERS must NOT include pVertexInputState or
+        // pInputAssemblyState — those belong to VERTEX_INPUT_INTERFACE (vi_lib).
         let vs_stages: Vec<_> = stages
             .iter()
             .filter(|s| s.stage.contains(vk::ShaderStageFlags::VERTEX))
@@ -767,8 +786,6 @@ impl PipelineRegistry {
         let pre_raster_info = vk::GraphicsPipelineCreateInfo::default()
             .flags(vk::PipelineCreateFlags::LIBRARY_KHR)
             .stages(&vs_stages)
-            .vertex_input_state(vertex_input)
-            .input_assembly_state(input_assembly)
             .viewport_state(viewport_state)
             .rasterization_state(rasterization)
             .dynamic_state(dynamic_state)

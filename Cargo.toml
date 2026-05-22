@@ -30,6 +30,8 @@ cosmic-text = "0.18"
 glam = { version = "0.32", features = ["bytemuck"] }
 winit = "0.30"
 serde = { version = "1", features = ["derive"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "ansi"] }
 
 # Keep engine crates optimized even when building debug/test profiles. This is
 # useful for GPU-facing code paths where debug codegen can distort timings and

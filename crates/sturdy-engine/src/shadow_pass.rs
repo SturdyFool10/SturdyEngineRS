@@ -257,8 +257,11 @@ impl CsmPass {
     }
 
     pub fn with_config(engine: &Engine, config: CsmConfig) -> Result<Self> {
+        tracing::debug!("compiling shadow_depth.slang");
         let depth_program = build_depth_program(engine)?;
+        tracing::debug!("shadow_depth OK, compiling shadow_depth_masked.slang");
         let masked_depth_program = build_masked_depth_program(engine)?;
+        tracing::debug!("shadow_depth_masked OK");
         let csm_buffer = engine.create_buffer(BufferDesc {
             size: std::mem::size_of::<GpuCsmData>() as u64,
             usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
@@ -285,15 +288,34 @@ impl CsmPass {
         frame: &RenderFrame,
     ) -> Result<CsmOutput> {
         let n = (self.config.cascade_count as usize).clamp(1, MAX_CASCADES);
+        let res = self.config.resolution;
+
+        // ── Validate inputs before touching GPU resources ─────────────────────
+        validate_csm_inputs(near, far, res, scene.directional_light.direction)?;
+
         let light_dir = scene.directional_light.direction.normalize();
         let splits = compute_cascade_splits(near, far, n, self.config.lambda);
-        let res = self.config.resolution;
+
+        tracing::debug!(
+            "CsmPass::draw n={n} res={res} near={near:.3} far={far:.3} \
+             light_dir=({:.3},{:.3},{:.3}) splits={:?}",
+            light_dir.x,
+            light_dir.y,
+            light_dir.z,
+            &splits[..=n]
+        );
 
         // Build cascade matrices from tight frustum fitting.
         let mut matrices = [Mat4::IDENTITY; MAX_CASCADES];
         let mut pcss_light_size_uv = [0.0f32; MAX_CASCADES];
         let tile_scale = 1.0 / ATLAS_COLS as f32; // 0.5 for a 2×2 atlas
         for i in 0..n {
+            tracing::debug!(
+                cascade = i,
+                near = splits[i],
+                far = splits[i + 1],
+                "building cascade matrix"
+            );
             let (mat, world_width) = cascade_light_matrix(
                 view,
                 proj,
@@ -306,9 +328,15 @@ impl CsmPass {
                 self.config.z_extension,
                 self.config.stabilise,
             );
+            if mat_has_nan_or_inf(&mat) {
+                return Err(Error::InvalidInput(format!(
+                    "cascade {i} light matrix contains NaN/Inf (near={near:.3} far={far:.3} \
+                     split=[{:.3},{:.3}] world_width={world_width:.3})",
+                    splits[i],
+                    splits[i + 1]
+                )));
+            }
             matrices[i] = mat;
-            // UV-space size of the light source within this cascade's atlas tile.
-            // Clamped to reasonable range to avoid huge kernels on tiny cascades.
             pcss_light_size_uv[i] = (self.config.pcss_light_size / world_width.max(1e-3)
                 * tile_scale)
                 .clamp(0.001, 0.25);
@@ -328,6 +356,7 @@ impl CsmPass {
         // Each tile is `res × res`; the atlas is `2*res × 2*res`.
         let atlas_w = res * ATLAS_COLS;
         let atlas_h = res * ATLAS_ROWS;
+        tracing::debug!("allocating shadow_atlas {atlas_w}×{atlas_h}");
         let atlas_desc = ImageDesc {
             dimension: ImageDimension::D2,
             extent: Extent3d {
@@ -355,13 +384,15 @@ impl CsmPass {
         let tile_scale_y = 1.0 / ATLAS_ROWS as f32;
         let mut atlas_tiles = [[0.0f32; 4]; MAX_CASCADES];
 
+        let batch_count = scene.drawable_batches().count();
+        tracing::debug!("scene has {batch_count} drawable batches");
+
         for i in 0..n {
             let col = (i % ATLAS_COLS as usize) as u32;
             let row = (i / ATLAS_COLS as usize) as u32;
             let tile_x = col * res;
             let tile_y = row * res;
 
-            // Atlas UV sub-region for this cascade [x_min, y_min, x_max, y_max].
             atlas_tiles[i] = [
                 col as f32 * tile_scale_x,
                 row as f32 * tile_scale_y,
@@ -369,7 +400,7 @@ impl CsmPass {
                 (row + 1) as f32 * tile_scale_y,
             ];
 
-            // Render this cascade into its tile using a viewport override.
+            tracing::debug!("drawing cascade {i} → tile viewport [{tile_x},{tile_y},{res},{res}]");
             draw_shadow_batches_viewport(
                 scene,
                 frame,
@@ -379,22 +410,18 @@ impl CsmPass {
                 matrices[i],
                 [tile_x, tile_y, res, res],
             )?;
+            tracing::debug!("cascade {i} draw_shadow_batches_viewport OK");
         }
-        // Fill unused tile bounds with the last valid cascade's bounds.
         for i in n..MAX_CASCADES {
             atlas_tiles[i] = atlas_tiles[n - 1];
         }
 
-        // Register for the deferred lighting shader.
+        tracing::debug!("registering shadow_atlas and legacy names");
         shadow_atlas.register_as("shadow_atlas");
-
-        // Also register the legacy per-cascade names so existing shaders keep working.
         for i in 0..MAX_CASCADES {
-            let name = format!("shadow_map_{i}");
-            shadow_atlas.register_as(&name);
+            shadow_atlas.register_as(&format!("shadow_map_{i}"));
         }
 
-        // Pack split distances (view-space linear depth of each cascade start).
         let mut split_dists = [0.0f32; MAX_CASCADES];
         for i in 0..MAX_CASCADES {
             split_dists[i] = splits[i.min(n)];
@@ -411,7 +438,10 @@ impl CsmPass {
             pcss_light_size_uv,
         };
 
-        // Upload to the persistent GPU buffer.
+        tracing::debug!(
+            "writing csm_buffer ({} bytes)",
+            std::mem::size_of::<GpuCsmData>()
+        );
         self.csm_buffer.write(0, bytemuck::bytes_of(&gpu_data))?;
 
         let shadow_atlas = frame.find_image_by_name("shadow_atlas").ok_or_else(|| {
@@ -420,11 +450,44 @@ impl CsmPass {
             )
         })?;
 
+        tracing::debug!("CsmPass::draw complete");
         Ok(CsmOutput {
             shadow_atlas,
             gpu_data,
         })
     }
+}
+
+// ── Shadow validation helpers ─────────────────────────────────────────────────
+
+fn validate_csm_inputs(near: f32, far: f32, resolution: u32, light_dir: Vec3) -> Result<()> {
+    if !near.is_finite() || near <= 0.0 {
+        return Err(Error::InvalidInput(format!(
+            "CSM: camera near={near} is invalid (must be finite and > 0)"
+        )));
+    }
+    if !far.is_finite() || far <= near {
+        return Err(Error::InvalidInput(format!(
+            "CSM: camera far={far} is invalid (must be finite and > near={near})"
+        )));
+    }
+    if resolution == 0 {
+        return Err(Error::InvalidInput(
+            "CSM: shadow map resolution is zero".into(),
+        ));
+    }
+    let len = light_dir.length();
+    if !len.is_finite() || len < 1e-6 {
+        return Err(Error::InvalidInput(format!(
+            "CSM: directional light direction ({},{},{}) is zero or NaN",
+            light_dir.x, light_dir.y, light_dir.z
+        )));
+    }
+    Ok(())
+}
+
+fn mat_has_nan_or_inf(m: &Mat4) -> bool {
+    m.to_cols_array().iter().any(|v| !v.is_finite())
 }
 
 // ── Cascade math ──────────────────────────────────────────────────────────────
@@ -621,13 +684,24 @@ fn draw_shadow_batches_viewport(
     viewport: [u32; 4],
 ) -> Result<()> {
     use crate::scene::material::MaterialDomain;
+
+    if mat_has_nan_or_inf(&light_view_proj) {
+        return Err(Error::InvalidInput(
+            "draw_shadow_batches_viewport: light_view_proj contains NaN/Inf".into(),
+        ));
+    }
+
     let constants = ShadowDepthConstants {
         light_view_proj: light_view_proj.to_cols_array_2d(),
     };
+    let mut drawn = 0u32;
     for (mesh_idx, instance_buf_opt, instance_count) in scene.drawable_batches() {
         let instance_buf = match instance_buf_opt {
             Some(b) => b,
-            None => continue,
+            None => {
+                tracing::warn!("mesh_idx={mesh_idx} skipped (no instance buffer)");
+                continue;
+            }
         };
         if instance_count == 0 {
             continue;
@@ -637,6 +711,13 @@ fn draw_shadow_batches_viewport(
             continue;
         }
         let mesh = scene.mesh_at(mesh_idx);
+
+        tracing::debug!(
+            "mesh_idx={mesh_idx} instances={instance_count} domain={domain:?} \
+             verts={} viewport={viewport:?}",
+            mesh.vertex_count
+        );
+
         frame.bind_buffer("instances", instance_buf);
         let prog = if domain == MaterialDomain::Masked {
             if let Some(mb) = scene.material_gpu_buffer_at(mesh_idx) {
@@ -654,7 +735,10 @@ fn draw_shadow_batches_viewport(
             &constants,
             viewport,
         )?;
+        drawn += 1;
+        tracing::debug!("mesh_idx={mesh_idx} draw recorded (total drawn={drawn})");
     }
+    tracing::debug!("viewport draw complete: {drawn} batches");
     Ok(())
 }
 

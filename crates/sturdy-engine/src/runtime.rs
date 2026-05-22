@@ -304,6 +304,8 @@ impl AppRuntime {
             surface_image,
             render_frame,
             frame_time,
+            window_scale_factor: 1.0,
+            window_logical_size: None,
             finished: false,
         })
     }
@@ -367,6 +369,10 @@ pub struct AppRuntimeFrame<'a> {
     surface_image: SurfaceImage,
     render_frame: RenderFrame,
     frame_time: FrameTime,
+    /// DPI scale factor from the OS window, set by the event loop shell.
+    window_scale_factor: f32,
+    /// Logical window size in window pixels, set by the event loop shell.
+    window_logical_size: Option<[f32; 2]>,
     /// Set to `true` after `finish_and_present` completes to prevent the `Drop`
     /// impl from double-presenting when the user calls it explicitly.
     finished: bool,
@@ -406,6 +412,29 @@ impl<'a> AppRuntimeFrame<'a> {
     /// Monotonic frame index for this runtime frame.
     pub fn frame_index(&self) -> u64 {
         self.frame_time.frame
+    }
+
+    /// DPI scale factor for converting logical window/UI pixels to physical surface pixels.
+    ///
+    /// Set by the event loop shell from the OS window state before calling `update`.
+    /// Defaults to `1.0` when running outside the first-party shell.
+    pub fn window_scale_factor(&self) -> f32 {
+        self.window_scale_factor
+    }
+
+    /// Current drawable window size in logical window pixels, when known.
+    ///
+    /// Set by the event loop shell from the OS window state before calling `update`.
+    pub fn window_logical_size(&self) -> Option<[f32; 2]> {
+        self.window_logical_size
+    }
+
+    pub(crate) fn set_window_scale_factor(&mut self, scale_factor: f32) {
+        self.window_scale_factor = scale_factor.max(f32::EPSILON);
+    }
+
+    pub(crate) fn set_window_logical_size(&mut self, size: [f32; 2]) {
+        self.window_logical_size = Some([size[0].max(1.0), size[1].max(1.0)]);
     }
 
     /// Return the runtime-owned default HDR scene-target policy for this frame.
@@ -450,8 +479,78 @@ impl<'a> AppRuntimeFrame<'a> {
         self.render_frame.find_image_by_name(name)
     }
 
-    /// Create a shell-frame wrapper for compatibility with the existing app shell.
-    pub(crate) fn shell_frame(&self) -> crate::application::ShellFrame<'_> {
+    /// Register a named debug image with the runtime-owned registry for this frame.
+    pub fn register_debug_image(&self, name: impl Into<String>, image: &GraphImage) {
+        self.runtime.debug_images.register(image, name);
+    }
+
+    /// Return the shared runtime settings/diagnostics controller.
+    pub fn runtime_controller(&self) -> RuntimeController {
+        self.runtime.controller.clone()
+    }
+
+    /// Return a snapshot of the current runtime diagnostics.
+    pub fn runtime_diagnostics(&self) -> RuntimeDiagnostics {
+        self.runtime.controller.diagnostics()
+    }
+
+    /// Format default diagnostics into overlay-friendly lines.
+    ///
+    /// Equivalent to [`ShellFrame::default_runtime_overlay_lines`] — useful when
+    /// displaying a standard diagnostics overlay without using the shell frame.
+    pub fn default_runtime_overlay_lines(&self) -> Vec<String> {
+        let diagnostics = self.runtime.controller.diagnostics();
+        let debug_images = if diagnostics.debug_images.is_empty() {
+            "none".to_string()
+        } else {
+            diagnostics.debug_images.join(", ")
+        };
+        vec![
+            format!(
+                "runtime: backend={:?} adapter={}",
+                diagnostics.backend,
+                diagnostics.adapter_name.as_deref().unwrap_or("<unknown>")
+            ),
+            format!(
+                "surface: {:?} {:?}",
+                diagnostics.surface_format, diagnostics.surface_color_space,
+            ),
+            format!(
+                "graph: passes={} images={} warnings={} errors={} timings={}",
+                diagnostics.graph.pass_count,
+                diagnostics.graph.image_count,
+                diagnostics.graph.warning_count,
+                diagnostics.graph.error_count,
+                if diagnostics.timings.available {
+                    "available"
+                } else {
+                    "pending"
+                },
+            ),
+            format!(
+                "cpu: {:.1}ms p95={:.1}ms p99={:.1}ms",
+                diagnostics.timings.cpu_frame_time_ms.unwrap_or(0.0),
+                diagnostics.timings.cpu_p95_ms.unwrap_or(0.0),
+                diagnostics.timings.cpu_p99_ms.unwrap_or(0.0),
+            ),
+            format!(
+                "gpu: {}",
+                diagnostics
+                    .timings
+                    .gpu_frame_time_ms
+                    .map(|ms| format!("{ms:.1}ms"))
+                    .unwrap_or_else(|| "pending".to_string()),
+            ),
+            format!("debug images: {debug_images}"),
+        ]
+    }
+
+    /// Create a [`ShellFrame`](crate::ShellFrame) wrapper for use with APIs that
+    /// still require the older frame type.
+    ///
+    /// Prefer the native `AppRuntimeFrame` methods for new code. This bridge
+    /// exists to ease migration from `EngineApp`/`GameApp` to `RuntimeApp`.
+    pub fn shell_frame(&self) -> crate::application::ShellFrame<'_> {
         crate::application::ShellFrame::new(
             self.render_frame.clone(),
             self.default_scene_target().clone(),
@@ -506,10 +605,20 @@ impl<'a> AppRuntimeFrame<'a> {
 
     pub fn finish_and_present(&mut self) -> Result<()> {
         self.finished = true;
-        let flush_report = self
+        let flush_report = match self
             .render_frame
-            .flush_with_reason(crate::FrameSyncReason::FrameBoundaryPresent)?;
-        self.runtime.surface.present()?;
+            .flush_with_reason(crate::FrameSyncReason::FrameBoundaryPresent)
+        {
+            Ok(report) => report,
+            Err(error) => {
+                tracing::error!("frame flush failed before present: {error:?}");
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.runtime.surface.present() {
+            tracing::error!("surface present failed after successful frame flush: {error:?}");
+            return Err(error);
+        }
         self.render_frame.mark_presented();
         self.runtime.controller.update_diagnostics(|d| {
             d.frame_sync = Some(format!(
@@ -553,8 +662,8 @@ impl<'a> AppRuntimeFrame<'a> {
                 }
                 if let Some(report) = FrameTimingReport::from_summary(&d.timings) {
                     if report.is_jittery() {
-                        eprintln!(
-                            "[SturdyEngine] frame jitter: p99={:.1}ms mean={:.1}ms (p99 > 2× mean)",
+                        tracing::info!(
+                            "frame jitter: p99={:.1}ms mean={:.1}ms (p99 > 2× mean)",
                             report.p99_cpu_ms, report.mean_cpu_ms
                         );
                     }
@@ -583,6 +692,125 @@ pub trait AppLayer {
 
     /// Build UI or overlay content for the frame.
     fn build_ui(&mut self, _ui: &mut UiContext<'_>) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Full application lifecycle trait for the runtime-owned frame loop.
+///
+/// Implement this instead of [`EngineApp`](crate::EngineApp) or
+/// [`GameApp`](crate::GameApp) to get the first-party runtime shell as the
+/// default frame loop. The runtime shell owns surface acquisition, frame
+/// timing, CPU/GPU diagnostic recording, and P95/P99 history — the app only
+/// provides content and responds to lifecycle callbacks.
+///
+/// Use [`run_with_runtime`](crate::run_with_runtime) to launch the event loop.
+///
+/// # Example
+///
+/// ```ignore
+/// use sturdy_engine::{AppRuntime, AppRuntimeFrame, RuntimeApp, WindowConfig, run_with_runtime};
+///
+/// struct MyApp { /* scene, passes, etc. */ }
+///
+/// impl RuntimeApp for MyApp {
+///     type Error = sturdy_engine::Error;
+///
+///     fn init(runtime: &mut AppRuntime) -> sturdy_engine::Result<Self> {
+///         Ok(Self { /* ... */ })
+///     }
+///
+///     fn update(&mut self, frame: &mut AppRuntimeFrame<'_>) -> sturdy_engine::Result<()> {
+///         // Acquire, record passes, present is handled by the runtime.
+///         Ok(())
+///     }
+/// }
+///
+/// fn main() {
+///     run_with_runtime::<MyApp>(WindowConfig::new("My App", 1280, 720));
+/// }
+/// ```
+pub trait RuntimeApp: Sized {
+    type Error: std::error::Error;
+
+    /// Initialize the application after `AppRuntime` is ready.
+    ///
+    /// Called once before the first frame. The runtime already owns the engine
+    /// and surface; use it to create scenes, passes, and other renderer state.
+    fn init(runtime: &mut AppRuntime) -> std::result::Result<Self, Self::Error>;
+
+    /// Advance and render one frame.
+    ///
+    /// Called every frame with the acquired surface image and render frame
+    /// bundled in `frame`. Call `frame.finish_and_present()` explicitly if you
+    /// want to observe its error, or let the `Drop` impl present automatically.
+    fn update(&mut self, frame: &mut AppRuntimeFrame<'_>) -> std::result::Result<(), Self::Error>;
+
+    /// Handle a window resize.
+    ///
+    /// Called when the window is resized. The surface has already been
+    /// resized by the runtime shell before this callback fires.
+    fn resize(
+        &mut self,
+        _runtime: &mut AppRuntime,
+        _width: u32,
+        _height: u32,
+    ) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Return the app's [`InputHub`](crate::InputHub) for automatic input routing.
+    ///
+    /// When this returns `Some`, the shell routes keyboard, pointer, and scroll
+    /// events into the hub before calling `update` — the individual `key_pressed`
+    /// and pointer callbacks below are skipped. Prefer `InputHub` for new code.
+    fn input_hub(&mut self) -> Option<&mut crate::InputHub> {
+        None
+    }
+
+    /// Handle a character key press.
+    ///
+    /// Only called when [`input_hub`](RuntimeApp::input_hub) returns `None` and
+    /// the pressed key has a printable character string (e.g. `"b"`, `"B"`, `"1"`).
+    fn key_pressed(&mut self, _key: &str) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Handle pointer (mouse/touch) movement.
+    ///
+    /// `pos` is in top-left/Y-down `WindowLogicalPx`. Only called when
+    /// [`input_hub`](RuntimeApp::input_hub) returns `None`.
+    fn pointer_moved(
+        &mut self,
+        _pos: clay_ui::WindowLogicalPx,
+    ) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Handle a pointer button press or release.
+    ///
+    /// `pos` is in top-left/Y-down `WindowLogicalPx`. `button` is 0 = primary,
+    /// 1 = secondary, 2 = middle. Only called when
+    /// [`input_hub`](RuntimeApp::input_hub) returns `None`.
+    fn pointer_button(
+        &mut self,
+        _pos: clay_ui::WindowLogicalPx,
+        _button: u8,
+        _pressed: bool,
+    ) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// React to runtime setting changes applied since the last frame.
+    ///
+    /// Called once per frame when at least one setting has changed. Inspect
+    /// `changes` to rebuild passes, recreate targets, or update config structs.
+    /// The surface has already been updated by the shell before this is called.
+    fn runtime_settings_changed(
+        &mut self,
+        _controller: &RuntimeController,
+        _changes: &[RuntimeSettingChange],
+    ) -> std::result::Result<(), Self::Error> {
         Ok(())
     }
 }
@@ -823,6 +1051,13 @@ impl RuntimeController {
             .collect();
         diag.asset_diagnostics.sort_by(|a, b| a.path.cmp(&b.path));
         diag
+    }
+
+    /// Publish renderer workload counters for the current frame.
+    pub fn report_workload_diagnostics(&self, workload: RuntimeWorkloadDiagnostics) {
+        self.update_diagnostics(|diagnostics| {
+            diagnostics.workload = workload;
+        });
     }
 
     /// Report a shader compile error so it appears in `RuntimeDiagnostics`.
@@ -1206,6 +1441,7 @@ pub struct RuntimeDiagnostics {
     pub debug_images: Vec<String>,
     pub graph: RuntimeGraphDiagnostics,
     pub timings: RuntimeTimingSummary,
+    pub workload: RuntimeWorkloadDiagnostics,
     /// Active shader compile errors reported via `RuntimeController::report_shader_compile_error`.
     pub shader_compile_errors: Vec<ShaderCompileError>,
     /// Asset paths that are missing or stale, surfaced via `RuntimeController::report_asset_state`.
@@ -1313,6 +1549,22 @@ impl FrameTimeHistory {
         let p99 = sorted[((sorted.len() - 1) as f32 * 0.99) as usize];
         Some((mean, p95, p99))
     }
+}
+
+/// Renderer workload counters surfaced to benchmark/reporting tools.
+///
+/// Values are optional when the backend or render path cannot report them yet.
+/// This keeps benchmark reports schema-stable while making missing counters
+/// explicit instead of silently omitting them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RuntimeWorkloadDiagnostics {
+    pub visible_triangles: Option<u64>,
+    pub submitted_triangles: Option<u64>,
+    pub draw_count: Option<u64>,
+    pub dispatch_count: Option<u64>,
+    pub memory_used_bytes: Option<u64>,
+    pub memory_budget_bytes: Option<u64>,
+    pub upload_bytes: Option<u64>,
 }
 
 /// Frame timing summary surfaced through runtime diagnostics.
@@ -1773,6 +2025,12 @@ fn sync_runtime_settings_snapshot_value(
             RuntimeSettingId::Engine(RuntimeSettingKey::AssetHotReloadPolicy),
             RuntimeSettingValue::Text(policy),
         ) => settings.asset_hot_reload_policy = policy.clone(),
+        (
+            RuntimeSettingId::Engine(RuntimeSettingKey::LogLevel),
+            RuntimeSettingValue::Text(level),
+        ) => {
+            crate::set_log_level(level);
+        }
         _ => {}
     }
 }
@@ -2086,6 +2344,9 @@ pub enum RuntimeSettingKey {
     OverlayVisibility,
     ShaderHotReloadPolicy,
     AssetHotReloadPolicy,
+    /// Controls the stdout log level at runtime.
+    /// Values: "error", "warn", "info", "debug", "trace".
+    LogLevel,
 }
 
 impl RuntimeSettingKey {
@@ -2125,6 +2386,7 @@ impl RuntimeSettingKey {
             Self::OverlayVisibility,
             Self::ShaderHotReloadPolicy,
             Self::AssetHotReloadPolicy,
+            Self::LogLevel,
         ]
     }
 
@@ -2163,7 +2425,8 @@ impl RuntimeSettingKey {
             | Self::FramePacingMode
             | Self::MaxFramesInFlight
             | Self::ThreadedInputMode
-            | Self::RenderThreadingMode => RuntimeApplyPath::Immediate,
+            | Self::RenderThreadingMode
+            | Self::LogLevel => RuntimeApplyPath::Immediate,
         }
     }
 
@@ -2203,6 +2466,7 @@ impl RuntimeSettingKey {
             Self::OverlayVisibility => "overlay_visibility",
             Self::ShaderHotReloadPolicy => "shader_hot_reload_policy",
             Self::AssetHotReloadPolicy => "asset_hot_reload_policy",
+            Self::LogLevel => "log_level",
         }
     }
 
@@ -2242,6 +2506,7 @@ impl RuntimeSettingKey {
             Self::OverlayVisibility => "overlay visibility",
             Self::ShaderHotReloadPolicy => "shader hot-reload policy",
             Self::AssetHotReloadPolicy => "asset hot-reload policy",
+            Self::LogLevel => "log level",
         }
     }
 }
@@ -2710,6 +2975,14 @@ fn default_setting_entries(
             settings.asset_hot_reload_policy.clone(),
         )
         .with_options(text_options(&["Disabled", "Manual", "Automatic"])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::LogLevel,
+            "Log Level",
+            RuntimeSettingKey::LogLevel.apply_path(),
+            "warn",
+        )
+        .with_description("Stdout log verbosity. Changes take effect immediately.")
+        .with_options(text_options(&["error", "warn", "info", "debug", "trace"])),
     ];
 
     descriptors

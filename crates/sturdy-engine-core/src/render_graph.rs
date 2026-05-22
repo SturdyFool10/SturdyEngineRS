@@ -1293,7 +1293,10 @@ impl RenderGraph {
             let pass = &self.passes[pass_index as usize];
             for usage in pass.reads.iter().chain(pass.writes.iter()) {
                 let Some(image_index) = image_indices.get(&usage.image).copied() else {
-                    return Err(Error::InvalidHandle);
+                    return Err(Error::ResourceStateCorruption(format!(
+                        "render graph pass '{}' references image {:?} in state {:?}, but that image was not imported into the graph",
+                        pass.name, usage.image, usage.state
+                    )));
                 };
                 let image = &mut images[image_index];
                 image.first_use = image.first_use.min(ordered_index as u32);
@@ -1301,7 +1304,10 @@ impl RenderGraph {
             }
             for usage in pass.buffer_reads.iter().chain(pass.buffer_writes.iter()) {
                 let Some(buffer_index) = buffer_indices.get(&usage.buffer).copied() else {
-                    return Err(Error::InvalidHandle);
+                    return Err(Error::ResourceStateCorruption(format!(
+                        "render graph pass '{}' references buffer {:?} in state {:?}, but that buffer was not imported into the graph",
+                        pass.name, usage.buffer, usage.state
+                    )));
                 };
                 let buffer = &mut buffers[buffer_index];
                 buffer.first_use = buffer.first_use.min(ordered_index as u32);

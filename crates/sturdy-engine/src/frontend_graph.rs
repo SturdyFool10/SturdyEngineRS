@@ -3,12 +3,13 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use sturdy_engine_core as core;
 
 use crate::{
-    Access, BindGroup, BindGroupDesc, BindGroupEntry, BindingKind, Buffer, BufferDesc, BufferUsage,
-    BufferUse, CopyImageToBufferDesc, DispatchDesc, DrawDesc, DrawIndirectDesc, Engine, Error,
-    Format, ImageDesc, ImageHandle, ImageRef, ImageUse, IndexBufferBinding, PassDesc, PassWork,
-    PushConstants, QueueType, ResolveImageDesc, ResourceBinding, Result, RgState, ShaderReflection,
-    StageMask, SubresourceRange, SurfaceImage, VertexBufferBinding,
-    compute_program::ComputeProgram, mesh::Mesh, mesh_program::MeshProgram,
+    Access, BindGroup, BindGroupDesc, BindGroupEntry, BindingKind, BlasBuildDesc, Buffer,
+    BufferDesc, BufferUsage, BufferUse, CopyImageToBufferDesc, DispatchDesc, DrawDesc,
+    DrawIndirectDesc, Engine, Error, Format, ImageDesc, ImageHandle, ImageRef, ImageUse,
+    IndexBufferBinding, PassDesc, PassWork, Pipeline, PushConstants, QueueType,
+    RayTracingShaderBindingTable, ResolveImageDesc, ResourceBinding, Result, RgState,
+    ShaderReflection, StageMask, SubresourceRange, SurfaceImage, TlasBuildDesc, TraceRaysDesc,
+    VertexBufferBinding, compute_program::ComputeProgram, mesh::Mesh, mesh_program::MeshProgram,
     sampler_catalog::SamplerPreset,
 };
 
@@ -514,6 +515,135 @@ impl RenderFrame {
             },
         );
         self
+    }
+
+    pub fn build_blas(&self, name: impl Into<String>, build: BlasBuildDesc) -> Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        let declaration_index = inner.declaration_index;
+        inner.declaration_index = inner.declaration_index.saturating_add(1);
+        let pass_name = format!("{declaration_index:04}-build-blas-{}", name.into());
+        inner.pass_records.push(PassRecord {
+            name: pass_name.clone(),
+            kind: PassKind::Compute,
+            queue: core::QueueType::Compute,
+            reads: Vec::new(),
+            writes: Vec::new(),
+            buffer_read_names: Vec::new(),
+            buffer_write_names: Vec::new(),
+            deferred_read_names: Vec::new(),
+            skip_read_name: String::new(),
+        });
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                work: PassWork::BuildBlas(build),
+                ..PassDesc::default_compute(pass_name)
+            },
+            deferred: None,
+        });
+        Ok(())
+    }
+
+    pub fn build_tlas(&self, name: impl Into<String>, build: TlasBuildDesc) -> Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        let declaration_index = inner.declaration_index;
+        inner.declaration_index = inner.declaration_index.saturating_add(1);
+        let pass_name = format!("{declaration_index:04}-build-tlas-{}", name.into());
+        inner.pass_records.push(PassRecord {
+            name: pass_name.clone(),
+            kind: PassKind::Compute,
+            queue: core::QueueType::Compute,
+            reads: Vec::new(),
+            writes: Vec::new(),
+            buffer_read_names: Vec::new(),
+            buffer_write_names: Vec::new(),
+            deferred_read_names: Vec::new(),
+            skip_read_name: String::new(),
+        });
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                work: PassWork::BuildTlas(build),
+                ..PassDesc::default_compute(pass_name)
+            },
+            deferred: None,
+        });
+        Ok(())
+    }
+
+    pub fn trace_rays(
+        &self,
+        name: impl Into<String>,
+        pipeline: &Pipeline,
+        sbt: &RayTracingShaderBindingTable,
+        width: u32,
+        height: u32,
+        depth: u32,
+        bind_groups: &[&BindGroup],
+    ) -> Result<()> {
+        self.trace_rays_with_desc(
+            name,
+            TraceRaysDesc {
+                pipeline: pipeline.handle(),
+                sbt: sbt.table(),
+                width,
+                height,
+                depth,
+                indirect: None,
+            },
+            bind_groups,
+        )
+    }
+
+    pub fn trace_rays_with_desc(
+        &self,
+        name: impl Into<String>,
+        trace: TraceRaysDesc,
+        bind_groups: &[&BindGroup],
+    ) -> Result<()> {
+        self.trace_rays_with_desc_and_writes(name, trace, bind_groups, &[])
+    }
+
+    pub fn trace_rays_with_desc_and_writes(
+        &self,
+        name: impl Into<String>,
+        trace: TraceRaysDesc,
+        bind_groups: &[&BindGroup],
+        image_writes: &[&GraphImage],
+    ) -> Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        let declaration_index = inner.declaration_index;
+        inner.declaration_index = inner.declaration_index.saturating_add(1);
+        let pass_name = format!("{declaration_index:04}-trace-rays-{}", name.into());
+        let writes = image_writes
+            .iter()
+            .map(|image| ImageUse {
+                image: image.handle,
+                access: Access::Write,
+                state: RgState::ShaderWrite,
+                subresource: SubresourceRange::WHOLE,
+            })
+            .collect::<Vec<_>>();
+        inner.pass_records.push(PassRecord {
+            name: pass_name.clone(),
+            kind: PassKind::Compute,
+            queue: core::QueueType::Compute,
+            reads: Vec::new(),
+            writes: writes.clone(),
+            buffer_read_names: Vec::new(),
+            buffer_write_names: Vec::new(),
+            deferred_read_names: Vec::new(),
+            skip_read_name: String::new(),
+        });
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                pipeline: Some(trace.pipeline),
+                bind_groups: bind_groups.iter().map(|group| group.handle()).collect(),
+                work: PassWork::TraceRays(trace),
+                writes,
+                ..PassDesc::default_compute(pass_name)
+            },
+            deferred: None,
+        });
+        Ok(())
     }
 
     /// Dispatch a compute shader that reads and writes GPU buffers (no image target).
@@ -2178,6 +2308,16 @@ impl GraphImage {
 
         let pass_name = format!("{declaration_index:04}-draw-mesh-mrt-{}", self.name);
         let mesh_read_names = reflected_image_reads(program.reflection());
+        for name in &mesh_read_names {
+            if name != &self.name {
+                if let Some(record) = inner.images_by_name.get(name.as_str()).copied() {
+                    inner
+                        .frame
+                        .inner
+                        .graph_mut(|g| g.import_image(record.handle, record.desc))?;
+                }
+            }
+        }
         let (eager_bindings, unresolved_read_names, eager_uses) =
             split_read_names(&mesh_read_names, &self.name, &inner.images_by_name);
 
@@ -2387,6 +2527,16 @@ impl GraphImage {
 
         let pass_name = format!("{declaration_index:04}-draw-indirect-{}", self.name);
         let mesh_read_names = reflected_image_reads(program.reflection());
+        for name in &mesh_read_names {
+            if name != &self.name {
+                if let Some(record) = inner.images_by_name.get(name.as_str()).copied() {
+                    inner
+                        .frame
+                        .inner
+                        .graph_mut(|g| g.import_image(record.handle, record.desc))?;
+                }
+            }
+        }
         let (eager_bindings, unresolved_read_names, eager_uses) =
             split_read_names(&mesh_read_names, &self.name, &inner.images_by_name);
 
@@ -2546,6 +2696,16 @@ impl GraphImage {
 
         let pass_name = format!("{declaration_index:04}-draw-mesh-{}", self.name);
         let mesh_read_names = reflected_image_reads(program.reflection());
+        for name in &mesh_read_names {
+            if name != &self.name {
+                if let Some(record) = inner.images_by_name.get(name.as_str()).copied() {
+                    inner
+                        .frame
+                        .inner
+                        .graph_mut(|g| g.import_image(record.handle, record.desc))?;
+                }
+            }
+        }
         let (eager_bindings, unresolved_read_names, mut eager_uses) =
             split_read_names(&mesh_read_names, &self.name, &inner.images_by_name);
 
@@ -2882,6 +3042,16 @@ fn record_fullscreen_shader_pass(
 
     let pipeline = shader.pipeline_handle(target.desc.format, target.desc.samples)?;
     let read_names = reflected_image_reads(shader.reflection());
+    for name in &read_names {
+        if name != &target.name {
+            if let Some(record) = inner.images_by_name.get(name.as_str()).copied() {
+                inner
+                    .frame
+                    .inner
+                    .graph_mut(|g| g.import_image(record.handle, record.desc))?;
+            }
+        }
+    }
     let (eager_bindings, unresolved_read_names, eager_uses) = split_read_names_with_explicit(
         &read_names,
         &target.name,
@@ -3351,10 +3521,28 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
                 &inner.buffers_by_name,
                 &deferred.eager_buffers,
             )?;
+            for use_ in buffer_reads.iter().chain(buffer_writes.iter()) {
+                let desc = deferred
+                    .eager_buffers
+                    .values()
+                    .chain(inner.buffers_by_name.values())
+                    .find_map(|(handle, desc)| (*handle == use_.buffer).then_some(*desc))
+                    .ok_or_else(|| {
+                        Error::ResourceStateCorruption(format!(
+                            "reflected buffer {:?} for pass '{}' had no descriptor for graph import",
+                            use_.buffer, desc.name
+                        ))
+                    })?;
+                inner
+                    .frame
+                    .inner
+                    .graph_mut(|g| g.import_buffer(use_.buffer, desc))?;
+            }
             append_unique_buffer_uses(&mut desc.buffer_reads, buffer_reads);
             append_unique_buffer_uses(&mut desc.buffer_writes, buffer_writes);
 
             // Build the bind group now that all images are known.
+            let pass_name = desc.name.clone();
             let bind_groups = build_reflected_bind_group(
                 &inner.engine,
                 deferred.layout_handle,
@@ -3369,7 +3557,12 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
                     .storage_output
                     .as_ref()
                     .map(|(s, h)| (s.as_str(), *h)),
-            )?;
+            )
+            .map_err(|error| {
+                Error::ResourceStateCorruption(format!(
+                    "resolving bind group for pass '{pass_name}' failed: {error:?}"
+                ))
+            })?;
             desc.bind_groups = bind_groups.iter().map(|bg| bg.handle()).collect();
             inner.held_bind_groups.extend(bind_groups);
         }
@@ -3392,7 +3585,12 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
                 "scheduler produced a duplicate pass index".into(),
             )
         })?;
-        inner.frame.add_pass(pass)?;
+        let pass_name = pass.name.clone();
+        inner.frame.add_pass(pass).map_err(|error| {
+            Error::ResourceStateCorruption(format!(
+                "adding graph pass '{pass_name}' failed: {error:?}"
+            ))
+        })?;
     }
     Ok(())
 }

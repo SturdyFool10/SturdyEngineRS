@@ -1,6 +1,6 @@
 use crate::{
-    BindGroup, BindGroupDesc, BindGroupEntry, BindingKind, Buffer, Engine, Error, Image,
-    PipelineLayout, ResourceBinding, Result, Sampler,
+    AccelerationStructure, BindGroup, BindGroupDesc, BindGroupEntry, BindingKind, Buffer, Engine,
+    Error, Image, PipelineLayout, ResourceBinding, Result, Sampler,
 };
 
 pub struct BindGroupBuilder<'a> {
@@ -64,6 +64,40 @@ impl<'a> BindGroupBuilder<'a> {
 
     pub fn sampler_auto(self, sampler: &Sampler) -> Result<Self> {
         self.entry_auto(ResourceBinding::Sampler(sampler.handle()))
+    }
+
+    pub fn acceleration_structure(
+        mut self,
+        path: impl Into<String>,
+        acceleration_structure: &AccelerationStructure,
+    ) -> Self {
+        self.entries.push(BindGroupEntry {
+            path: path.into(),
+            resource: ResourceBinding::AccelerationStructure(acceleration_structure.handle()),
+        });
+        self
+    }
+
+    pub fn acceleration_structure_binding(
+        self,
+        set: usize,
+        binding: u32,
+        acceleration_structure: &AccelerationStructure,
+    ) -> Result<Self> {
+        self.entry_binding(
+            set,
+            binding,
+            ResourceBinding::AccelerationStructure(acceleration_structure.handle()),
+        )
+    }
+
+    pub fn acceleration_structure_auto(
+        self,
+        acceleration_structure: &AccelerationStructure,
+    ) -> Result<Self> {
+        self.entry_auto(ResourceBinding::AccelerationStructure(
+            acceleration_structure.handle(),
+        ))
     }
 
     pub fn entry(mut self, path: impl Into<String>, resource: ResourceBinding) -> Self {
@@ -164,6 +198,10 @@ fn resource_matches_binding(resource: ResourceBinding, kind: BindingKind) -> boo
             ResourceBinding::Buffer(_),
             BindingKind::UniformBuffer | BindingKind::StorageBuffer
         ) | (ResourceBinding::Sampler(_), BindingKind::Sampler)
+            | (
+                ResourceBinding::AccelerationStructure(_),
+                BindingKind::AccelerationStructure,
+            )
     )
 }
 
@@ -173,6 +211,7 @@ fn resource_label(resource: ResourceBinding) -> &'static str {
         ResourceBinding::ImageView { .. } => "image view",
         ResourceBinding::Buffer(_) => "buffer",
         ResourceBinding::Sampler(_) => "sampler",
+        ResourceBinding::AccelerationStructure(_) => "acceleration structure",
     }
 }
 

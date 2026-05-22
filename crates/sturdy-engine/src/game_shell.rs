@@ -293,7 +293,7 @@ where
     App::Error: std::fmt::Debug,
 {
     if let Err(error) = try_run_game::<App>(config) {
-        eprintln!("{error}");
+        tracing::error!("{error}");
         std::process::exit(1);
     }
 }

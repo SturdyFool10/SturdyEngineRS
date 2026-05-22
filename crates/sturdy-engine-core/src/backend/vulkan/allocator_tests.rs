@@ -36,3 +36,47 @@ fn block_free_rejects_out_of_range_deallocation() {
 
     assert!(format!("{error}").contains("invalid deallocation range"));
 }
+
+#[test]
+fn allocator_device_local_capacity_uses_whole_device_memory() {
+    let mut props = vk::PhysicalDeviceMemoryProperties::default();
+    props.memory_heap_count = 2;
+    props.memory_heaps[0] = vk::MemoryHeap {
+        size: 4 * 1024 * 1024 * 1024,
+        flags: vk::MemoryHeapFlags::DEVICE_LOCAL,
+    };
+    props.memory_heaps[1] = vk::MemoryHeap {
+        size: 512 * 1024 * 1024,
+        flags: vk::MemoryHeapFlags::empty(),
+    };
+
+    let allocator = GpuAllocator::new(props);
+
+    assert_eq!(allocator.device_local_memory_bytes, 4 * 1024 * 1024 * 1024);
+}
+
+#[test]
+fn allocator_block_size_pressure_ignores_transient_os_budget_dips() {
+    let mut props = vk::PhysicalDeviceMemoryProperties::default();
+    props.memory_heap_count = 1;
+    props.memory_heaps[0] = vk::MemoryHeap {
+        size: 4 * 1024 * 1024 * 1024,
+        flags: vk::MemoryHeapFlags::DEVICE_LOCAL,
+    };
+
+    let mut allocator = GpuAllocator::new(props);
+    allocator.device_local_budget = 128 * 1024 * 1024;
+    let mut pool = TypePool::new(0, false, vk::MemoryAllocateFlags::empty());
+    pool.blocks.push(Block::new(
+        0,
+        vk::DeviceMemory::default(),
+        512 * 1024 * 1024,
+        None,
+    ));
+    allocator.pools.push(pool);
+
+    assert_eq!(
+        allocator.device_local_new_block_size(),
+        DEVICE_LOCAL_BLOCK_SIZE
+    );
+}

@@ -55,6 +55,7 @@ mod point_shadow_pass;
 mod post_process;
 mod procedural_texture;
 mod quad_batch;
+mod realtime_raytracing;
 pub mod render_world;
 mod runtime;
 mod sampler_catalog;
@@ -91,7 +92,7 @@ pub use ao_pass::{AoConfig, AoMode, AoPass};
 pub use application::{
     EngineApp, MotionVectorLayer, MotionVectorSpace, RuntimeMotionVectorDesc,
     RuntimePostProcessDesc, RuntimePostProcessOutput, ShellFrame, WindowConfig, WindowDesc, run,
-    try_run,
+    run_with_runtime, set_log_level, try_run, try_run_with_runtime,
 };
 pub use asset_loader::{AssetCache, AssetHandle, LoadState};
 pub use asset_watcher::{AssetReloadDiagnostic, AssetWatcher};
@@ -186,6 +187,10 @@ pub use procedural_texture::{
     CpuProceduralTexture2d, ProceduralTextureRecipe, ProceduralTextureUpdatePolicy,
 };
 pub use quad_batch::QuadBatch;
+pub use realtime_raytracing::{
+    RealtimeBlas, RealtimeRayTracingDenoiser, RealtimeRayTracingPipeline,
+    RealtimeRayTracingShaderDesc, RealtimeRayTracingSupport, RealtimeTlas, RealtimeTlasInstance,
+};
 pub use render_world::{
     Aabb, GpuObjectAllocator, GpuObjectId, LayerMask, LocalToWorld, LodGroupId, MaterialId,
     PreviousTransform, RenderBounds, RenderDirtyFlags, RenderExtractionStats, RenderMaterial,
@@ -195,13 +200,14 @@ pub use render_world::{
 };
 pub use runtime::{
     AppLayer, AppRuntime, AppRuntimeFrame, AssetDiagnostic, AssetState, DebugImageRegistry,
-    DefaultSceneTargetConfig, FrameTimingReport, RuntimeApplyNotification, RuntimeApplyPath,
-    RuntimeApplyReport, RuntimeChangeResult, RuntimeController, RuntimeDiagnostics,
-    RuntimeGraphDiagnostics, RuntimePassTiming, RuntimeSettingChange, RuntimeSettingDescriptor,
-    RuntimeSettingEntry, RuntimeSettingId, RuntimeSettingKey, RuntimeSettingOption,
-    RuntimeSettingSource, RuntimeSettingSupport, RuntimeSettingValue, RuntimeSettingsSnapshot,
-    RuntimeSettingsTransaction, RuntimeTimingSummary, RuntimeUserDiagnostic,
-    RuntimeWindowDiagnostics, SceneRenderContext, ShaderCompileError, UiContext, WindowMode,
+    DefaultSceneTargetConfig, FrameTimingReport, RuntimeApp, RuntimeApplyNotification,
+    RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult, RuntimeController,
+    RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimePassTiming, RuntimeSettingChange,
+    RuntimeSettingDescriptor, RuntimeSettingEntry, RuntimeSettingId, RuntimeSettingKey,
+    RuntimeSettingOption, RuntimeSettingSource, RuntimeSettingSupport, RuntimeSettingValue,
+    RuntimeSettingsSnapshot, RuntimeSettingsTransaction, RuntimeTimingSummary,
+    RuntimeUserDiagnostic, RuntimeWindowDiagnostics, RuntimeWorkloadDiagnostics,
+    SceneRenderContext, ShaderCompileError, UiContext, WindowMode,
 };
 pub use sampler_catalog::SamplerPreset;
 pub use scene::{
@@ -250,26 +256,28 @@ pub use shader_program::{ShaderName, ShaderProgram, ShaderProgramDesc, SlangEntr
 pub use sturdy_engine_core::NativeSurfaceDesc;
 pub use sturdy_engine_core::ShaderReflection;
 pub use sturdy_engine_core::{
-    AccelerationStructureDesc, AccelerationStructureKind, Access, AdapterInfo, AdapterKind,
-    AdapterSelection, AddressMode, BackendKind, BackendRawCapabilities, BindGroupDesc,
-    BindGroupEntry, BindingKind, BlendMode, BorderColor, BufferDesc, BufferUsage, BufferUse,
-    CanonicalBinding, CanonicalGroupLayout, CanonicalPipelineLayout, Caps, ColorTargetDesc,
-    CompareOp, CompiledShaderArtifact, ComputePipelineDesc, CopyBufferToImageDesc,
-    CopyImageToBufferDesc, CullMode, D3d12RawCapabilities, DispatchDesc, DispatchIndirectDesc,
-    DrawDesc, DrawIndirectCountDesc, DrawIndirectDesc, DrawMeshShaderDesc,
-    DrawMeshShaderIndirectDesc, Error, ErrorCategory, Extent3d, ExternalBufferDesc,
-    ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode, Format,
-    FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GpuMemoryBudget,
-    GraphicsPipelineDesc, HdrMetadata, ImageBuilder, ImageCompression, ImageDesc, ImageDimension,
-    ImageRole, ImageUsage, ImageUse, IndexBufferBinding, IndexFormat, MemoryBudgetReport,
-    MemoryHeapBudget, MetalRawCapabilities, MipmapMode, NativeHandleCapabilities,
-    NativeHandleCapability, NativeHandleKind, NativeHandleOwnership, PassDesc, PassWork,
-    PolygonMode, PrimitiveTopology, PushConstants, QueueType, RasterState, ResolveImageDesc,
-    ResourceBinding, Result, RgState, SamplerDesc, ShaderDesc, ShaderParameterKind,
-    ShaderParameterReflection, ShaderResourceAccess, ShaderSource, ShaderStage, ShaderTarget,
-    ShadingRate, SlangCompileDesc, StageMask, SubresourceRange, SurfaceCapabilities,
-    SurfaceColorSpace, SurfaceEvent, SurfaceFormatInfo, SurfaceHdrCaps, SurfaceHdrPreference,
-    SurfaceInfo, SurfacePresentMode, SurfaceRecreateDesc, UpdateRate, VertexAttributeDesc,
+    AccelerationStructureBuildMode, AccelerationStructureBuildSizes, AccelerationStructureDesc,
+    AccelerationStructureKind, Access, AdapterInfo, AdapterKind, AdapterSelection, AddressMode,
+    BackendKind, BackendRawCapabilities, BindGroupDesc, BindGroupEntry, BindingKind, BlasBuildDesc,
+    BlasGeometryDesc, BlendMode, BorderColor, BufferDesc, BufferUsage, BufferUse, CanonicalBinding,
+    CanonicalGroupLayout, CanonicalPipelineLayout, Caps, ColorTargetDesc, CompareOp,
+    CompiledShaderArtifact, ComputePipelineDesc, CopyBufferToImageDesc, CopyImageToBufferDesc,
+    CullMode, D3d12RawCapabilities, DispatchDesc, DispatchIndirectDesc, DrawDesc,
+    DrawIndirectCountDesc, DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, Error,
+    ErrorCategory, Extent3d, ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc,
+    ExternalImageHandle, FilterMode, Format, FormatCapabilities, FrontFace, GpuCaptureDesc,
+    GpuCaptureTool, GpuMemoryBudget, GraphicsPipelineDesc, HdrMetadata, ImageBuilder,
+    ImageCompression, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse,
+    IndexBufferBinding, IndexFormat, MemoryBudgetReport, MemoryHeapBudget, MetalRawCapabilities,
+    MipmapMode, NativeHandleCapabilities, NativeHandleCapability, NativeHandleKind,
+    NativeHandleOwnership, PassDesc, PassWork, PolygonMode, PrimitiveTopology, PushConstants,
+    QueueType, RasterState, RayTracingPipelineDesc, RayTracingStageDesc, ResolveImageDesc,
+    ResourceBinding, Result, RgState, RtShaderGroupDesc, RtShaderGroupKind, SamplerDesc,
+    ShaderBindingTableDesc, ShaderDesc, ShaderParameterKind, ShaderParameterReflection,
+    ShaderResourceAccess, ShaderSource, ShaderStage, ShaderTarget, ShadingRate, SlangCompileDesc,
+    StageMask, SubresourceRange, SurfaceCapabilities, SurfaceColorSpace, SurfaceEvent,
+    SurfaceFormatInfo, SurfaceHdrCaps, SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode,
+    SurfaceRecreateDesc, TlasBuildDesc, TraceRaysDesc, UpdateRate, VertexAttributeDesc,
     VertexBufferBinding, VertexBufferLayout, VertexFormat, VertexInputRate, VertexInputReflection,
     VulkanExternalBuffer, VulkanExternalImage, VulkanRawCapabilities, compile_slang,
     compile_slang_to_file, compile_slang_to_spirv, native_handle_capabilities_for_backend,
@@ -362,7 +370,9 @@ impl Engine {
             .prefer_feature(core::DeviceFeature::SamplerAnisotropy)
             .prefer_feature(core::DeviceFeature::BindlessResources)
             .prefer_feature(core::DeviceFeature::BufferDeviceAddress)
-            .prefer_feature(core::DeviceFeature::MeshShading);
+            .prefer_feature(core::DeviceFeature::MeshShading)
+            .prefer_feature(core::DeviceFeature::RayTracing)
+            .prefer_feature(core::DeviceFeature::RayQuery);
         Self::with_desc(desc)
     }
 
@@ -403,7 +413,7 @@ impl Engine {
     /// # Example
     /// ```ignore
     /// if let Some(b) = engine.memory_budget() {
-    ///     eprintln!("{}", b.summary()); // "VRAM 423 / 512 MiB (82 %) [over budget]"
+    ///     tracing::warn!("{}", b.summary()); // "VRAM 423 / 512 MiB (82 %) [over budget]"
     /// }
     /// ```
     pub fn memory_budget(&self) -> Option<GpuMemoryBudget> {
@@ -509,6 +519,39 @@ impl Engine {
             handle,
             desc,
         })
+    }
+
+    pub fn create_acceleration_structure(
+        &self,
+        desc: AccelerationStructureDesc,
+    ) -> Result<AccelerationStructure> {
+        let handle = self.device.create_acceleration_structure(desc)?;
+        Ok(AccelerationStructure {
+            device: self.device.clone(),
+            handle,
+            desc,
+        })
+    }
+
+    pub fn blas_build_sizes(
+        &self,
+        desc: &BlasBuildDesc,
+    ) -> Result<AccelerationStructureBuildSizes> {
+        self.device.blas_build_sizes(desc)
+    }
+
+    pub fn tlas_build_sizes(
+        &self,
+        desc: &TlasBuildDesc,
+    ) -> Result<AccelerationStructureBuildSizes> {
+        self.device.tlas_build_sizes(desc)
+    }
+
+    pub fn acceleration_structure_device_address(
+        &self,
+        acceleration_structure: &AccelerationStructure,
+    ) -> Result<u64> {
+        acceleration_structure.device_address()
     }
 
     /// Import a borrowed native buffer into the engine.
@@ -780,6 +823,25 @@ impl Engine {
         })
     }
 
+    pub fn create_ray_tracing_pipeline(&self, desc: RayTracingPipelineDesc) -> Result<Pipeline> {
+        let handle = self.device.create_ray_tracing_pipeline(desc)?;
+        Ok(Pipeline {
+            device: self.device.clone(),
+            handle,
+        })
+    }
+
+    pub fn create_shader_binding_table(
+        &self,
+        desc: ShaderBindingTableDesc,
+    ) -> Result<RayTracingShaderBindingTable> {
+        let table = self.device.create_shader_binding_table(desc)?;
+        Ok(RayTracingShaderBindingTable {
+            device: self.device.clone(),
+            table,
+        })
+    }
+
     pub fn begin_frame(&self) -> Result<Frame> {
         Ok(Frame {
             engine: self.clone(),
@@ -917,7 +979,7 @@ impl Engine {
                 if now_secs.saturating_sub(last) >= 5 {
                     self.last_budget_warn_secs
                         .store(now_secs, Ordering::Relaxed);
-                    eprintln!("[SturdyEngine] VRAM pressure: {}", budget.summary());
+                    tracing::warn!("VRAM pressure: {}", budget.summary());
                 }
             }
         }
@@ -1033,7 +1095,7 @@ impl Engine {
     /// if let Ok(engine) = Engine::global() {
     /// if let Some(t) = engine.frame_timing() {
     ///     if t.is_jittery() {
-    ///         eprintln!("jitter! p99={:.1}ms mean={:.1}ms", t.p99_cpu_ms, t.mean_cpu_ms);
+    ///         tracing::warn!("jitter! p99={:.1}ms mean={:.1}ms", t.p99_cpu_ms, t.mean_cpu_ms);
     ///     }
     /// }
     /// ```
@@ -1194,6 +1256,28 @@ impl Drop for Image {
     }
 }
 
+pub struct AccelerationStructure {
+    device: core::Device,
+    handle: core::AccelerationStructureHandle,
+    desc: AccelerationStructureDesc,
+}
+
+impl AccelerationStructure {
+    pub fn handle(&self) -> core::AccelerationStructureHandle {
+        self.handle
+    }
+
+    pub fn desc(&self) -> AccelerationStructureDesc {
+        self.desc
+    }
+}
+
+impl Drop for AccelerationStructure {
+    fn drop(&mut self) {
+        let _ = self.device.destroy_acceleration_structure(self.handle);
+    }
+}
+
 pub struct Buffer {
     device: core::Device,
     handle: core::BufferHandle,
@@ -1338,6 +1422,23 @@ impl Pipeline {
 impl Drop for Pipeline {
     fn drop(&mut self) {
         let _ = self.device.destroy_pipeline(self.handle);
+    }
+}
+
+pub struct RayTracingShaderBindingTable {
+    device: core::Device,
+    table: core::ShaderBindingTable,
+}
+
+impl RayTracingShaderBindingTable {
+    pub fn table(&self) -> core::ShaderBindingTable {
+        self.table
+    }
+}
+
+impl Drop for RayTracingShaderBindingTable {
+    fn drop(&mut self) {
+        let _ = self.device.destroy_buffer(self.table.raygen.buffer);
     }
 }
 

@@ -25,7 +25,6 @@ struct PointShadowConstants {
     float     is_back;              // 1.0 for back hemisphere, 0.0 for front
     float     _pad;
 };
-uniform PointShadowConstants push;
 
 struct VSInput {
     float3 position : POSITION;
@@ -38,7 +37,8 @@ struct VSOut {
     float  depth    : TEXCOORD0;   // linear depth [0, 1]
 };
 
-VSOut main(VSInput input, uint instance_id : SV_InstanceID) {
+VSOut main(VSInput input, uint instance_id : SV_InstanceID,
+           uniform PointShadowConstants push) {
     float4x4 model     = instances[instance_id].model;
     float3   world_pos = mul(model, float4(input.position, 1.0)).xyz;
 

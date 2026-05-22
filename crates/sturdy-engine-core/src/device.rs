@@ -957,6 +957,19 @@ impl Device {
             .ok_or(Error::InvalidHandle)
     }
 
+    pub fn acceleration_structure_device_address(
+        &self,
+        handle: AccelerationStructureHandle,
+    ) -> Result<u64> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        validate_as_handle(&inner, handle)?;
+        inner.backend.acceleration_structure_device_address(handle)
+    }
+
     pub fn blas_build_sizes(
         &self,
         desc: &BlasBuildDesc,
@@ -976,7 +989,9 @@ impl Device {
                 crate::AccelerationStructureKind::BottomLevel,
             );
         }
-        validate_as_handle(&inner, desc.dst)?;
+        if desc.dst != Default::default() {
+            validate_as_handle(&inner, desc.dst)?;
+        }
         if let Some(src) = desc.src {
             validate_as_handle(&inner, src)?;
         }
@@ -1014,7 +1029,9 @@ impl Device {
                 crate::AccelerationStructureKind::TopLevel,
             );
         }
-        validate_as_handle(&inner, desc.dst)?;
+        if desc.dst != Default::default() {
+            validate_as_handle(&inner, desc.dst)?;
+        }
         if let Some(src) = desc.src {
             validate_as_handle(&inner, src)?;
         }
@@ -1479,6 +1496,7 @@ impl Device {
             size: layout.total_size,
             usage: BufferUsage::COPY_SRC
                 | BufferUsage::STORAGE
+                | BufferUsage::SHADER_BINDING_TABLE
                 | BufferUsage::SHADER_DEVICE_ADDRESS,
         })?;
         if let Err(error) = self.write_buffer(buffer, 0, &data) {
@@ -2519,6 +2537,11 @@ impl DeviceInner {
             ResourceBinding::ImageView { image, .. } if self.images.contains_key(&image) => Ok(()),
             ResourceBinding::Buffer(handle) if self.buffers.contains_key(&handle) => Ok(()),
             ResourceBinding::Sampler(handle) if self.samplers.contains_key(&handle) => Ok(()),
+            ResourceBinding::AccelerationStructure(handle)
+                if self.acceleration_structures.contains_key(&handle) =>
+            {
+                Ok(())
+            }
             _ => Err(Error::InvalidHandle),
         }
     }
@@ -2538,6 +2561,10 @@ fn validate_binding_resource_kind(
             BindingKind::UniformBuffer | BindingKind::StorageBuffer,
             ResourceBinding::Buffer(_)
         ) | (BindingKind::Sampler, ResourceBinding::Sampler(_))
+            | (
+                BindingKind::AccelerationStructure,
+                ResourceBinding::AccelerationStructure(_),
+            )
     );
 
     if valid {
@@ -2556,6 +2583,7 @@ fn resource_binding_label(resource: ResourceBinding) -> &'static str {
         ResourceBinding::ImageView { .. } => "image view",
         ResourceBinding::Buffer(_) => "buffer",
         ResourceBinding::Sampler(_) => "sampler",
+        ResourceBinding::AccelerationStructure(_) => "acceleration structure",
     }
 }
 
@@ -2639,16 +2667,14 @@ fn merge_shader_reflection<const N: usize>(
             }
         }
     }
-    // Collect vertex inputs from the vertex shader reflection (if any).
-    let vertex_inputs = reflections
-        .iter()
-        .find_map(|(_, r)| {
-            if r.vertex_inputs.is_empty() {
-                None
-            } else {
-                Some(r.vertex_inputs.clone())
-            }
-        })
+    // Collect vertex inputs from the graphics vertex shader only. Looking at
+    // every compiled shader reflection is order-dependent and can accidentally
+    // validate a 3D pipeline against an unrelated 2D/fullscreen shader layout.
+    let vertex_inputs = shaders
+        .first()
+        .and_then(|shader| *shader)
+        .and_then(|shader| reflections.get(&shader))
+        .map(|reflection| reflection.vertex_inputs.clone())
         .unwrap_or_default();
     ShaderReflection {
         layout,
@@ -3113,8 +3139,17 @@ impl Frame {
                 .inner
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let graph = inner.frames.get(&self.handle).ok_or(Error::InvalidHandle)?;
-            graph.compile()?
+            let graph = inner.frames.get(&self.handle).ok_or_else(|| {
+                Error::ResourceStateCorruption(format!(
+                    "frame flush could not find render graph for frame handle {:?}",
+                    self.handle
+                ))
+            })?;
+            graph.compile().map_err(|error| {
+                Error::ResourceStateCorruption(format!(
+                    "render graph compile failed during frame flush: {error:?}"
+                ))
+            })?
         };
 
         let token = {
@@ -3126,7 +3161,12 @@ impl Frame {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             // `backend.flush` → `submit_graph` waits the previous frame's fence
             // before submitting.  Everything after this point is safe to destroy.
-            let token = inner.backend.flush(&compiled)?;
+            let token = inner.backend.flush(&compiled).map_err(|error| {
+                Error::ResourceStateCorruption(format!(
+                    "backend flush failed for compiled graph with {} passes: {error:?}",
+                    compiled.passes.len()
+                ))
+            })?;
 
             for (key, state) in &compiled.final_image_states {
                 if inner.images.contains_key(&key.image) {

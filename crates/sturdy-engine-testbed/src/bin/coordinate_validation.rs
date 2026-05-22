@@ -1,8 +1,8 @@
 use clay_ui::Rect;
 use sturdy_engine::{
-    DebugOverlay, DebugOverlayRenderer, Engine, EngineApp, RenderTargetPx, Result, ShellFrame,
-    Surface, SurfaceImage, UiPx, WindowConfig, WindowLogicalPx, render_target_to_uv, ui_to_surface,
-    window_logical_to_surface,
+    AppRuntime, AppRuntimeFrame, DebugOverlay, DebugOverlayRenderer, RenderTargetPx, Result,
+    RuntimeApp, UiPx, WindowConfig, WindowLogicalPx, render_target_to_uv, run_with_runtime,
+    ui_to_surface, window_logical_to_surface,
 };
 
 struct CoordinateValidationApp {
@@ -10,40 +10,39 @@ struct CoordinateValidationApp {
     cursor: Option<WindowLogicalPx>,
 }
 
-impl EngineApp for CoordinateValidationApp {
+impl RuntimeApp for CoordinateValidationApp {
     type Error = sturdy_engine::Error;
 
-    fn init(engine: &Engine, _surface: &Surface) -> Result<Self> {
+    fn init(runtime: &mut AppRuntime) -> Result<Self> {
         Ok(Self {
-            overlay: DebugOverlayRenderer::new(engine)?,
+            overlay: DebugOverlayRenderer::new(runtime.engine())?,
             cursor: None,
         })
     }
 
-    fn render(&mut self, frame: &mut ShellFrame<'_>, surface_image: &SurfaceImage) -> Result<()> {
+    fn update(&mut self, appframe: &mut AppRuntimeFrame<'_>) -> Result<()> {
+        let shell_frame = appframe.shell_frame();
+        let surface_image = appframe.surface_image();
         let ext = surface_image.desc().extent;
-        let swapchain = frame.inner().swapchain_image(surface_image)?;
+        let frame = shell_frame.inner();
+        let swapchain = frame.swapchain_image(surface_image)?;
         let mut overlay = DebugOverlay::new();
 
         draw_coordinate_validation_scene(
             &mut overlay,
             ext.width,
             ext.height,
-            frame.window_scale_factor(),
+            shell_frame.window_scale_factor(),
             self.cursor,
         );
 
         self.overlay
-            .draw(frame.inner(), &swapchain, ext.width, ext.height, &overlay)?;
-        frame.inner().present_image(&swapchain)?;
+            .draw(frame, &swapchain, ext.width, ext.height, &overlay)?;
+        frame.present_image(&swapchain)?;
         Ok(())
     }
 
-    fn resize(&mut self, _width: u32, _height: u32) -> Result<()> {
-        Ok(())
-    }
-
-    fn pointer_moved(&mut self, pos: WindowLogicalPx, _surface: &mut Surface) -> Result<()> {
+    fn pointer_moved(&mut self, pos: WindowLogicalPx) -> Result<()> {
         self.cursor = Some(pos);
         Ok(())
     }
@@ -301,7 +300,7 @@ fn intersect_rects(a: Rect, b: Rect) -> Rect {
 }
 
 fn main() {
-    sturdy_engine::run::<CoordinateValidationApp>(
+    run_with_runtime::<CoordinateValidationApp>(
         WindowConfig::new("SturdyEngine Coordinate Validation", 960, 640).with_resizable(true),
     );
 }

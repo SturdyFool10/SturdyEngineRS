@@ -195,8 +195,8 @@ impl CompiledSchedule {
                     if self.debug_timing && cfg!(debug_assertions) {
                         let t0 = std::time::Instant::now();
                         system.run(world);
-                        eprintln!(
-                            "[CompiledSchedule] serial '{}': {:.3}ms",
+                        tracing::info!(
+                            "serial '{}': {:.3}ms",
                             name,
                             t0.elapsed().as_secs_f64() * 1000.0
                         );
@@ -244,8 +244,8 @@ impl CompiledSchedule {
                         if let Some(t0) = t0 {
                             let names: Vec<&str> =
                                 entries.iter().map(|e| e.name.as_str()).collect();
-                            eprintln!(
-                                "[CompiledSchedule] wave [{}]: {:.3}ms",
+                            tracing::info!(
+                                "wave [{}]: {:.3}ms",
                                 names.join(", "),
                                 t0.elapsed().as_secs_f64() * 1000.0
                             );

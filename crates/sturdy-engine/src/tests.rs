@@ -1074,6 +1074,59 @@ fn graphics_shader_reflection_populates_vertex_inputs_for_vertex_shader() {
 }
 
 #[test]
+fn graphics_shader_reflection_uses_requested_vertex_shader_inputs_only() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+
+    let vertex_2d = engine
+        .create_shader(ShaderDesc {
+            source: ShaderSource::File(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("shaders/mesh_vertex_2d.slang"),
+            ),
+            entry_point: "main".into(),
+            stage: ShaderStage::Vertex,
+            requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
+        })
+        .unwrap();
+    let vertex_3d = engine
+        .create_shader(ShaderDesc {
+            source: ShaderSource::File(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("shaders/mesh_vertex_3d.slang"),
+            ),
+            entry_point: "main".into(),
+            stage: ShaderStage::Vertex,
+            requires_ray_query: false,
+            requires_cooperative_matrix: false,
+            uses_ser: false,
+        })
+        .unwrap();
+
+    let reflection_2d = engine.graphics_shader_reflection(&vertex_2d, None).unwrap();
+    let reflection_3d = engine.graphics_shader_reflection(&vertex_3d, None).unwrap();
+
+    assert_eq!(
+        reflection_2d
+            .vertex_inputs
+            .iter()
+            .find(|input| input.location == 0)
+            .map(|input| input.format),
+        Some(VertexFormat::Float32x2)
+    );
+    assert_eq!(
+        reflection_3d
+            .vertex_inputs
+            .iter()
+            .find(|input| input.location == 0)
+            .map(|input| input.format),
+        Some(VertexFormat::Float32x3),
+        "3D reflection must not inherit the previously compiled 2D vertex layout"
+    );
+}
+
+#[test]
 fn begin_frame_for_surface_returns_frame_and_swapchain_image() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     let surface = engine

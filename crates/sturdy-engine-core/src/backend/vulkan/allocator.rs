@@ -7,7 +7,7 @@ use crate::{Error, Result};
 
 // Block sizes for new VkDeviceMemory allocations.
 const DEVICE_LOCAL_BLOCK_SIZE: u64 = 256 * 1024 * 1024; // 256 MiB
-/// Reduced block size when device-local usage exceeds 80 % of the OS-reported budget.
+/// Reduced retry block size used only after a preferred device-local block allocation fails.
 const DEVICE_LOCAL_BLOCK_SIZE_REDUCED: u64 = 32 * 1024 * 1024; // 32 MiB
 const HOST_VISIBLE_BLOCK_SIZE: u64 = 64 * 1024 * 1024; // 64 MiB
 
@@ -187,15 +187,17 @@ pub struct PoolStats {
 struct TypePool {
     memory_type: u32,
     host_visible: bool,
+    allocate_flags: vk::MemoryAllocateFlags,
     blocks: Vec<Block>,
     next_block_id: u64,
 }
 
 impl TypePool {
-    fn new(memory_type: u32, host_visible: bool) -> Self {
+    fn new(memory_type: u32, host_visible: bool, allocate_flags: vk::MemoryAllocateFlags) -> Self {
         Self {
             memory_type,
             host_visible,
+            allocate_flags,
             blocks: Vec::new(),
             next_block_id: 0,
         }
@@ -225,22 +227,42 @@ impl TypePool {
                 });
             }
         }
-        // No existing block had room — create a new one.
-        let block_capacity = new_block_size.max(size);
-        let mut alloc_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(block_capacity)
-            .memory_type_index(self.memory_type);
-        // GFX-1e: chain VkMemoryPriorityAllocateInfoEXT when memory priority is available.
-        let mut priority_info;
-        if let Some(p) = priority {
-            priority_info = vk::MemoryPriorityAllocateInfoEXT::default().priority(p);
-            alloc_info = alloc_info.push(&mut priority_info);
-        }
-        let alloc_info = alloc_info;
-        let memory = unsafe {
-            device
-                .allocate_memory(&alloc_info, None)
-                .map_err(|e| Error::Backend(format!("vkAllocateMemory failed: {e:?}")))?
+        // No existing block had room — create a new one. Prefer a large block so the
+        // allocator can keep growing under load, but retry with a request-sized block
+        // when the driver rejects the preferred block under memory pressure.
+        let preferred_capacity = new_block_size.max(size);
+        let retry_capacity = size
+            .max(DEVICE_LOCAL_BLOCK_SIZE_REDUCED)
+            .min(preferred_capacity);
+        let (memory, block_capacity) = match allocate_memory_block(
+            device,
+            self.memory_type,
+            preferred_capacity,
+            priority,
+            self.allocate_flags,
+        ) {
+            Ok(memory) => (memory, preferred_capacity),
+            Err(preferred_error) if retry_capacity < preferred_capacity => {
+                #[cfg(debug_assertions)]
+                tracing::error!(
+                    "vkAllocateMemory failed for preferred {} MiB block; retrying {} MiB: {preferred_error}",
+                    preferred_capacity / (1024 * 1024),
+                    retry_capacity / (1024 * 1024),
+                );
+                #[cfg(not(debug_assertions))]
+                let _ = &preferred_error;
+                (
+                    allocate_memory_block(
+                        device,
+                        self.memory_type,
+                        retry_capacity,
+                        priority,
+                        self.allocate_flags,
+                    )?,
+                    retry_capacity,
+                )
+            }
+            Err(error) => return Err(error),
         };
         let mapped_ptr = if self.host_visible {
             let ptr = unsafe {
@@ -346,10 +368,13 @@ pub struct GpuAllocator {
     pools: Vec<TypePool>,
     /// `VK_EXT_memory_priority` is available; chained into every allocation.
     pub memory_priority_enabled: bool,
-    /// Total device-local memory budget in bytes from `VK_EXT_memory_budget`; 0 = unconstrained.
-    /// When set, new device-local blocks are capped to `DEVICE_LOCAL_BLOCK_SIZE_REDUCED` once
-    /// current capacity reaches 80 % of this budget.
+    /// Total OS-reported device-local memory budget in bytes from `VK_EXT_memory_budget`;
+    /// 0 means unavailable. Used for diagnostics/reporting, not as a hard block-size cap.
     pub device_local_budget: u64,
+    /// Total physical device-local heap size in bytes. Allocator pressure decisions are
+    /// relative to this whole-device capacity so a transient OS budget dip does not
+    /// artificially prevent the allocator from growing.
+    pub device_local_memory_bytes: u64,
 }
 
 // Safety: GpuAllocator is only accessed through Mutex<ResourceRegistry> in VulkanBackend.
@@ -360,11 +385,18 @@ unsafe impl Sync for GpuAllocator {}
 
 impl GpuAllocator {
     pub fn new(memory_properties: vk::PhysicalDeviceMemoryProperties) -> Self {
+        let device_local_memory_bytes = memory_properties.memory_heaps
+            [..memory_properties.memory_heap_count as usize]
+            .iter()
+            .filter(|heap| heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+            .map(|heap| heap.size)
+            .sum();
         Self {
             memory_properties,
             pools: Vec::new(),
             memory_priority_enabled: false,
             device_local_budget: 0,
+            device_local_memory_bytes,
         }
     }
 
@@ -373,6 +405,21 @@ impl GpuAllocator {
         device: &Device,
         requirements: vk::MemoryRequirements,
         required_flags: vk::MemoryPropertyFlags,
+    ) -> Result<Allocation> {
+        self.alloc_with_flags(
+            device,
+            requirements,
+            required_flags,
+            vk::MemoryAllocateFlags::empty(),
+        )
+    }
+
+    pub fn alloc_with_flags(
+        &mut self,
+        device: &Device,
+        requirements: vk::MemoryRequirements,
+        required_flags: vk::MemoryPropertyFlags,
+        allocate_flags: vk::MemoryAllocateFlags,
     ) -> Result<Allocation> {
         let memory_type = self.find_memory_type(requirements.memory_type_bits, required_flags)?;
         let host_visible = self.memory_properties.memory_types[memory_type as usize]
@@ -394,10 +441,15 @@ impl GpuAllocator {
         } else {
             self.device_local_new_block_size()
         };
-        let pool_index = match self.pools.iter().position(|p| p.memory_type == memory_type) {
+        let pool_index = match self
+            .pools
+            .iter()
+            .position(|p| p.memory_type == memory_type && p.allocate_flags == allocate_flags)
+        {
             Some(index) => index,
             None => {
-                self.pools.push(TypePool::new(memory_type, host_visible));
+                self.pools
+                    .push(TypePool::new(memory_type, host_visible, allocate_flags));
                 self.pools.len() - 1
             }
         };
@@ -411,25 +463,35 @@ impl GpuAllocator {
         )
     }
 
-    /// GFX-1e: Choose block size for a new device-local block based on budget pressure.
+    /// Choose the preferred block size for a new device-local block.
+    ///
+    /// The allocator keeps requesting normal-sized blocks while below whole-device
+    /// pressure. Near total physical device-local capacity, it asks for smaller blocks
+    /// to reduce allocation failures. If the driver still rejects a preferred block,
+    /// `TypePool::alloc` retries with a request-sized block.
     fn device_local_new_block_size(&self) -> u64 {
-        if self.device_local_budget > 0 {
-            let current: u64 = self
-                .pools
-                .iter()
-                .filter(|p| !p.host_visible)
-                .map(|p| p.stats().capacity_bytes)
-                .sum();
-            if current >= self.device_local_budget * 4 / 5 {
+        if self.device_local_memory_bytes > 0 {
+            let current = self.device_local_capacity_bytes();
+            if current >= self.device_local_memory_bytes * 9 / 10 {
                 #[cfg(debug_assertions)]
-                eprintln!(
-                    "[SturdyEngine] VRAM pressure: new device-local block capped to {} MiB",
+                tracing::warn!(
+                    "VRAM pressure: allocator capacity is {} / {} MiB; preferring {} MiB blocks",
+                    current / (1024 * 1024),
+                    self.device_local_memory_bytes / (1024 * 1024),
                     DEVICE_LOCAL_BLOCK_SIZE_REDUCED / (1024 * 1024)
                 );
                 return DEVICE_LOCAL_BLOCK_SIZE_REDUCED;
             }
         }
         DEVICE_LOCAL_BLOCK_SIZE
+    }
+
+    fn device_local_capacity_bytes(&self) -> u64 {
+        self.pools
+            .iter()
+            .filter(|p| !p.host_visible)
+            .map(|p| p.stats().capacity_bytes)
+            .sum()
     }
 
     pub fn dealloc(&mut self, device: &Device, alloc: Allocation) -> Result<()> {
@@ -488,6 +550,35 @@ impl GpuAllocator {
             }
         }
         Err(Error::Unsupported("no compatible Vulkan memory type found"))
+    }
+}
+
+fn allocate_memory_block(
+    device: &Device,
+    memory_type: u32,
+    capacity: u64,
+    priority: Option<f32>,
+    allocate_flags: vk::MemoryAllocateFlags,
+) -> Result<vk::DeviceMemory> {
+    let mut alloc_info = vk::MemoryAllocateInfo::default()
+        .allocation_size(capacity)
+        .memory_type_index(memory_type);
+    let mut flags_info;
+    if !allocate_flags.is_empty() {
+        flags_info = vk::MemoryAllocateFlagsInfo::default().flags(allocate_flags);
+        alloc_info = alloc_info.push(&mut flags_info);
+    }
+    let mut priority_info;
+    if let Some(p) = priority {
+        priority_info = vk::MemoryPriorityAllocateInfoEXT::default().priority(p);
+        alloc_info = alloc_info.push(&mut priority_info);
+    }
+    unsafe {
+        device.allocate_memory(&alloc_info, None).map_err(|e| {
+            Error::Backend(format!(
+                "vkAllocateMemory failed: {e:?} capacity={capacity} memory_type={memory_type}"
+            ))
+        })
     }
 }
 

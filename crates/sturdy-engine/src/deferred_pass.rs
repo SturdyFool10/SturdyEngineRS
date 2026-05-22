@@ -134,6 +134,7 @@ impl DeferredPass {
     }
 
     pub fn with_csm_config(engine: &Engine, csm_config: CsmConfig) -> Result<Self> {
+        tracing::debug!("compiling gbuffer_fragment.slang");
         let default_gbuffer_program = MeshProgram::new(
             engine,
             MeshProgramDesc {
@@ -151,6 +152,7 @@ impl DeferredPass {
                 uses_depth: true,
             },
         )?;
+        tracing::debug!("gbuffer_fragment OK, compiling forward_opaque.slang");
         let forward_opaque_program = MeshProgram::new(
             engine,
             MeshProgramDesc {
@@ -168,8 +170,11 @@ impl DeferredPass {
                 uses_depth: true,
             },
         )?;
+        tracing::debug!("forward_opaque OK, compiling deferred_lighting.slang");
         let lighting_program = engine.load_shader(engine_shader("deferred_lighting.slang"))?;
+        tracing::debug!("deferred_lighting OK, building CsmPass");
         let csm = CsmPass::with_config(engine, csm_config)?;
+        tracing::debug!("CsmPass OK");
 
         let flat_normal_map =
             engine.generate_texture_2d("flat_normal_map", 1, 1, |_, _| [128, 128, 255, 255])?;
@@ -406,24 +411,69 @@ impl DeferredPass {
         // Extract camera near/far from the projection matrix (RH perspective).
         // proj.w_axis.z = near*far/(near-far),  proj.z_axis.z = far/(near-far)
         let (cam_near, cam_far) = extract_near_far(proj);
-        self.csm.draw(scene, view, proj, cam_near, cam_far, frame)?;
+        tracing::debug!(
+            "DeferredPass::draw — CSM start \
+             cam_near={cam_near:.3} cam_far={cam_far:.3} \
+             cascade_count={} res={}",
+            self.csm.config.cascade_count,
+            self.csm.config.resolution
+        );
+        self.csm
+            .draw(scene, view, proj, cam_near, cam_far, frame)
+            .map_err(|e| {
+                tracing::error!("CsmPass::draw ERROR: {e:?}");
+                e
+            })?;
+        tracing::debug!("DeferredPass::draw — CSM done");
 
         // ── 2b. Spot light shadow passes ─────────────────────────────────────
-        // The spot_light_buf_offset is 1 (directional) + N_point_lights.
         let spot_buf_offset = 1u32 + scene.point_lights.len() as u32;
+        tracing::debug!(
+            "spot_shadows={} spot_lights={}",
+            self.spot_shadows.is_some(),
+            scene.spot_lights.len()
+        );
         if let Some(spot) = &mut self.spot_shadows {
             if !scene.spot_lights.is_empty() {
                 spot.draw(scene, spot_buf_offset, frame, engine)?;
-                frame.bind_buffer("spot_shadow_data", &spot.shadow_buf);
+            } else {
+                // Pass is attached but no spot lights — register fallback images so
+                // the deferred lighting shader's samplers are always bound.
+                for name in [
+                    "spot_shadow_map_0",
+                    "spot_shadow_map_1",
+                    "spot_shadow_map_2",
+                    "spot_shadow_map_3",
+                ] {
+                    frame.bind_image(name, &self.black_spot_depth);
+                }
             }
         }
 
         // ── 2c. Point light shadow passes (dual-paraboloid) ───────────────────
-        // Point lights occupy buffer slots 1..(1 + N_point).
         let point_buf_offset = 1u32;
+        tracing::debug!(
+            "point_shadows={} point_lights={}",
+            self.point_shadows.is_some(),
+            scene.point_lights.len()
+        );
         if let Some(pt) = &mut self.point_shadows {
             if !scene.point_lights.is_empty() {
                 pt.draw(scene, point_buf_offset, frame, engine)?;
+            } else {
+                // Pass is attached but no point lights — register fallback images.
+                for name in [
+                    "point_shadow_front_0",
+                    "point_shadow_front_1",
+                    "point_shadow_front_2",
+                    "point_shadow_front_3",
+                    "point_shadow_back_0",
+                    "point_shadow_back_1",
+                    "point_shadow_back_2",
+                    "point_shadow_back_3",
+                ] {
+                    frame.bind_image(name, &self.black_spot_depth);
+                }
             }
         }
 
@@ -546,7 +596,7 @@ impl DeferredPass {
                     }
                     Err(e) => {
                         let msg = format!("{e}");
-                        eprintln!(
+                        tracing::error!(
                             "[DeferredPass] G-Buffer variant compile failed for material '{mat_name}'.\n\
                              Error: {msg}\n\
                              Falling back to default G-Buffer shader for this material. \
@@ -789,6 +839,9 @@ impl DeferredPass {
             .write(0, bytemuck::bytes_of(&fwd_uniforms))?;
         frame.bind_buffer("forward_lighting", &self.forward_lighting_buf);
 
+        tracing::debug!(
+            "DeferredPass::draw — all shadow passes recorded, starting deferred lighting"
+        );
         // Deferred lighting fullscreen pass — only in DeferredThenForward mode.
         if self.render_path == RenderPath::DeferredThenForward {
             let inv_vp = (proj * view).inverse().to_cols_array_2d();
@@ -818,6 +871,9 @@ impl DeferredPass {
             oit.draw(scene, view, proj, output, frame, engine, time)?;
         }
 
+        tracing::error!(
+            "DeferredPass::draw — frame recording complete (crash after here = GPU flush)"
+        );
         Ok(())
     }
 }

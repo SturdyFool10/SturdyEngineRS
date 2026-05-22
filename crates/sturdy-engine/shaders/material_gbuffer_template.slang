@@ -12,7 +12,6 @@ struct CameraConstants {
     float time;
     float3 _pad;
 };
-uniform CameraConstants cam;
 
 struct VSOut {
     float4 position : SV_POSITION;
@@ -46,7 +45,7 @@ struct GBufferOut {
 };
 
 // Material evaluation
-GBufferOut main(VSOut v) {
+GBufferOut main(VSOut v, uniform CameraConstants cam) {
     float4 base_color = float4(1.0, 1.0, 1.0, 1.0); // __MATERIAL_BASE_COLOR__
     float metallic = 0.0; // __MATERIAL_METALLIC__
     float roughness = 1.0; // __MATERIAL_ROUGHNESS__

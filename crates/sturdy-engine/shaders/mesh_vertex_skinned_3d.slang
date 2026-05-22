@@ -16,7 +16,6 @@ struct CameraConstants {
     float    time;
     float3   _pad;
 };
-uniform CameraConstants cam;
 
 /// Skinning matrices: one float4x4 per joint in the skin, in joint order.
 StructuredBuffer<float4x4> bone_matrices;
@@ -39,7 +38,7 @@ struct VSOut {
     float4 tangent   : TANGENT;
 };
 
-VSOut main(VSInput input, uint instance_id : SV_InstanceID) {
+VSOut main(VSInput input, uint instance_id : SV_InstanceID, uniform CameraConstants cam) {
     // Cast float indices back to uint for buffer indexing.
     uint4 ji = uint4(input.joint_idx_f);
 

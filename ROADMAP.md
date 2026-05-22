@@ -11,7 +11,7 @@ The repo already contains substantial foundation work: backend-neutral core/rend
 ## Non-Negotiable Direction
 
 1. **Measure first.** Every major rendering change must improve or intentionally trade against reference-scene metrics.
-2. **The simple path is the serious path.** `AppRuntime` / `AppRenderer` should own the default frame loop and renderer stack so examples and apps do not rebuild engine plumbing.
+2. **The simple path is the serious path.** `AppRuntime` / `RuntimeApp` should own the default frame loop and renderer stack so examples and apps do not rebuild engine plumbing.
 3. **CPU submits intent, GPU expands work.** The CPU should not touch every renderable object every frame.
 4. **Bindless and GPU-resident tables are the fast path.** Fallbacks are explicit, degraded, and reported.
 5. **Temporal correctness comes before advanced effects.** Bad motion/history data breaks TAA, motion blur, denoising, upscaling, reflections, and shadows.
@@ -42,18 +42,44 @@ Initial performance targets:
 
 ---
 
-## Priority 1 — Realistic Reference Scene And Benchmark Harness
+## Priority 1 — First-Party Runtime Shell As The Default Product Path
 
-Build the brutal test scene before adding more renderer features. It defines what “realistic enough” and “fast enough” mean.
+The runtime shell should own the common frame pipeline. Testbed/example code should provide content and hooks, not rebuild HDR/MSAA/bloom/AA/tonemap/debug plumbing.
 
-### Scene requirements
+### RuntimeApp / AppRuntime frame loop
 
-- [ ] Create `examples/realistic_reference_scene` as the primary renderer regression example.
-- [ ] Include HDR lighting and an indoor/outdoor exposure transition.
-- [ ] Include glass/translucency, wet surfaces, foliage/clutter, dense static geometry, animated objects, emissives, shadows, and camera motion.
-- [ ] Include debug views for G-buffer channels, depth, Hi-Z, motion vectors, material IDs, light clusters/visibility, shadow cascades, OIT, exposure, and final tonemapped output.
-- [ ] Provide deterministic camera paths for benchmark and screenshot comparison runs.
-- [ ] Add asset/scenario scale presets: smoke, default, stress, and pathological.
+- [x] Define `RuntimeApp` trait with `init(runtime: &mut AppRuntime)`, `update(&mut AppRuntimeFrame)`, `resize`, `input_hub`, `key_pressed`, `pointer_moved`, `pointer_button`, and `runtime_settings_changed`.
+- [x] Add `run_with_runtime<App: RuntimeApp>(config)` and `try_run_with_runtime` as the primary entry points.
+- [x] Create `AppRuntime` before calling app init so the app sees surface/engine state from the start.
+- [x] `AppRuntimeFrame::finish_and_present` records CPU time, P95/P99, and GPU pass timings into `RuntimeDiagnostics`.
+- [x] `AppRuntimeFrame` exposes `window_scale_factor`, `window_logical_size`, `runtime_controller`, `runtime_diagnostics`, `register_debug_image`, `default_runtime_overlay_lines`, and `shell_frame()` bridge.
+- [x] Migrate testbed main, shader_playground, plot_demo, coordinate_validation, and ui_demo from `EngineApp`/`GameApp` to `RuntimeApp`.
+- [ ] Migrate `game_2d` and `game_3d` testbed binaries from `GameApp` to `RuntimeApp` (or add fixed-step support to RuntimeApp).
+- [ ] Expose `AppRuntime::run_default_post_process` that handles HDR, bloom, AA, tonemapping, and debug images without per-example wiring.
+
+### Runtime settings
+
+- [x] Settings changes are applied via `RuntimeSettingsTransaction`.
+- [x] Surface settings (HDR, present mode, transparency) report `Applied`, `Degraded`, or `Failed` with reason and apply path.
+- [x] Window settings (title, size, decorations, resizable, always-on-top, corner style) apply immediately.
+- [ ] Apply settings changes through the `RuntimeApp::runtime_settings_changed` callback automatically.
+- [ ] Every setting application must report `Applied`, `Degraded`, or `Rejected` with a reason and apply path — extend to all remaining settings (AA, bloom, AO, shadow quality).
+- [ ] Support apply paths for graph rebuilds and deferred/device-level changes.
+
+### Debug shell
+
+- [ ] Expose HDR, AA, post stack, render targets, pass timings, memory, graph inspection, backend/capability details, and runtime setting results via a consistent debug overlay.
+- [ ] Support screenshot/export from the shell.
+- [ ] Support shader and asset hot reload from the shell.
+- [ ] Make debug image registration a renderer/runtime service, not testbed-local state.
+
+Acceptance: a new graphical app gets the serious renderer, diagnostics, settings, and debug shell by default.
+
+---
+
+## Priority 2 — Benchmark Harness And Reference Scene
+
+Build a benchmark harness before adding more renderer features. It defines what "realistic enough" and "fast enough" mean.
 
 ### Benchmark harness
 
@@ -61,38 +87,18 @@ Build the brutal test scene before adding more renderer features. It defines wha
 - [ ] Export machine-readable benchmark reports.
 - [ ] Add screenshot/export support for fixed camera frames.
 - [ ] Add screenshot comparison hooks with tolerances suitable for temporal rendering.
+
+### Reference scene
+
+- [ ] Create `examples/realistic_reference_scene` as the primary renderer regression example — do this after the engine is ready to support it.
+- [ ] Include HDR lighting and an indoor/outdoor exposure transition.
+- [ ] Include glass/translucency, wet surfaces, foliage/clutter, dense static geometry, animated objects, emissives, shadows, and camera motion.
+- [ ] Include debug views for G-buffer channels, depth, Hi-Z, motion vectors, material IDs, light clusters/visibility, shadow cascades, OIT, exposure, and final tonemapped output.
+- [ ] Provide deterministic camera paths for benchmark and screenshot comparison runs.
+- [ ] Add asset/scenario scale presets: smoke, default, stress, and pathological.
 - [ ] Make the reference scene the default target for renderer regression checks.
 
 Acceptance: a renderer change can be judged against numbers and images, not subjective impressions.
-
----
-
-## Priority 2 — First-Party Runtime Shell As The Default Product Path
-
-The runtime shell should own the common frame pipeline. Testbed/example code should provide content and hooks, not rebuild HDR/MSAA/bloom/AA/tonemap/debug plumbing.
-
-### AppRuntime / AppRenderer
-
-- [ ] Move the common frame pipeline into `AppRuntime` / `AppRenderer`: surface acquire/present, HDR policy, scene targets, MSAA, bloom, AA, tonemapping, debug images, text overlay, and diagnostics.
-- [ ] Make `AppRuntime` own the default frame loop for graphical apps.
-- [ ] Route examples through the first-party runtime shell instead of custom per-example renderer assembly.
-- [ ] Keep lower-level access available without making it the default path.
-
-### Runtime settings
-
-- [ ] Apply runtime settings through transactions.
-- [ ] Every setting application must report `Applied`, `Degraded`, or `Rejected` with a reason and apply path.
-- [ ] Support apply paths for immediate changes, graph rebuilds, surface recreation, window reconfiguration, and deferred/device-level changes.
-- [ ] Expose settings snapshots and renderer diagnostics through the runtime controller.
-
-### Debug shell
-
-- [ ] Expose HDR, AA, post stack, render targets, pass timings, memory, graph inspection, backend/capability details, and runtime setting results.
-- [ ] Support screenshot/export from the shell.
-- [ ] Support shader and asset hot reload from the shell.
-- [ ] Make debug image registration a renderer/runtime service, not testbed-local state.
-
-Acceptance: a new graphical app gets the serious renderer, diagnostics, settings, and debug shell by default.
 
 ---
 
@@ -287,9 +293,9 @@ Ray tracing should wait as a visual-feature priority until bindless resources, m
 
 ## Best Immediate Commit Sequence
 
-1. Create `examples/realistic_reference_scene`.
-2. Move the common testbed frame pipeline into `AppRuntime` / `AppRenderer`.
-3. Add mandatory CPU/GPU/pass timing output to the runtime shell.
+1. ~~Route existing testbed examples through RuntimeApp instead of GameApp/EngineApp.~~ ✅ Done (main, shader_playground, plot_demo, coordinate_validation, ui_demo migrated).
+2. Migrate `game_2d` and `game_3d` to `RuntimeApp` (needs fixed-step support or InputHub pattern).
+3. Expose `AppRuntime::run_default_post_process` on `AppRuntimeFrame` so new apps don't need per-example bloom/AA/tonemap wiring.
 4. Add screenshot/export and graph inspection from the debug shell.
 5. Implement GPU transform build from compact object buffers.
 6. Replace per-batch culling with one GPU cull pass per view.
@@ -297,5 +303,6 @@ Ray tracing should wait as a visual-feature priority until bindless resources, m
 8. Add indirect-count compaction.
 9. Add centralized GPU material/resource tables.
 10. Finish auto exposure, mip bloom, HDR tonemap validation, and TAA validation.
+11. Create `examples/realistic_reference_scene` once the engine can support it end-to-end.
 
 This sequence keeps the engine focused on the real goal: dense, realistic scenes with measurable performance where the CPU submits compact intent and the GPU performs visibility, batching, and draw generation.

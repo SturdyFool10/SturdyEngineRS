@@ -504,10 +504,16 @@ impl ResourceRegistry {
                 .map_err(|error| Error::Backend(format!("vkCreateBuffer failed: {error:?}")))?
         };
         let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-        let allocation = match self.allocator.alloc(
+        let allocate_flags = if desc.usage.contains(BufferUsage::SHADER_DEVICE_ADDRESS) {
+            vk::MemoryAllocateFlags::DEVICE_ADDRESS
+        } else {
+            vk::MemoryAllocateFlags::empty()
+        };
+        let allocation = match self.allocator.alloc_with_flags(
             device,
             requirements,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            allocate_flags,
         ) {
             Ok(a) => a,
             Err(error) => {
@@ -918,8 +924,9 @@ impl ResourceRegistry {
                 "scratch buffer size must be non-zero".into(),
             ));
         }
+        let alignment = 256;
         let info = vk::BufferCreateInfo::default()
-            .size(size)
+            .size(size.saturating_add(alignment - 1))
             .usage(
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             )
@@ -930,17 +937,18 @@ impl ResourceRegistry {
                 .map_err(|e| Error::Backend(format!("vkCreateBuffer (AS scratch) failed: {e:?}")))?
         };
         let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-        let allocation =
-            match self
-                .allocator
-                .alloc(device, requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)
-            {
-                Ok(allocation) => allocation,
-                Err(error) => {
-                    unsafe { device.destroy_buffer(buffer, None) };
-                    return Err(error);
-                }
-            };
+        let allocation = match self.allocator.alloc_with_flags(
+            device,
+            requirements,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::MemoryAllocateFlags::DEVICE_ADDRESS,
+        ) {
+            Ok(allocation) => allocation,
+            Err(error) => {
+                unsafe { device.destroy_buffer(buffer, None) };
+                return Err(error);
+            }
+        };
         if let Err(error) =
             unsafe { device.bind_buffer_memory(buffer, allocation.memory, allocation.offset) }
         {
@@ -975,7 +983,7 @@ impl ResourceRegistry {
                 "vkGetBufferDeviceAddress returned 0 for AS scratch buffer".into(),
             ));
         }
-        Ok(base)
+        Ok((base + 255) & !255)
     }
 
     /// Look up a `VkAccelerationStructureKHR` by handle.
@@ -1022,17 +1030,18 @@ impl ResourceRegistry {
                 .map_err(|e| Error::Backend(format!("vkCreateBuffer (AS) failed: {e:?}")))?
         };
         let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-        let allocation =
-            match self
-                .allocator
-                .alloc(device, requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)
-            {
-                Ok(a) => a,
-                Err(e) => {
-                    unsafe { device.destroy_buffer(buffer, None) };
-                    return Err(e);
-                }
-            };
+        let allocation = match self.allocator.alloc_with_flags(
+            device,
+            requirements,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::MemoryAllocateFlags::DEVICE_ADDRESS,
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                unsafe { device.destroy_buffer(buffer, None) };
+                return Err(e);
+            }
+        };
         if let Err(e) =
             unsafe { device.bind_buffer_memory(buffer, allocation.memory, allocation.offset) }
         {
@@ -1400,10 +1409,13 @@ pub(super) fn vk_buffer_usage(usage: BufferUsage) -> vk::BufferUsageFlags {
         flags |= vk::BufferUsageFlags::INDIRECT_BUFFER;
     }
     if usage.contains(BufferUsage::ACCELERATION_STRUCTURE) {
-        flags |= vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR;
+        flags |= vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR;
     }
     if usage.contains(BufferUsage::SHADER_DEVICE_ADDRESS) {
         flags |= vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+    }
+    if usage.contains(BufferUsage::SHADER_BINDING_TABLE) {
+        flags |= vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR;
     }
     if usage.contains(BufferUsage::VIDEO_ENCODE_DST) {
         flags |= vk::BufferUsageFlags::VIDEO_ENCODE_DST_KHR;

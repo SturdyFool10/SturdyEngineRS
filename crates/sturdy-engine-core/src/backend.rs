@@ -252,6 +252,14 @@ pub trait Backend: Send + Sync {
     fn destroy_acceleration_structure(&self, _handle: AccelerationStructureHandle) -> Result<()> {
         Ok(())
     }
+    fn acceleration_structure_device_address(
+        &self,
+        _handle: AccelerationStructureHandle,
+    ) -> Result<u64> {
+        Err(crate::Error::Unsupported(
+            "backend does not expose acceleration structure device addresses",
+        ))
+    }
     fn blas_build_sizes(&self, _desc: &BlasBuildDesc) -> Result<AccelerationStructureBuildSizes> {
         Err(crate::Error::Unsupported(
             "backend does not support BLAS build size queries",

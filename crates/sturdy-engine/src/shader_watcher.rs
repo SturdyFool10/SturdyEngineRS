@@ -89,7 +89,7 @@ struct WatchedEntry {
 ///
 /// // Each frame:
 /// for diag in watcher.tick(&mut [&mut my_shader, &mut my_compute]) {
-///     eprintln!("{}", diag.summary());
+///     tracing::info!("{}", diag.summary());
 /// }
 /// ```
 pub struct ShaderWatcher {

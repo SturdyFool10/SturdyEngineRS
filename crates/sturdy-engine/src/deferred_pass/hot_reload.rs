@@ -27,7 +27,7 @@ impl DeferredPass {
     /// # Example
     /// ```ignore
     /// for d in deferred.tick_hot_reload() {
-    ///     if !d.success { eprintln!("{}", d.summary()); }
+    ///     if !d.success { tracing::info!("{}", d.summary()); }
     /// }
     /// ```
     pub fn tick_hot_reload(&mut self) -> Vec<ShaderReloadDiagnostic> {

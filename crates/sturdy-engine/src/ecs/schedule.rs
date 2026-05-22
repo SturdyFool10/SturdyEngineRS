@@ -135,8 +135,8 @@ impl Schedule {
                 match entry {
                     ScheduleEntry::Serial(name, sys) => {
                         sys.run(world);
-                        eprintln!(
-                            "[Schedule] {name}: {:.3}ms",
+                        tracing::info!(
+                            "{name}: {:.3}ms",
                             t0.elapsed().as_secs_f64() * 1000.0
                         );
                     }
@@ -149,8 +149,8 @@ impl Schedule {
                             sys.run(&view, &mut cmds);
                         }
                         cmds.apply(world);
-                        eprintln!(
-                            "[Schedule] {name} (parallel→serial): {:.3}ms",
+                        tracing::info!(
+                            "{name} (parallel→serial): {:.3}ms",
                             t0.elapsed().as_secs_f64() * 1000.0
                         );
                     }

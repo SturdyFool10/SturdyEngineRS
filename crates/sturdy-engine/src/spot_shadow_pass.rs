@@ -161,8 +161,7 @@ impl SpotShadowPass {
 
             // Render depth into the slot's shadow map.
             let map_name = format!("spot_shadow_map_{slot}");
-            let map_name_static = Box::leak(map_name.clone().into_boxed_str());
-            let desc = spot_shadow_image_desc(res, map_name_static);
+            let desc = spot_shadow_image_desc(res);
             let img = frame.image(&map_name, desc)?;
             draw_spot_shadow_batches(
                 scene,
@@ -201,7 +200,7 @@ fn spot_light_proj(outer_angle: f32, near: f32, far: f32) -> Mat4 {
     Mat4::perspective_rh(fov, 1.0, near, far.max(near + 0.1))
 }
 
-fn spot_shadow_image_desc(resolution: u32, debug_name: &'static str) -> ImageDesc {
+fn spot_shadow_image_desc(resolution: u32) -> ImageDesc {
     ImageDesc {
         dimension: ImageDimension::D2,
         extent: Extent3d {
@@ -216,7 +215,7 @@ fn spot_shadow_image_desc(resolution: u32, debug_name: &'static str) -> ImageDes
         usage: ImageUsage::DEPTH_STENCIL | ImageUsage::SAMPLED,
         transient: false,
         clear_value: None,
-        debug_name: Some(debug_name),
+        debug_name: None,
         compression: Default::default(),
         min_lod_bits: None,
         msaa_resolve_to_single_sampled: false,

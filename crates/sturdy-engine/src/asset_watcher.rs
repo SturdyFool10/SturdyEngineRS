@@ -15,7 +15,7 @@
 //
 // // Each frame:
 // for diag in watcher.tick(&engine, &frame) {
-//     eprintln!("{}", diag.summary());
+//     tracing::info!("{}", diag.summary());
 // }
 // ```
 //

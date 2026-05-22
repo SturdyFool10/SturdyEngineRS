@@ -263,6 +263,14 @@ impl ShaderProgram {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let key = (format, samples.max(1));
         if !pipelines.contains_key(&key) {
+            tracing::debug!(
+                "ShaderProgram::pipeline_handle compiling for format={format:?} samples={} \
+                 vert={:?} frag={:?} layout={:?}",
+                key.1,
+                self.vertex.handle(),
+                self.fragment.handle(),
+                self.pipeline_layout.handle(),
+            );
             let pipeline = self.engine.create_graphics_pipeline(GraphicsPipelineDesc {
                 vertex_shader: self.vertex.handle(),
                 fragment_shader: Some(self.fragment.handle()),
@@ -299,8 +307,14 @@ impl ShaderProgram {
                 },
                 conservative_raster: sturdy_engine_core::ConservativeRasterMode::Off,
             })?;
+            tracing::debug!(
+                "ShaderProgram pipeline compiled OK handle={:?}",
+                pipeline.handle()
+            );
             pipeline.set_debug_name("reflected-fullscreen-program")?;
+            tracing::debug!("ShaderProgram debug name set");
             pipelines.insert(key, pipeline);
+            tracing::debug!("ShaderProgram pipeline cached");
         }
         pipelines
             .get(&key)

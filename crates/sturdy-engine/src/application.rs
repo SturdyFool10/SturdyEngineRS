@@ -55,6 +55,69 @@ use std::{
 
 use sturdy_engine_core::SurfaceSize;
 
+// ── Tracing setup ─────────────────────────────────────────────────────────────
+
+/// Global handle for reloading the log filter at runtime (e.g. from settings UI).
+static LOG_RELOAD_HANDLE: std::sync::OnceLock<
+    tracing_subscriber::reload::Handle<
+        tracing_subscriber::EnvFilter,
+        tracing_subscriber::Registry,
+    >,
+> = std::sync::OnceLock::new();
+
+/// Initialize the global tracing subscriber once.
+///
+/// Uses `RUST_LOG` for level filtering (default: `warn`).  No-ops if a
+/// subscriber has already been installed — safe to call from multiple entry
+/// points in the same process.
+///
+/// Output is ANSI-coloured.  Use `RUST_LOG=debug` or call [`set_log_level`]
+/// to change verbosity at runtime.
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, Registry, fmt, prelude::*, reload};
+
+    let default_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn"));
+
+    let (filter_layer, handle) = reload::Layer::new(default_filter);
+
+    let fmt_layer = fmt::layer()
+        .with_ansi(true)
+        .with_level(true)
+        .with_target(true)
+        .with_thread_names(false)
+        .with_file(false)
+        .with_line_number(false);
+
+    let subscriber = Registry::default().with(filter_layer).with(fmt_layer);
+
+    if tracing::subscriber::set_global_default(subscriber).is_ok() {
+        let _ = LOG_RELOAD_HANDLE.set(handle);
+    }
+}
+
+/// Change the active log level filter at runtime.
+///
+/// Accepts any `RUST_LOG`-style directive, e.g. `"warn"`, `"debug"`,
+/// `"info,vulkan=debug"`.  Silently ignores invalid directives and is a
+/// no-op when called before the subscriber is initialised.
+pub fn set_log_level(filter: &str) {
+    use tracing_subscriber::EnvFilter;
+    let Some(handle) = LOG_RELOAD_HANDLE.get() else {
+        return;
+    };
+    match filter.parse::<EnvFilter>() {
+        Ok(new_filter) => {
+            if let Err(e) = handle.reload(new_filter) {
+                tracing::warn!("failed to reload log filter to '{filter}': {e}");
+            } else {
+                tracing::info!("log level set to '{filter}'");
+            }
+        }
+        Err(e) => tracing::warn!("invalid log filter '{filter}': {e}"),
+    }
+}
+
 use crate::{
     AntiAliasingMode, AntiAliasingPass, AppRuntime, BloomConfig, BloomPass, DebugImageRegistry,
     DefaultSceneTargetConfig, DiagnosticLevel, Engine, FrameTime, GamepadAxis, GamepadButton,
@@ -658,6 +721,34 @@ impl<'a> ShellFrame<'a> {
                 },
             ),
             format!(
+                "workload: visible_tris={} submitted_tris={} draws={} dispatches={} upload={}",
+                diagnostics
+                    .workload
+                    .visible_triangles
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                diagnostics
+                    .workload
+                    .submitted_triangles
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                diagnostics
+                    .workload
+                    .draw_count
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                diagnostics
+                    .workload
+                    .dispatch_count
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                diagnostics
+                    .workload
+                    .upload_bytes
+                    .map(|value| format!("{value}B"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+            ),
+            format!(
                 "motion: {}",
                 diagnostics
                     .motion_validation
@@ -882,10 +973,20 @@ impl<'a> ShellFrame<'a> {
     /// semaphore. The frames-in-flight fence is waited at the start of the next
     /// frame's submission, enabling CPU/GPU overlap.
     pub fn finish_and_present(&mut self, surface: &Surface) -> EngineResult<()> {
-        let flush_report = self
+        let flush_report = match self
             .inner
-            .flush_with_reason(crate::FrameSyncReason::FrameBoundaryPresent)?;
-        surface.present()?;
+            .flush_with_reason(crate::FrameSyncReason::FrameBoundaryPresent)
+        {
+            Ok(report) => report,
+            Err(error) => {
+                tracing::error!("shell frame flush failed before present: {error:?}");
+                return Err(error);
+            }
+        };
+        if let Err(error) = surface.present() {
+            tracing::error!("shell surface present failed after successful frame flush: {error:?}");
+            return Err(error);
+        }
         self.inner.mark_presented();
         self.controller.update_diagnostics(|diagnostics| {
             diagnostics.frame_sync = Some(format!(
@@ -951,8 +1052,9 @@ pub fn run<App: EngineApp>(config: WindowConfig)
 where
     App::Error: std::fmt::Debug,
 {
+    init_tracing();
     if let Err(error) = try_run::<App>(config) {
-        eprintln!("{error}");
+        tracing::error!("{error}");
         std::process::exit(1);
     }
 }
@@ -991,12 +1093,12 @@ where
     let native_appearance_report = created_window.native_appearance_report;
 
     if native_appearance_report.is_degraded() {
-        eprintln!(
+        tracing::warn!(
             "native window appearance setup degraded: {}",
             native_appearance_report.diagnostic_string()
         );
     } else if native_appearance_report.is_failed() {
-        eprintln!(
+        tracing::warn!(
             "native window appearance setup fell back to winit: {}",
             native_appearance_report.diagnostic_string()
         );
@@ -1092,7 +1194,7 @@ where
         self.poll_gamepads();
         self.publish_window_diagnostics();
         if let Err(e) = self.apply_pending_runtime_settings() {
-            eprintln!("runtime settings apply failed: {e:?}");
+            tracing::error!("runtime settings apply failed: {e:?}");
             std::process::exit(1);
         }
     }
@@ -1204,7 +1306,7 @@ impl GamepadBackend {
             Ok(gilrs) => Self { gilrs: Some(gilrs) },
             Err(gilrs::Error::NotImplemented(gilrs)) => Self { gilrs: Some(gilrs) },
             Err(error) => {
-                eprintln!("gamepad backend disabled: {error}");
+                tracing::error!("gamepad backend disabled: {error}");
                 Self { gilrs: None }
             }
         }
@@ -1484,7 +1586,7 @@ where
                         window.refresh_surface_state();
                     }
                     if let Err(e) = self.app_state.resize(size.width, size.height) {
-                        eprintln!("resize failed: {e:?}");
+                        tracing::error!("resize failed: {e:?}");
                         std::process::exit(1);
                     }
                     let resize_result = self.runtime.surface_mut().resize(SurfaceSize {
@@ -1495,7 +1597,7 @@ where
                         window.state_mut().waiting_for_surface_recreation = resize_result.is_err();
                     }
                     if let Err(e) = resize_result {
-                        eprintln!("surface resize failed: {e:?}");
+                        tracing::error!("surface resize failed: {e:?}");
                     }
                     if let Some(window) = self.window_for_handle(window_handle) {
                         let snapshot = window_settings_snapshot(
@@ -1562,7 +1664,7 @@ where
                     } else {
                         if let Err(e) = self.app_state.key_input(&input, self.runtime.surface_mut())
                         {
-                            eprintln!("key input handler failed: {e:?}");
+                            tracing::error!("key input handler failed: {e:?}");
                             std::process::exit(1);
                         }
                         if event.state == ElementState::Pressed {
@@ -1571,7 +1673,7 @@ where
                                     .app_state
                                     .key_pressed(s.as_str(), self.runtime.surface_mut())
                                 {
-                                    eprintln!("key handler failed: {e:?}");
+                                    tracing::error!("key handler failed: {e:?}");
                                     std::process::exit(1);
                                 }
                             }
@@ -1597,7 +1699,7 @@ where
                     .app_state
                     .pointer_moved(pos, self.runtime.surface_mut())
                 {
-                    eprintln!("pointer_moved failed: {e:?}");
+                    tracing::error!("pointer_moved failed: {e:?}");
                     std::process::exit(1);
                 }
             }
@@ -1636,7 +1738,7 @@ where
                     self.app_state
                         .pointer_button(pos, btn, pressed, self.runtime.surface_mut())
                 {
-                    eprintln!("pointer_button failed: {e:?}");
+                    tracing::error!("pointer_button failed: {e:?}");
                     std::process::exit(1);
                 }
             }
@@ -1659,7 +1761,7 @@ where
                     self.app_state
                         .pointer_scroll(pos, dx, dy, self.runtime.surface_mut())
                 {
-                    eprintln!("pointer_scroll failed: {e:?}");
+                    tracing::error!("pointer_scroll failed: {e:?}");
                     std::process::exit(1);
                 }
             }
@@ -1703,12 +1805,12 @@ where
                 }
                 let outcome = match self.runtime.acquire_frame() {
                     Err(ref e) if e.is_device_lost() => {
-                        eprintln!("[FATAL] GPU device lost during frame acquire: {e}");
+                        tracing::error!("GPU device lost during frame acquire: {e}");
                         FrameOutcome::FatalDeviceLost
                     }
                     Err(ref e) if e.is_surface_lost() => FrameOutcome::RecreateSurface,
                     Err(ref e) => {
-                        eprintln!("failed to acquire runtime frame: {e:?}");
+                        tracing::error!("failed to acquire runtime frame: {e:?}");
                         FrameOutcome::FatalOther
                     }
                     Ok(mut runtime_frame) => {
@@ -1722,19 +1824,19 @@ where
                             .app_state
                             .render(&mut render_frame, runtime_frame.surface_image())
                         {
-                            eprintln!("render failed: {e:?}");
+                            tracing::error!("render failed: {e:?}");
                             std::process::exit(1);
                         }
 
                         // Present — explicit call so errors surface here rather than Drop.
                         match runtime_frame.finish_and_present() {
                             Err(ref e) if e.is_device_lost() => {
-                                eprintln!("[FATAL] GPU device lost during present: {e}");
+                                tracing::error!("GPU device lost during present: {e}");
                                 FrameOutcome::FatalDeviceLost
                             }
                             Err(ref e) if e.is_surface_lost() => FrameOutcome::RecreateSurface,
                             Err(ref e) => {
-                                eprintln!("present failed: {e:?}");
+                                tracing::error!("present failed: {e:?}");
                                 FrameOutcome::FatalOther
                             }
                             Ok(()) => FrameOutcome::Ok,
@@ -1752,7 +1854,7 @@ where
                             .surface_mut()
                             .recreate(crate::SurfaceRecreateDesc::default())
                         {
-                            eprintln!("surface recreate failed: {re}");
+                            tracing::error!("surface recreate failed: {re}");
                             std::process::exit(1);
                         }
                         if let Some(window) = self.window_context_for_handle_mut(window_handle) {
@@ -1762,7 +1864,9 @@ where
                         return;
                     }
                     FrameOutcome::FatalDeviceLost => {
-                        eprintln!("The GPU is no longer usable. The application cannot recover.");
+                        tracing::warn!(
+                            "The GPU is no longer usable. The application cannot recover."
+                        );
                         std::process::exit(1);
                     }
                     FrameOutcome::FatalOther => std::process::exit(1),
@@ -1861,7 +1965,7 @@ where
                 setting, reason, ..
             } = result
             {
-                eprintln!("surface runtime setting apply failed for {setting}: {reason}");
+                tracing::error!("surface runtime setting apply failed for {setting}: {reason}");
             }
         }
         if let Some(window) = self.primary_window() {
@@ -2059,12 +2163,12 @@ fn apply_window_appearance_from_settings(
     );
     if native_report.is_degraded() || native_report.is_failed() {
         if native_report.is_degraded() {
-            eprintln!(
+            tracing::warn!(
                 "native window appearance apply degraded: {}",
                 native_report.diagnostic_string()
             );
         } else {
-            eprintln!(
+            tracing::warn!(
                 "native window appearance apply fell back to winit: {}",
                 native_report.diagnostic_string()
             );
@@ -2409,6 +2513,599 @@ fn windows_backdrop_for_appearance(appearance: WindowAppearance) -> BackdropType
         },
         _ => BackdropType::None,
     }
+}
+
+// ── RuntimeApp entry point ────────────────────────────────────────────────────
+
+/// Run the application using the runtime-owned frame loop.
+///
+/// Identical to [`try_run_with_runtime`] but prints the error and calls
+/// `process::exit(1)` on failure, matching the ergonomics of [`run`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_with_runtime<App: crate::RuntimeApp>(config: WindowConfig)
+where
+    App::Error: std::fmt::Debug,
+{
+    init_tracing();
+    if let Err(error) = try_run_with_runtime::<App>(config) {
+        tracing::error!("{error}");
+        std::process::exit(1);
+    }
+}
+
+/// Try to run the application with the runtime-owned frame loop.
+///
+/// Unlike [`try_run`], the `AppRuntime` is created *before* `App::init` is
+/// called, so the app can query engine/surface state at initialization time
+/// without separately holding engine and surface references.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn try_run_with_runtime<App: crate::RuntimeApp>(
+    config: WindowConfig,
+) -> std::result::Result<(), String>
+where
+    App::Error: std::fmt::Debug,
+{
+    use winit::event_loop::{ControlFlow, EventLoop};
+
+    let engine =
+        crate::Engine::new().map_err(|error| format!("failed to create engine: {error}"))?;
+    crate::Engine::set_global(&engine);
+
+    let event_loop: EventLoop<()> =
+        EventLoop::new().map_err(|error| format!("failed to create event loop: {error}"))?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    let primary_desc = WindowDesc::from_config(&config);
+    let mut shell_commands = ShellEventLoopCommandQueue::new();
+    shell_commands.create_window(primary_desc);
+    let created_window = drain_initial_window_commands(&event_loop, &mut shell_commands)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "primary window command did not create a window".to_string())?;
+    let created_desc = created_window.desc.clone();
+    let window = created_window.window;
+    let native_appearance_report = created_window.native_appearance_report;
+
+    if native_appearance_report.is_degraded() {
+        tracing::warn!(
+            "native window appearance setup degraded: {}",
+            native_appearance_report.diagnostic_string()
+        );
+    } else if native_appearance_report.is_failed() {
+        tracing::warn!(
+            "native window appearance setup fell back to winit: {}",
+            native_appearance_report.diagnostic_string()
+        );
+    }
+
+    let surface = engine
+        .create_surface_for_window_with_hdr(
+            &window,
+            SurfaceSize {
+                width: created_desc.width.max(1),
+                height: created_desc.height.max(1),
+            },
+            if created_desc.prefer_hdr {
+                SurfaceHdrPreference::ScRgb
+            } else {
+                SurfaceHdrPreference::Sdr
+            },
+        )
+        .map_err(|error| format!("failed to create surface: {error}"))?;
+
+    let mut runtime = AppRuntime::new(engine, surface)
+        .map_err(|error| format!("failed to initialize runtime: {error}"))?;
+    seed_window_settings(runtime.controller_mut(), &config)
+        .map_err(|error| format!("failed to seed runtime window settings: {error}"))?;
+    runtime.controller().update_diagnostics(|diagnostics| {
+        diagnostics.native_window_appearance = Some(native_appearance_report.diagnostic_string());
+    });
+    runtime.controller().set_settings(window_settings_snapshot(
+        &window,
+        &config,
+        runtime.controller(),
+    ));
+
+    let app_state = App::init(&mut runtime)
+        .map_err(|error| format!("failed to initialize application: {error:?}"))?;
+
+    let mut windows = WindowRegistry::new();
+    let primary_window = windows.insert(ShellWindow::new(
+        window,
+        config.appearance,
+        native_appearance_report.clone(),
+    ));
+    let mut winit_windows = std::collections::HashMap::new();
+    if let Some(window) = windows.get(primary_window) {
+        winit_windows.insert(window.window().id(), primary_window);
+    }
+
+    event_loop
+        .run_app(&mut RuntimeAppShell {
+            runtime,
+            windows,
+            winit_windows,
+            primary_window,
+            app_state,
+            gamepad_backend: GamepadBackend::new(),
+            modifiers: KeyModifiers::default(),
+            applied_settings_revision: 0,
+            _config: config,
+        })
+        .map_err(|error| format!("event loop exited unexpectedly: {error}"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct RuntimeAppShell<App: crate::RuntimeApp> {
+    runtime: AppRuntime,
+    windows: WindowRegistry<ShellWindow>,
+    winit_windows: std::collections::HashMap<winit::window::WindowId, WindowHandle>,
+    primary_window: WindowHandle,
+    app_state: App,
+    gamepad_backend: GamepadBackend,
+    modifiers: KeyModifiers,
+    applied_settings_revision: u64,
+    _config: WindowConfig,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<App: crate::RuntimeApp> winit::application::ApplicationHandler for RuntimeAppShell<App>
+where
+    App::Error: std::fmt::Debug,
+{
+    fn new_events(
+        &mut self,
+        _event_loop: &winit::event_loop::ActiveEventLoop,
+        _cause: winit::event::StartCause,
+    ) {
+        self.poll_gamepads();
+        self.publish_window_diagnostics();
+        if let Err(e) = self.apply_pending_runtime_settings() {
+            tracing::error!("runtime settings apply failed: {e:?}");
+            std::process::exit(1);
+        }
+    }
+
+    fn resumed(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
+        self.request_redraw_for_window(self.primary_window);
+    }
+
+    fn window_event(
+        &mut self,
+        _event_loop: &winit::event_loop::ActiveEventLoop,
+        window_id: winit::window::WindowId,
+        event: winit::event::WindowEvent,
+    ) {
+        let Some(window) = self.window_handle_for_winit_id(window_id) else {
+            return;
+        };
+        self.dispatch_window_event(ShellWindowEvent { window, event });
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &winit::event_loop::ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        if let winit::event::DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+            if let Some(hub) = self.app_state.input_hub() {
+                hub.on_raw_mouse_motion(glam::Vec2::new(dx as f32, dy as f32));
+            }
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
+        self.poll_gamepads();
+        self.apply_pointer_lock();
+        self.request_redraw_for_window(self.primary_window);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<App: crate::RuntimeApp> RuntimeAppShell<App>
+where
+    App::Error: std::fmt::Debug,
+{
+    fn poll_gamepads(&mut self) {
+        if let Some(hub) = self.app_state.input_hub() {
+            self.gamepad_backend.poll(hub);
+        }
+    }
+
+    fn apply_pointer_lock(&mut self) {
+        let (desired, current) = {
+            let Some(hub) = self.app_state.input_hub() else {
+                return;
+            };
+            (hub.pointer_lock_desired(), hub.is_pointer_locked())
+        };
+        if desired == current {
+            return;
+        }
+        let lock_applied = if let Some(window) = self.window_for_handle(self.primary_window) {
+            use winit::window::CursorGrabMode;
+            if desired {
+                let ok = window
+                    .set_cursor_grab(CursorGrabMode::Locked)
+                    .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
+                    .is_ok();
+                if ok {
+                    window.set_cursor_visible(false);
+                }
+                ok
+            } else {
+                let _ = window.set_cursor_grab(CursorGrabMode::None);
+                window.set_cursor_visible(true);
+                true
+            }
+        } else {
+            false
+        };
+        if let Some(hub) = self.app_state.input_hub() {
+            hub.set_pointer_locked(desired && lock_applied);
+        }
+    }
+
+    fn window_for_handle(&self, handle: WindowHandle) -> Option<&winit::window::Window> {
+        self.windows.get(handle).map(ShellWindow::window)
+    }
+
+    fn window_state_for_handle(&self, handle: WindowHandle) -> Option<&ShellWindowState> {
+        self.windows.get(handle).map(ShellWindow::state)
+    }
+
+    fn window_context_for_handle_mut(&mut self, handle: WindowHandle) -> Option<&mut ShellWindow> {
+        self.windows.get_mut(handle)
+    }
+
+    fn primary_window_ref(&self) -> Option<&winit::window::Window> {
+        self.windows
+            .get(self.primary_window)
+            .map(ShellWindow::window)
+    }
+
+    fn window_handle_for_winit_id(&self, id: winit::window::WindowId) -> Option<WindowHandle> {
+        self.winit_windows.get(&id).copied()
+    }
+
+    fn request_redraw_for_window(&mut self, handle: WindowHandle) {
+        if let Some(window) = self.window_context_for_handle_mut(handle) {
+            window.state_mut().dirty = true;
+            window.window().request_redraw();
+        }
+    }
+
+    fn publish_window_diagnostics(&self) {
+        let mut diagnostics = RuntimeWindowDiagnostics {
+            live_count: self.windows.live_count(),
+            ..RuntimeWindowDiagnostics::default()
+        };
+        for (handle, window) in self.windows.iter() {
+            let state = window.state();
+            let id = handle.id().raw();
+            if state.focused {
+                diagnostics.focused_window = Some(id);
+            }
+            if state.hovered {
+                diagnostics.hovered_window = Some(id);
+            }
+            if state.dirty {
+                diagnostics.dirty_count += 1;
+            }
+        }
+        self.runtime
+            .controller()
+            .update_diagnostics(|d| d.windows = diagnostics);
+    }
+
+    fn apply_pending_runtime_settings(&mut self) -> std::result::Result<(), App::Error> {
+        let controller = self.runtime.controller().clone();
+        let changes = controller.setting_changes_since(self.applied_settings_revision);
+        if changes.is_empty() {
+            self.applied_settings_revision = controller.settings_revision();
+            return Ok(());
+        }
+        apply_window_runtime_settings_for_primary(self.primary_window_ref(), &controller, &changes);
+        if let Some(window) = self.primary_window_ref() {
+            let snapshot =
+                window_settings_snapshot(window, &self._config, self.runtime.controller());
+            self.runtime.controller().set_settings(snapshot);
+        }
+        if changes.iter().any(|c| {
+            matches!(
+                c.setting,
+                RuntimeSettingId::Engine(RuntimeSettingKey::HdrMode)
+                    | RuntimeSettingId::Engine(RuntimeSettingKey::PresentMode)
+                    | RuntimeSettingId::Engine(RuntimeSettingKey::PresentPolicy)
+                    | RuntimeSettingId::Engine(RuntimeSettingKey::SurfaceTransparency)
+            )
+        }) {
+            if let Some(window) = self.window_context_for_handle_mut(self.primary_window) {
+                window.state_mut().waiting_for_surface_recreation = true;
+            }
+            self.runtime.apply_surface_runtime_settings(&changes);
+            if let Some(window) = self.window_context_for_handle_mut(self.primary_window) {
+                window.state_mut().waiting_for_surface_recreation = false;
+            }
+        }
+        self.app_state
+            .runtime_settings_changed(&controller, &changes)?;
+        self.applied_settings_revision = controller.settings_revision();
+        Ok(())
+    }
+
+    fn dispatch_window_event(&mut self, event: ShellWindowEvent) {
+        let window_handle = event.window;
+        match event {
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::CloseRequested,
+                ..
+            } => {
+                std::process::exit(0);
+            }
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::Resized(size),
+                ..
+            } => {
+                if size.width > 0 && size.height > 0 {
+                    if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                        window.refresh_surface_state();
+                    }
+                    let resize_result = self.runtime.surface_mut().resize(SurfaceSize {
+                        width: size.width.max(1),
+                        height: size.height.max(1),
+                    });
+                    if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                        window.state_mut().waiting_for_surface_recreation = resize_result.is_err();
+                    }
+                    if let Err(e) = resize_result {
+                        tracing::error!("surface resize failed: {e}");
+                    }
+                    if let Some(window) = self.window_for_handle(window_handle) {
+                        let snapshot = window_settings_snapshot(
+                            window,
+                            &self._config,
+                            self.runtime.controller(),
+                        );
+                        self.runtime.controller().set_settings(snapshot);
+                    }
+                    if let Err(e) =
+                        self.app_state
+                            .resize(&mut self.runtime, size.width, size.height)
+                    {
+                        tracing::error!("resize failed: {e:?}");
+                        std::process::exit(1);
+                    }
+                    self.request_redraw_for_window(window_handle);
+                }
+            }
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::ScaleFactorChanged { .. },
+                ..
+            } => {
+                if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                    window.refresh_surface_state();
+                }
+            }
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::Focused(focused),
+                ..
+            } => {
+                if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                    window.state_mut().focused = focused;
+                }
+            }
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::Moved(position),
+                ..
+            } => {
+                if let Some(window) = self.window_for_handle(window_handle) {
+                    let mut snapshot =
+                        window_settings_snapshot(window, &self._config, self.runtime.controller());
+                    snapshot.window_position = Some((position.x, position.y));
+                    self.runtime.controller().set_settings(snapshot);
+                }
+            }
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::ModifiersChanged(modifiers),
+                ..
+            } => {
+                self.modifiers = crate::input::key_modifiers_from_winit(modifiers.state());
+            }
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::KeyboardInput { event, .. },
+                ..
+            } => {
+                use winit::event::ElementState;
+                use winit::keyboard::Key;
+                if let Some(input) = crate::input::KeyInput::from_winit(&event, self.modifiers) {
+                    if let Some(hub) = self.app_state.input_hub() {
+                        hub.on_key_input(&input);
+                    } else if event.state == ElementState::Pressed {
+                        if let Key::Character(s) = &event.logical_key {
+                            if let Err(e) = self.app_state.key_pressed(s.as_str()) {
+                                tracing::error!("key handler failed: {e:?}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+            }
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::CursorMoved { position, .. },
+                ..
+            } => {
+                let pos = clay_ui::WindowLogicalPx::new(position.x as f32, position.y as f32);
+                if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                    window.state_mut().cursor_pos = pos;
+                    window.state_mut().hovered = true;
+                }
+                if let Some(hub) = self.app_state.input_hub() {
+                    hub.on_pointer_moved(pos);
+                } else if let Err(e) = self.app_state.pointer_moved(pos) {
+                    tracing::error!("pointer_moved failed: {e:?}");
+                    std::process::exit(1);
+                }
+            }
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::CursorLeft { .. },
+                ..
+            } => {
+                if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                    window.state_mut().hovered = false;
+                    window.state_mut().primary_held = false;
+                }
+            }
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::MouseInput { state, button, .. },
+                ..
+            } => {
+                use winit::event::{ElementState, MouseButton};
+                let btn: u8 = match button {
+                    MouseButton::Left => 0,
+                    MouseButton::Right => 1,
+                    MouseButton::Middle => 2,
+                    _ => 3,
+                };
+                let pressed = state == ElementState::Pressed;
+                let pos = if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                    if btn == 0 {
+                        window.state_mut().primary_held = pressed;
+                    }
+                    window.state().cursor_pos
+                } else {
+                    clay_ui::WindowLogicalPx::ZERO
+                };
+                if let Some(hub) = self.app_state.input_hub() {
+                    hub.on_pointer_button(pos, btn, pressed);
+                } else if let Err(e) = self.app_state.pointer_button(pos, btn, pressed) {
+                    tracing::error!("pointer_button failed: {e:?}");
+                    std::process::exit(1);
+                }
+            }
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::MouseWheel { delta, .. },
+                ..
+            } => {
+                use winit::event::MouseScrollDelta;
+                let (dx, dy) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x * 20.0, -y * 20.0),
+                    MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
+                };
+                if let Some(hub) = self.app_state.input_hub() {
+                    hub.on_pointer_scroll(dx, dy);
+                }
+            }
+            ShellWindowEvent {
+                event: winit::event::WindowEvent::RedrawRequested,
+                ..
+            } => {
+                if let Some(state) = self.window_state_for_handle(window_handle) {
+                    if state.surface_size.width == 0 || state.surface_size.height == 0 {
+                        return;
+                    }
+                }
+                let (window_scale_factor, window_logical_size) =
+                    if let Some(state) = self.window_state_for_handle(window_handle) {
+                        (
+                            state.scale_factor as f32,
+                            Some([
+                                state.surface_size.width as f32,
+                                state.surface_size.height as f32,
+                            ]),
+                        )
+                    } else {
+                        (1.0, None)
+                    };
+                enum FrameOutcome {
+                    Ok,
+                    RecreateSurface,
+                    FatalDeviceLost,
+                    FatalOther,
+                }
+                let outcome = match self.runtime.acquire_frame() {
+                    Err(ref e) if e.is_device_lost() => {
+                        tracing::error!("GPU device lost during frame acquire: {e}");
+                        FrameOutcome::FatalDeviceLost
+                    }
+                    Err(ref e) if e.is_surface_lost() => FrameOutcome::RecreateSurface,
+                    Err(ref e) => {
+                        tracing::error!("failed to acquire runtime frame: {e:?}");
+                        FrameOutcome::FatalOther
+                    }
+                    Ok(mut runtime_frame) => {
+                        runtime_frame.set_window_scale_factor(window_scale_factor);
+                        if let Some(size) = window_logical_size {
+                            runtime_frame.set_window_logical_size(size);
+                        }
+                        if let Err(e) = self.app_state.update(&mut runtime_frame) {
+                            tracing::error!("update failed: {e:?}");
+                            std::process::exit(1);
+                        }
+                        match runtime_frame.finish_and_present() {
+                            Err(ref e) if e.is_device_lost() => {
+                                tracing::error!("GPU device lost during present: {e}");
+                                FrameOutcome::FatalDeviceLost
+                            }
+                            Err(ref e) if e.is_surface_lost() => FrameOutcome::RecreateSurface,
+                            Err(ref e) => {
+                                tracing::error!("present failed: {e:?}");
+                                FrameOutcome::FatalOther
+                            }
+                            Ok(()) => FrameOutcome::Ok,
+                        }
+                    }
+                };
+
+                match outcome {
+                    FrameOutcome::Ok => {}
+                    FrameOutcome::RecreateSurface => {
+                        if let Err(re) = self
+                            .runtime
+                            .surface_mut()
+                            .recreate(crate::SurfaceRecreateDesc::default())
+                        {
+                            tracing::error!("surface recreate failed: {re}");
+                            std::process::exit(1);
+                        }
+                        if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                            window.state_mut().dirty = false;
+                        }
+                        self.publish_window_diagnostics();
+                        return;
+                    }
+                    FrameOutcome::FatalDeviceLost => {
+                        tracing::warn!(
+                            "The GPU is no longer usable. The application cannot recover."
+                        );
+                        std::process::exit(1);
+                    }
+                    FrameOutcome::FatalOther => std::process::exit(1),
+                }
+
+                if let Some(window) = self.window_context_for_handle_mut(window_handle) {
+                    window.state_mut().dirty = false;
+                }
+                self.request_redraw_for_window(window_handle);
+            }
+            _ => {}
+        }
+        self.publish_window_diagnostics();
+    }
+}
+
+/// Apply window-level runtime settings (title, decorations, resize, mode)
+/// without touching the surface. Used by `RuntimeAppShell` where we don't have
+/// a mutable borrow on a `ShellApp<EngineApp>`.
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_window_runtime_settings_for_primary(
+    window: Option<&winit::window::Window>,
+    controller: &RuntimeController,
+    changes: &[RuntimeSettingChange],
+) {
+    let Some(window) = window else { return };
+    apply_window_runtime_settings(window, controller, changes);
 }
 
 #[cfg(test)]

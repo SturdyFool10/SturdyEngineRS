@@ -28,7 +28,7 @@ pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
             };
             match extract_primitive(engine, &primitive, &buffers, &gpu_images, &name) {
                 Ok(p) => out.push(p),
-                Err(e) => eprintln!("[gltf] skipping '{name}' in '{}': {e}", path.display()),
+                Err(e) => tracing::warn!("gltf: skipping '{name}' in '{}': {e}", path.display()),
             }
         }
     }
@@ -47,7 +47,7 @@ fn upload_images(engine: &Engine, images: &[gltf::image::Data]) -> Result<Vec<Op
         match upload_one_image(&mut frame, img, i) {
             Ok(image) => gpu_images.push(Some(Arc::new(image))),
             Err(e) => {
-                eprintln!("[gltf] failed to upload image {i}: {e}");
+                tracing::error!("failed to upload image {i}: {e}");
                 gpu_images.push(None);
             }
         }

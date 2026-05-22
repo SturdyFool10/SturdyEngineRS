@@ -574,8 +574,8 @@ impl DescriptorRegistry {
                         Ok(backing) => Some(backing),
                         Err(e) => {
                             // Non-fatal: fall back to pool-based path silently.
-                            eprintln!(
-                                "[SturdyEngine] descriptor buffer backing creation failed (using pool fallback): {e}"
+                            tracing::error!(
+                                "descriptor buffer backing creation failed (using pool fallback): {e}"
                             );
                             None
                         }
@@ -1070,6 +1070,28 @@ fn write_descriptor(
                 .dst_binding(binding.binding_index)
                 .descriptor_type(binding.descriptor_type)
                 .image_info(&info)];
+            unsafe {
+                device.update_descriptor_sets(&write, &[]);
+            }
+        }
+        ResourceBinding::AccelerationStructure(acceleration_structure) => {
+            if binding.descriptor_type != vk::DescriptorType::ACCELERATION_STRUCTURE_KHR {
+                return Err(Error::InvalidInput(
+                    "acceleration structure resource can only be bound to acceleration structure descriptors".into(),
+                ));
+            }
+            let as_handle = resources.acceleration_structure(acceleration_structure)?;
+            let as_handles = [as_handle];
+            let as_info = vk::WriteDescriptorSetAccelerationStructureKHR::default()
+                .acceleration_structures(&as_handles);
+            let mut write = vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(binding.binding_index)
+                .descriptor_type(binding.descriptor_type)
+                .descriptor_count(1);
+            write.p_next = (&as_info as *const vk::WriteDescriptorSetAccelerationStructureKHR<'_>)
+                .cast::<std::ffi::c_void>();
+            let write = [write];
             unsafe {
                 device.update_descriptor_sets(&write, &[]);
             }

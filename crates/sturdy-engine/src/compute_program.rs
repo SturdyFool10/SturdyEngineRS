@@ -12,16 +12,29 @@ pub struct ComputeProgram {
     pub(crate) shader: Shader,
     pub(crate) reflection: ShaderReflection,
     source_path: Option<PathBuf>,
+    requires_ray_query: bool,
 }
 
 impl ComputeProgram {
     pub fn load(engine: &Engine, path: impl Into<PathBuf>) -> Result<Self> {
+        Self::load_with_ray_query(engine, path, false)
+    }
+
+    pub fn load_ray_query(engine: &Engine, path: impl Into<PathBuf>) -> Result<Self> {
+        Self::load_with_ray_query(engine, path, true)
+    }
+
+    fn load_with_ray_query(
+        engine: &Engine,
+        path: impl Into<PathBuf>,
+        requires_ray_query: bool,
+    ) -> Result<Self> {
         let path = path.into();
         let shader = engine.create_shader(ShaderDesc {
             source: ShaderSource::File(path.clone()),
             entry_point: "main".to_owned(),
             stage: ShaderStage::Compute,
-            requires_ray_query: false,
+            requires_ray_query,
             requires_cooperative_matrix: false,
             uses_ser: false,
         })?;
@@ -38,6 +51,7 @@ impl ComputeProgram {
             shader,
             reflection,
             source_path: Some(path),
+            requires_ray_query,
         })
     }
 
@@ -64,7 +78,7 @@ impl ComputeProgram {
             source: ShaderSource::File(path),
             entry_point: "main".to_owned(),
             stage: ShaderStage::Compute,
-            requires_ray_query: false,
+            requires_ray_query: self.requires_ray_query,
             requires_cooperative_matrix: false,
             uses_ser: false,
         })?;

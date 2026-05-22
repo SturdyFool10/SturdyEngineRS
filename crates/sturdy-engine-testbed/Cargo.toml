@@ -22,6 +22,8 @@ path = "src/bin/game_2d.rs"
 bytemuck = "1"
 clay-ui = { path = "../clay-ui" }
 glam.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 raw-window-handle = "0.6"
 sturdy-engine = { path = "../sturdy-engine" }
 sturdy-engine-core = { path = "../sturdy-engine-core" }

@@ -303,6 +303,49 @@ fn spirv_words_from_byte_source(source: &ShaderSource) -> Result<Option<Vec<u32>
     Ok(None)
 }
 
+fn spirv_entry_point_name(words: &[u32], stage: ShaderStage) -> Option<String> {
+    const OP_ENTRY_POINT: u16 = 15;
+
+    let wanted_model = spirv_execution_model(stage)?;
+    let mut offset = 5;
+    while offset < words.len() {
+        let word = words[offset];
+        let word_count = (word >> 16) as usize;
+        let opcode = (word & 0xffff) as u16;
+        if word_count == 0 || offset + word_count > words.len() {
+            return None;
+        }
+        if opcode == OP_ENTRY_POINT && word_count >= 4 && words[offset + 1] == wanted_model {
+            let name_words = &words[offset + 3..offset + word_count];
+            let mut bytes = Vec::with_capacity(name_words.len() * 4);
+            for word in name_words {
+                for byte in word.to_le_bytes() {
+                    if byte == 0 {
+                        return String::from_utf8(bytes).ok();
+                    }
+                    bytes.push(byte);
+                }
+            }
+            return String::from_utf8(bytes).ok();
+        }
+        offset += word_count;
+    }
+    None
+}
+
+fn spirv_execution_model(stage: ShaderStage) -> Option<u32> {
+    Some(match stage {
+        ShaderStage::Vertex => 0,
+        ShaderStage::Fragment => 4,
+        ShaderStage::Compute => 5,
+        ShaderStage::RayGeneration => 5313,
+        ShaderStage::ClosestHit => 5316,
+        ShaderStage::Miss => 5317,
+        ShaderStage::Task => 5364,
+        ShaderStage::Mesh => 5365,
+    })
+}
+
 /// Reflect the pipeline layout of a Slang shader source.
 ///
 /// Returns an empty layout for `ShaderSource::Spirv` (no source available to reflect).
@@ -881,9 +924,13 @@ pub fn compile_and_reflect(
 
         // For SPIR-V output, parse the words once for both the compiled source and
         // vertex input reflection — avoids a second parse after the bytes are moved.
+        let mut compiled_entry_point = desc.entry_point.clone();
         let (compiled_source, vertex_inputs) = match target {
             ShaderTarget::Spirv => {
                 let words = spirv_words_from_bytes(&code_bytes)?;
+                if let Some(entry_point) = spirv_entry_point_name(&words, engine_stage) {
+                    compiled_entry_point = entry_point;
+                }
                 let inputs = if engine_stage == ShaderStage::Vertex {
                     spirv_vertex_inputs::reflect_spirv_vertex_inputs(&words)
                 } else {
@@ -897,7 +944,7 @@ pub fn compile_and_reflect(
 
         let compiled_desc = ShaderDesc {
             source: compiled_source,
-            entry_point: desc.entry_point.clone(),
+            entry_point: compiled_entry_point,
             stage: desc.stage,
             requires_ray_query: desc.requires_ray_query,
             requires_cooperative_matrix: desc.requires_cooperative_matrix,

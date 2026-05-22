@@ -9,9 +9,10 @@ mod batch_pool;
 
 use crate::{
     AccelerationStructureBuildMode, BufferBarrier, CompiledGraph, Error, Extent3d, Format,
-    ImageBarrier, IndexFormat, OpticalFlowEstimateDesc, OpticalFlowSessionHandle, PassDesc,
-    PassWork, PipelineHandle, PushConstants, PushDescriptorBinding, Result, RgState, ShaderBinding,
-    ShaderBindingTableRegion, ShadingRate, SubmissionHandle, SubresourceRange, VertexFormat,
+    ImageBarrier, ImageUsage, IndexFormat, OpticalFlowEstimateDesc, OpticalFlowSessionHandle,
+    PassDesc, PassWork, PipelineHandle, PushConstants, PushDescriptorBinding, Result, RgState,
+    ShaderBinding, ShaderBindingTableRegion, ShadingRate, SubmissionHandle, SubresourceRange,
+    VertexFormat,
 };
 
 use super::bindless::BindlessVkInfo;
@@ -447,7 +448,7 @@ impl CommandContext {
                         if !pass.name.is_empty() {
                             debug.begin_region(cmd, &pass.name, [0.5, 0.5, 1.0, 1.0]);
                         }
-                        self.record_pass(
+                        if let Err(error) = self.record_pass(
                             device,
                             cmd,
                             pass,
@@ -473,7 +474,12 @@ impl CommandContext {
                             optical_flow_sessions,
                             dgc_nv,
                             indirect_command_layouts,
-                        )?;
+                        ) {
+                            return Err(Error::ResourceStateCorruption(format!(
+                                "recording pass '{}' failed: {error:?}",
+                                pass.name
+                            )));
+                        }
                         if !pass.name.is_empty() {
                             debug.end_region(cmd);
                         }
@@ -1770,7 +1776,9 @@ impl CommandContext {
                         .geometries(&geometries);
 
                     let scratch_addr = if let Some(scratch) = build.scratch_buffer {
-                        resources.buffer_device_address_raw(device, scratch)?
+                        align_as_scratch_address(
+                            resources.buffer_device_address_raw(device, scratch)?,
+                        )
                     } else {
                         let scratch_size =
                             build_scratch_size(as_ext, &build_info, &build_range_infos)?;
@@ -1793,6 +1801,7 @@ impl CommandContext {
                             &range_slices,
                         );
                     }
+                    record_as_build_to_trace_barrier(device, command_buffer, sync2);
                 }
             }
 
@@ -1862,7 +1871,9 @@ impl CommandContext {
                         transform_offset: 0,
                     }];
                     let scratch_addr = if let Some(scratch) = build.scratch_buffer {
-                        resources.buffer_device_address_raw(device, scratch)?
+                        align_as_scratch_address(
+                            resources.buffer_device_address_raw(device, scratch)?,
+                        )
                     } else {
                         let scratch_size = build_scratch_size(as_ext, &build_info, &range_info)?;
                         let scratch = resources.create_scratch_buffer(device, scratch_size)?;
@@ -1883,6 +1894,7 @@ impl CommandContext {
                             &range_slices,
                         );
                     }
+                    record_as_build_to_trace_barrier(device, command_buffer, sync2);
                 }
             }
 
@@ -2141,24 +2153,13 @@ impl CommandContext {
             (ext, layers)
         };
 
-        let render_area = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: vk::Extent2D {
-                width: first_extent.width,
-                height: first_extent.height,
-            },
-        };
-        let (vp, scissor) = match viewport_override {
+        // When a viewport tile is specified (e.g. shadow atlas cascades), scope the
+        // render_area to that tile so LOAD_OP_CLEAR only clears the tile being written,
+        // not the entire attachment. Without this, each cascade's clear would erase
+        // the depth data written by previous cascades.
+        let (render_area, vp, scissor) = match viewport_override {
             Some([x, y, w, h]) => {
-                let vp = vk::Viewport {
-                    x: x as f32,
-                    y: y as f32,
-                    width: w as f32,
-                    height: h as f32,
-                    min_depth: 0.0,
-                    max_depth: 1.0,
-                };
-                let sc = vk::Rect2D {
+                let tile = vk::Rect2D {
                     offset: vk::Offset2D {
                         x: x as i32,
                         y: y as i32,
@@ -2168,9 +2169,24 @@ impl CommandContext {
                         height: h,
                     },
                 };
-                (vp, sc)
+                let vp = vk::Viewport {
+                    x: x as f32,
+                    y: y as f32,
+                    width: w as f32,
+                    height: h as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                };
+                (tile, vp, tile)
             }
             None => {
+                let full = vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: vk::Extent2D {
+                        width: first_extent.width,
+                        height: first_extent.height,
+                    },
+                };
                 let vp = vk::Viewport {
                     x: 0.0,
                     y: 0.0,
@@ -2179,7 +2195,7 @@ impl CommandContext {
                     min_depth: 0.0,
                     max_depth: 1.0,
                 };
-                (vp, render_area)
+                (full, vp, full)
             }
         };
 
@@ -2211,12 +2227,21 @@ impl CommandContext {
                 let depth_attachment_info = if let Some(du) = depth_use {
                     let depth_view =
                         resources.image_view_for_subresource(device, du.image, du.subresource)?;
+                    // Use STORE when the depth image has SAMPLED usage — it will be read
+                    // by a later shader pass (e.g. shadow atlas or gbuffer depth).
+                    // DONT_CARE is fine for transient depth used only within the pass.
+                    let depth_store_op = resources
+                        .image_desc(du.image)
+                        .ok()
+                        .filter(|d| d.usage.contains(ImageUsage::SAMPLED))
+                        .map(|_| vk::AttachmentStoreOp::STORE)
+                        .unwrap_or(vk::AttachmentStoreOp::DONT_CARE);
                     Some(
                         vk::RenderingAttachmentInfo::default()
                             .image_view(depth_view)
                             .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                             .load_op(vk::AttachmentLoadOp::CLEAR)
-                            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                            .store_op(depth_store_op)
                             .clear_value(vk::ClearValue {
                                 depth_stencil: vk::ClearDepthStencilValue {
                                     depth: 1.0,
@@ -2536,9 +2561,11 @@ fn stage_mask(state: RgState) -> vk::PipelineStageFlags {
             vk::PipelineStageFlags::VERTEX_SHADER
                 | vk::PipelineStageFlags::FRAGMENT_SHADER
                 | vk::PipelineStageFlags::COMPUTE_SHADER
+                | vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR
         }
-        // Storage writes happen exclusively in compute shaders in this engine.
-        RgState::ShaderWrite => vk::PipelineStageFlags::COMPUTE_SHADER,
+        RgState::ShaderWrite => {
+            vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR
+        }
         RgState::RenderTarget => vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
         RgState::DepthRead | RgState::DepthWrite => {
             vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
@@ -2577,8 +2604,12 @@ fn stage_mask2(state: RgState) -> vk::PipelineStageFlags2 {
             vk::PipelineStageFlags2::VERTEX_SHADER
                 | vk::PipelineStageFlags2::FRAGMENT_SHADER
                 | vk::PipelineStageFlags2::COMPUTE_SHADER
+                | vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR
         }
-        RgState::ShaderWrite => vk::PipelineStageFlags2::COMPUTE_SHADER,
+        RgState::ShaderWrite => {
+            vk::PipelineStageFlags2::COMPUTE_SHADER
+                | vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR
+        }
         RgState::RenderTarget => vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
         RgState::DepthRead | RgState::DepthWrite => {
             vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
@@ -2638,6 +2669,46 @@ fn vk_vertex_format_for_as(format: VertexFormat) -> Result<vk::Format> {
         VertexFormat::Float32x2 => Ok(vk::Format::R32G32_SFLOAT),
         VertexFormat::Float32x3 => Ok(vk::Format::R32G32B32_SFLOAT),
         VertexFormat::Float32x4 => Ok(vk::Format::R32G32B32A32_SFLOAT),
+    }
+}
+
+fn align_as_scratch_address(address: u64) -> u64 {
+    (address + 255) & !255
+}
+
+fn record_as_build_to_trace_barrier(
+    device: &Device,
+    command_buffer: vk::CommandBuffer,
+    sync2: Option<&ash::khr::synchronization2::Device>,
+) {
+    unsafe {
+        if let Some(sync2) = sync2 {
+            let barrier = vk::MemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR)
+                .src_access_mask(vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR)
+                .dst_stage_mask(
+                    vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR
+                        | vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR,
+                )
+                .dst_access_mask(vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR);
+            let dependency =
+                vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&barrier));
+            sync2.cmd_pipeline_barrier2(command_buffer, &dependency);
+        } else {
+            let barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR)
+                .dst_access_mask(vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR);
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR,
+                vk::PipelineStageFlags::ACCELERATION_STRUCTURE_BUILD_KHR
+                    | vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+                vk::DependencyFlags::empty(),
+                std::slice::from_ref(&barrier),
+                &[],
+                &[],
+            );
+        }
     }
 }
 

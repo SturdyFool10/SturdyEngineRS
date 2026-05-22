@@ -24,8 +24,8 @@ unsafe extern "system" fn device_memory_report_callback(
             };
             let bytes = data.size;
             if bytes > 0 {
-                eprintln!(
-                    "[device-memory-report] {type_str} type={} size={}B obj={:#x}",
+                tracing::info!(
+                    "{type_str} type={} size={}B obj={:#x}",
                     data.memory_type, bytes, data.memory_object_id
                 );
             }
@@ -69,6 +69,7 @@ pub struct LogicalDevice {
     pub extended_dynamic_state3_enabled: bool,
     pub vertex_input_dynamic_state_enabled: bool,
     pub shader_object_enabled: bool,
+    pub graphics_pipeline_library_enabled: bool,
 }
 
 impl DeviceSelection {
@@ -190,6 +191,10 @@ pub fn create_logical_device(
         .vertex_input_dynamic_state
         == vk::TRUE;
     let shader_object_enabled = feature_request.shader_object.shader_object == vk::TRUE;
+    let graphics_pipeline_library_enabled = feature_request
+        .graphics_pipeline_library
+        .graphics_pipeline_library
+        == vk::TRUE;
     // push_descriptors, conservative_rasterization, and global_queue_priority are extension-only
     // (no feature struct).
     // They are enabled if the extension was added to required_extensions by resolve().
@@ -223,6 +228,8 @@ pub fn create_logical_device(
         for ext_name in [
             "VK_EXT_device_memory_report",
             "VK_EXT_device_address_binding_report",
+            "VK_EXT_device_fault",
+            "VK_NV_device_diagnostic_checkpoints",
         ] {
             if available_exts.contains(ext_name) {
                 let Ok(c_name) = CString::new(ext_name) else {
@@ -336,6 +343,7 @@ pub fn create_logical_device(
         extended_dynamic_state3_enabled,
         vertex_input_dynamic_state_enabled,
         shader_object_enabled,
+        graphics_pipeline_library_enabled,
     })
 }
 
@@ -431,6 +439,7 @@ impl ExtensionRequest {
 
 struct FeatureRequest<'a> {
     features2: vk::PhysicalDeviceFeatures2<'a>,
+    vulkan11: vk::PhysicalDeviceVulkan11Features<'a>,
     descriptor_indexing: vk::PhysicalDeviceDescriptorIndexingFeatures<'a>,
     timeline: vk::PhysicalDeviceTimelineSemaphoreFeatures<'a>,
     dynamic_rendering: vk::PhysicalDeviceDynamicRenderingFeatures<'a>,
@@ -449,6 +458,7 @@ struct FeatureRequest<'a> {
     vertex_input_dynamic_state: vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT<'a>,
     shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT<'a>,
     optical_flow: vk::PhysicalDeviceOpticalFlowFeaturesNV<'a>,
+    graphics_pipeline_library: vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT<'a>,
     use_feature_chain: bool,
     required_extensions: Vec<&'static CStr>,
 }
@@ -475,6 +485,7 @@ impl FeatureRequest<'static> {
             .collect::<HashSet<_>>();
         let mut request = Self {
             features2: vk::PhysicalDeviceFeatures2::default(),
+            vulkan11: vk::PhysicalDeviceVulkan11Features::default(),
             descriptor_indexing: vk::PhysicalDeviceDescriptorIndexingFeatures::default(),
             timeline: vk::PhysicalDeviceTimelineSemaphoreFeatures::default(),
             dynamic_rendering: vk::PhysicalDeviceDynamicRenderingFeatures::default(),
@@ -495,6 +506,8 @@ impl FeatureRequest<'static> {
                 vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT::default(),
             shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT::default(),
             optical_flow: vk::PhysicalDeviceOpticalFlowFeaturesNV::default(),
+            graphics_pipeline_library:
+                vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT::default(),
             use_feature_chain: false,
             required_extensions: Vec::new(),
         };
@@ -519,14 +532,25 @@ impl FeatureRequest<'static> {
             if disabled.contains(name) {
                 continue;
             }
-            request.enable_feature(
+            match request.enable_feature(
                 name,
                 false,
                 &available_core,
                 &available_chain,
                 &available_extensions,
                 properties.api_version,
-            )?;
+            ) {
+                Ok(()) => tracing::debug!("optional Vulkan feature enabled: {name}"),
+                Err(e) => {
+                    tracing::debug!("optional Vulkan feature skipped (not available): {name}: {e}")
+                }
+            }
+        }
+
+        if !disabled.contains("shader_draw_parameters")
+            && available_chain.vulkan11.shader_draw_parameters == vk::TRUE
+        {
+            request.vulkan11.shader_draw_parameters = vk::TRUE;
         }
 
         if request.ray_tracing.ray_tracing_pipeline == vk::TRUE
@@ -542,11 +566,18 @@ impl FeatureRequest<'static> {
             )?;
         }
 
-        request.rebuild_chain();
+        // Do NOT call rebuild_chain() here — the struct is returned by value and
+        // rebuild_chain() stores raw self-pointers in the pNext chain.  Moving the
+        // struct after that would leave every pNext pointer dangling.  Instead,
+        // rebuild_chain() is called inside apply_to(), after the struct is at its
+        // final stable address in the caller's stack frame.
         Ok(request)
     }
 
     fn apply_to<'a>(&'a mut self, info: vk::DeviceCreateInfo<'a>) -> vk::DeviceCreateInfo<'a> {
+        // Rebuild the pNext chain now that `self` is at its stable location and
+        // will not be moved again before vkCreateDevice is called.
+        self.rebuild_chain();
         if self.use_feature_chain {
             let mut info = info;
             info.p_next = (&mut self.features2 as *mut vk::PhysicalDeviceFeatures2<'static>).cast();
@@ -620,10 +651,27 @@ impl FeatureRequest<'static> {
                     .shader_sampled_image_array_non_uniform_indexing = available
                     .descriptor_indexing
                     .shader_sampled_image_array_non_uniform_indexing;
-                self.descriptor_indexing
-                    .descriptor_binding_sampled_image_update_after_bind = available
+                if available
                     .descriptor_indexing
-                    .descriptor_binding_sampled_image_update_after_bind;
+                    .descriptor_binding_sampled_image_update_after_bind
+                    != vk::TRUE
+                    || available
+                        .descriptor_indexing
+                        .descriptor_binding_storage_image_update_after_bind
+                        != vk::TRUE
+                    || available
+                        .descriptor_indexing
+                        .descriptor_binding_storage_buffer_update_after_bind
+                        != vk::TRUE
+                {
+                    return false;
+                }
+                self.descriptor_indexing
+                    .descriptor_binding_sampled_image_update_after_bind = vk::TRUE;
+                self.descriptor_indexing
+                    .descriptor_binding_storage_image_update_after_bind = vk::TRUE;
+                self.descriptor_indexing
+                    .descriptor_binding_storage_buffer_update_after_bind = vk::TRUE;
                 true
             }
             "timeline_semaphore" | "timeline_semaphores" => {
@@ -837,6 +885,17 @@ impl FeatureRequest<'static> {
                 self.optical_flow.optical_flow = vk::TRUE;
                 true
             }
+            "graphics_pipeline_library" => {
+                if available
+                    .graphics_pipeline_library
+                    .graphics_pipeline_library
+                    != vk::TRUE
+                {
+                    return false;
+                }
+                self.graphics_pipeline_library.graphics_pipeline_library = vk::TRUE;
+                true
+            }
             _ => self.enable_descriptor_indexing_field(name, &available.descriptor_indexing),
         }
     }
@@ -987,6 +1046,10 @@ impl FeatureRequest<'static> {
             "optical_flow" | "optical_flow_nv" => {
                 self.require_extension(ash::nv::optical_flow::NAME, available_extensions)?
             }
+            "graphics_pipeline_library" => self.require_extension(
+                ash::ext::graphics_pipeline_library::NAME,
+                available_extensions,
+            )?,
             "buffer_device_address" if api_version < vk::API_VERSION_1_2 => {
                 self.require_extension(ash::khr::buffer_device_address::NAME, available_extensions)?
             }
@@ -1023,6 +1086,10 @@ impl FeatureRequest<'static> {
         self.features2.p_next = std::ptr::null_mut();
         self.use_feature_chain = false;
 
+        if self.vulkan11.shader_draw_parameters == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.vulkan11);
+            self.use_feature_chain = true;
+        }
         if self.has_descriptor_indexing_features() {
             push_feature_chain(&mut self.features2, &mut self.descriptor_indexing);
             self.use_feature_chain = true;
@@ -1110,6 +1177,10 @@ impl FeatureRequest<'static> {
             push_feature_chain(&mut self.features2, &mut self.optical_flow);
             self.use_feature_chain = true;
         }
+        if self.graphics_pipeline_library.graphics_pipeline_library == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.graphics_pipeline_library);
+            self.use_feature_chain = true;
+        }
     }
 
     fn has_descriptor_indexing_features(&self) -> bool {
@@ -1157,6 +1228,7 @@ fn is_known_feature_name(name: &str) -> bool {
                 | "dynamic_rendering"
                 | "synchronization2"
                 | "buffer_device_address"
+                | "shader_draw_parameters"
                 | "mesh_shading"
                 | "mesh_shader"
                 | "task_shader"
@@ -1182,6 +1254,7 @@ fn is_known_feature_name(name: &str) -> bool {
                 | "shader_object"
                 | "optical_flow"
                 | "optical_flow_nv"
+                | "graphics_pipeline_library"
         )
 }
 

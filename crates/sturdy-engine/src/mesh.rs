@@ -345,6 +345,100 @@ impl Mesh {
         Self::indexed_3d(engine, &verts, &idx)
     }
 
+    /// Cylinder centered at the origin with its height along the Y axis.
+    ///
+    /// `segments` controls radial tessellation (minimum 3). Normals are split
+    /// between side wall and caps so the cylinder has crisp top and bottom edges.
+    pub fn cylinder(engine: &Engine, radius: f32, height: f32, segments: u32) -> Result<Self> {
+        let segments = segments.max(3);
+        let radius = radius.max(0.001);
+        let half_height = height.max(0.001) * 0.5;
+        let mut verts: Vec<Vertex3d> =
+            Vec::with_capacity(((segments + 1) * 2 + (segments + 2) * 2) as usize);
+        let mut idx: Vec<u32> = Vec::with_capacity((segments * 12) as usize);
+        let tangent = [1.0, 0.0, 0.0, 1.0];
+
+        for seg in 0..=segments {
+            let u = seg as f32 / segments as f32;
+            let theta = std::f32::consts::TAU * u;
+            let (sin_theta, cos_theta) = theta.sin_cos();
+            let normal = [cos_theta, 0.0, sin_theta];
+            let x = cos_theta * radius;
+            let z = sin_theta * radius;
+            verts.push(Vertex3d {
+                position: [x, -half_height, z],
+                normal,
+                uv: [u, 1.0],
+                tangent,
+            });
+            verts.push(Vertex3d {
+                position: [x, half_height, z],
+                normal,
+                uv: [u, 0.0],
+                tangent,
+            });
+        }
+
+        for seg in 0..segments {
+            let bottom = seg * 2;
+            let top = bottom + 1;
+            let next_bottom = bottom + 2;
+            let next_top = bottom + 3;
+            idx.extend_from_slice(&[bottom, top, next_bottom, top, next_top, next_bottom]);
+        }
+
+        let top_center = verts.len() as u32;
+        verts.push(Vertex3d {
+            position: [0.0, half_height, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            uv: [0.5, 0.5],
+            tangent,
+        });
+        for seg in 0..segments {
+            let u = seg as f32 / segments as f32;
+            let theta = std::f32::consts::TAU * u;
+            let (sin_theta, cos_theta) = theta.sin_cos();
+            verts.push(Vertex3d {
+                position: [cos_theta * radius, half_height, sin_theta * radius],
+                normal: [0.0, 1.0, 0.0],
+                uv: [cos_theta.mul_add(0.5, 0.5), sin_theta.mul_add(0.5, 0.5)],
+                tangent,
+            });
+        }
+        for seg in 0..segments {
+            let current = top_center + 1 + seg;
+            let next = top_center + 1 + ((seg + 1) % segments);
+            idx.extend_from_slice(&[top_center, next, current]);
+        }
+
+        let bottom_center = verts.len() as u32;
+        verts.push(Vertex3d {
+            position: [0.0, -half_height, 0.0],
+            normal: [0.0, -1.0, 0.0],
+            uv: [0.5, 0.5],
+            tangent,
+        });
+        for seg in 0..segments {
+            let u = seg as f32 / segments as f32;
+            let theta = std::f32::consts::TAU * u;
+            let (sin_theta, cos_theta) = theta.sin_cos();
+            verts.push(Vertex3d {
+                position: [cos_theta * radius, -half_height, sin_theta * radius],
+                normal: [0.0, -1.0, 0.0],
+                uv: [cos_theta.mul_add(0.5, 0.5), sin_theta.mul_add(0.5, 0.5)],
+                tangent,
+            });
+        }
+        for seg in 0..segments {
+            let current = bottom_center + 1 + seg;
+            let next = bottom_center + 1 + ((seg + 1) % segments);
+            idx.extend_from_slice(&[bottom_center, current, next]);
+        }
+
+        compute_tangents(&mut verts, &idx);
+        Self::indexed_3d(engine, &verts, &idx)
+    }
+
     /// UV sphere centered at the origin.
     ///
     /// `rings` controls horizontal latitude bands (minimum 2), `segments` controls

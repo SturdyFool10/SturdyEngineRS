@@ -109,12 +109,10 @@ float sample_csm_cascade_fo(uint cas, float3 wp, float bias) {
     float2 uv = lc.xy * float2(0.5, -0.5) + 0.5;
     float  ref = lc.z - bias;
     if (any(uv < 0.0) || any(uv > 1.0) || ref > 1.0 || ref < 0.0) return 1.0;
-    Texture2D<float> smap;
-    if      (cas == 0) smap = shadow_map_0;
-    else if (cas == 1) smap = shadow_map_1;
-    else if (cas == 2) smap = shadow_map_2;
-    else               smap = shadow_map_3;
-    return pcf3x3_fo(smap, uv, ref);
+    if      (cas == 0) return pcf3x3_fo(shadow_map_0, uv, ref);
+    else if (cas == 1) return pcf3x3_fo(shadow_map_1, uv, ref);
+    else if (cas == 2) return pcf3x3_fo(shadow_map_2, uv, ref);
+    else               return pcf3x3_fo(shadow_map_3, uv, ref);
 }
 
 float eval_csm_fo(float3 wp, float3 cam) {

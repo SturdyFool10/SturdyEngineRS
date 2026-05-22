@@ -1,4 +1,7 @@
-use crate::{BufferHandle, ImageHandle, PipelineLayoutHandle, SamplerHandle, SubresourceRange};
+use crate::{
+    AccelerationStructureHandle, BufferHandle, ImageHandle, PipelineLayoutHandle, SamplerHandle,
+    SubresourceRange,
+};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum BindingKind {
@@ -88,6 +91,7 @@ pub enum ResourceBinding {
     },
     Buffer(BufferHandle),
     Sampler(SamplerHandle),
+    AccelerationStructure(AccelerationStructureHandle),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

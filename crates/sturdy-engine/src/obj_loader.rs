@@ -81,7 +81,7 @@ pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
         let mesh = match Mesh::indexed_3d(engine, &vertices, &indices) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("[obj] skipping model '{name}': {e}");
+                tracing::warn!("skipping model '{name}': {e}");
                 continue;
             }
         };
