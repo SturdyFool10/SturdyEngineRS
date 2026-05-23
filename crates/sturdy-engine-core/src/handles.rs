@@ -1,65 +1,88 @@
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct DeviceHandle(pub u64);
+macro_rules! define_handle {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[repr(transparent)]
+        #[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
+        pub struct $name(pub(crate) u64);
 
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct ImageHandle(pub u64);
+        impl $name {
+            /// Return the raw numeric handle value for diagnostics, FFI bridging, or serialization.
+            pub const fn as_raw(self) -> u64 {
+                self.0
+            }
 
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct BufferHandle(pub u64);
+            /// Reconstruct a handle from a raw numeric value.
+            ///
+            /// # Safety
+            ///
+            /// The value must have been produced by this engine instance for the same
+            /// handle type, and the referenced resource/token must still be valid for
+            /// the API call that receives it. Prefer safe engine APIs that return typed
+            /// resource wrappers whenever possible.
+            pub const unsafe fn from_raw(raw: u64) -> Self {
+                Self(raw)
+            }
+        }
+    };
+}
 
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct SamplerHandle(pub u64);
+macro_rules! define_ordered_handle {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[repr(transparent)]
+        #[derive(Copy, Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        pub struct $name(pub(crate) u64);
 
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct ShaderHandle(pub u64);
+        impl $name {
+            /// Return the raw numeric handle value for diagnostics, FFI bridging, or serialization.
+            pub const fn as_raw(self) -> u64 {
+                self.0
+            }
 
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct FrameHandle(pub u64);
+            /// Reconstruct a handle from a raw numeric value.
+            ///
+            /// # Safety
+            ///
+            /// The value must have been produced by this engine instance for the same
+            /// handle type, and the referenced resource/token must still be valid for
+            /// the API call that receives it. Prefer safe engine APIs that return typed
+            /// resource wrappers whenever possible.
+            pub const unsafe fn from_raw(raw: u64) -> Self {
+                Self(raw)
+            }
+        }
+    };
+}
 
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct PassHandle(pub u64);
+define_handle!(DeviceHandle);
+define_handle!(ImageHandle);
+define_handle!(BufferHandle);
+define_handle!(SamplerHandle);
+define_handle!(ShaderHandle);
+define_handle!(FrameHandle);
+define_handle!(PassHandle);
+define_handle!(PipelineLayoutHandle);
+define_handle!(PipelineHandle);
+define_handle!(AccelerationStructureHandle);
+define_handle!(BindGroupHandle);
+define_handle!(SurfaceHandle);
 
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct PipelineLayoutHandle(pub u64);
+define_ordered_handle!(
+    #[doc = "Opaque token returned by `flush`. Callers can pass it to"]
+    #[doc = "`Device::wait_for_submission` to block until the GPU finishes that frame."]
+    SubmissionHandle
+);
 
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct PipelineHandle(pub u64);
+define_ordered_handle!(VideoSessionHandle);
+define_ordered_handle!(IndirectCommandLayoutHandle);
+define_ordered_handle!(OpticalFlowSessionHandle);
+define_handle!(SemaphoreHandle);
 
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct AccelerationStructureHandle(pub u64);
-
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct BindGroupHandle(pub u64);
-
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct SurfaceHandle(pub u64);
-
-/// Opaque token returned by `flush`.  Callers can pass it to
-/// `Device::wait_for_submission` to block until the GPU finishes that frame.
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct SubmissionHandle(pub u64);
-
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct VideoSessionHandle(pub u64);
-
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct IndirectCommandLayoutHandle(pub u64);
-
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
-pub struct OpticalFlowSessionHandle(pub u64);
+define_handle!(
+    #[doc = "Handle for an externally-exportable Vulkan fence."]
+    #[doc = "Created by `Device::create_exportable_fence`. Requires `BackendFeatures::external_fence_fd`."]
+    FenceHandle
+);
 
 #[derive(Debug, Default)]
 pub(crate) struct HandleAllocator {
@@ -74,13 +97,3 @@ impl HandleAllocator {
         handle
     }
 }
-
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct SemaphoreHandle(pub u64);
-
-/// Handle for an externally-exportable Vulkan fence.
-/// Created by `Device::create_exportable_fence`. Requires `BackendFeatures::external_fence_fd`.
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct FenceHandle(pub u64);

@@ -14,7 +14,8 @@ use sturdy_engine::{
     Result as EngineResult, RuntimeApp, RuntimeController, RuntimeMotionVectorDesc,
     RuntimePostProcessDesc, RuntimeSettingDescriptor, RuntimeSettingId, RuntimeSettingKey,
     RuntimeSettingOption, ShaderProgram, ShaderWatcher, ShellFrame, SurfaceColorSpace,
-    ToneMappingOp, WindowConfig, push_constants, run_with_runtime,
+    ToneMappingOp, WindowConfig, init_tracing_with_default_filter, push_constants,
+    run_with_runtime, set_log_level,
 };
 
 #[push_constants]
@@ -557,6 +558,7 @@ impl RuntimeApp for Testbed {
     type Error = sturdy_engine::Error;
 
     fn init(runtime: &mut AppRuntime) -> EngineResult<Self> {
+        ensure_testbed_tracing_filter();
         let engine = runtime.engine();
         let surface_info = runtime.surface().info();
         let hdr_caps = runtime.surface().hdr_caps()?;
@@ -564,18 +566,19 @@ impl RuntimeApp for Testbed {
             HdrPipelineDesc::select(&hdr_caps, &engine.caps(), HdrPreference::PreferHdr)?;
         let hdr_output = surface_is_hdr(surface_info.color_space);
 
-        println!(
-            "rendering on {:?} using {:?}; surface {:?}/{:?} at {}x{}",
-            engine.adapter_name(),
-            engine.backend_kind(),
-            surface_info.format,
-            surface_info.color_space,
-            surface_info.size.width,
-            surface_info.size.height,
+        tracing::info!(
+            adapter = ?engine.adapter_name(),
+            backend = ?engine.backend_kind(),
+            surface_format = ?surface_info.format,
+            color_space = ?surface_info.color_space,
+            width = surface_info.size.width,
+            height = surface_info.size.height,
+            "testbed renderer initialized"
         );
-        println!(
-            "HDR mode: {:?}, tone mapping: {:?}",
-            hdr_desc.mode, hdr_desc.tone_mapping,
+        tracing::info!(
+            hdr_mode = ?hdr_desc.mode,
+            tone_mapping = ?hdr_desc.tone_mapping,
+            "HDR pipeline selected"
         );
 
         // GPU-driven color LUT: the generator shader receives a phase parameter
@@ -623,9 +626,9 @@ impl RuntimeApp for Testbed {
         let shadow_scene = ShadowShowcase::new(engine)?;
         let cornell_rt_scene = CornellRtScene::new(engine, shader_path("cornell_rt.slang"))?;
         if cornell_rt_scene.is_some() {
-            println!("Cornell box: hardware ray tracing path enabled");
+            tracing::info!("Cornell box hardware ray tracing path enabled");
         } else {
-            println!("Cornell box: hardware ray tracing unavailable; using shader fallback");
+            tracing::warn!("Cornell box hardware ray tracing unavailable; using shader fallback");
         }
         let engine_clone = engine.clone();
         let mut testbed = Self {
@@ -642,7 +645,7 @@ impl RuntimeApp for Testbed {
             show_motion_vectors: false,
             hdr_output,
             tone_mapping: if hdr_output && hdr_desc.tone_mapping == ToneMappingOp::Linear {
-                ToneMappingOp::Aces
+                ToneMappingOp::Hermite
             } else {
                 hdr_desc.tone_mapping
             },
@@ -674,6 +677,9 @@ impl RuntimeApp for Testbed {
     }
 
     fn update(&mut self, appframe: &mut AppRuntimeFrame<'_>) -> EngineResult<()> {
+        appframe.set_wait_for_gpu_before_present(
+            self.selected_scene == ShowcaseScene::CornellPathTracing,
+        );
         let shell_frame = appframe.shell_frame();
         let surface_image = appframe.surface_image();
         let runtime_controller = shell_frame.runtime_controller();
@@ -753,13 +759,17 @@ impl RuntimeApp for Testbed {
         } else {
             let mut scene_color = if self.selected_scene == ShowcaseScene::CornellPathTracing {
                 if let Some(cornell_rt_scene) = &self.cornell_rt_scene {
+                    let cornell_sample_frame = self.cornell_denoiser.next_frame_index(
+                        frame,
+                        CornellRtScene::output_desc(ext.width, ext.height),
+                    );
                     cornell_rt_scene.draw(
                         frame,
                         &self.engine,
                         ext.width,
                         ext.height,
                         aspect,
-                        frame_index,
+                        cornell_sample_frame,
                     )?
                 } else {
                     let scene_target = shell_frame
@@ -932,7 +942,7 @@ impl RuntimeApp for Testbed {
                 overlay_lines.extend(shell_frame.runtime_graph_inspection_lines(10, 8));
             }
             overlay_lines.push(
-                "keys: 1-9 scenes  [/]=tonemap  .=aa  R/U reset  B/b bloom  H hdr  V motion  O overlay  I graph  E export  X transparency  G effect  N/M debug  F1/F2/F3 tex"
+                "keys: 1-9 scenes  [/]=tonemap  .=aa  a=aa  Shift+A=clear RT accumulation  R/U reset  B/b bloom  H hdr  V motion  O overlay  I graph  E export  X transparency  G effect  N/M debug  F1/F2/F3 tex"
                     .to_string(),
             );
             if self.selected_scene == ShowcaseScene::RealtimeShadows {
@@ -1044,7 +1054,10 @@ impl RuntimeApp for Testbed {
                 self.selected_tonemap_dial.label(),
                 self.tonemap_settings.get(self.selected_tonemap_dial),
             );
-        } else if key == "A" || key == "a" {
+        } else if key == "A" {
+            self.cornell_denoiser.reset();
+            tracing::info!("Cornell RT accumulation cleared");
+        } else if key == "a" {
             let mut next = self.aa.clone();
             next.next_mode();
             if let Some(controller) = runtime_controller.as_mut() {
@@ -1223,7 +1236,17 @@ impl RuntimeApp for Testbed {
         self.apply_runtime_settings(controller, changes)
     }
 
-    fn resize(&mut self, _runtime: &mut AppRuntime, _width: u32, _height: u32) -> EngineResult<()> {
+    fn resize(&mut self, _runtime: &mut AppRuntime, width: u32, height: u32) -> EngineResult<()> {
+        self.cornell_denoiser.reset();
+        self.engine
+            .evict_cached_graph_images_with_prefix("cornell_rt_sample");
+        self.engine
+            .evict_cached_graph_images_with_prefix("cornell_accumulation");
+        tracing::info!(
+            "Cornell RT accumulation and cached images reset for resize to {}x{}",
+            width,
+            height
+        );
         Ok(())
     }
 }
@@ -1779,11 +1802,38 @@ fn sanitize_debug_image_name(name: &str) -> String {
 }
 
 fn main() {
+    init_testbed_tracing();
     run_with_runtime::<Testbed>(
         WindowConfig::new("SturdyEngine Systems Showcase", 1600, 900)
             .with_resizable(true)
             .with_hdr(true),
     );
+}
+
+fn testbed_default_tracing_filter() -> &'static str {
+    if cfg!(debug_assertions) {
+        "trace"
+    } else {
+        "warn"
+    }
+}
+
+fn init_testbed_tracing() {
+    let default_filter = testbed_default_tracing_filter();
+    let installed = init_tracing_with_default_filter(default_filter);
+    ensure_testbed_tracing_filter();
+    tracing::warn!(
+        default_filter,
+        installed,
+        rust_log_was_set = std::env::var_os("RUST_LOG").is_some(),
+        "testbed tracing ready"
+    );
+}
+
+fn ensure_testbed_tracing_filter() {
+    if std::env::var_os("RUST_LOG").is_none() {
+        set_log_level(testbed_default_tracing_filter());
+    }
 }
 
 #[cfg(test)]

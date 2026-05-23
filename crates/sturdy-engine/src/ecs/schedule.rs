@@ -135,10 +135,7 @@ impl Schedule {
                 match entry {
                     ScheduleEntry::Serial(name, sys) => {
                         sys.run(world);
-                        tracing::info!(
-                            "{name}: {:.3}ms",
-                            t0.elapsed().as_secs_f64() * 1000.0
-                        );
+                        tracing::info!("{name}: {:.3}ms", t0.elapsed().as_secs_f64() * 1000.0);
                     }
                     ScheduleEntry::Parallel(name, sys) => {
                         // Downgrade: run parallel system serially via a temporary WorldView.

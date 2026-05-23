@@ -438,6 +438,8 @@ version = "0.1.0"
 dependencies = [
  "image",
  "sturdy-engine",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

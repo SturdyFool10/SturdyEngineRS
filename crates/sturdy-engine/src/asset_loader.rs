@@ -57,6 +57,7 @@ pub(crate) struct PendingUpload {
 /// Returns a `PendingUpload` ready to be submitted to the GPU. Called from
 /// rayon worker threads by `load_texture_2d_from_path_async`.
 pub(crate) fn decode_and_compress(path: &Path, name: &str) -> Result<(Vec<u8>, Format, u32, u32)> {
+    tracing::debug!(path = %path.display(), name, "decoding texture");
     let dyn_image = image::open(path)
         .map_err(|e| crate::Error::Unknown(format!("failed to open '{}': {e}", path.display())))?;
     let source_channels = dyn_image.color().channel_count() as u32;
@@ -73,6 +74,13 @@ pub(crate) fn decode_and_compress(path: &Path, name: &str) -> Result<(Vec<u8>, F
         Some(path),
         true,
     ) {
+        tracing::debug!(
+            name,
+            width = compressed.width,
+            height = compressed.height,
+            format = ?compressed.format,
+            "texture block-compressed"
+        );
         return Ok((
             compressed.data,
             compressed.format,
@@ -80,6 +88,12 @@ pub(crate) fn decode_and_compress(path: &Path, name: &str) -> Result<(Vec<u8>, F
             compressed.height,
         ));
     }
+    tracing::debug!(
+        name,
+        width,
+        height,
+        "texture not block-compressed (uploading as Rgba8Unorm)"
+    );
     Ok((pixels, Format::Rgba8Unorm, width, height))
 }
 
@@ -97,11 +111,19 @@ pub(crate) fn load_texture_2d_async(
         .unwrap_or("texture")
         .to_owned();
 
+    tracing::debug!(path = %path.display(), name = %name, "queuing async texture load");
     let handle: AssetHandle<Image> = AssetHandle::new_loading();
     let handle_bg = handle.clone();
 
     rayon::spawn(move || match decode_and_compress(&path, &name) {
         Ok((data, format, width, height)) => {
+            tracing::debug!(
+                name = %name,
+                format = ?format,
+                width,
+                height,
+                "texture decoded, queuing GPU upload"
+            );
             let upload = PendingUpload {
                 handle: handle_bg,
                 name,
@@ -117,6 +139,7 @@ pub(crate) fn load_texture_2d_async(
                 .push(upload);
         }
         Err(e) => {
+            tracing::error!(path = %path.display(), "async texture load failed: {e}");
             handle_bg.set_failed(format!("load_texture_2d '{}': {e}", path.display()));
         }
     });

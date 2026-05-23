@@ -29,12 +29,26 @@ impl ShaderRegistry {
                 "Vulkan shader creation currently requires ShaderSource::Spirv",
             ));
         };
+        tracing::debug!(
+            stage = ?desc.stage,
+            entry_point = %desc.entry_point,
+            spirv_words = words.len(),
+            "creating shader module"
+        );
         let info = vk::ShaderModuleCreateInfo::default().code(words);
         let module = unsafe {
             device.create_shader_module(&info, None).map_err(|error| {
+                tracing::error!(
+                    stage = ?desc.stage,
+                    entry_point = %desc.entry_point,
+                    spirv_words = words.len(),
+                    "vkCreateShaderModule failed — SPIR-V may be malformed, the entry point \
+                     may be missing, or a required capability is unsupported: {error:?}"
+                );
                 Error::Backend(format!("vkCreateShaderModule failed: {error:?}"))
             })?
         };
+        tracing::debug!(stage = ?desc.stage, entry_point = %desc.entry_point, "shader module ready");
         self.shaders.insert(
             handle,
             VulkanShader {
@@ -49,6 +63,7 @@ impl ShaderRegistry {
 
     pub fn destroy_shader(&mut self, device: &Device, handle: ShaderHandle) -> Result<()> {
         let shader = self.shaders.remove(&handle).ok_or(Error::InvalidHandle)?;
+        tracing::trace!(stage = ?shader.stage, entry_point = %shader.entry_point, "destroying shader module");
         unsafe {
             device.destroy_shader_module(shader.module, None);
         }

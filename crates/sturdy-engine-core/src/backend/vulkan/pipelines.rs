@@ -99,8 +99,24 @@ impl PipelineRegistry {
     /// Returns `None` if the threshold has not yet been reached.
     pub fn maybe_checkpoint(&mut self, device: &Device) -> Option<Vec<u8>> {
         if self.pipelines_since_checkpoint >= PIPELINE_CACHE_CHECKPOINT_THRESHOLD {
+            tracing::debug!(
+                new_pipelines = self.pipelines_since_checkpoint,
+                total_pipelines = self.pipelines.len(),
+                "pipeline cache checkpoint: serializing to disk"
+            );
             self.pipelines_since_checkpoint = 0;
-            self.serialize_cache(device).ok()
+            match self.serialize_cache(device) {
+                Ok(data) => {
+                    tracing::debug!(bytes = data.len(), "pipeline cache serialized");
+                    Some(data)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "pipeline cache serialization failed — cache will not be saved this checkpoint: {e:?}"
+                    );
+                    None
+                }
+            }
         } else {
             None
         }
@@ -165,7 +181,15 @@ impl PipelineRegistry {
         let uses_bindless = descriptors.pipeline_uses_bindless(layout_handle)?;
         let push_constants_bytes = descriptors.push_constants_bytes(layout_handle)?;
         let push_constant_stages = descriptors.push_constant_stages(layout_handle)?;
-        let entry = CString::new(shaders.entry_point(desc.shader)?).map_err(|_| {
+        let entry_str = shaders.entry_point(desc.shader)?;
+        tracing::debug!(
+            ?handle,
+            entry_point = %entry_str,
+            uses_bindless,
+            push_constants_bytes,
+            "compiling compute pipeline"
+        );
+        let entry = CString::new(entry_str).map_err(|_| {
             Error::InvalidInput("shader entry point cannot contain interior nul bytes".into())
         })?;
         let stage_info = vk::PipelineShaderStageCreateInfo::default()
@@ -175,9 +199,11 @@ impl PipelineRegistry {
         let mut info = vk::ComputePipelineCreateInfo::default()
             .stage(stage_info)
             .layout(layout);
-        // GFX-7b: signal descriptor heap access.
+        // GFX-7b: only pipelines whose layout actually uses the bindless heap should carry
+        // VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT. Advertising heap access on ordinary
+        // descriptor-set/descriptor-buffer pipelines can trigger driver crashes on some stacks.
         let mut heap_flags_info;
-        if self.descriptor_heap_enabled {
+        if self.descriptor_heap_enabled && uses_bindless {
             heap_flags_info = vk::PipelineCreateFlags2CreateInfo::default()
                 .flags(vk::PipelineCreateFlags2::DESCRIPTOR_HEAP_EXT);
             info = info.push(&mut heap_flags_info);
@@ -190,10 +216,16 @@ impl PipelineRegistry {
             device
                 .create_compute_pipelines(self.pipeline_cache, &[info], None)
                 .map_err(|(_, error)| {
+                    tracing::error!(
+                        ?handle,
+                        "vkCreateComputePipelines failed — check shader compilation errors \
+                         above, push constant size limits, or descriptor layout mismatch: {error:?}"
+                    );
                     Error::Backend(format!("vkCreateComputePipelines failed: {error:?}"))
                 })?
         }
         .remove(0);
+        tracing::debug!(?handle, "compute pipeline compiled");
 
         self.pipelines.insert(
             handle,
@@ -331,6 +363,17 @@ impl PipelineRegistry {
         shaders: &ShaderRegistry,
         descriptors: &DescriptorRegistry,
     ) -> Result<()> {
+        tracing::debug!(
+            ?handle,
+            color_targets = desc.color_targets.len(),
+            has_depth = desc.depth_format.is_some(),
+            samples = desc.samples,
+            topology = ?desc.topology,
+            cull_mode = ?desc.raster.cull_mode,
+            dynamic_rendering = self.dynamic_rendering_enabled,
+            pipeline_library = self.graphics_pipeline_library_enabled,
+            "creating graphics pipeline"
+        );
         let layout_handle = desc.layout.ok_or_else(|| {
             Error::InvalidInput(
                 "graphics pipeline layout must be resolved before backend call".into(),
@@ -630,9 +673,11 @@ impl PipelineRegistry {
         if render_pass == vk::RenderPass::null() {
             info = info.push(&mut pipeline_rendering_info);
         }
-        // GFX-7b: signal that this pipeline accesses the descriptor heap.
+        // GFX-7b: only pipelines whose layout actually uses the bindless heap should carry
+        // VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT. Advertising heap access on ordinary
+        // descriptor-set/descriptor-buffer pipelines can trigger driver crashes on some stacks.
         let mut heap_flags_info;
-        if self.descriptor_heap_enabled {
+        if self.descriptor_heap_enabled && uses_bindless {
             heap_flags_info = vk::PipelineCreateFlags2CreateInfo::default()
                 .flags(vk::PipelineCreateFlags2::DESCRIPTOR_HEAP_EXT);
             info = info.push(&mut heap_flags_info);
@@ -642,14 +687,38 @@ impl PipelineRegistry {
             info = info.flags(info.flags | vk::PipelineCreateFlags::DESCRIPTOR_BUFFER_EXT);
         }
 
+        tracing::debug!(
+            ?handle,
+            stages = stages.len(),
+            color_targets = desc.color_targets.len(),
+            has_depth = desc.depth_format.is_some(),
+            push_constants_bytes,
+            uses_bindless,
+            descriptor_heap_enabled = self.descriptor_heap_enabled,
+            descriptor_heap_pipeline_flag = self.descriptor_heap_enabled && uses_bindless,
+            descriptor_buffer_enabled = self.descriptor_buffer_enabled,
+            descriptor_buffer_pipeline_flag = self.descriptor_buffer_enabled && !uses_bindless,
+            "vkCreateGraphicsPipelines (monolithic)"
+        );
         let pipeline = unsafe {
             device
                 .create_graphics_pipelines(self.pipeline_cache, &[info], None)
                 .map_err(|(_, error)| {
+                    tracing::error!(
+                        ?handle,
+                        stages = stages.len(),
+                        color_targets = desc.color_targets.len(),
+                        has_depth = desc.depth_format.is_some(),
+                        "vkCreateGraphicsPipelines failed — likely causes: shader interface \
+                         mismatch between vertex/fragment stages, color/depth format incompatible \
+                         with render pass, push constant size exceeds device limit, or \
+                         unsupported feature combination: {error:?}"
+                    );
                     Error::Backend(format!("vkCreateGraphicsPipelines failed: {error:?}"))
                 })?
         }
         .remove(0);
+        tracing::debug!(?handle, "graphics pipeline compiled");
 
         self.pipelines.insert(
             handle,

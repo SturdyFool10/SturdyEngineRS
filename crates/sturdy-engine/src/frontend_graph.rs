@@ -1454,13 +1454,11 @@ impl RenderFrame {
     /// History is tracked independently for each swapchain slot and is reset
     /// automatically when the descriptor changes. When `has_history` is false,
     /// callers should ignore `read` and use current-frame data instead.
-    pub fn history_images(
+    pub(crate) fn next_history_frame_index(
         &self,
         state: &mut GraphImageHistory,
-        base_name: impl Into<String>,
         desc: ImageDesc,
-    ) -> Result<GraphImageHistoryFrame> {
-        let base_name = base_name.into();
+    ) -> u64 {
         let key = GraphImageHistoryKey {
             desc: GraphImageDescKey::from(desc),
         };
@@ -1475,11 +1473,23 @@ impl RenderFrame {
                 frame_index: 0,
             };
         }
+        slot_state.frame_index
+    }
 
-        let frame_index = slot_state.frame_index;
+    pub fn history_images(
+        &self,
+        state: &mut GraphImageHistory,
+        base_name: impl Into<String>,
+        desc: ImageDesc,
+    ) -> Result<GraphImageHistoryFrame> {
+        let base_name = base_name.into();
+        let frame_index = self.next_history_frame_index(state, desc);
         let read_index = frame_index % 2;
         let write_index = (frame_index + 1) % 2;
-        slot_state.frame_index = slot_state.frame_index.saturating_add(1);
+        let slot = self.swapchain_slot();
+        if let Some(slot_state) = state.slots.get_mut(&slot) {
+            slot_state.frame_index = slot_state.frame_index.saturating_add(1);
+        }
 
         let read = self.image(format!("{base_name}_{read_index}"), desc)?;
         let write = self.image(format!("{base_name}_{write_index}"), desc)?;

@@ -9,6 +9,7 @@ mod config;
 mod debug;
 mod descriptors;
 mod device;
+mod error_context;
 mod instance;
 mod pipelines;
 mod queues;
@@ -2013,12 +2014,16 @@ impl Backend for VulkanBackend {
     }
 
     fn present_surface(&self, surface: SurfaceHandle) -> Result<()> {
+        tracing::trace!(?surface, "presenting swapchain image");
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let result = self
             .surfaces
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .present(self.queues.graphics, surface);
+        if let Err(ref e) = result {
+            tracing::warn!("swapchain present failed — surface may need recreation: {e:?}");
+        }
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         *self
             .active_surface
@@ -2028,6 +2033,11 @@ impl Backend for VulkanBackend {
     }
 
     fn flush(&self, graph: &CompiledGraph) -> Result<SubmissionHandle> {
+        tracing::trace!(
+            passes = graph.passes.len(),
+            images = graph.images.len(),
+            "submitting frame"
+        );
         // Resolve per-surface semaphores if a swapchain image was acquired.
         let (wait_sem, signal_sem) = {
             //panic allowed, reason = "poisoned mutex is unrecoverable"
@@ -2145,8 +2155,15 @@ impl Backend for VulkanBackend {
             signal_sem,
         );
         let handle = match submit_result {
-            Ok(h) => h,
+            Ok(h) => {
+                tracing::trace!(?h, "frame submission enqueued");
+                h
+            }
             Err(Error::DeviceLost(msg)) => {
+                tracing::error!(
+                    passes = graph.passes.len(),
+                    "GPU device lost during submission — collecting fault breadcrumbs"
+                );
                 // Attempt to enrich with VK_EXT_device_fault breadcrumbs.
                 if let Some(fault_ext) = self.device_fault_ext.as_ref() {
                     let enriched = gather_device_fault_info(fault_ext, &msg);
@@ -2155,6 +2172,10 @@ impl Backend for VulkanBackend {
                 return Err(Error::DeviceLost(msg));
             }
             Err(e) => {
+                tracing::error!(
+                    passes = graph.passes.len(),
+                    "command submission failed — GPU may be in an invalid state: {e:?}"
+                );
                 return Err(Error::ResourceStateCorruption(format!(
                     "vulkan command submission failed: {e:?}"
                 )));
@@ -2188,11 +2209,19 @@ impl Backend for VulkanBackend {
     }
 
     fn wait_submission(&self, token: SubmissionHandle) -> Result<()> {
-        //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.commands
+        tracing::trace!(?token, "waiting for GPU submission to complete");
+        let result = self
+            .commands
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .wait_for_submission(&self.device, token)
+            .wait_for_submission(&self.device, token);
+        if let Err(ref e) = result {
+            tracing::error!(
+                ?token,
+                "fence wait failed — GPU may have crashed or timed out: {e:?}"
+            );
+        }
+        result
     }
 
     fn present(&self) -> Result<()> {
@@ -4114,8 +4143,12 @@ fn build_sampler_create_info_for_heap(
         .unnormalized_coordinates(desc.unnormalized_coordinates)
 }
 
+const PIPELINE_CACHE_SCHEMA_VERSION: u32 = 2;
+
 fn pipeline_cache_path() -> PathBuf {
-    dirs_next().join("sturdy-engine").join("pipeline_cache.bin")
+    dirs_next().join("sturdy-engine").join(format!(
+        "pipeline_cache_v{PIPELINE_CACHE_SCHEMA_VERSION}.bin"
+    ))
 }
 
 fn dirs_next() -> PathBuf {

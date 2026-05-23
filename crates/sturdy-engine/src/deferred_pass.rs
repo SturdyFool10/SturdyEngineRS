@@ -43,7 +43,8 @@ use crate::{
     light_bvh::LightBvhBuilder,
     oit_pass::OitPass,
     scene::Scene,
-    shadow_pass::{CsmConfig, CsmPass},
+    shadow_pass::CsmConfig,
+    shadow_pipeline::ShadowPipeline,
 };
 use sturdy_engine_core::Extent3d;
 
@@ -77,7 +78,8 @@ pub struct DeferredPass {
     /// Forward-lit opaque program used when `render_path == ForwardOnly`.
     forward_opaque_program: MeshProgram,
     lighting_program: ShaderProgram,
-    csm: CsmPass,
+    /// All shadow passes (CSM + optional spot/point) as one composable unit.
+    pub shadows: ShadowPipeline,
     flat_normal_map: crate::Image,
     variant_cache: HashMap<u64, MeshProgram>,
     brdf_lut: crate::Image,
@@ -102,20 +104,10 @@ pub struct DeferredPass {
     e_avg_buf: Buffer,
     /// Selects the rendering path for opaque geometry. Default `DeferredThenForward`.
     pub render_path: RenderPath,
-    /// Optional spot light shadow pass. Attach via `set_spot_shadows`.
-    spot_shadows: Option<crate::SpotShadowPass>,
-    /// Zero-filled spot shadow data buffer bound when no spot shadows are active.
-    empty_spot_shadow_buf: Buffer,
-    /// 1×1 depth image bound as a placeholder for spot/point shadow maps when disabled.
-    black_spot_depth: crate::Image,
-    /// Optional point light shadow pass (dual-paraboloid). Attach via `set_point_shadows`.
-    point_shadows: Option<crate::PointShadowPass>,
     /// Optional screen-space/ray-traced ambient occlusion pass.
     ao: Option<AoPass>,
     /// 1x1 white AO fallback bound as `gtao_result` when AO is disabled.
     white_ao: crate::Image,
-    /// Zero-filled point shadow data buffer bound when no point shadows are active.
-    empty_point_shadow_buf: Buffer,
     /// Watches the engine shader files and drives hot-reload + cache invalidation.
     shader_watcher: crate::ShaderWatcher,
     /// Pending environment map being blended toward. `None` when not blending.
@@ -172,9 +164,9 @@ impl DeferredPass {
         )?;
         tracing::debug!("forward_opaque OK, compiling deferred_lighting.slang");
         let lighting_program = engine.load_shader(engine_shader("deferred_lighting.slang"))?;
-        tracing::debug!("deferred_lighting OK, building CsmPass");
-        let csm = CsmPass::with_config(engine, csm_config)?;
-        tracing::debug!("CsmPass OK");
+        tracing::debug!("deferred_lighting OK, building ShadowPipeline");
+        let shadows = ShadowPipeline::with_csm_config(engine, csm_config)?;
+        tracing::debug!("ShadowPipeline OK");
 
         let flat_normal_map =
             engine.generate_texture_2d("flat_normal_map", 1, 1, |_, _| [128, 128, 255, 255])?;
@@ -221,44 +213,6 @@ impl DeferredPass {
             usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
         })?;
 
-        // Zero-filled spot shadow buffer for when no spot shadows are active.
-        let spot_data_size = std::mem::size_of::<crate::GpuSpotShadowData>() as u64;
-        let empty_spot_shadow_buf = engine.create_buffer(BufferDesc {
-            size: spot_data_size,
-            usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
-        })?;
-        empty_spot_shadow_buf.write(0, &vec![0u8; spot_data_size as usize])?;
-
-        // Zero-filled point shadow buffer for when no point shadows are active.
-        let pt_data_size = std::mem::size_of::<crate::GpuPointShadowData>() as u64;
-        let empty_point_shadow_buf = engine.create_buffer(BufferDesc {
-            size: pt_data_size,
-            usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
-        })?;
-        empty_point_shadow_buf.write(0, &vec![0u8; pt_data_size as usize])?;
-
-        // 1×1 Depth32Float placeholder for unbound spot shadow slots.
-        let black_spot_depth = engine.create_image(crate::ImageDesc {
-            dimension: crate::ImageDimension::D2,
-            extent: sturdy_engine_core::Extent3d {
-                width: 1,
-                height: 1,
-                depth: 1,
-            },
-            mip_levels: 1,
-            layers: 1,
-            samples: 1,
-            format: crate::Format::Depth32Float,
-            usage: crate::ImageUsage::DEPTH_STENCIL | crate::ImageUsage::SAMPLED,
-            transient: false,
-            clear_value: None,
-            debug_name: Some("black_spot_depth"),
-            compression: Default::default(),
-            min_lod_bits: None,
-            msaa_resolve_to_single_sampled: false,
-            drm_format_modifier: None,
-        })?;
-
         let e_avg_buf = compute_e_avg_lut(engine)?;
 
         // Auto-create the default studio environment so PBR materials look
@@ -289,7 +243,7 @@ impl DeferredPass {
             default_gbuffer_program,
             forward_opaque_program,
             lighting_program,
-            csm,
+            shadows,
             flat_normal_map,
             variant_cache: HashMap::new(),
             failed_variants: HashMap::new(),
@@ -309,13 +263,8 @@ impl DeferredPass {
             blend_alpha: 0.0,
             blend_step: 0.0,
             blend_sh9_buf,
-            spot_shadows: None,
-            empty_spot_shadow_buf,
-            black_spot_depth,
-            point_shadows: None,
             ao: None,
             white_ao,
-            empty_point_shadow_buf,
         })
     }
 
@@ -407,78 +356,18 @@ impl DeferredPass {
         // ── 1. Upload lighting uniform + build lights buffer ──────────────────
         scene.prepare_deferred_lighting(view, engine, frame)?;
 
-        // ── 2. CSM shadow passes ──────────────────────────────────────────────
-        // Extract camera near/far from the projection matrix (RH perspective).
-        // proj.w_axis.z = near*far/(near-far),  proj.z_axis.z = far/(near-far)
+        // ── 2. All shadow passes (CSM + spot + point) ────────────────────────
         let (cam_near, cam_far) = extract_near_far(proj);
         tracing::debug!(
-            "DeferredPass::draw — CSM start \
-             cam_near={cam_near:.3} cam_far={cam_far:.3} \
-             cascade_count={} res={}",
-            self.csm.config.cascade_count,
-            self.csm.config.resolution
+            "DeferredPass::draw — shadow start cam_near={cam_near:.3} cam_far={cam_far:.3}"
         );
-        self.csm
-            .draw(scene, view, proj, cam_near, cam_far, frame)
-            .map_err(|e| {
-                tracing::error!("CsmPass::draw ERROR: {e:?}");
-                e
-            })?;
-        tracing::debug!("DeferredPass::draw — CSM done");
-
-        // ── 2b. Spot light shadow passes ─────────────────────────────────────
-        let spot_buf_offset = 1u32 + scene.point_lights.len() as u32;
-        tracing::debug!(
-            "spot_shadows={} spot_lights={}",
-            self.spot_shadows.is_some(),
-            scene.spot_lights.len()
-        );
-        if let Some(spot) = &mut self.spot_shadows {
-            if !scene.spot_lights.is_empty() {
-                spot.draw(scene, spot_buf_offset, frame, engine)?;
-            } else {
-                // Pass is attached but no spot lights — register fallback images so
-                // the deferred lighting shader's samplers are always bound.
-                for name in [
-                    "spot_shadow_map_0",
-                    "spot_shadow_map_1",
-                    "spot_shadow_map_2",
-                    "spot_shadow_map_3",
-                ] {
-                    frame.bind_image(name, &self.black_spot_depth);
-                }
-            }
-        }
-
-        // ── 2c. Point light shadow passes (dual-paraboloid) ───────────────────
-        let point_buf_offset = 1u32;
-        tracing::debug!(
-            "point_shadows={} point_lights={}",
-            self.point_shadows.is_some(),
-            scene.point_lights.len()
-        );
-        if let Some(pt) = &mut self.point_shadows {
-            if !scene.point_lights.is_empty() {
-                pt.draw(scene, point_buf_offset, frame, engine)?;
-            } else {
-                // Pass is attached but no point lights — register fallback images.
-                for name in [
-                    "point_shadow_front_0",
-                    "point_shadow_front_1",
-                    "point_shadow_front_2",
-                    "point_shadow_front_3",
-                    "point_shadow_back_0",
-                    "point_shadow_back_1",
-                    "point_shadow_back_2",
-                    "point_shadow_back_3",
-                ] {
-                    frame.bind_image(name, &self.black_spot_depth);
-                }
-            }
-        }
+        self.shadows
+            .draw(scene, view, proj, cam_near, cam_far, frame, engine)?;
+        tracing::debug!("DeferredPass::draw — shadows done");
 
         // ── 3. Camera world position ──────────────────────────────────────────
-        let cam_world = view.inverse() * Vec4::new(0.0, 0.0, 0.0, 1.0);
+        let inv_view = view.inverse();
+        let cam_world = inv_view * Vec4::new(0.0, 0.0, 0.0, 1.0);
 
         // ── 4. Allocate G-Buffer images (auto-resize) ─────────────────────────
         let ext = output.desc().extent;
@@ -747,36 +636,7 @@ impl DeferredPass {
 
         frame.bind_image("brdf_lut", &self.brdf_lut);
         frame.bind_buffer("e_avg_lut", &self.e_avg_buf);
-        frame.bind_buffer("csm_data", &self.csm.csm_buffer);
-
-        // Bind spot shadow data (all-invalid when no spot shadows are active).
-        if let Some(spot) = &self.spot_shadows {
-            frame.bind_buffer("spot_shadow_data", &spot.shadow_buf);
-            // spot_shadow_map_0..3 are registered by SpotShadowPass::draw() above.
-        } else {
-            frame.bind_buffer("spot_shadow_data", &self.empty_spot_shadow_buf);
-            // Register placeholder depth images so the binding resolves.
-            frame.bind_image("spot_shadow_map_0", &self.black_spot_depth);
-            frame.bind_image("spot_shadow_map_1", &self.black_spot_depth);
-            frame.bind_image("spot_shadow_map_2", &self.black_spot_depth);
-            frame.bind_image("spot_shadow_map_3", &self.black_spot_depth);
-        }
-
-        // Bind point shadow data (all-invalid when no point shadows are active).
-        if let Some(pt) = &self.point_shadows {
-            frame.bind_buffer("point_shadow_data", &pt.shadow_buf);
-            // point_shadow_front/back_0..3 registered by PointShadowPass::draw() above.
-        } else {
-            frame.bind_buffer("point_shadow_data", &self.empty_point_shadow_buf);
-            frame.bind_image("point_shadow_front_0", &self.black_spot_depth);
-            frame.bind_image("point_shadow_front_1", &self.black_spot_depth);
-            frame.bind_image("point_shadow_front_2", &self.black_spot_depth);
-            frame.bind_image("point_shadow_front_3", &self.black_spot_depth);
-            frame.bind_image("point_shadow_back_0", &self.black_spot_depth);
-            frame.bind_image("point_shadow_back_1", &self.black_spot_depth);
-            frame.bind_image("point_shadow_back_2", &self.black_spot_depth);
-            frame.bind_image("point_shadow_back_3", &self.black_spot_depth);
-        }
+        // Shadow buffers/images were already bound by self.shadows.draw() above.
 
         // Advance blend transition if one is active.
         if self.blend_target.is_some() {
@@ -871,9 +731,7 @@ impl DeferredPass {
             oit.draw(scene, view, proj, output, frame, engine, time)?;
         }
 
-        tracing::error!(
-            "DeferredPass::draw — frame recording complete (crash after here = GPU flush)"
-        );
+        tracing::debug!("DeferredPass::draw — frame recording complete");
         Ok(())
     }
 }

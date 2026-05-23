@@ -173,6 +173,10 @@ pub struct CsmConfig {
     /// World-space angular diameter of the light source used for PCSS penumbra
     /// estimation. Larger values produce softer shadows. \[0.1, 20.0\]. Default 2.5.
     pub pcss_light_size: f32,
+    /// World-space normal-offset distance applied before shadow comparison.
+    /// Shifts the shadow sample point outward along the surface normal, preventing
+    /// self-shadowing on surfaces facing the light at grazing angles. Default 0.05.
+    pub normal_bias: f32,
 }
 
 impl Default for CsmConfig {
@@ -187,6 +191,7 @@ impl Default for CsmConfig {
             z_extension: 50.0,
             pcss: false,
             pcss_light_size: 2.5,
+            normal_bias: 0.05,
         }
     }
 }
@@ -221,6 +226,11 @@ pub struct GpuCsmData {
     /// Per-cascade light source size in atlas UV space for PCSS blocker search.
     /// = world_light_size / cascade_world_width * tile_scale.
     pub pcss_light_size_uv: [f32; MAX_CASCADES], //  16 bytes → 368 bytes
+    /// World-space normal-offset bias. The shadow sample point is displaced by
+    /// `normal_bias * surface_normal` before projection, preventing self-shadowing
+    /// on surfaces at grazing angles to the light.
+    pub normal_bias: f32, //   4 bytes → 372 bytes
+    pub _pad: [u32; 3], //  12 bytes → 384 bytes (16-byte aligned for StructuredBuffer)
 }
 
 /// Per-frame output of `CsmPass::draw`.
@@ -436,6 +446,8 @@ impl CsmPass {
             pcss_enabled: self.config.pcss as u32,
             atlas_tiles,
             pcss_light_size_uv,
+            normal_bias: self.config.normal_bias,
+            _pad: [0; 3],
         };
 
         tracing::debug!(

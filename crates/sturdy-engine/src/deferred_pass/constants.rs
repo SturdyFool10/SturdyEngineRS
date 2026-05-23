@@ -1,6 +1,7 @@
 use crate::push_constants;
 
-/// Push constants for `deferred_lighting.slang` (128 bytes = Vulkan guaranteed minimum).
+/// Push constants for `deferred_lighting.slang` (128 bytes).
+/// Keep this at the Vulkan-spec minimum for broad driver compatibility.
 #[push_constants]
 pub(super) struct DeferredLightingConstants {
     pub(super) camera_world_pos: [f32; 4],   // 16
@@ -13,7 +14,7 @@ pub(super) struct DeferredLightingConstants {
     pub(super) inv_view_proj: [[f32; 4]; 4], // 64  -> 112
     pub(super) sky_turbidity: f32,           //  4
     pub(super) sky_exposure: f32,            //  4
-    pub(super) sky_sun_size: f32,            //  4
+    pub(super) sky_sun_size: f32,            //  4  -> 124
     pub(super) _pad: f32,                    //  4  -> 128
 }
 

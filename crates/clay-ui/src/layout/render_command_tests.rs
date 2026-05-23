@@ -8,6 +8,16 @@ use crate::{
 };
 use sturdy_engine_core::{PipelineHandle, ShaderHandle};
 
+fn shader_handle(raw: u64) -> ShaderHandle {
+    // Tests use deterministic fake handles; production code obtains handles from engine APIs.
+    unsafe { ShaderHandle::from_raw(raw) }
+}
+
+fn pipeline_handle(raw: u64) -> PipelineHandle {
+    // Tests use deterministic fake handles; production code obtains handles from engine APIs.
+    unsafe { PipelineHandle::from_raw(raw) }
+}
+
 #[test]
 fn render_commands_sort_by_layer_before_z_index() {
     let overlay_id = ElementId::new("overlay");
@@ -123,7 +133,7 @@ fn clip_commands_carry_resolved_shape() {
 #[test]
 fn render_commands_carry_element_shader_slot_uniforms() {
     let id = ElementId::new("shader-slot");
-    let shader = ShaderRef::custom(ShaderHandle(10), PipelineHandle(20));
+    let shader = ShaderRef::custom(shader_handle(10), pipeline_handle(20));
     let mut element = Element::new(id);
     element.layout.width = LayoutSizing::Fixed(100.0);
     element.layout.height = LayoutSizing::Fixed(40.0);
@@ -163,7 +173,7 @@ fn render_commands_carry_element_shader_slot_uniforms() {
 #[test]
 fn transparent_background_with_shader_slot_still_emits_rectangle() {
     let id = ElementId::new("transparent-shader-bg");
-    let shader = ShaderRef::custom(ShaderHandle(11), PipelineHandle(21));
+    let shader = ShaderRef::custom(shader_handle(11), pipeline_handle(21));
     let mut element = Element::new(id.clone());
     element.layout.width = LayoutSizing::Fixed(100.0);
     element.layout.height = LayoutSizing::Fixed(40.0);
@@ -199,7 +209,7 @@ fn transparent_background_with_shader_slot_still_emits_rectangle() {
 #[test]
 fn transparent_outline_with_shader_slot_still_emits_border() {
     let id = ElementId::new("transparent-shader-border");
-    let shader = ShaderRef::custom(ShaderHandle(12), PipelineHandle(22));
+    let shader = ShaderRef::custom(shader_handle(12), pipeline_handle(22));
     let mut element = Element::new(id.clone());
     element.layout.width = LayoutSizing::Fixed(100.0);
     element.layout.height = LayoutSizing::Fixed(40.0);

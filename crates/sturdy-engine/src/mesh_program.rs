@@ -207,6 +207,17 @@ impl MeshProgram {
             ShaderSource::File(p) => Some(p.clone()),
             _ => None,
         };
+        let frag_label = fragment_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(inline)".to_owned());
+        tracing::debug!(
+            fragment = %frag_label,
+            vertex_kind = ?desc.vertex_kind,
+            alpha_blend = desc.alpha_blend,
+            uses_depth = desc.uses_depth,
+            "compiling MeshProgram"
+        );
         let vertex_desc = desc.vertex.unwrap_or_else(|| ShaderDesc {
             source: ShaderSource::File(builtin_shader_path(default_vertex_file)),
             entry_point: "main".to_owned(),
@@ -215,17 +226,30 @@ impl MeshProgram {
             requires_cooperative_matrix: false,
             uses_ser: false,
         });
-        let vertex = engine.create_shader(vertex_desc)?;
-        let fragment = engine.create_shader(desc.fragment)?;
-        let reflection = engine.graphics_shader_reflection(&vertex, Some(&fragment))?;
+        let vertex = engine.create_shader(vertex_desc).map_err(|e| {
+            tracing::error!(fragment = %frag_label, "MeshProgram vertex shader compilation failed: {e}");
+            e
+        })?;
+        let fragment = engine.create_shader(desc.fragment).map_err(|e| {
+            tracing::error!(fragment = %frag_label, "MeshProgram fragment shader compilation failed: {e}");
+            e
+        })?;
+        let reflection = engine.graphics_shader_reflection(&vertex, Some(&fragment)).map_err(|e| {
+            tracing::error!(fragment = %frag_label, "MeshProgram shader reflection failed — check binding name mismatches or unsupported resource types: {e}");
+            e
+        })?;
         let expected_attributes = match desc.vertex_kind {
             MeshVertexKind::V2d => vertex2d_attributes(),
             MeshVertexKind::V3d => vertex3d_attributes(),
             MeshVertexKind::V3dSkinned => skinned_vertex3d_attributes(),
         };
-        validate_vertex_inputs_match_layout(&reflection, &expected_attributes)?;
+        validate_vertex_inputs_match_layout(&reflection, &expected_attributes).map_err(|e| {
+            tracing::error!(fragment = %frag_label, "MeshProgram vertex input validation failed: {e}");
+            e
+        })?;
         let pipeline_layout =
             engine.create_reflected_graphics_pipeline_layout(&vertex, Some(&fragment))?;
+        tracing::debug!(fragment = %frag_label, "MeshProgram compiled");
         Ok(Self {
             engine: engine.clone(),
             pipelines: Mutex::new(HashMap::new()),
@@ -265,13 +289,17 @@ impl MeshProgram {
             Some(p) => p.clone(),
             None => return Ok(false),
         };
+        tracing::info!(path = %path.display(), "hot-reloading fragment shader");
         let fragment = self.engine.create_shader(ShaderDesc {
-            source: ShaderSource::File(path),
+            source: ShaderSource::File(path.clone()),
             entry_point: "main".to_owned(),
             stage: ShaderStage::Fragment,
             requires_ray_query: false,
             requires_cooperative_matrix: false,
             uses_ser: false,
+        }).map_err(|e| {
+            tracing::error!(path = %path.display(), "fragment shader hot-reload compile failed: {e}");
+            e
         })?;
         let reflection = self
             .engine
@@ -283,15 +311,30 @@ impl MeshProgram {
         self.reflection = reflection;
         self.pipeline_layout = pipeline_layout;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.pipelines
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        let cleared = {
+            let mut p = self
+                .pipelines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let n = p.len();
+            p.clear();
+            n
+        };
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.pipelines_mrt
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        let cleared_mrt = {
+            let mut p = self
+                .pipelines_mrt
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let n = p.len();
+            p.clear();
+            n
+        };
+        tracing::info!(
+            path = %path.display(),
+            cleared_variants = cleared + cleared_mrt,
+            "fragment shader hot-reload complete — pipeline variants will recompile on next draw"
+        );
         Ok(true)
     }
 
@@ -304,13 +347,17 @@ impl MeshProgram {
             Some(p) => p.clone(),
             None => return Ok(false),
         };
+        tracing::info!(path = %path.display(), "hot-reloading vertex shader");
         let vertex = self.engine.create_shader(ShaderDesc {
-            source: ShaderSource::File(path),
+            source: ShaderSource::File(path.clone()),
             entry_point: "main".to_owned(),
             stage: ShaderStage::Vertex,
             requires_ray_query: false,
             requires_cooperative_matrix: false,
             uses_ser: false,
+        }).map_err(|e| {
+            tracing::error!(path = %path.display(), "vertex shader hot-reload compile failed: {e}");
+            e
         })?;
         let reflection = self
             .engine
@@ -322,15 +369,30 @@ impl MeshProgram {
         self.reflection = reflection;
         self.pipeline_layout = pipeline_layout;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.pipelines
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        let cleared = {
+            let mut p = self
+                .pipelines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let n = p.len();
+            p.clear();
+            n
+        };
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.pipelines_mrt
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        let cleared_mrt = {
+            let mut p = self
+                .pipelines_mrt
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let n = p.len();
+            p.clear();
+            n
+        };
+        tracing::info!(
+            path = %path.display(),
+            cleared_variants = cleared + cleared_mrt,
+            "vertex shader hot-reload complete — pipeline variants will recompile on next draw"
+        );
         Ok(true)
     }
 
@@ -346,6 +408,15 @@ impl MeshProgram {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let key = (format, samples.max(1), self.uses_depth);
         if !pipelines.contains_key(&key) {
+            tracing::debug!(
+                format = ?key.0,
+                samples = key.1,
+                uses_depth = key.2,
+                vertex_kind = ?self.vertex_kind,
+                alpha_blend = self.alpha_blend,
+                fragment = ?self.fragment_path,
+                "compiling MeshProgram pipeline variant"
+            );
             let (vertex_stride, attributes) = match self.vertex_kind {
                 MeshVertexKind::V2d => (
                     std::mem::size_of::<Vertex2d>() as u32,
@@ -392,6 +463,7 @@ impl MeshProgram {
                 conservative_raster: core::ConservativeRasterMode::Off,
             })?;
             pipeline.set_debug_name("mesh-program")?;
+            tracing::debug!(format = ?key.0, samples = key.1, "MeshProgram pipeline variant ready");
             pipelines.insert(key, pipeline);
         }
         pipelines
@@ -417,6 +489,14 @@ impl MeshProgram {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let key = (color_formats.to_vec(), samples.max(1), self.uses_depth);
         if !pipelines.contains_key(&key) {
+            tracing::debug!(
+                color_targets = color_formats.len(),
+                samples = key.1,
+                uses_depth = key.2,
+                vertex_kind = ?self.vertex_kind,
+                fragment = ?self.fragment_path,
+                "compiling MeshProgram MRT pipeline variant"
+            );
             let (vertex_stride, attributes) = match self.vertex_kind {
                 MeshVertexKind::V2d => (
                     std::mem::size_of::<Vertex2d>() as u32,
@@ -463,6 +543,11 @@ impl MeshProgram {
                 conservative_raster: core::ConservativeRasterMode::Off,
             })?;
             pipeline.set_debug_name("mesh-program-mrt")?;
+            tracing::debug!(
+                color_targets = color_formats.len(),
+                samples = key.1,
+                "MeshProgram MRT pipeline variant ready"
+            );
             pipelines.insert(key.clone(), pipeline);
         }
         pipelines

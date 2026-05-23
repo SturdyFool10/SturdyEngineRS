@@ -5,6 +5,8 @@ use ash::{Device, vk};
 
 use crate::{Error, Result};
 
+use super::error_context::VkResultExt;
+
 // Block sizes for new VkDeviceMemory allocations.
 const DEVICE_LOCAL_BLOCK_SIZE: u64 = 256 * 1024 * 1024; // 256 MiB
 /// Reduced retry block size used only after a preferred device-local block allocation fails.
@@ -268,10 +270,13 @@ impl TypePool {
             let ptr = unsafe {
                 device
                     .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
-                    .map_err(|e| {
-                        device.free_memory(memory, None);
-                        Error::Backend(format!("vkMapMemory failed: {e:?}"))
-                    })?
+                    .trace_vk_with("vkMapMemory", || {
+                        format!(
+                            "block_capacity={block_capacity} memory_type={} host_visible={}",
+                            self.memory_type, self.host_visible
+                        )
+                    })
+                    .inspect_err(|_| device.free_memory(memory, None))?
             };
             Some(ptr as *mut u8)
         } else {
@@ -574,11 +579,14 @@ fn allocate_memory_block(
         alloc_info = alloc_info.push(&mut priority_info);
     }
     unsafe {
-        device.allocate_memory(&alloc_info, None).map_err(|e| {
-            Error::Backend(format!(
-                "vkAllocateMemory failed: {e:?} capacity={capacity} memory_type={memory_type}"
-            ))
-        })
+        device
+            .allocate_memory(&alloc_info, None)
+            .trace_vk_with("vkAllocateMemory", || {
+                format!(
+                    "capacity={capacity} memory_type={memory_type} priority={priority:?} flags=0x{:x}",
+                    allocate_flags.as_raw()
+                )
+            })
     }
 }
 

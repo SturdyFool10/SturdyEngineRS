@@ -24,19 +24,34 @@ use std::time::Instant;
 
 use sturdy_engine::{TextureKind, compress_texture};
 
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_thread_names(false)
+        .try_init();
+}
+
+fn print_usage() {
+    let usage = "Usage: compress-textures <asset_dir> [asset_dir ...]\n\n\
+Recursively compresses eligible images to block-compressed GPU formats\n\
+(BC3sRGB / BC5 / BC4) and caches the result as .sce-cache/<stem>.<tag>.sceb.\n\n\
+Format selection heuristic (same as at-load compression):\n\
+  *normal*, *_nrm*, *_nm*  → BC5  (XY normal map)\n\
+  *rough*, *_ao*, *_metal* → BC4  (single-channel utility)\n\
+  everything else          → BC3sRGB (colour albedo)\n";
+    let _ = std::io::Write::write_all(&mut std::io::stderr(), usage.as_bytes());
+}
+
 fn main() {
+    init_tracing();
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
-        eprintln!("Usage: compress-textures <asset_dir> [asset_dir ...]");
-        eprintln!();
-        eprintln!("Recursively compresses eligible images to block-compressed GPU formats");
-        eprintln!("(BC3sRGB / BC5 / BC4) and caches the result as .sce-cache/<stem>.<tag>.sceb.");
-        eprintln!();
-        eprintln!("Format selection heuristic (same as at-load compression):");
-        eprintln!("  *normal*, *_nrm*, *_nm*  → BC5  (XY normal map)");
-        eprintln!("  *rough*, *_ao*, *_metal* → BC4  (single-channel utility)");
-        eprintln!("  everything else          → BC3sRGB (colour albedo)");
+        print_usage();
         std::process::exit(if args.is_empty() { 1 } else { 0 });
     }
 
@@ -50,7 +65,7 @@ fn main() {
     for dir_arg in &args {
         let base = PathBuf::from(dir_arg);
         if !base.is_dir() {
-            eprintln!("warning: '{}' is not a directory, skipping", base.display());
+            tracing::warn!(path = %base.display(), "asset directory does not exist; skipping");
             continue;
         }
         visit_dir(&base, extensions, &mut |path: &Path| {
@@ -64,7 +79,7 @@ fn main() {
             let dyn_image = match image::open(path) {
                 Ok(i) => i,
                 Err(e) => {
-                    eprintln!("  error: {} — {e}", path.display());
+                    tracing::error!(path = %path.display(), error = %e, "failed to decode source image");
                     errors += 1;
                     return;
                 }
@@ -76,12 +91,12 @@ fn main() {
 
             match compress_texture(&pixels, w, h, channels, name, Some(path), true) {
                 Some(_) => {
-                    println!(
-                        "  compressed: {} ({}×{}, {})",
-                        path.display(),
-                        w,
-                        h,
-                        TextureKind::detect(name, channels).gpu_format_name()
+                    tracing::info!(
+                        path = %path.display(),
+                        width = w,
+                        height = h,
+                        format = TextureKind::detect(name, channels).gpu_format_name(),
+                        "compressed texture"
                     );
                     compressed += 1;
                 }
@@ -94,9 +109,13 @@ fn main() {
     }
 
     let elapsed = t0.elapsed().as_secs_f32();
-    println!();
-    println!(
-        "Done in {elapsed:.1}s — {total} files scanned, {compressed} compressed, {skipped} cached/skipped, {errors} errors"
+    tracing::info!(
+        elapsed_seconds = elapsed,
+        total,
+        compressed,
+        skipped,
+        errors,
+        "texture compression complete"
     );
     if errors > 0 {
         std::process::exit(1);

@@ -43,12 +43,12 @@ pub enum HdrPreference {
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum ToneMappingOp {
     /// ACES filmic tone mapping (industry standard for HDR → SDR).
-    #[default]
     Aces,
     /// Simple Reinhard tone mapping.
     Reinhard,
     /// Hermite spline tone mapping — smooth, perceptually-friendly curve with
     /// no harsh clipping at highlights.
+    #[default]
     Hermite,
     /// Pass-through: no tone mapping applied (for HDR displays).
     Linear,
@@ -116,7 +116,7 @@ impl HdrPipelineDesc {
         let tone_mapping = if mode.is_hdr() {
             ToneMappingOp::Linear
         } else {
-            ToneMappingOp::Aces
+            ToneMappingOp::Hermite
         };
 
         Ok(Self { mode, tone_mapping })

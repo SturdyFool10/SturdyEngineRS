@@ -122,6 +122,11 @@ impl LayoutPoolSlab {
             self.pages[idx].remaining -= self.sets_per_bg.max(1);
             self.pages[idx].pool
         } else {
+            tracing::debug!(
+                pages_now = self.pages.len() + 1,
+                capacity = POOL_PAGE_CAPACITY,
+                "allocating new descriptor pool page"
+            );
             let pool = create_pool(device, &self.pool_sizes_per_bg, POOL_PAGE_CAPACITY)?;
             let remaining = POOL_PAGE_CAPACITY - self.sets_per_bg.max(1);
             self.pages.push(PoolPage { pool, remaining });
@@ -139,6 +144,12 @@ impl LayoutPoolSlab {
             device
                 .allocate_descriptor_sets(&allocate_info)
                 .map_err(|error| {
+                    tracing::error!(
+                        set_layouts = set_layouts.len(),
+                        pages = self.pages.len(),
+                        "vkAllocateDescriptorSets failed — pool may be exhausted or fragmented; \
+                         check POOL_PAGE_CAPACITY or descriptor type counts: {error:?}"
+                    );
                     Error::Backend(format!("vkAllocateDescriptorSets failed: {error:?}"))
                 })?
         };
@@ -198,9 +209,15 @@ fn create_pool(
         .max_sets(capacity)
         .pool_sizes(pool_sizes);
     unsafe {
-        device
-            .create_descriptor_pool(&info, None)
-            .map_err(|error| Error::Backend(format!("vkCreateDescriptorPool failed: {error:?}")))
+        device.create_descriptor_pool(&info, None).map_err(|error| {
+            tracing::error!(
+                capacity,
+                pool_size_types = pool_sizes.len(),
+                "vkCreateDescriptorPool failed — device may have exhausted descriptor pool \
+                     resources or the pool size type list is empty: {error:?}"
+            );
+            Error::Backend(format!("vkCreateDescriptorPool failed: {error:?}"))
+        })
     }
 }
 
@@ -230,6 +247,13 @@ impl DescriptorRegistry {
         bindless_set_layout: Option<vk::DescriptorSetLayout>,
         limits: &Limits,
     ) -> Result<()> {
+        tracing::debug!(
+            ?handle,
+            groups = layout.groups.len(),
+            bindless = bindless_set_layout.is_some(),
+            push_constants_bytes = layout.push_constants_bytes,
+            "creating pipeline layout"
+        );
         validate_pipeline_layout(layout, bindless_set_layout.is_some(), limits)?;
 
         let mut set_layouts = Vec::with_capacity(layout.groups.len());
@@ -286,6 +310,13 @@ impl DescriptorRegistry {
                 match device.create_descriptor_set_layout(&info, None) {
                     Ok(layout) => layout,
                     Err(error) => {
+                        tracing::error!(
+                            ?handle,
+                            set_index,
+                            bindings = bindings.len(),
+                            "vkCreateDescriptorSetLayout failed — check binding count limits \
+                             or unsupported descriptor types in this set: {error:?}"
+                        );
                         destroy_set_layouts(device, &mut owned_set_layouts);
                         return Err(Error::Backend(format!(
                             "vkCreateDescriptorSetLayout failed: {error:?}"
@@ -320,6 +351,13 @@ impl DescriptorRegistry {
             match device.create_pipeline_layout(&info, None) {
                 Ok(layout) => layout,
                 Err(error) => {
+                    tracing::error!(
+                        ?handle,
+                        set_count = set_layouts.len(),
+                        push_constants_bytes = layout.push_constants_bytes,
+                        "vkCreatePipelineLayout failed — push constant size may exceed \
+                         device limit, or too many descriptor sets: {error:?}"
+                    );
                     destroy_set_layouts(device, &mut owned_set_layouts);
                     return Err(Error::Backend(format!(
                         "vkCreatePipelineLayout failed: {error:?}"
@@ -350,6 +388,7 @@ impl DescriptorRegistry {
                 push_constant_stages,
             },
         );
+        tracing::debug!(?handle, uses_bindless, "pipeline layout created");
         // Pre-register the pool slab so it's ready on first bind-group creation.
         let layout = self.layouts.get(&handle).ok_or_else(|| {
             Error::ResourceStateCorruption(

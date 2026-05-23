@@ -25,6 +25,26 @@ pub struct CornellRtScene {
 }
 
 impl CornellRtScene {
+    pub fn output_desc(width: u32, height: u32) -> ImageDesc {
+        ImageDesc {
+            dimension: ImageDimension::D2,
+            extent: Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth: 1,
+            },
+            mip_levels: 1,
+            layers: 1,
+            samples: 1,
+            format: Format::Rgba16Float,
+            usage: ImageUsage::SAMPLED | ImageUsage::STORAGE | ImageUsage::COPY_SRC,
+            transient: false,
+            clear_value: None,
+            debug_name: Some("cornell_rt_sample"),
+            ..ImageDesc::default()
+        }
+    }
+
     pub fn new(engine: &Engine, shader_path: PathBuf) -> Result<Option<Self>> {
         if !engine.realtime_ray_tracing_support().available() {
             return Ok(None);
@@ -155,26 +175,7 @@ impl CornellRtScene {
         frame.build_blas("cornell_static_blas", self.blas.build_desc())?;
         frame.build_tlas("cornell_static_tlas", self.tlas.build_desc())?;
 
-        let output = frame.image(
-            "cornell_rt_sample",
-            ImageDesc {
-                dimension: ImageDimension::D2,
-                extent: Extent3d {
-                    width: width.max(1),
-                    height: height.max(1),
-                    depth: 1,
-                },
-                mip_levels: 1,
-                layers: 1,
-                samples: 1,
-                format: Format::Rgba16Float,
-                usage: ImageUsage::SAMPLED | ImageUsage::STORAGE | ImageUsage::COPY_SRC,
-                transient: false,
-                clear_value: None,
-                debug_name: Some("cornell_rt_sample"),
-                ..ImageDesc::default()
-            },
-        )?;
+        let output = frame.image("cornell_rt_sample", Self::output_desc(width, height))?;
 
         self.constants_buffer.write(
             0,

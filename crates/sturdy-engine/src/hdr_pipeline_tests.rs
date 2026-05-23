@@ -75,9 +75,9 @@ fn hdr_pipeline_uses_linear_tone_mapping_in_hdr_mode() {
 }
 
 #[test]
-fn sdr_pipeline_uses_aces_tone_mapping() {
+fn sdr_pipeline_uses_hermite_tone_mapping() {
     let desc =
         HdrPipelineDesc::select(&hdr_caps_none(), &Caps::default(), HdrPreference::PreferHdr)
             .unwrap();
-    assert_eq!(desc.tone_mapping, ToneMappingOp::Aces);
+    assert_eq!(desc.tone_mapping, ToneMappingOp::Hermite);
 }

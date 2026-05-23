@@ -1272,7 +1272,19 @@ impl RenderGraph {
     }
 
     pub fn compile(&self) -> Result<CompiledGraph> {
-        let order = self.topological_order()?;
+        tracing::trace!(
+            passes = self.passes.len(),
+            images = self.images.len(),
+            buffers = self.buffers.len(),
+            "compiling render graph"
+        );
+        let order = self.topological_order().map_err(|e| {
+            tracing::error!(
+                passes = self.passes.len(),
+                "render graph topological sort failed — likely a dependency cycle between passes: {e:?}"
+            );
+            e
+        })?;
         let mut images = self.images.clone();
         let mut buffers = self.buffers.clone();
         let mut image_indices = HashMap::new();

@@ -9,8 +9,17 @@ use crate::mesh_loader::{MeshAlphaMode, MeshMaterialParams, MeshPrimitive, MeshT
 use crate::{Engine, FrameSyncReason, Image, Mesh, Result, TextureUploadDesc, Vertex3d};
 
 pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
-    let (doc, buffers, images) = gltf::import(path)
-        .map_err(|e| crate::Error::Unknown(format!("gltf import '{}': {e}", path.display())))?;
+    tracing::info!(path = %path.display(), "loading GLTF");
+    let (doc, buffers, images) = gltf::import(path).map_err(|e| {
+        tracing::error!(path = %path.display(), "GLTF import failed — file may be missing, corrupt, or use unsupported extensions: {e}");
+        crate::Error::Unknown(format!("gltf import '{}': {e}", path.display()))
+    })?;
+    tracing::debug!(
+        meshes = doc.meshes().count(),
+        images = images.len(),
+        path = %path.display(),
+        "GLTF parsed"
+    );
 
     // Upload all images to GPU once; indexed by gltf source image index.
     let gpu_images = upload_images(engine, &images)?;
@@ -32,6 +41,7 @@ pub(crate) fn load(engine: &Engine, path: &Path) -> Result<Vec<MeshPrimitive>> {
             }
         }
     }
+    tracing::info!(path = %path.display(), primitives = out.len(), "GLTF loaded");
     Ok(out)
 }
 
@@ -67,6 +77,7 @@ fn upload_one_image(
 
     let w = img.width;
     let h = img.height;
+    tracing::debug!(idx, width = w, height = h, source_format = ?img.format, "uploading GLTF image");
 
     // Convert to RGBA8 — the only 8-bit format the engine uploads directly.
     let rgba: Vec<u8> = match img.format {

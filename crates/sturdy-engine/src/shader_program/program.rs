@@ -153,20 +153,45 @@ impl ShaderProgram {
     }
 
     pub fn new(engine: &Engine, desc: ShaderProgramDesc) -> Result<Self> {
-        let vertex = engine.create_shader(desc.vertex.unwrap_or_else(default_vertex_desc))?;
         let fragment_stage = desc.fragment.stage;
-        let fragment = engine.create_shader(desc.fragment)?;
+        let source_label = match &desc.fragment.source {
+            ShaderSource::File(p) => p.display().to_string(),
+            ShaderSource::Inline(_) => "(inline)".to_owned(),
+            ShaderSource::Spirv(_) | ShaderSource::Dxil(_) => "(precompiled)".to_owned(),
+            _ => "(other source)".to_owned(),
+        };
+        tracing::debug!(
+            stage = ?fragment_stage,
+            source = %source_label,
+            "compiling ShaderProgram"
+        );
+        let vertex = engine.create_shader(desc.vertex.unwrap_or_else(default_vertex_desc))?;
+        let fragment = engine.create_shader(desc.fragment).map_err(|e| {
+            tracing::error!(
+                stage = ?fragment_stage,
+                source = %source_label,
+                "ShaderProgram fragment/compute shader compilation failed: {e}"
+            );
+            e
+        })?;
         let (reflection, pipeline_layout) = if fragment_stage == ShaderStage::Compute {
             (
-                engine.shader_reflection(&fragment)?,
+                engine.shader_reflection(&fragment).map_err(|e| {
+                    tracing::error!(source = %source_label, "compute shader reflection failed — check binding declarations: {e}");
+                    e
+                })?,
                 engine.create_reflected_compute_pipeline_layout(&fragment)?,
             )
         } else {
             (
-                engine.graphics_shader_reflection(&vertex, Some(&fragment))?,
+                engine.graphics_shader_reflection(&vertex, Some(&fragment)).map_err(|e| {
+                    tracing::error!(source = %source_label, "graphics shader reflection failed — check binding name mismatches: {e}");
+                    e
+                })?,
                 engine.create_reflected_graphics_pipeline_layout(&vertex, Some(&fragment))?,
             )
         };
+        tracing::debug!(stage = ?fragment_stage, source = %source_label, "ShaderProgram compiled");
         let fullscreen_triangle = create_fullscreen_triangle(engine)?;
         Ok(Self {
             engine: engine.clone(),
@@ -199,14 +224,25 @@ impl ShaderProgram {
             Some(p) => p.clone(),
             None => return Ok(false),
         };
-        let fragment = self.engine.create_shader(ShaderDesc {
-            source: ShaderSource::File(path),
-            entry_point: "main".to_owned(),
-            stage: self.stage,
-            requires_ray_query: false,
-            requires_cooperative_matrix: false,
-            uses_ser: false,
-        })?;
+        tracing::info!(path = %path.display(), stage = ?self.stage, "hot-reloading shader");
+        let fragment = self
+            .engine
+            .create_shader(ShaderDesc {
+                source: ShaderSource::File(path.clone()),
+                entry_point: "main".to_owned(),
+                stage: self.stage,
+                requires_ray_query: false,
+                requires_cooperative_matrix: false,
+                uses_ser: false,
+            })
+            .map_err(|e| {
+                tracing::error!(
+                    path = %path.display(),
+                    stage = ?self.stage,
+                    "shader hot-reload compile failed: {e}"
+                );
+                e
+            })?;
         let (reflection, pipeline_layout) = if self.stage == ShaderStage::Compute {
             (
                 self.engine.shader_reflection(&fragment)?,
@@ -225,10 +261,20 @@ impl ShaderProgram {
         self.reflection = reflection;
         self.pipeline_layout = pipeline_layout;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.pipelines
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        let cleared = {
+            let mut p = self
+                .pipelines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let n = p.len();
+            p.clear();
+            n
+        };
+        tracing::info!(
+            path = %path.display(),
+            cleared_variants = cleared,
+            "shader hot-reload complete — pipeline variants will recompile on next draw"
+        );
         Ok(true)
     }
 

@@ -1,7 +1,7 @@
 use crate::{
     AccelerationStructure, AccelerationStructureBuildMode, AccelerationStructureDesc,
     AccelerationStructureKind, BindGroup, BlasBuildDesc, BlasGeometryDesc, Buffer, BufferDesc,
-    BufferUsage, Engine, Error, GraphImage, GraphImageHistory, Pipeline, PipelineLayout,
+    BufferUsage, Engine, Error, GraphImage, GraphImageHistory, ImageDesc, Pipeline, PipelineLayout,
     RayTracingPipelineDesc, RayTracingShaderBindingTable, RayTracingStageDesc, RenderFrame, Result,
     RtShaderGroupDesc, Shader, ShaderBindingTableDesc, ShaderDesc, ShaderSource, ShaderStage,
     StageMask, TlasBuildDesc, TraceRaysDesc,
@@ -356,6 +356,14 @@ impl RealtimeRayTracingDenoiser {
 
     pub fn reset(&mut self) {
         self.history.reset();
+    }
+
+    pub fn next_frame_index(&mut self, frame: &RenderFrame, input_desc: ImageDesc) -> u32 {
+        let mut history_desc = input_desc;
+        history_desc.usage |= crate::ImageUsage::RENDER_TARGET;
+        frame
+            .next_history_frame_index(&mut self.history, history_desc)
+            .min(u32::MAX as u64) as u32
     }
 
     pub fn accumulate(

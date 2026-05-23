@@ -26,7 +26,9 @@ unsafe extern "system" fn device_memory_report_callback(
             if bytes > 0 {
                 tracing::info!(
                     "{type_str} type={} size={}B obj={:#x}",
-                    data.memory_type, bytes, data.memory_object_id
+                    data.memory_type,
+                    bytes,
+                    data.memory_object_id
                 );
             }
         }

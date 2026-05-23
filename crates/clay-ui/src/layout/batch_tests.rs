@@ -7,10 +7,20 @@ use crate::{
     UiLayer, UiShaderSlotBinding, UiShape,
 };
 
+fn shader_handle(raw: u64) -> ShaderHandle {
+    // Tests use deterministic fake handles; production code obtains handles from engine APIs.
+    unsafe { ShaderHandle::from_raw(raw) }
+}
+
+fn pipeline_handle(raw: u64) -> PipelineHandle {
+    // Tests use deterministic fake handles; production code obtains handles from engine APIs.
+    unsafe { PipelineHandle::from_raw(raw) }
+}
+
 #[test]
 fn batches_use_element_shader_slot_pipeline() {
-    let shader = ShaderHandle(11);
-    let pipeline = PipelineHandle(22);
+    let shader = shader_handle(11);
+    let pipeline = pipeline_handle(22);
     let mut queue = GpuWorkQueue::new("ui", OffscreenTarget::Swapchain);
     queue.commands.push(RenderCommand {
         id: ElementId::new("custom-background"),

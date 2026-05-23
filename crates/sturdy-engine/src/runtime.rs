@@ -306,6 +306,7 @@ impl AppRuntime {
             frame_time,
             window_scale_factor: 1.0,
             window_logical_size: None,
+            wait_for_gpu_before_present: false,
             finished: false,
         })
     }
@@ -373,6 +374,10 @@ pub struct AppRuntimeFrame<'a> {
     window_scale_factor: f32,
     /// Logical window size in window pixels, set by the event loop shell.
     window_logical_size: Option<[f32; 2]>,
+    /// When enabled, `finish_and_present` waits for this frame's GPU submission
+    /// before queueing presentation. This is useful for very expensive temporal
+    /// paths where multiple frames in flight can make history appear to jump.
+    wait_for_gpu_before_present: bool,
     /// Set to `true` after `finish_and_present` completes to prevent the `Drop`
     /// impl from double-presenting when the user calls it explicitly.
     finished: bool,
@@ -435,6 +440,10 @@ impl<'a> AppRuntimeFrame<'a> {
 
     pub(crate) fn set_window_logical_size(&mut self, size: [f32; 2]) {
         self.window_logical_size = Some([size[0].max(1.0), size[1].max(1.0)]);
+    }
+
+    pub fn set_wait_for_gpu_before_present(&mut self, wait: bool) {
+        self.wait_for_gpu_before_present = wait;
     }
 
     /// Return the runtime-owned default HDR scene-target policy for this frame.
@@ -615,6 +624,10 @@ impl<'a> AppRuntimeFrame<'a> {
                 return Err(error);
             }
         };
+        if self.wait_for_gpu_before_present {
+            self.render_frame
+                .wait_with_reason(crate::FrameSyncReason::FrameBoundaryPresent)?;
+        }
         if let Err(error) = self.runtime.surface.present() {
             tracing::error!("surface present failed after successful frame flush: {error:?}");
             return Err(error);
@@ -622,8 +635,11 @@ impl<'a> AppRuntimeFrame<'a> {
         self.render_frame.mark_presented();
         self.runtime.controller.update_diagnostics(|d| {
             d.frame_sync = Some(format!(
-                "reason={:?} submitted={} waited=false presented=true submission={:?}",
-                flush_report.reason, flush_report.submitted, flush_report.submission
+                "reason={:?} submitted={} waited={} presented=true submission={:?}",
+                flush_report.reason,
+                flush_report.submitted,
+                self.wait_for_gpu_before_present,
+                flush_report.submission
             ));
         });
         if let Some(start) = self.runtime.frame_start.take() {
@@ -664,10 +680,11 @@ impl<'a> AppRuntimeFrame<'a> {
                     if report.is_jittery() {
                         tracing::info!(
                             "frame jitter: p99={:.1}ms mean={:.1}ms (p99 > 2× mean)",
-                            report.p99_cpu_ms, report.mean_cpu_ms
+                            report.p99_cpu_ms,
+                            report.mean_cpu_ms
                         );
                     }
-                    crate::set_global_frame_timing(report);
+                    crate::engine_global::set_frame_timing(report);
                 }
             });
         }
@@ -1155,7 +1172,7 @@ impl RuntimeController {
     /// ```ignore
     /// let report = render_frame.describe();
     /// let text = controller.format_graph_report(&report);
-    /// println!("{text}");
+    /// tracing::info!("{text}");
     /// ```
     pub fn format_graph_report(report: &GraphReport) -> String {
         let mut out = String::new();
@@ -2929,7 +2946,7 @@ fn default_setting_entries(
             RuntimeSettingKey::ToneMappingOperator,
             "Tone Mapping Operator",
             RuntimeSettingKey::ToneMappingOperator.apply_path(),
-            "Aces",
+            "Hermite",
         )
         .with_options(text_options(&[
             "Aces",

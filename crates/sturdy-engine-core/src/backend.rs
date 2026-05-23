@@ -16,17 +16,17 @@ use crate::{
 use crate::{Format, FormatCapabilities, GpuMemoryBudget};
 
 #[cfg(target_os = "windows")]
-pub mod d3d12;
-pub mod factory;
+pub(crate) mod d3d12;
+pub(crate) mod factory;
 #[cfg(any(
     target_os = "macos",
     target_os = "ios",
     target_os = "tvos",
     target_os = "visionos"
 ))]
-pub mod metal;
+pub(crate) mod metal;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod vulkan;
+pub(crate) mod vulkan;
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum BackendKind {

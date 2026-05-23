@@ -103,7 +103,7 @@ impl GraphFrame {
                 subresource,
             }],
             clear_colors: vec![(image.handle(), color.map(f32::to_bits))],
-            ..PassDesc::default_graphics(format!("clear-{}", image.handle().0))
+            ..PassDesc::default_graphics(format!("clear-{}", image.handle().as_raw()))
         })
     }
 

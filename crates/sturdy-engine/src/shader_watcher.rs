@@ -175,7 +175,7 @@ impl ShaderWatcher {
     /// ```ignore
     /// let diags = watcher.tick(&mut [&mut scene_shader, &mut bloom_shader]);
     /// for d in &diags {
-    ///     if !d.success { log::warn!("{}", d.summary()); }
+    ///     if !d.success { tracing::warn!("{}", d.summary()); }
     /// }
     /// ```
     pub fn tick(&mut self, programs: &mut [&mut dyn Reloadable]) -> Vec<ShaderReloadDiagnostic> {

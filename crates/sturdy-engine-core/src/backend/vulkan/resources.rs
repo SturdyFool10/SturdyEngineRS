@@ -105,6 +105,18 @@ impl ResourceRegistry {
         handle: ImageHandle,
         desc: ImageDesc,
     ) -> Result<()> {
+        tracing::trace!(
+            name = desc.debug_name.unwrap_or("(unnamed)"),
+            format = ?desc.format,
+            width = desc.extent.width,
+            height = desc.extent.height,
+            depth = desc.extent.depth,
+            mips = desc.mip_levels,
+            layers = desc.layers,
+            samples = desc.samples,
+            usage = ?desc.usage,
+            "allocating image"
+        );
         let mut info = vk::ImageCreateInfo::default()
             .image_type(image_type(desc))
             .format(vk_format(desc.format)?)
@@ -146,9 +158,18 @@ impl ResourceRegistry {
         }
 
         let image = unsafe {
-            device
-                .create_image(&info, None)
-                .map_err(|error| Error::Backend(format!("vkCreateImage failed: {error:?}")))?
+            device.create_image(&info, None).map_err(|error| {
+                tracing::error!(
+                    name = desc.debug_name.unwrap_or("(unnamed)"),
+                    format = ?desc.format,
+                    width = desc.extent.width,
+                    height = desc.extent.height,
+                    usage = ?desc.usage,
+                    "vkCreateImage failed — check for unsupported format/usage combination, \
+                     exceeding maxImageDimension2D, or invalid mip/layer count: {error:?}"
+                );
+                Error::Backend(format!("vkCreateImage failed: {error:?}"))
+            })?
         };
 
         // GFX-1e: query dedicated allocation requirements (Vulkan 1.1 core).
@@ -194,6 +215,12 @@ impl ResourceRegistry {
             }
             let memory = unsafe {
                 device.allocate_memory(&alloc_info, None).map_err(|e| {
+                    tracing::error!(
+                        name = desc.debug_name.unwrap_or("(unnamed)"),
+                        size = requirements.size,
+                        "dedicated image vkAllocateMemory failed — \
+                         device may be out of memory or memory type exhausted: {e:?}"
+                    );
                     device.destroy_image(image, None);
                     Error::Backend(format!("dedicated vkAllocateMemory failed: {e:?}"))
                 })?
@@ -266,6 +293,14 @@ impl ResourceRegistry {
             match device.create_image_view(&view_info, None) {
                 Ok(view) => view,
                 Err(error) => {
+                    tracing::error!(
+                        name = desc.debug_name.unwrap_or("(unnamed)"),
+                        format = ?desc.format,
+                        mips = desc.mip_levels,
+                        layers = desc.layers,
+                        "vkCreateImageView failed — format may not support the requested \
+                         view type, aspect mask may be wrong, or mip/layer range is invalid: {error:?}"
+                    );
                     let cleanup = self.allocator.dealloc(device, allocation);
                     device.destroy_image(image, None);
                     if let Err(cleanup_error) = cleanup {
@@ -493,15 +528,25 @@ impl ResourceRegistry {
         handle: BufferHandle,
         desc: BufferDesc,
     ) -> Result<()> {
+        tracing::trace!(
+            size = desc.size,
+            usage = ?desc.usage,
+            "allocating buffer"
+        );
         let info = vk::BufferCreateInfo::default()
             .size(desc.size)
             .usage(vk_buffer_usage(desc.usage))
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let buffer = unsafe {
-            device
-                .create_buffer(&info, None)
-                .map_err(|error| Error::Backend(format!("vkCreateBuffer failed: {error:?}")))?
+            device.create_buffer(&info, None).map_err(|error| {
+                tracing::error!(
+                    size = desc.size,
+                    usage = ?desc.usage,
+                    "vkCreateBuffer failed — check usage flag support or device memory limits: {error:?}"
+                );
+                Error::Backend(format!("vkCreateBuffer failed: {error:?}"))
+            })?
         };
         let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
         let allocate_flags = if desc.usage.contains(BufferUsage::SHADER_DEVICE_ADDRESS) {
@@ -525,6 +570,12 @@ impl ResourceRegistry {
             if let Err(error) =
                 device.bind_buffer_memory(buffer, allocation.memory, allocation.offset)
             {
+                tracing::error!(
+                    size = desc.size,
+                    usage = ?desc.usage,
+                    "vkBindBufferMemory failed — memory type may not support the requested \
+                     usage flags or the allocation offset is misaligned: {error:?}"
+                );
                 let cleanup = self.allocator.dealloc(device, allocation);
                 device.destroy_buffer(buffer, None);
                 if let Err(cleanup_error) = cleanup {

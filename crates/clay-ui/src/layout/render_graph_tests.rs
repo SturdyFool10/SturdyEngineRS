@@ -9,12 +9,32 @@ use crate::{
 };
 use sturdy_engine_core::{BufferHandle, ImageHandle, PipelineHandle, ShaderHandle};
 
+fn image_handle(raw: u64) -> ImageHandle {
+    // Tests use deterministic fake handles; production code obtains handles from engine APIs.
+    unsafe { ImageHandle::from_raw(raw) }
+}
+
+fn buffer_handle(raw: u64) -> BufferHandle {
+    // Tests use deterministic fake handles; production code obtains handles from engine APIs.
+    unsafe { BufferHandle::from_raw(raw) }
+}
+
+fn shader_handle(raw: u64) -> ShaderHandle {
+    // Tests use deterministic fake handles; production code obtains handles from engine APIs.
+    unsafe { ShaderHandle::from_raw(raw) }
+}
+
+fn pipeline_handle(raw: u64) -> PipelineHandle {
+    // Tests use deterministic fake handles; production code obtains handles from engine APIs.
+    unsafe { PipelineHandle::from_raw(raw) }
+}
+
 #[test]
 fn graph_passes_include_shader_slot_image_and_buffer_reads() {
-    let scene = ImageHandle(3);
-    let resolved = ImageHandle(4);
-    let buffer = BufferHandle(5);
-    let shader = ShaderRef::custom(ShaderHandle(6), PipelineHandle(7));
+    let scene = image_handle(3);
+    let resolved = image_handle(4);
+    let buffer = buffer_handle(5);
+    let shader = ShaderRef::custom(shader_handle(6), pipeline_handle(7));
     let mut queue = GpuWorkQueue::new("ui", OffscreenTarget::Swapchain);
     queue.commands.push(RenderCommand {
         id: ElementId::new("effect"),
@@ -41,7 +61,7 @@ fn graph_passes_include_shader_slot_image_and_buffer_reads() {
     let passes = UiGraphPassBuilder::build_passes_with_resource_resolver(
         &queue,
         RenderGraphTarget {
-            image: ImageHandle(9),
+            image: image_handle(9),
         },
         |name| (name == "scene-blur").then_some(resolved),
     );
@@ -57,7 +77,7 @@ fn graph_passes_include_shader_slot_image_and_buffer_reads() {
 
 #[test]
 fn graph_passes_pack_single_command_shader_uniforms_as_push_constants() {
-    let shader = ShaderRef::custom(ShaderHandle(6), PipelineHandle(7));
+    let shader = ShaderRef::custom(shader_handle(6), pipeline_handle(7));
     let mut queue = GpuWorkQueue::new("ui", OffscreenTarget::Swapchain);
     queue.commands.push(RenderCommand {
         id: ElementId::new("effect"),
@@ -89,7 +109,7 @@ fn graph_passes_pack_single_command_shader_uniforms_as_push_constants() {
     let passes = UiGraphPassBuilder::build_passes(
         &queue,
         RenderGraphTarget {
-            image: ImageHandle(9),
+            image: image_handle(9),
         },
     );
 
@@ -101,7 +121,7 @@ fn graph_passes_pack_single_command_shader_uniforms_as_push_constants() {
 
 #[test]
 fn graph_parameter_plan_packs_multi_command_uniform_payloads() {
-    let shader = ShaderRef::custom(ShaderHandle(6), PipelineHandle(7));
+    let shader = ShaderRef::custom(shader_handle(6), pipeline_handle(7));
     let mut queue = GpuWorkQueue::new("ui", OffscreenTarget::Swapchain);
     for (index, amount) in [(0, 0.25_f32), (1, 0.75_f32)] {
         queue.commands.push(RenderCommand {

@@ -8,7 +8,6 @@ fn main() {
 
     if let Err(error) = run() {
         println!("cargo:error={error}");
-        eprintln!("{error}");
         process::exit(1);
     }
 }

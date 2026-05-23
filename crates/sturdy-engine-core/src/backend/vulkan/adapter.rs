@@ -4,8 +4,21 @@ use ash::{Instance, vk};
 
 use crate::{AdapterInfo, AdapterKind, AdapterSelection, BackendKind, Error, Result};
 
+use super::error_context::VkResultExt;
+
 pub fn enumerate(instance: &Instance) -> Vec<AdapterInfo> {
-    let physical_devices = unsafe { instance.enumerate_physical_devices().unwrap_or_default() };
+    let physical_devices = unsafe {
+        match instance
+            .enumerate_physical_devices()
+            .trace_vk("vkEnumeratePhysicalDevices")
+        {
+            Ok(devices) => devices,
+            Err(error) => {
+                tracing::warn!(%error, "Vulkan adapter enumeration failed; returning empty adapter list");
+                Vec::new()
+            }
+        }
+    };
     physical_devices
         .into_iter()
         .map(|pd| adapter_info(instance, pd))
@@ -16,7 +29,7 @@ pub fn pick(instance: &Instance, selection: &AdapterSelection) -> Result<vk::Phy
     let physical_devices = unsafe {
         instance
             .enumerate_physical_devices()
-            .map_err(|e| Error::Backend(format!("failed to enumerate physical devices: {e:?}")))?
+            .trace_vk("vkEnumeratePhysicalDevices")?
     };
 
     if physical_devices.is_empty() {

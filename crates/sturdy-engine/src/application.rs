@@ -59,10 +59,7 @@ use sturdy_engine_core::SurfaceSize;
 
 /// Global handle for reloading the log filter at runtime (e.g. from settings UI).
 static LOG_RELOAD_HANDLE: std::sync::OnceLock<
-    tracing_subscriber::reload::Handle<
-        tracing_subscriber::EnvFilter,
-        tracing_subscriber::Registry,
-    >,
+    tracing_subscriber::reload::Handle<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>,
 > = std::sync::OnceLock::new();
 
 /// Initialize the global tracing subscriber once.
@@ -74,12 +71,27 @@ static LOG_RELOAD_HANDLE: std::sync::OnceLock<
 /// Output is ANSI-coloured.  Use `RUST_LOG=debug` or call [`set_log_level`]
 /// to change verbosity at runtime.
 fn init_tracing() {
+    init_tracing_with_default_filter("warn");
+}
+
+/// Initialize the global tracing subscriber with a caller-provided default filter.
+///
+/// `RUST_LOG` still takes precedence. This is useful for binaries such as the
+/// testbed that want profile-specific defaults while keeping runtime reloads via
+/// [`set_log_level`].
+pub fn init_tracing_with_default_filter(default_filter: &str) -> bool {
     use tracing_subscriber::{EnvFilter, Registry, fmt, prelude::*, reload};
 
-    let default_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("warn"));
+    if LOG_RELOAD_HANDLE.get().is_some() {
+        return true;
+    }
 
-    let (filter_layer, handle) = reload::Layer::new(default_filter);
+    let rust_log_was_set = std::env::var_os("RUST_LOG").is_some();
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
+    let active_filter = filter.to_string();
+
+    let (filter_layer, handle) = reload::Layer::new(filter);
 
     let fmt_layer = fmt::layer()
         .with_ansi(true)
@@ -91,8 +103,23 @@ fn init_tracing() {
 
     let subscriber = Registry::default().with(filter_layer).with(fmt_layer);
 
-    if tracing::subscriber::set_global_default(subscriber).is_ok() {
-        let _ = LOG_RELOAD_HANDLE.set(handle);
+    match tracing::subscriber::set_global_default(subscriber) {
+        Ok(()) => {
+            let _ = LOG_RELOAD_HANDLE.set(handle);
+            tracing::warn!(
+                default_filter,
+                active_filter,
+                rust_log_was_set,
+                "tracing subscriber initialized"
+            );
+            true
+        }
+        Err(_) => {
+            eprintln!(
+                "failed to install Sturdy Engine tracing subscriber: another global tracing subscriber is already installed; default_filter={default_filter} active_filter={active_filter} rust_log_was_set={rust_log_was_set}"
+            );
+            false
+        }
     }
 }
 
@@ -767,16 +794,11 @@ impl<'a> ShellFrame<'a> {
                     .unwrap_or("unpublished")
             ),
             format!(
-                "windows: live={} focused={} hovered={} dirty={} surface-wait={}",
+                "windows: live={} focused={} dirty={} surface-wait={}",
                 diagnostics.windows.live_count,
                 diagnostics
                     .windows
                     .focused_window
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "none".to_string()),
-                diagnostics
-                    .windows
-                    .hovered_window
                     .map(|id| id.to_string())
                     .unwrap_or_else(|| "none".to_string()),
                 diagnostics.windows.dirty_count,

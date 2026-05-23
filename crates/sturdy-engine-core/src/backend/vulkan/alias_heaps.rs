@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use ash::{Device, vk};
 
-use crate::{Error, Result};
+use crate::Result;
+
+use super::error_context::VkResultExt;
 
 /// A single shared `VkDeviceMemory` backing one alias slot.
 struct AliasHeap {
@@ -63,6 +65,8 @@ fn alloc_raw(device: &Device, size: u64, memory_type: u32) -> Result<vk::DeviceM
     unsafe {
         device
             .allocate_memory(&info, None)
-            .map_err(|e| Error::Backend(format!("vkAllocateMemory (alias heap) failed: {e:?}")))
+            .trace_vk_with("vkAllocateMemory(alias heap)", || {
+                format!("size={size} memory_type={memory_type}")
+            })
     }
 }

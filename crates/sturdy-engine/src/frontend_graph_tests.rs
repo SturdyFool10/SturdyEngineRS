@@ -6,9 +6,14 @@ use super::scheduler::{
 };
 use super::*;
 
+fn image_handle(raw: u64) -> core::ImageHandle {
+    // Tests use deterministic fake handles; production code obtains handles from Engine APIs.
+    unsafe { core::ImageHandle::from_raw(raw) }
+}
+
 fn image_use(image: u64, access: Access, state: RgState) -> crate::ImageUse {
     crate::ImageUse {
-        image: core::ImageHandle(image),
+        image: image_handle(image),
         access,
         state,
         subresource: single_subresource(),
@@ -17,7 +22,7 @@ fn image_use(image: u64, access: Access, state: RgState) -> crate::ImageUse {
 
 fn image_use_mip(image: u64, mip: u16, access: Access, state: RgState) -> crate::ImageUse {
     crate::ImageUse {
-        image: core::ImageHandle(image),
+        image: image_handle(image),
         access,
         state,
         subresource: SubresourceRange::new(mip, 1, 0, 1),
@@ -118,7 +123,7 @@ fn overlapping_mip_write_and_read_create_raw_dependency() {
 #[test]
 fn full_resource_access_overlaps_selected_mip() {
     let full = crate::ImageUse {
-        image: core::ImageHandle(1),
+        image: image_handle(1),
         access: Access::Write,
         state: RgState::RenderTarget,
         subresource: SubresourceRange::WHOLE,

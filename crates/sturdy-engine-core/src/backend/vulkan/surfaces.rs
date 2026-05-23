@@ -70,13 +70,24 @@ impl SurfaceRegistry {
         desc: NativeSurfaceDesc,
         use_timeline: bool,
     ) -> Result<SurfaceInfo> {
+        tracing::info!(
+            width = desc.size.width,
+            height = desc.size.height,
+            hdr = ?desc.hdr,
+            transparent = desc.transparent,
+            "creating Vulkan surface"
+        );
         let surface = unsafe {
             ash_window::SurfaceFactory::new(entry, instance, desc.display_handle)
                 .map_err(|error| {
+                    tracing::error!("vkCreateSurfaceKHR (factory) failed — check display/window handle validity: {error:?}");
                     Error::Backend(format!("vkCreateSurfaceKHR (factory) failed: {error:?}"))
                 })?
                 .create_surface(desc.window_handle, None)
-                .map_err(|error| Error::Backend(format!("vkCreateSurfaceKHR failed: {error:?}")))?
+                .map_err(|error| {
+                    tracing::error!("vkCreateSurfaceKHR failed — window handle may be invalid or platform unsupported: {error:?}");
+                    Error::Backend(format!("vkCreateSurfaceKHR failed: {error:?}"))
+                })?
         };
         let surface_loader = khr::surface::Instance::load(entry, instance);
         let swapchain_loader = khr::swapchain::Device::load(instance, device);
@@ -128,6 +139,13 @@ impl SurfaceRegistry {
             }
         };
         let info = swapchain.info()?;
+        tracing::info!(
+            width = info.size.width,
+            height = info.size.height,
+            format = ?info.format,
+            color_space = ?info.color_space,
+            "surface created"
+        );
         self.surfaces.insert(
             handle,
             VulkanSurface {
@@ -154,6 +172,11 @@ impl SurfaceRegistry {
         handle: SurfaceHandle,
         size: SurfaceSize,
     ) -> Result<SurfaceInfo> {
+        tracing::info!(
+            width = size.width,
+            height = size.height,
+            "resizing swapchain"
+        );
         let surface = self.surfaces.get_mut(&handle).ok_or(Error::InvalidHandle)?;
         if surface.acquired_image_index.is_some() {
             return Err(Error::InvalidInput(
@@ -190,6 +213,11 @@ impl SurfaceRegistry {
         handle: SurfaceHandle,
         desc: SurfaceRecreateDesc,
     ) -> Result<SurfaceInfo> {
+        tracing::info!(
+            size_override = ?desc.size,
+            hdr_override = ?desc.hdr,
+            "recreating swapchain"
+        );
         let surface = self.surfaces.get_mut(&handle).ok_or(Error::InvalidHandle)?;
         if surface.acquired_image_index.is_some() {
             return Err(Error::InvalidInput(
@@ -253,6 +281,7 @@ impl SurfaceRegistry {
                 .map_err(|e| map_surface_error(e, "vkAcquireNextImageKHR"))?
         };
 
+        tracing::trace!(image_index, "swapchain image acquired");
         surface.acquired_image_index = Some(image_index);
         let idx = image_index as usize;
         Ok(AcquiredSurfaceImage {
@@ -346,12 +375,19 @@ impl SurfaceRegistry {
 
         match present_result {
             // VK_SUCCESS — everything is fine.
-            Ok(false) => {}
+            Ok(false) => {
+                tracing::trace!(image_index, "frame presented");
+            }
             // VK_SUBOPTIMAL_KHR — present succeeded but swapchain no longer matches the surface
             // perfectly. Treat as success; the next acquire will return OUT_OF_DATE and trigger
             // a recreate at the start of the following frame.
-            Ok(true) => {}
-            Err(e) => return Err(map_surface_error(e, "vkQueuePresentKHR")),
+            Ok(true) => {
+                tracing::debug!("swapchain suboptimal — will recreate on next frame");
+            }
+            Err(e) => {
+                tracing::warn!("vkQueuePresentKHR failed — surface may need recreation: {e:?}");
+                return Err(map_surface_error(e, "vkQueuePresentKHR"));
+            }
         }
         Ok(())
     }
@@ -506,6 +542,16 @@ fn create_swapchain(
     let extent = choose_extent(&capabilities, size);
     let image_count = choose_image_count(&capabilities);
     let composite_alpha = choose_composite_alpha(&capabilities, transparent);
+    tracing::info!(
+        width = extent.width,
+        height = extent.height,
+        vk_format = format.format.as_raw(),
+        vk_color_space = format.color_space.as_raw(),
+        vk_present_mode = present_mode.as_raw(),
+        image_count,
+        timeline_semaphore = use_timeline,
+        "creating swapchain"
+    );
     let mut create_info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface)
         .min_image_count(image_count)
@@ -527,13 +573,24 @@ fn create_swapchain(
     let swapchain = unsafe {
         swapchain_loader
             .create_swapchain(&create_info, None)
-            .map_err(|error| Error::Backend(format!("vkCreateSwapchainKHR failed: {error:?}")))?
+            .map_err(|error| {
+                tracing::error!(
+                    width = extent.width,
+                    height = extent.height,
+                    vk_format = format.format.as_raw(),
+                    vk_present_mode = present_mode.as_raw(),
+                    "vkCreateSwapchainKHR failed — surface may be out-of-date, the format may \
+                     no longer be supported, or the extent is zero: {error:?}"
+                );
+                Error::Backend(format!("vkCreateSwapchainKHR failed: {error:?}"))
+            })?
     };
     let images = unsafe {
         swapchain_loader
             .get_swapchain_images(swapchain)
             .map_err(|error| Error::Backend(format!("vkGetSwapchainImagesKHR failed: {error:?}")))?
     };
+    tracing::debug!(image_count = images.len(), "swapchain images retrieved");
     let mut image_views = Vec::with_capacity(images.len());
     let mut render_finished = Vec::with_capacity(images.len());
     for image in images.iter().copied() {
@@ -643,12 +700,17 @@ fn choose_surface_format(
                 .copied()
                 .find(|f| f.format == vk_fmt && f.color_space == vk_cs)
             {
+                tracing::debug!(
+                    vk_format = hit.format.as_raw(),
+                    vk_color_space = hit.color_space.as_raw(),
+                    "surface format selected (preferred)"
+                );
                 return Ok(hit);
             }
         }
     }
     // Fall back to any known-good format in the available list.
-    available
+    let fallback = available
         .iter()
         .copied()
         .find(|f| {
@@ -662,7 +724,12 @@ fn choose_surface_format(
         })
         .ok_or(Error::Unsupported(
             "Vulkan surface did not report a format supported by the engine",
-        ))
+        ))?;
+    tracing::debug!(
+        vk_format = fallback.format.as_raw(),
+        "surface format selected (fallback — preferred formats not available)"
+    );
+    Ok(fallback)
 }
 
 fn choose_present_mode(
@@ -672,15 +739,28 @@ fn choose_present_mode(
     if let Some(pref) = preferred {
         let vk_pref = engine_present_mode_to_vk(pref);
         if available.iter().any(|m| *m == vk_pref) {
+            tracing::debug!(
+                vk_present_mode = vk_pref.as_raw(),
+                "present mode selected (preferred)"
+            );
             return vk_pref;
         }
+        tracing::debug!(
+            vk_requested = vk_pref.as_raw(),
+            "requested present mode unavailable, falling back to Mailbox or FIFO"
+        );
     }
     // Default preference: Mailbox → FIFO.
-    available
+    let chosen = available
         .iter()
         .copied()
         .find(|m| *m == vk::PresentModeKHR::MAILBOX)
-        .unwrap_or(vk::PresentModeKHR::FIFO)
+        .unwrap_or(vk::PresentModeKHR::FIFO);
+    tracing::debug!(
+        vk_present_mode = chosen.as_raw(),
+        "present mode selected (default)"
+    );
+    chosen
 }
 
 fn choose_extent(capabilities: &vk::SurfaceCapabilitiesKHR, size: SurfaceSize) -> vk::Extent2D {
