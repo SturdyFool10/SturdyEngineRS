@@ -297,19 +297,18 @@ float3 bloomScene(float2 uv, float time) {
   float3 color =
       skyboxRadiance(ray, normalize(float3(-0.28, 0.42, 0.86))) * 0.06;
   float2 p = uv;
-  float3 glow = float3(0.0, 0.0, 0.0);
+  float3 emitters = float3(0.0, 0.0, 0.0);
   for (int i = 0; i < 10; ++i) {
     float fi = float(i);
     float angle = time * (0.35 + fi * 0.035) + fi * 2.399;
     float2 c = float2(cos(angle), sin(angle * 1.37)) * float2(0.76, 0.46);
     float d = length(p - c);
     float3 hue = lut(frac(fi / 10.0 + time * 0.025));
-    glow += hue * (0.026 / max(d * d, 0.0016));
-    glow += smoothstep(0.030, 0.0, d) * hue * 18.0;
+    emitters += smoothstep(0.030, 0.0, d) * hue * 18.0;
   }
-  float core = smoothstep(0.18, 0.0, length(p));
-  glow += core * float3(5.8, 4.2, 2.4);
-  return color + glow;
+  float core = smoothstep(0.040, 0.0, length(p));
+  emitters += core * float3(18.0, 13.0, 7.5);
+  return color + emitters;
 }
 
 float lcg(inout uint state) {
@@ -745,10 +744,6 @@ float4 main(VSOut input, uniform FrameGraphConstants graph) : SV_TARGET {
   float3 tint = lut(luma * 0.45 + 0.05);
   color *= lerp(float3(1.0, 1.0, 1.0), tint,
                 graph.scene == 1 || graph.scene == 3 ? 0.06 : 0.22);
-
-  float mask =
-      procedural_mask.SampleLevel(procedural_mask_sampler, flippedUv, 0).a;
-  color *= lerp(0.95, 1.06, mask);
 
   return float4(color, 1.0);
 }

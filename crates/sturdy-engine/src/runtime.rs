@@ -785,6 +785,15 @@ pub trait RuntimeApp: Sized {
         None
     }
 
+    /// Handle a structured key input event.
+    ///
+    /// Only called when [`input_hub`](RuntimeApp::input_hub) returns `None`.
+    /// Unlike [`key_pressed`](RuntimeApp::key_pressed), this receives press and
+    /// release transitions for physical keys and is suitable for held controls.
+    fn key_input(&mut self, _input: &crate::KeyInput) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Handle a character key press.
     ///
     /// Only called when [`input_hub`](RuntimeApp::input_hub) returns `None` and

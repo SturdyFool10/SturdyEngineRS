@@ -10,9 +10,10 @@ use crate::shader_watcher::Reloadable;
 use sturdy_engine_core as core;
 
 use crate::{
-    ColorTargetDesc, CullMode, Engine, Error, Format, FrontFace, GraphicsPipelineDesc, Pipeline,
-    PipelineLayout, PrimitiveTopology, RasterState, Result, Shader, ShaderDesc, ShaderReflection,
-    ShaderSource, ShaderStage, VertexAttributeDesc, VertexBufferLayout, VertexInputRate,
+    BlendMode, ColorTargetDesc, CullMode, Engine, Error, Format, FrontFace, GraphicsPipelineDesc,
+    Pipeline, PipelineLayout, PrimitiveTopology, RasterState, Result, Shader, ShaderDesc,
+    ShaderReflection, ShaderSource, ShaderStage, VertexAttributeDesc, VertexBufferLayout,
+    VertexInputRate,
     mesh::{
         Vertex2d, Vertex3d, skinned_vertex3d_attributes, vertex2d_attributes, vertex3d_attributes,
     },
@@ -49,6 +50,7 @@ pub struct MeshProgram {
     pub(crate) fragment: Shader,
     pub(crate) vertex_kind: MeshVertexKind,
     pub(crate) alpha_blend: bool,
+    pub(crate) blend_mode: BlendMode,
     pub(crate) uses_depth: bool,
     pub(crate) reflection: ShaderReflection,
     fragment_path: Option<PathBuf>,
@@ -194,6 +196,20 @@ impl MeshProgram {
     }
 
     pub fn new(engine: &Engine, desc: MeshProgramDesc) -> Result<Self> {
+        let blend_mode = if desc.alpha_blend {
+            BlendMode::Alpha
+        } else {
+            BlendMode::Opaque
+        };
+        Self::new_with_blend_mode(engine, desc, blend_mode)
+    }
+
+    pub fn new_with_blend_mode(
+        engine: &Engine,
+        mut desc: MeshProgramDesc,
+        blend_mode: BlendMode,
+    ) -> Result<Self> {
+        desc.alpha_blend = blend_mode != BlendMode::Opaque;
         let default_vertex_file = match desc.vertex_kind {
             MeshVertexKind::V2d => "mesh_vertex_2d.slang",
             MeshVertexKind::V3d => "mesh_vertex_3d.slang",
@@ -259,6 +275,7 @@ impl MeshProgram {
             fragment,
             vertex_kind: desc.vertex_kind,
             alpha_blend: desc.alpha_blend,
+            blend_mode,
             uses_depth: desc.uses_depth,
             reflection,
             fragment_path,
@@ -441,11 +458,7 @@ impl MeshProgram {
                     input_rate: VertexInputRate::Vertex,
                 }],
                 vertex_attributes: attributes,
-                color_targets: vec![if self.alpha_blend {
-                    ColorTargetDesc::alpha_blend(format)
-                } else {
-                    ColorTargetDesc::opaque(format)
-                }],
+                color_targets: vec![ColorTargetDesc::with_blend(format, self.blend_mode)],
                 depth_format: if self.uses_depth {
                     Some(Format::Depth32Float)
                 } else {

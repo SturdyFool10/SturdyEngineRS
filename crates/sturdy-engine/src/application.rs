@@ -2944,11 +2944,17 @@ where
                 if let Some(input) = crate::input::KeyInput::from_winit(&event, self.modifiers) {
                     if let Some(hub) = self.app_state.input_hub() {
                         hub.on_key_input(&input);
-                    } else if event.state == ElementState::Pressed {
-                        if let Key::Character(s) = &event.logical_key {
-                            if let Err(e) = self.app_state.key_pressed(s.as_str()) {
-                                tracing::error!("key handler failed: {e:?}");
-                                std::process::exit(1);
+                    } else {
+                        if let Err(e) = self.app_state.key_input(&input) {
+                            tracing::error!("key input handler failed: {e:?}");
+                            std::process::exit(1);
+                        }
+                        if event.state == ElementState::Pressed {
+                            if let Key::Character(s) = &event.logical_key {
+                                if let Err(e) = self.app_state.key_pressed(s.as_str()) {
+                                    tracing::error!("key handler failed: {e:?}");
+                                    std::process::exit(1);
+                                }
                             }
                         }
                     }

@@ -185,7 +185,7 @@ pub struct AntiAliasingConfig {
 impl Default for AntiAliasingConfig {
     fn default() -> Self {
         Self {
-            mode: AntiAliasingMode::Off,
+            mode: AntiAliasingMode::Msaa(MsaaSettings::default()),
             selected_dial: AntiAliasingDial::Mode,
         }
     }

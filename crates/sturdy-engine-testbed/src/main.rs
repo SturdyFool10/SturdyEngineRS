@@ -1,21 +1,26 @@
 use std::{path::PathBuf, time::Instant};
 
 mod cornell_rt;
+mod overlay;
+mod path_tracer_camera;
+mod path_tracer_subscene;
 mod shadow_showcase;
 
 use cornell_rt::CornellRtScene;
+use path_tracer_camera::{PathTracerCameraInput, PathTracerCameraRig};
+use path_tracer_subscene::PathTracerSubscene;
 use shadow_showcase::ShadowShowcase;
 use sturdy_engine::{
     AntiAliasingConfig, AntiAliasingDial, AntiAliasingPass, AppRuntime, AppRuntimeFrame,
     BloomConfig, BloomPass, CpuProceduralTexture2d, DebugOverlay, DebugOverlayRenderer,
     DebugViewPicker, Engine, Error, Extent3d, Format, GpuProceduralTexture, HdrPipelineDesc,
-    HdrPreference, ImageDesc, ImageDimension, ImageUsage, MotionVectorLayer, MotionVectorSpace,
-    ProceduralTextureRecipe, ProceduralTextureUpdatePolicy, RealtimeRayTracingDenoiser,
-    Result as EngineResult, RuntimeApp, RuntimeController, RuntimeMotionVectorDesc,
-    RuntimePostProcessDesc, RuntimeSettingDescriptor, RuntimeSettingId, RuntimeSettingKey,
-    RuntimeSettingOption, ShaderProgram, ShaderWatcher, ShellFrame, SurfaceColorSpace,
-    ToneMappingOp, WindowConfig, init_tracing_with_default_filter, push_constants,
-    run_with_runtime, set_log_level,
+    HdrPreference, ImageDesc, ImageDimension, ImageUsage, KeyInput, KeyInputState, KeyModifier,
+    KeyToken, MotionVectorLayer, MotionVectorSpace, ProceduralTextureRecipe,
+    ProceduralTextureUpdatePolicy, RealtimeRayTracingDenoiser, Result as EngineResult, RuntimeApp,
+    RuntimeController, RuntimeMotionVectorDesc, RuntimePostProcessDesc, RuntimeSettingDescriptor,
+    RuntimeSettingId, RuntimeSettingKey, RuntimeSettingOption, ShaderProgram, ShaderWatcher,
+    ShellFrame, SurfaceColorSpace, ToneMappingOp, WindowConfig, init_tracing_with_default_filter,
+    push_constants, run_with_runtime, set_log_level,
 };
 
 #[push_constants]
@@ -30,6 +35,14 @@ struct FrameConstants {
 #[push_constants]
 struct LutParams {
     phase: f32,
+}
+
+#[push_constants]
+struct CornellDenoiseParams {
+    frame_index: u32,
+    max_frames: u32,
+    output_mode: u32,
+    _pad: u32,
 }
 
 #[push_constants]
@@ -60,6 +73,8 @@ struct TonemapParams {
     psycho_adapt_contrast: f32,
     psycho_cone_exp: f32,
 }
+
+const CORNELL_RT_MAX_ACCUMULATION_FRAMES: u32 = 65536;
 
 #[derive(Clone, Copy, Debug)]
 struct TonemapSettings {
@@ -412,6 +427,7 @@ struct Testbed {
     motion_program: ShaderProgram,
     tonemap_program: ShaderProgram,
     cornell_accumulation_program: ShaderProgram,
+    cornell_denoise_program: ShaderProgram,
     bloom_pass: BloomPass,
     aa_pass: AntiAliasingPass,
     bloom_config: BloomConfig,
@@ -432,12 +448,17 @@ struct Testbed {
     selected_scene: ShowcaseScene,
     shadow_scene: ShadowShowcase,
     cornell_rt_scene: Option<CornellRtScene>,
+    path_tracer_subscene: PathTracerSubscene,
+    path_tracer_camera: PathTracerCameraRig,
+    path_tracer_camera_input: PathTracerCameraInput,
     cornell_denoiser: RealtimeRayTracingDenoiser,
+    clear_path_tracer_after_first_trace: bool,
     show_graph_inspector: bool,
     pending_debug_image_export: bool,
     debug_image_export_index: u64,
     frame_index: u64,
     started_at: Instant,
+    last_frame_elapsed: f32,
     shader_watcher: ShaderWatcher,
 }
 
@@ -503,6 +524,10 @@ impl ShowcaseScene {
         }
     }
 
+    fn number(self) -> u32 {
+        self.id() + 1
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Overview => "overview",
@@ -517,13 +542,41 @@ impl ShowcaseScene {
         }
     }
 
-    fn controls_line() -> String {
-        Self::ALL
+    fn short_label(self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::ProceduralSky => "sky",
+            Self::ProceduralMaterials => "materials",
+            Self::RealtimeShadows => "shadows",
+            Self::TemporalAndPost => "temporal",
+            Self::ProceduralTextures => "textures",
+            Self::Bloom => "bloom",
+            Self::CornellPathTracing => "cornell",
+            Self::DebugGraph => "debug",
+        }
+    }
+
+    fn summary(self) -> &'static str {
+        match self {
+            Self::Overview => "mosaic of every showcase scene",
+            Self::ProceduralSky => "shader-driven sky lighting",
+            Self::ProceduralMaterials => "procedural PBR-style material spheres",
+            Self::RealtimeShadows => "deferred PBR with dynamic cascaded shadows",
+            Self::TemporalAndPost => "motion-vector and post-processing stress scene",
+            Self::ProceduralTextures => "CPU/GPU procedural texture sampling",
+            Self::Bloom => "HDR emitters for bloom evaluation",
+            Self::CornellPathTracing => "progressive path tracing subscenes",
+            Self::DebugGraph => "debug image and render-graph inspection",
+        }
+    }
+
+    fn picker_line() -> String {
+        let choices = Self::ALL
             .iter()
-            .enumerate()
-            .map(|(index, scene)| format!("{}={}", index + 1, scene.label()))
+            .map(|scene| format!("{} {}", scene.number(), scene.short_label()))
             .collect::<Vec<_>>()
-            .join("  ")
+            .join("  ");
+        format!("scenes: {choices}")
     }
 }
 
@@ -610,6 +663,7 @@ impl RuntimeApp for Testbed {
         let tonemap_program = engine.load_shader(shader_path("tonemap.slang"))?;
         let cornell_accumulation_program =
             engine.load_shader(shader_path("cornell_accumulate.slang"))?;
+        let cornell_denoise_program = engine.load_shader(shader_path("cornell_denoise.slang"))?;
 
         let mut shader_watcher = ShaderWatcher::new();
         for program in [
@@ -617,6 +671,7 @@ impl RuntimeApp for Testbed {
             &motion_program,
             &tonemap_program,
             &cornell_accumulation_program,
+            &cornell_denoise_program,
         ] {
             if let Some(path) = program.source_path() {
                 shader_watcher.watch(path);
@@ -626,9 +681,9 @@ impl RuntimeApp for Testbed {
         let shadow_scene = ShadowShowcase::new(engine)?;
         let cornell_rt_scene = CornellRtScene::new(engine, shader_path("cornell_rt.slang"))?;
         if cornell_rt_scene.is_some() {
-            tracing::info!("Cornell box hardware ray tracing path enabled");
+            tracing::info!("hardware path tracing enabled for Cornell/outdoor subscenes");
         } else {
-            tracing::warn!("Cornell box hardware ray tracing unavailable; using shader fallback");
+            tracing::warn!("hardware path tracing unavailable; using shader fallback");
         }
         let engine_clone = engine.clone();
         let mut testbed = Self {
@@ -637,6 +692,7 @@ impl RuntimeApp for Testbed {
             motion_program,
             tonemap_program,
             cornell_accumulation_program,
+            cornell_denoise_program,
             bloom_pass: BloomPass::new(engine)?,
             aa_pass: AntiAliasingPass::new(engine)?,
             bloom_config: BloomConfig::default(),
@@ -644,11 +700,7 @@ impl RuntimeApp for Testbed {
             bloom_only: false,
             show_motion_vectors: false,
             hdr_output,
-            tone_mapping: if hdr_output && hdr_desc.tone_mapping == ToneMappingOp::Linear {
-                ToneMappingOp::Hermite
-            } else {
-                hdr_desc.tone_mapping
-            },
+            tone_mapping: ToneMappingOp::Hermite,
             tonemap_settings: TonemapSettings::default(),
             selected_tonemap_dial: TonemapDial::Exposure,
             aa: AntiAliasingConfig::default(),
@@ -658,15 +710,20 @@ impl RuntimeApp for Testbed {
             debug_view_picker: DebugViewPicker::new(engine)?,
             runtime_controller: None,
             texture_resolution: TextureResolutionTier::Medium,
-            selected_scene: ShowcaseScene::Overview,
+            selected_scene: ShowcaseScene::CornellPathTracing,
             shadow_scene,
             cornell_rt_scene,
-            cornell_denoiser: RealtimeRayTracingDenoiser::new(512),
+            path_tracer_subscene: PathTracerSubscene::DEFAULT,
+            path_tracer_camera: PathTracerCameraRig::outdoor_default(),
+            path_tracer_camera_input: PathTracerCameraInput::default(),
+            cornell_denoiser: RealtimeRayTracingDenoiser::new(CORNELL_RT_MAX_ACCUMULATION_FRAMES),
+            clear_path_tracer_after_first_trace: true,
             show_graph_inspector: false,
             pending_debug_image_export: false,
             debug_image_export_index: 0,
             frame_index: 0,
             started_at: Instant::now(),
+            last_frame_elapsed: 0.0,
             shader_watcher,
         };
         let controller = runtime.controller().clone();
@@ -700,13 +757,20 @@ impl RuntimeApp for Testbed {
                     .unwrap_or(path.as_path())
             {
                 self.cornell_accumulation_program.reload()
+            } else if path
+                == self
+                    .cornell_denoise_program
+                    .source_path()
+                    .unwrap_or(path.as_path())
+            {
+                self.cornell_denoise_program.reload()
             } else {
                 Ok(false)
             };
             match result {
                 Ok(true) => {
                     runtime_controller.clear_shader_compile_error(path);
-                    self.cornell_denoiser.reset();
+                    self.reset_path_tracer_accumulation();
                     tracing::info!("hot reload: reloaded {}", path.display());
                 }
                 Err(e) => {
@@ -718,10 +782,16 @@ impl RuntimeApp for Testbed {
         }
 
         let elapsed = self.started_at.elapsed().as_secs_f32();
+        let delta_seconds = (elapsed - self.last_frame_elapsed).clamp(0.0, 0.1);
+        self.last_frame_elapsed = elapsed;
         let frame_index = self.frame_index.min(u32::MAX as u64) as u32;
         self.frame_index = self.frame_index.saturating_add(1);
         let ext = surface_image.desc().extent;
         let aspect = ext.width as f32 / ext.height.max(1) as f32;
+
+        if self.advance_path_tracer_camera(delta_seconds) {
+            self.reset_path_tracer_accumulation();
+        }
 
         // Register swapchain first — required so hdr_color_image can read the extent.
         let swapchain = shell_frame.inner().swapchain_image(surface_image)?;
@@ -757,20 +827,35 @@ impl RuntimeApp for Testbed {
             shell_frame.register_debug_image("hdr_shadow_scene_color", &scene_color);
             (scene_color, None)
         } else {
+            let mut cornell_guide = None;
+            let mut cornell_material_guide = None;
+            let mut cornell_accumulation_frame = 0;
             let mut scene_color = if self.selected_scene == ShowcaseScene::CornellPathTracing {
                 if let Some(cornell_rt_scene) = &self.cornell_rt_scene {
                     let cornell_sample_frame = self.cornell_denoiser.next_frame_index(
                         frame,
                         CornellRtScene::output_desc(ext.width, ext.height),
                     );
-                    cornell_rt_scene.draw(
+                    let cornell_frame = cornell_rt_scene.draw(
                         frame,
                         &self.engine,
+                        self.path_tracer_subscene,
                         ext.width,
                         ext.height,
                         aspect,
                         cornell_sample_frame,
-                    )?
+                        self.path_tracer_camera.gpu_data(),
+                    )?;
+                    shell_frame.register_debug_image("hdr_cornell_rt_sample", &cornell_frame.color);
+                    shell_frame.register_debug_image("hdr_cornell_guides", &cornell_frame.guide);
+                    shell_frame.register_debug_image(
+                        "hdr_cornell_material_guides",
+                        &cornell_frame.material_guide,
+                    );
+                    cornell_accumulation_frame = cornell_sample_frame;
+                    cornell_guide = Some(cornell_frame.guide);
+                    cornell_material_guide = Some(cornell_frame.material_guide);
+                    cornell_frame.color
                 } else {
                     let scene_target = shell_frame
                         .default_hdr_scene_target("scene_color", self.actual_msaa_samples())?;
@@ -813,7 +898,62 @@ impl RuntimeApp for Testbed {
                     &self.cornell_accumulation_program,
                 )?;
                 shell_frame.register_debug_image("hdr_cornell_accumulated", &accumulated);
-                scene_color = accumulated;
+
+                if let (Some(guide), Some(material_guide)) =
+                    (&cornell_guide, &cornell_material_guide)
+                {
+                    let mut denoise_desc = accumulated.desc();
+                    denoise_desc.usage |=
+                        ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET | ImageUsage::COPY_SRC;
+                    denoise_desc.debug_name = Some("cornell_rt_denoised");
+                    let denoised = frame.image("cornell_denoised", denoise_desc)?;
+                    accumulated.register_as("accumulated_radiance");
+                    guide.register_as("current_guides");
+                    material_guide.register_as("current_material_guides");
+                    denoised.execute_shader_with_constants_auto(
+                        &self.cornell_denoise_program,
+                        &CornellDenoiseParams {
+                            frame_index: cornell_accumulation_frame,
+                            max_frames: CORNELL_RT_MAX_ACCUMULATION_FRAMES,
+                            output_mode: 0,
+                            _pad: 0,
+                        },
+                    )?;
+                    shell_frame.register_debug_image("hdr_cornell_denoised", &denoised);
+
+                    let mut delta_desc = accumulated.desc();
+                    delta_desc.usage |=
+                        ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET | ImageUsage::COPY_SRC;
+                    delta_desc.debug_name = Some("cornell_rt_denoise_delta");
+                    let denoise_delta = frame.image("cornell_denoise_delta", delta_desc)?;
+                    denoise_delta.execute_shader_with_constants_auto(
+                        &self.cornell_denoise_program,
+                        &CornellDenoiseParams {
+                            frame_index: cornell_accumulation_frame,
+                            max_frames: CORNELL_RT_MAX_ACCUMULATION_FRAMES,
+                            output_mode: 1,
+                            _pad: 0,
+                        },
+                    )?;
+                    shell_frame.register_debug_image("hdr_cornell_denoise_delta", &denoise_delta);
+
+                    // Accumulation registers the raw history as `scene_color` for its pass.
+                    // Override that alias only after denoising so bloom/tonemap consume the
+                    // display denoise without ever feeding it back into raw accumulation.
+                    denoised.register_as("scene_color");
+                    scene_color = denoised;
+                } else {
+                    scene_color = accumulated;
+                }
+
+                if self.clear_path_tracer_after_first_trace {
+                    self.cornell_denoiser.reset();
+                    self.clear_path_tracer_after_first_trace = false;
+                    tracing::debug!(
+                        subscene = self.path_tracer_subscene.label(),
+                        "path tracer accumulation cleared after first trace"
+                    );
+                }
             }
             shell_frame.register_debug_image("hdr_scene_color", &scene_color);
             let motion_vectors = self.motion_vector_image(frame, ext.width, ext.height)?;
@@ -870,7 +1010,11 @@ impl RuntimeApp for Testbed {
                 bloom_config: self.bloom_enabled.then_some(bloom_config),
                 bloom_only: self.bloom_only,
                 aa_pass: &self.aa_pass,
-                aa_mode: self.aa.mode,
+                aa_mode: if self.selected_scene == ShowcaseScene::CornellPathTracing {
+                    sturdy_engine::AntiAliasingMode::Fxaa(Default::default())
+                } else {
+                    self.aa.mode
+                },
                 swapchain: &swapchain,
                 tonemap_program: &self.tonemap_program,
                 tonemap_constants: &tonemap_constants,
@@ -889,80 +1033,8 @@ impl RuntimeApp for Testbed {
             .bool_setting(RuntimeSettingKey::OverlayVisibility)
             .unwrap_or(true)
         {
-            let mut overlay_lines = shell_frame.default_runtime_overlay_lines();
-            overlay_lines.push(format!(
-                "controls: T={} P={}={:.2}",
-                tone_mapping_label(self.tone_mapping),
-                self.selected_tonemap_dial.label(),
-                self.tonemap_settings.get(self.selected_tonemap_dial),
-            ));
-            overlay_lines.push(format!(
-                "controls: D={} V={} H={} T={} FX={} tex={}",
-                self.aa.selected_dial.label(),
-                if self.show_motion_vectors {
-                    "shown"
-                } else {
-                    "hidden"
-                },
-                if self.hdr_output { "on" } else { "off" },
-                if runtime_controller
-                    .bool_setting(RuntimeSettingKey::SurfaceTransparency)
-                    .unwrap_or(false)
-                {
-                    "on"
-                } else {
-                    "off"
-                },
-                runtime_controller
-                    .text_setting(RuntimeSettingKey::WindowBackgroundEffect)
-                    .unwrap_or_else(|| "None".to_string()),
-                self.texture_resolution.label(),
-            ));
-            overlay_lines.push(format!(
-                "scene: {} | {}",
-                self.selected_scene.label(),
-                ShowcaseScene::controls_line()
-            ));
-            overlay_lines.push(format!(
-                "debug view: {} ({})",
-                self.debug_view_picker
-                    .selected_name(&runtime_controller)
-                    .unwrap_or_else(|| "Off".to_string()),
-                shell_frame.debug_image_names().join(", ")
-            ));
-            overlay_lines.push(format!(
-                "debug export: {}",
-                if self.pending_debug_image_export {
-                    "queued"
-                } else {
-                    "idle"
-                }
-            ));
-            if self.show_graph_inspector {
-                overlay_lines.extend(shell_frame.runtime_graph_inspection_lines(10, 8));
-            }
-            overlay_lines.push(
-                "keys: 1-9 scenes  [/]=tonemap  .=aa  a=aa  Shift+A=clear RT accumulation  R/U reset  B/b bloom  H hdr  V motion  O overlay  I graph  E export  X transparency  G effect  N/M debug  F1/F2/F3 tex"
-                    .to_string(),
-            );
-            if self.selected_scene == ShowcaseScene::RealtimeShadows {
-                overlay_lines.push(
-                    "scene 4 (realtime shadows): arrows=orbit  PgUp/PgDn=zoom  [deferred PBR + dynamic CSM]"
-                        .to_string(),
-                );
-            }
-            // Show any active shader compile errors (cleared automatically on successful hot reload).
-            for err in runtime_controller.diagnostics().shader_compile_errors {
-                overlay_lines.push(format!(
-                    "[shader error] {}: {}",
-                    err.path
-                        .file_name()
-                        .unwrap_or(err.path.as_os_str())
-                        .to_string_lossy(),
-                    err.message.lines().next().unwrap_or("compile failed"),
-                ));
-            }
-            shell_frame.set_runtime_overlay_lines(overlay_lines);
+            shell_frame
+                .set_runtime_overlay_lines(self.overlay_lines(&shell_frame, &runtime_controller));
         }
 
         shell_frame.run_camera_locked_pass("hud_overlay", &swapchain, |frame, target| {
@@ -983,15 +1055,39 @@ impl RuntimeApp for Testbed {
         Ok(())
     }
 
-    fn key_pressed(&mut self, key: &str) -> EngineResult<()> {
-        let mut runtime_controller = self.runtime_controller.clone();
-        if let Some(scene) = ShowcaseScene::from_number_key(key) {
-            if self.selected_scene != scene {
-                self.cornell_denoiser.reset();
+    fn key_input(&mut self, input: &KeyInput) -> EngineResult<()> {
+        if input.repeat {
+            return Ok(());
+        }
+
+        let pressed = input.state == KeyInputState::Pressed;
+        match &input.key {
+            KeyToken::Key(key) => self.set_path_tracer_camera_key(key, pressed),
+            KeyToken::Modifier(KeyModifier::Ctrl) => {
+                self.path_tracer_camera_input.fast = pressed;
             }
-            self.selected_scene = scene;
-            tracing::info!("showcase scene: {}", scene.label());
-        } else if key == "b" {
+            KeyToken::Modifier(_) => {}
+        }
+        Ok(())
+    }
+
+    fn key_pressed(&mut self, key: &str) -> EngineResult<()> {
+        if let Some(slot) = PathTracerSubscene::shifted_digit_slot(key) {
+            self.select_path_tracer_subscene_slot(slot)?;
+            return Ok(());
+        }
+
+        if self.outdoor_camera_active() && matches!(key, "w" | "a" | "s" | "d" | "q" | "e") {
+            return Ok(());
+        }
+
+        if let Some(scene) = ShowcaseScene::from_number_key(key) {
+            self.select_scene(scene)?;
+            return Ok(());
+        }
+
+        let mut runtime_controller = self.runtime_controller.clone();
+        if key == "b" {
             if let Some(controller) = runtime_controller.as_mut() {
                 let next = !controller
                     .bool_setting(RuntimeSettingKey::BloomOnly)
@@ -1014,15 +1110,19 @@ impl RuntimeApp for Testbed {
                 tracing::info!("bloom: {}", if next { "on" } else { "off" });
             }
         } else if key == "V" || key == "v" {
-            if let Some(controller) = runtime_controller.as_mut() {
-                let next = !controller
-                    .bool_setting(RuntimeSettingKey::MotionDebugView)
-                    .unwrap_or(self.show_motion_vectors);
-                controller
-                    .transact()
-                    .set_engine_value(RuntimeSettingKey::MotionDebugView, next)
-                    .apply()?;
-                tracing::info!("motion vectors: {}", if next { "shown" } else { "hidden" });
+            if self.selected_scene == ShowcaseScene::TemporalAndPost {
+                if let Some(controller) = runtime_controller.as_mut() {
+                    let next = !controller
+                        .bool_setting(RuntimeSettingKey::MotionDebugView)
+                        .unwrap_or(self.show_motion_vectors);
+                    controller
+                        .transact()
+                        .set_engine_value(RuntimeSettingKey::MotionDebugView, next)
+                        .apply()?;
+                    tracing::info!("motion vectors: {}", if next { "shown" } else { "hidden" });
+                }
+            } else {
+                tracing::info!("motion-vector debug is a scene 5 temporal/post control");
             }
         } else if key == "T" || key == "t" {
             if let Some(controller) = runtime_controller.as_mut() {
@@ -1055,8 +1155,15 @@ impl RuntimeApp for Testbed {
                 self.tonemap_settings.get(self.selected_tonemap_dial),
             );
         } else if key == "A" {
-            self.cornell_denoiser.reset();
-            tracing::info!("Cornell RT accumulation cleared");
+            if self.selected_scene == ShowcaseScene::CornellPathTracing {
+                self.reset_path_tracer_accumulation();
+                tracing::info!(
+                    "path tracer accumulation cleared for {}",
+                    self.path_tracer_subscene.label()
+                );
+            } else {
+                tracing::info!("RT accumulation reset is a scene 8 path tracer control");
+            }
         } else if key == "a" {
             let mut next = self.aa.clone();
             next.next_mode();
@@ -1085,18 +1192,29 @@ impl RuntimeApp for Testbed {
                 tracing::info!("overlay: {}", if visible { "shown" } else { "hidden" });
             }
         } else if key == "I" || key == "i" {
-            self.show_graph_inspector = !self.show_graph_inspector;
-            tracing::info!(
-                "graph inspector: {}",
-                if self.show_graph_inspector {
-                    "shown"
-                } else {
-                    "hidden"
-                }
-            );
+            if self.selected_scene == ShowcaseScene::DebugGraph {
+                self.show_graph_inspector = !self.show_graph_inspector;
+                tracing::info!(
+                    "graph inspector: {}",
+                    if self.show_graph_inspector {
+                        "shown"
+                    } else {
+                        "hidden"
+                    }
+                );
+            } else {
+                tracing::info!("graph inspector is a scene 9 debug-graph control");
+            }
         } else if key == "E" || key == "e" {
-            self.pending_debug_image_export = true;
-            tracing::info!("debug image export queued");
+            if matches!(
+                self.selected_scene,
+                ShowcaseScene::DebugGraph | ShowcaseScene::CornellPathTracing
+            ) {
+                self.pending_debug_image_export = true;
+                tracing::info!("debug image export queued");
+            } else {
+                tracing::info!("debug image export is a debug-graph or Cornell control");
+            }
         } else if key == "X" || key == "x" {
             if let Some(controller) = runtime_controller.as_mut() {
                 let enabled = !controller
@@ -1114,31 +1232,57 @@ impl RuntimeApp for Testbed {
         } else if key == "G" || key == "g" {
             self.cycle_window_background_effect()?;
         } else if key == "N" || key == "n" {
-            if let Some(controller) = runtime_controller.as_mut() {
-                let selection = self
-                    .debug_view_picker
-                    .cycle_next(controller, &self.current_debug_image_names())?;
-                tracing::info!(
-                    "debug view: {}",
-                    selection.unwrap_or_else(|| "Off".to_string())
-                );
+            if matches!(
+                self.selected_scene,
+                ShowcaseScene::DebugGraph | ShowcaseScene::CornellPathTracing
+            ) {
+                if let Some(controller) = runtime_controller.as_mut() {
+                    let selection = self
+                        .debug_view_picker
+                        .cycle_next(controller, &self.current_debug_image_names())?;
+                    tracing::info!(
+                        "debug view: {}",
+                        selection.unwrap_or_else(|| "Off".to_string())
+                    );
+                }
+            } else {
+                tracing::info!("debug view cycling is a debug-graph or Cornell control");
             }
         } else if key == "M" || key == "m" {
-            if let Some(controller) = runtime_controller.as_mut() {
-                let selection = self
-                    .debug_view_picker
-                    .cycle_previous(controller, &self.current_debug_image_names())?;
-                tracing::info!(
-                    "debug view: {}",
-                    selection.unwrap_or_else(|| "Off".to_string())
-                );
+            if matches!(
+                self.selected_scene,
+                ShowcaseScene::DebugGraph | ShowcaseScene::CornellPathTracing
+            ) {
+                if let Some(controller) = runtime_controller.as_mut() {
+                    let selection = self
+                        .debug_view_picker
+                        .cycle_previous(controller, &self.current_debug_image_names())?;
+                    tracing::info!(
+                        "debug view: {}",
+                        selection.unwrap_or_else(|| "Off".to_string())
+                    );
+                }
+            } else {
+                tracing::info!("debug view cycling is a debug-graph or Cornell control");
             }
         } else if key == "F1" {
-            self.set_texture_resolution_setting(TextureResolutionTier::Low)?;
+            if self.selected_scene == ShowcaseScene::ProceduralTextures {
+                self.set_texture_resolution_setting(TextureResolutionTier::Low)?;
+            } else {
+                tracing::info!("texture resolution is a scene 6 procedural-textures control");
+            }
         } else if key == "F2" {
-            self.set_texture_resolution_setting(TextureResolutionTier::Medium)?;
+            if self.selected_scene == ShowcaseScene::ProceduralTextures {
+                self.set_texture_resolution_setting(TextureResolutionTier::Medium)?;
+            } else {
+                tracing::info!("texture resolution is a scene 6 procedural-textures control");
+            }
         } else if key == "F3" {
-            self.set_texture_resolution_setting(TextureResolutionTier::High)?;
+            if self.selected_scene == ShowcaseScene::ProceduralTextures {
+                self.set_texture_resolution_setting(TextureResolutionTier::High)?;
+            } else {
+                tracing::info!("texture resolution is a scene 6 procedural-textures control");
+            }
         } else if matches!(
             key,
             "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown" | "PageUp" | "PageDown"
@@ -1237,7 +1381,7 @@ impl RuntimeApp for Testbed {
     }
 
     fn resize(&mut self, _runtime: &mut AppRuntime, width: u32, height: u32) -> EngineResult<()> {
-        self.cornell_denoiser.reset();
+        self.reset_path_tracer_accumulation();
         self.engine
             .evict_cached_graph_images_with_prefix("cornell_rt_sample");
         self.engine
@@ -1252,15 +1396,106 @@ impl RuntimeApp for Testbed {
 }
 
 impl Testbed {
+    fn select_scene(&mut self, scene: ShowcaseScene) -> EngineResult<()> {
+        if self.selected_scene != scene {
+            self.reset_path_tracer_accumulation();
+            self.selected_scene = scene;
+            self.apply_scene_scoped_runtime_state()?;
+        }
+        tracing::info!("showcase scene: {}", scene.label());
+        Ok(())
+    }
+
+    fn select_path_tracer_subscene_slot(&mut self, slot: u32) -> EngineResult<()> {
+        let Some(subscene) = PathTracerSubscene::from_slot(slot) else {
+            tracing::info!("path tracer subscene {slot} is not assigned yet");
+            return Ok(());
+        };
+
+        let subscene_changed = self.path_tracer_subscene != subscene;
+        if self.selected_scene != ShowcaseScene::CornellPathTracing {
+            self.select_scene(ShowcaseScene::CornellPathTracing)?;
+        }
+        if subscene_changed {
+            self.path_tracer_subscene = subscene;
+            self.reset_path_tracer_accumulation();
+        }
+
+        tracing::info!(
+            "path tracer subscene {}: {}",
+            subscene.slot(),
+            subscene.label()
+        );
+        Ok(())
+    }
+
+    fn reset_path_tracer_accumulation(&mut self) {
+        self.cornell_denoiser.reset();
+        self.clear_path_tracer_after_first_trace = true;
+    }
+
+    fn advance_path_tracer_camera(&mut self, delta_seconds: f32) -> bool {
+        if !self.outdoor_camera_active() {
+            return false;
+        }
+        self.path_tracer_camera
+            .apply_input(self.path_tracer_camera_input, delta_seconds)
+    }
+
+    fn outdoor_camera_active(&self) -> bool {
+        self.selected_scene == ShowcaseScene::CornellPathTracing
+            && self.path_tracer_subscene == PathTracerSubscene::Outdoor
+    }
+
+    fn set_path_tracer_camera_key(&mut self, key: &str, pressed: bool) {
+        match key {
+            "KeyW" => self.path_tracer_camera_input.forward = pressed,
+            "KeyS" => self.path_tracer_camera_input.backward = pressed,
+            "KeyA" => self.path_tracer_camera_input.left = pressed,
+            "KeyD" => self.path_tracer_camera_input.right = pressed,
+            "KeyE" => self.path_tracer_camera_input.up = pressed,
+            "KeyQ" => self.path_tracer_camera_input.down = pressed,
+            "ArrowLeft" => self.path_tracer_camera_input.yaw_left = pressed,
+            "ArrowRight" => self.path_tracer_camera_input.yaw_right = pressed,
+            "ArrowUp" => self.path_tracer_camera_input.pitch_up = pressed,
+            "ArrowDown" => self.path_tracer_camera_input.pitch_down = pressed,
+            _ => {}
+        }
+    }
+
+    fn apply_scene_scoped_runtime_state(&mut self) -> EngineResult<()> {
+        if self.selected_scene != ShowcaseScene::DebugGraph {
+            self.show_graph_inspector = false;
+            self.pending_debug_image_export = false;
+            if let Some(controller) = self.runtime_controller.as_mut() {
+                self.debug_view_picker.set_selected_name(controller, None)?;
+            }
+        }
+
+        if self.selected_scene != ShowcaseScene::TemporalAndPost && self.show_motion_vectors {
+            self.show_motion_vectors = false;
+            if let Some(controller) = self.runtime_controller.as_mut() {
+                controller
+                    .transact()
+                    .set_engine_value(RuntimeSettingKey::MotionDebugView, false)
+                    .apply()?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn register_runtime_settings(&mut self, controller: &RuntimeController) -> EngineResult<()> {
         controller.register_app_setting(
             RuntimeSettingDescriptor::new(
                 RuntimeSettingId::app("testbed.texture_resolution"),
-                "Texture Resolution",
+                "Procedural Texture Resolution",
                 sturdy_engine::RuntimeApplyPath::Immediate,
                 self.texture_resolution.label(),
             )
-            .with_description("Swap the procedural mask texture resolution immediately.")
+            .with_description(
+                "Scene 6 / Procedural Textures: swap the procedural mask resolution immediately.",
+            )
             .with_options(vec![
                 RuntimeSettingOption {
                     value: "low".into(),

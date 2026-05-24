@@ -18,6 +18,10 @@ path = "src/bin/game_3d.rs"
 name = "game_2d"
 path = "src/bin/game_2d.rs"
 
+[[bin]]
+name = "light_transport_demo"
+path = "src/bin/light_transport_demo.rs"
+
 [dependencies]
 bytemuck = "1"
 clay-ui = { path = "../clay-ui" }

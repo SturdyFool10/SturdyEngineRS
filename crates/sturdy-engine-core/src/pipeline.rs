@@ -120,6 +120,10 @@ impl ColorTargetDesc {
             blend: BlendMode::Alpha,
         }
     }
+
+    pub const fn with_blend(format: Format, blend: BlendMode) -> Self {
+        Self { format, blend }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -127,6 +131,7 @@ pub enum BlendMode {
     #[default]
     Opaque,
     Alpha,
+    Negative,
 }
 
 /// Conservative rasterization mode for graphics pipelines.

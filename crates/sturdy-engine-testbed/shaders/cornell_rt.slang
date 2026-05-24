@@ -2,12 +2,37 @@
 RWTexture2D<float4> output_image;
 [[vk::binding(1, 0)]]
 RaytracingAccelerationStructure scene_tlas;
+[[vk::binding(3, 0)]]
+RWTexture2D<float4> guide_image;
+[[vk::binding(4, 0)]]
+RWTexture2D<float4> material_guide_image;
+
+struct TriangleInfo {
+  float3 normal;
+  uint material;
+  float3 albedo;
+  uint shape;
+  float3 emission;
+  uint _pad0;
+  float3 sphereCenter;
+  uint _pad1;
+};
+[[vk::binding(5, 0)]]
+StructuredBuffer<TriangleInfo> triangle_infos;
 
 struct RtConstants {
   uint frameIndex;
   uint width;
   uint height;
+  uint sceneId;
   float aspect;
+  float tanHalfFovY;
+  uint _pad0;
+  uint _pad1;
+  float4 cameraOrigin;
+  float4 cameraForward;
+  float4 cameraRight;
+  float4 cameraUp;
 };
 [[vk::binding(2, 0)]]
 ConstantBuffer<RtConstants> rt_constants;
@@ -17,6 +42,7 @@ struct RayPayload {
   float3 albedo;
   float3 normal;
   float hitT;
+  float3 geometricNormal;
   uint material;
   uint hit;
   uint seed;
@@ -36,13 +62,17 @@ struct SpectralPathResult {
 };
 
 static const float PI = 3.14159265359;
+static const uint SCENE_CORNELL = 0u;
+static const uint SCENE_OUTDOOR = 1u;
 static const uint MATERIAL_DIFFUSE = 0u;
 static const uint MATERIAL_LIGHT = 1u;
 static const uint MATERIAL_GLASS = 2u;
+static const uint SHAPE_FLAT = 0u;
+static const uint SHAPE_SPHERE = 1u;
 static const float3 GLASS_CENTER = float3(0.0, 0.84, 0.34);
 static const float GLASS_RADIUS = 0.32;
-static const uint MAX_PATH_BOUNCES = 10u;
-static const uint PHOTON_MAP_LIGHT_SUBPATH_SAMPLES = 8u;
+static const uint MAX_PATH_BOUNCES = 16u;
+static const uint PHOTON_MAP_LIGHT_SUBPATH_SAMPLES = 16u;
 static const float PHOTON_MAP_GATHER_RADIUS = 0.10;
 static const float DIFFUSE_GLASS_GUIDE_PROBABILITY = 0.35;
 static const float SPEED_OF_LIGHT_NM_THZ = 299792.458;
@@ -54,10 +84,13 @@ static const float VISIBLE_FREQUENCY_MAX_THZ =
     SPEED_OF_LIGHT_NM_THZ / VISIBLE_WAVELENGTH_MIN_NM;
 static const float RED_GREEN_BOUNDARY_THZ = SPEED_OF_LIGHT_NM_THZ / 585.0;
 static const float GREEN_BLUE_BOUNDARY_THZ = SPEED_OF_LIGHT_NM_THZ / 505.0;
-// Frequencies are sampled from three equal-probability RGB bands. Multiplying
-// each single-band contribution by 3 keeps RGB scene colors energy-preserving
-// under progressive random-frequency accumulation.
-static const float SPECTRAL_RGB_RECONSTRUCTION_WEIGHT = 3.0;
+// Frequencies are sampled from three equal-probability RGB bands. The binary
+// wavelengthToRgbBasis drives sampleRgbSpectrum for exact per-band energy; the
+// final reconstruction step uses the full CIE 1931 XYZ response (Wyman, Sloan,
+// Shirley — JCGT 2013) converted to linear sRGB for physically correct hues.
+// Per-channel weights normalise a spectrally-flat emitter to (1,1,1): derived
+// by numerically integrating CIE sRGB over the three frequency-uniform bands.
+static const float3 CIE_RECONSTRUCTION_WEIGHTS = float3(2.110, 2.234, 3.602);
 // Clear high-dispersion N-SF11 dense flint optical glass. The spectral solver
 // evaluates a smooth IOR curve-map at the ray frequency instead of tracing
 // fixed RGB wavelengths, which makes chromatic caustic separation visible in
@@ -85,6 +118,44 @@ uint wangHash(uint s) {
 float rand(inout uint seed) {
   seed = wangHash(seed);
   return float(seed & 0x00ffffffu) / 16777216.0;
+}
+
+float3 outdoorSunDirection() { return normalize(float3(0.34, 0.72, 0.61)); }
+
+float3 proceduralSkyRadiance(float3 direction) {
+  float3 rd = normalize(direction);
+  float up = saturate(rd.y * 0.5 + 0.5);
+  float horizon = exp(-max(rd.y, 0.0) * 5.5);
+  float belowHorizon = saturate(-rd.y * 4.0);
+
+  float3 zenithColor = float3(0.10, 0.28, 0.82) * 1.6;
+  float3 midColor = float3(0.38, 0.58, 0.95) * 1.15;
+  float3 horizonColor = float3(1.00, 0.72, 0.42) * 0.95;
+  float3 groundBounce = float3(0.34, 0.42, 0.27) * belowHorizon;
+
+  float3 sky = lerp(horizonColor, midColor, smoothstep(0.02, 0.55, up));
+  sky = lerp(sky, zenithColor, smoothstep(0.48, 1.0, up));
+  sky += horizonColor * horizon * 0.55;
+
+  float3 sunDir = outdoorSunDirection();
+  float sunCos = saturate(dot(rd, sunDir));
+  float antiSun = saturate(
+      dot(rd, normalize(float3(-sunDir.x, sunDir.y * 0.35, -sunDir.z))));
+  float rayleigh =
+      0.38 * (1.0 + sunCos * sunCos) * pow(saturate(rd.y + 0.12), 0.35);
+  float mie = pow(sunCos, 32.0) * 2.5 + pow(sunCos, 650.0) * 55.0;
+  float warmBand = pow(antiSun, 6.0) * horizon * 0.35;
+
+  float azimuth = atan2(rd.z, rd.x);
+  float stratosphere = (sin(azimuth * 5.0 + rd.y * 11.0) * 0.5 + 0.5) *
+                       (sin(azimuth * 2.0 - rd.y * 7.0) * 0.5 + 0.5);
+  sky *= 0.94 + 0.08 * stratosphere * smoothstep(0.05, 0.95, up);
+
+  sky += float3(0.32, 0.48, 0.85) * rayleigh;
+  sky += float3(1.0, 0.78, 0.48) * warmBand;
+  sky += float3(1.0, 0.86, 0.62) * mie;
+  sky = lerp(sky, groundBounce, belowHorizon);
+  return max(sky, float3(0.0));
 }
 
 float fresnelDielectric(float cosThetaI, float etaI, float etaT) {
@@ -177,8 +248,10 @@ bool refractDielectricBoundary(float3 incidentDir, float3 orientedNormal,
   float cosI = saturate(dot(-incidentDir, orientedNormal));
   float sin2T = eta * eta * max(0.0, 1.0 - cosI * cosI);
   fresnel = fresnelDielectric(cosI, etaI, etaT);
-  if (sin2T >= 1.0)
+  if (sin2T >= 1.0) {
+    refractedDir = float3(0.0);
     return false;
+  }
 
   refractedDir = normalize(refract(incidentDir, orientedNormal, eta));
   return true;
@@ -243,6 +316,12 @@ float glassGuidePdfForDirection(float3 p, float3 n, float3 wi) {
 }
 
 float3 sampleGuidedDiffuse(float3 p, float3 n, inout uint seed, out float pdf) {
+  if (rt_constants.sceneId != SCENE_CORNELL) {
+    float3 wi = cosineHemisphere(float2(rand(seed), rand(seed)), n);
+    pdf = saturate(dot(n, wi)) / PI;
+    return wi;
+  }
+
   float3 axis;
   float cosThetaMax;
   float guidePdf;
@@ -281,63 +360,10 @@ bool intersectSphere(float3 ro, float3 rd, float3 center, float radius,
   return true;
 }
 
-float3 primitiveNormal(uint primitive) {
-  uint quad = primitive / 2u;
-  if (quad == 0u)
-    return float3(0.0, 1.0, 0.0); // floor
-  if (quad == 1u)
-    return float3(0.0, -1.0, 0.0); // ceiling
-  if (quad == 2u)
-    return float3(0.0, 0.0, -1.0); // back
-  if (quad == 3u)
-    return float3(1.0, 0.0, 0.0); // red wall
-  if (quad == 4u)
-    return float3(-1.0, 0.0, 0.0); // green wall
-  if (quad == 5u)
-    return float3(0.0, -1.0, 0.0); // light
-
-  uint face = (quad - 6u) % 6u;
-  float s = 0.70710678118;
-  if (face == 0u)
-    return float3(-s, 0.0, s);
-  if (face == 1u)
-    return float3(s, 0.0, -s);
-  if (face == 2u)
-    return float3(-s, 0.0, -s);
-  if (face == 3u)
-    return float3(s, 0.0, s);
-  if (face == 4u)
-    return float3(0.0, -1.0, 0.0);
-  return float3(0.0, 1.0, 0.0);
-}
-
-float3 primitiveAlbedo(uint primitive) {
-  uint quad = primitive / 2u;
-  if (quad == 3u)
-    return float3(0.86, 0.12, 0.08);
-  if (quad == 4u)
-    return float3(0.10, 0.48, 0.16);
-  if (quad >= 6u && quad < 12u)
-    return float3(0.76, 0.72, 0.64);
-  if (quad >= 12u)
-    return float3(0.72, 0.72, 0.76);
-  return float3(0.78, 0.76, 0.70);
-}
-
-uint primitiveMaterial(uint primitive) {
-  uint quad = primitive / 2u;
-  if (quad == 5u)
-    return MATERIAL_LIGHT;
-  return MATERIAL_DIFFUSE;
-}
-
-float3 primitiveEmission(uint primitive) {
-  return primitiveMaterial(primitive) == MATERIAL_LIGHT
-             ? float3(18.0, 14.0, 9.0)
-             : float3(0.0, 0.0, 0.0);
-}
-
 float3 wavelengthToRgbBasis(float wavelengthNm) {
+  // Binary three-band basis matching the equal-probability RGB sampling bands.
+  // Used by sampleRgbSpectrum for every surface/emission evaluation along the
+  // path; must stay a strict partition of unity so scene colors are energy-correct.
   if (wavelengthNm < 505.0)
     return float3(0.0, 0.0, 1.0);
   if (wavelengthNm < 585.0)
@@ -345,16 +371,46 @@ float3 wavelengthToRgbBasis(float wavelengthNm) {
   return float3(1.0, 0.0, 0.0);
 }
 
+float3 wavelengthToLinearSrgb(float wavelengthNm) {
+  // CIE 1931 2-degree observer — Wyman, Sloan, Shirley (JCGT 2013) multi-lobe
+  // Gaussian fit. Converted to linear sRGB via IEC 61966-2-1 D65 matrix.
+  // Used ONLY for the final per-sample colour reconstruction, never for path
+  // throughput, so it does not affect scene colour energy balance.
+  float wl = wavelengthNm;
+  float dX1 = (wl - 442.0) * (wl < 442.0 ? 0.0624 : 0.0374);
+  float dX2 = (wl - 599.8) * (wl < 599.8 ? 0.0264 : 0.0323);
+  float dX3 = (wl - 501.1) * (wl < 501.1 ? 0.0490 : 0.0382);
+  float X = 0.362 * exp(-0.5*dX1*dX1) + 1.056 * exp(-0.5*dX2*dX2)
+          - 0.065 * exp(-0.5*dX3*dX3);
+
+  float dY1 = (wl - 568.8) * (wl < 568.8 ? 0.0213 : 0.0247);
+  float dY2 = (wl - 530.9) * (wl < 530.9 ? 0.0613 : 0.0322);
+  float Y = 0.821 * exp(-0.5*dY1*dY1) + 0.286 * exp(-0.5*dY2*dY2);
+
+  float dZ1 = (wl - 437.0) * (wl < 437.0 ? 0.0845 : 0.0278);
+  float dZ2 = (wl - 459.0) * (wl < 459.0 ? 0.0385 : 0.0725);
+  float Z = 1.217 * exp(-0.5*dZ1*dZ1) + 0.681 * exp(-0.5*dZ2*dZ2);
+
+  // Negative sRGB values are wavelengths outside the sRGB gamut (imaginary
+  // primaries). Clamping rather than wrapping keeps violet/cyan from going black.
+  return max(float3(0.0),
+             float3( 3.2406*X - 1.5372*Y - 0.4986*Z,
+                    -0.9689*X + 1.8758*Y + 0.0415*Z,
+                     0.0557*X - 0.2040*Y + 1.0570*Z));
+}
+
+float3 uniformUpperHemisphere(float2 xi) {
+  // Uniform sampling of the hemisphere with y > 0. Used for glass entry points
+  // because the ceiling light is always above the sphere — lower hemisphere
+  // samples are always rejected, so sampling the full sphere wastes half the budget.
+  float z = xi.x;
+  float r = sqrt(max(0.0, 1.0 - z * z));
+  float phi = 2.0 * PI * xi.y;
+  return float3(r * cos(phi), z, r * sin(phi));
+}
+
 float sampleRgbSpectrum(float3 rgb, float wavelengthNm) {
   return dot(rgb, wavelengthToRgbBasis(wavelengthNm));
-}
-
-float primitiveAlbedoAtWavelength(uint primitive, float wavelengthNm) {
-  return sampleRgbSpectrum(primitiveAlbedo(primitive), wavelengthNm);
-}
-
-float primitiveEmissionAtWavelength(uint primitive, float wavelengthNm) {
-  return sampleRgbSpectrum(primitiveEmission(primitive), wavelengthNm);
 }
 
 void traceTriangles(float3 ro, float3 rd, inout RayPayload payload) {
@@ -372,16 +428,19 @@ void traceTriangles(float3 ro, float3 rd, inout RayPayload payload) {
 void traceScene(float3 ro, float3 rd, inout RayPayload payload) {
   traceTriangles(ro, rd, payload);
 
-  float sphereT;
-  float3 sphereN;
-  if (intersectSphere(ro, rd, GLASS_CENTER, GLASS_RADIUS, sphereT, sphereN) &&
-      (payload.hit == 0u || sphereT < payload.hitT)) {
-    payload.hit = 1u;
-    payload.hitT = sphereT;
-    payload.normal = sphereN;
-    payload.albedo = float3(0.998, 0.998, 0.998);
-    payload.material = MATERIAL_GLASS;
-    payload.radiance = float3(0.0);
+  if (rt_constants.sceneId == SCENE_CORNELL) {
+    float sphereT;
+    float3 sphereN;
+    if (intersectSphere(ro, rd, GLASS_CENTER, GLASS_RADIUS, sphereT, sphereN) &&
+        (payload.hit == 0u || sphereT < payload.hitT)) {
+      payload.hit = 1u;
+      payload.hitT = sphereT;
+      payload.normal = sphereN;
+      payload.geometricNormal = sphereN;
+      payload.albedo = float3(0.998, 0.998, 0.998);
+      payload.material = MATERIAL_GLASS;
+      payload.radiance = float3(0.0);
+    }
   }
 }
 
@@ -450,18 +509,21 @@ float sampleSpectralPhotonMapCaustics(float3 p, float3 n,
   float sum = 0.0;
   float wavelengthNm = frequencyToWavelengthNm(frequencyThz);
   float lightArea = 0.64 * 0.58;
-  float sphereArea = 4.0 * PI * GLASS_RADIUS * GLASS_RADIUS;
+  // Upper hemisphere only: the ceiling light never illuminates the glass sphere
+  // from below, so we restrict sphere-normal samples to y > 0 and use the
+  // matching half-sphere area to keep the estimator unbiased.
+  float sphereArea = 2.0 * PI * GLASS_RADIUS * GLASS_RADIUS;
   float kernelRadius2 = PHOTON_MAP_GATHER_RADIUS * PHOTON_MAP_GATHER_RADIUS;
 
-  // This is a stochastic per-query photon map: light subpaths become virtual
-  // spectral photons after refraction through the glass, then the camera path
-  // gathers nearby photons with a density kernel for bidirectional caustics.
+  // Stochastic per-query photon map: light subpaths become virtual spectral
+  // photons after refraction through the glass, then the camera path gathers
+  // nearby photons with a cone density kernel for bidirectional caustics.
   [loop]
   for (uint sample = 0u; sample < PHOTON_MAP_LIGHT_SUBPATH_SAMPLES; ++sample) {
     float2 lightXi = float2(rand(seed), rand(seed));
     float3 lightPos = float3(lerp(-0.32, 0.32, lightXi.x), 1.998,
                              lerp(0.78, 1.36, lightXi.y));
-    float3 sphereN = uniformSphere(float2(rand(seed), rand(seed)));
+    float3 sphereN = uniformUpperHemisphere(float2(rand(seed), rand(seed)));
 
     SpectralPhoton photon;
     if (!traceSpectralPhotonThroughGlass(lightPos, sphereN, frequencyThz,
@@ -475,7 +537,10 @@ float sampleSpectralPhotonMapCaustics(float3 p, float3 n,
     if (d2 >= kernelRadius2)
       continue;
 
-    float kernel = exp(-d2 / max(kernelRadius2, 1e-5)) / (PI * kernelRadius2);
+    // Cone kernel K(d) = 2/πR² * max(0, 1 - d²/R²). Compared to the previous
+    // Gaussian this is properly area-normalized and gives a sharper peak at the
+    // caustic focus while rolling off smoothly to zero at radius R.
+    float kernel = 2.0 * max(0.0, 1.0 - d2 / kernelRadius2) / (PI * kernelRadius2);
     float emission = sampleRgbSpectrum(float3(18.0, 14.0, 9.0), wavelengthNm);
     float cosSurface = saturate(dot(n, photon.incidentDirection));
     sum += emission * photon.throughput * photon.geometry * kernel *
@@ -517,21 +582,69 @@ float sampleCornellAreaLight(float3 p, float3 n, float wavelengthNm,
   return sum * 0.25;
 }
 
+void makeLookAtCameraRay(float2 uv, float3 origin, float3 target,
+                         float tanHalfFovY, out float3 ro, out float3 rd) {
+  float3 forward = normalize(target - origin);
+  float3 right = normalize(cross(forward, float3(0.0, 1.0, 0.0)));
+  float3 up = normalize(cross(right, forward));
+  ro = origin;
+  rd = normalize(forward + right * (uv.x * rt_constants.aspect * tanHalfFovY) +
+                 up * (uv.y * tanHalfFovY));
+}
+
+void makeCameraRay(uint2 pixel, uint2 extent, float2 jitterPixels,
+                   out float3 ro, out float3 rd) {
+  float2 uv = ((float2(pixel) + 0.5 + jitterPixels) /
+               float2(max(extent, uint2(1, 1)))) *
+                  2.0 -
+              1.0;
+  uv.y = -uv.y;
+
+  if (rt_constants.sceneId == SCENE_OUTDOOR) {
+    ro = rt_constants.cameraOrigin.xyz;
+    rd = normalize(rt_constants.cameraForward.xyz +
+                   rt_constants.cameraRight.xyz *
+                       (uv.x * rt_constants.aspect * rt_constants.tanHalfFovY) +
+                   rt_constants.cameraUp.xyz *
+                       (uv.y * rt_constants.tanHalfFovY));
+    return;
+  }
+
+  ro = float3(0.0, 1.0, -3.15);
+  float tanHalfFovY = 0.42;
+  rd = normalize(float3(uv.x * rt_constants.aspect * tanHalfFovY,
+                        uv.y * tanHalfFovY, 1.0));
+}
+
+void tracePrimaryGuides(uint2 pixel, uint2 extent, out float4 geometricGuide,
+                        out float4 materialGuide) {
+  float3 ro;
+  float3 rd;
+  makeCameraRay(pixel, extent, float2(0.0), ro, rd);
+
+  RayPayload payload;
+  payload.seed = 0u;
+  traceScene(ro, rd, payload);
+  if (payload.hit == 0u) {
+    geometricGuide = float4(0.5, 0.5, 0.5, 100.0);
+    materialGuide = float4(0.0, 0.0, 0.0, 255.0);
+    return;
+  }
+
+  float3 n = normalize(payload.normal);
+  if (dot(n, rd) > 0.0)
+    n = -n;
+  geometricGuide = float4(n * 0.5 + 0.5, payload.hitT);
+  materialGuide = float4(saturate(payload.albedo), float(payload.material));
+}
+
 SpectralPathResult solveBidirectionalSpectralPath(uint2 pixel, uint2 extent,
                                                   float frequencyThz,
                                                   float wavelengthNm,
                                                   inout uint seed) {
-  float2 jitter = float2(rand(seed), rand(seed)) - 0.5;
-  float2 uv =
-      ((float2(pixel) + 0.5 + jitter) / float2(max(extent, uint2(1, 1)))) *
-          2.0 -
-      1.0;
-  uv.y = -uv.y;
-
-  float3 ro = float3(0.0, 1.0, -3.15);
-  float tanHalfFovY = 0.42;
-  float3 rd = normalize(float3(uv.x * rt_constants.aspect * tanHalfFovY,
-                               uv.y * tanHalfFovY, 1.0));
+  float3 ro;
+  float3 rd;
+  makeCameraRay(pixel, extent, float2(rand(seed), rand(seed)) - 0.5, ro, rd);
   SpectralPathResult result;
   result.throughput = 1.0;
   result.radiance = 0.0;
@@ -542,8 +655,11 @@ SpectralPathResult solveBidirectionalSpectralPath(uint2 pixel, uint2 extent,
     payload.seed = seed;
     traceScene(ro, rd, payload);
     seed = payload.seed;
-    if (payload.hit == 0u)
+    if (payload.hit == 0u) {
+      result.radiance +=
+          result.throughput * sampleRgbSpectrum(payload.radiance, wavelengthNm);
       break;
+    }
 
     float3 n = normalize(payload.normal);
     if (dot(n, rd) > 0.0)
@@ -557,8 +673,14 @@ SpectralPathResult solveBidirectionalSpectralPath(uint2 pixel, uint2 extent,
     }
 
     if (payload.material == MATERIAL_GLASS) {
-      bool entering = dot(rd, payload.normal) < 0.0;
-      float3 orientedN = entering ? payload.normal : -payload.normal;
+      float3 shadingN = normalize(payload.normal);
+      float3 geometricN = normalize(payload.geometricNormal);
+      bool entering = dot(rd, geometricN) < 0.0;
+      float3 orientedGeometricN = entering ? geometricN : -geometricN;
+      float3 orientedN = entering ? shadingN : -shadingN;
+      if (dot(orientedN, orientedGeometricN) < 0.0)
+        orientedN = -orientedN;
+
       float glassIor = glassIorForFrequency(frequencyThz);
       float etaI = entering ? 1.0 : glassIor;
       float etaT = entering ? glassIor : 1.0;
@@ -566,6 +688,10 @@ SpectralPathResult solveBidirectionalSpectralPath(uint2 pixel, uint2 extent,
       float fresnel;
       bool canRefract = refractDielectricBoundary(rd, orientedN, etaI, etaT,
                                                   refractedDir, fresnel);
+      if (canRefract && dot(refractedDir, orientedGeometricN) >= -1e-4) {
+        canRefract = refractDielectricBoundary(rd, orientedGeometricN, etaI,
+                                               etaT, refractedDir, fresnel);
+      }
 
       if (!entering)
         result.throughput *=
@@ -573,23 +699,29 @@ SpectralPathResult solveBidirectionalSpectralPath(uint2 pixel, uint2 extent,
 
       bool reflectEvent = !canRefract || rand(seed) < fresnel;
       if (reflectEvent) {
-        rd = normalize(reflect(rd, orientedN));
-        ro = p + orientedN * 0.004;
+        float3 reflectedDir = normalize(reflect(rd, orientedN));
+        if (dot(reflectedDir, orientedGeometricN) <= 1e-4)
+          reflectedDir = normalize(reflect(rd, orientedGeometricN));
+        rd = reflectedDir;
+        ro = p + orientedGeometricN * 0.006;
       } else {
         rd = refractedDir;
-        ro = p - orientedN * 0.004;
+        ro = p - orientedGeometricN * 0.006;
       }
       result.throughput *= sampleRgbSpectrum(payload.albedo, wavelengthNm);
     } else {
       float surfaceReflectance =
           sampleRgbSpectrum(payload.albedo, wavelengthNm);
-      result.radiance += result.throughput * surfaceReflectance *
-                         sampleCornellAreaLight(p, n, wavelengthNm, seed) / PI;
-      if (bounce <= 1u) {
-        result.radiance += result.throughput *
-                           sampleSpectralPhotonMapCaustics(
-                               p, n, surfaceReflectance, frequencyThz, seed) /
+      if (rt_constants.sceneId == SCENE_CORNELL) {
+        result.radiance += result.throughput * surfaceReflectance *
+                           sampleCornellAreaLight(p, n, wavelengthNm, seed) /
                            PI;
+        if (bounce <= 1u) {
+          result.radiance += result.throughput *
+                             sampleSpectralPhotonMapCaustics(
+                                 p, n, surfaceReflectance, frequencyThz, seed) /
+                             PI;
+        }
       }
 
       float diffusePdf;
@@ -622,8 +754,8 @@ float3 traceBidirectionalSpectralSample(uint2 pixel, uint2 extent,
   float wavelengthNm = frequencyToWavelengthNm(frequencyThz);
   SpectralPathResult result = solveBidirectionalSpectralPath(
       pixel, extent, frequencyThz, wavelengthNm, seed);
-  return result.radiance * wavelengthToRgbBasis(wavelengthNm) *
-         SPECTRAL_RGB_RECONSTRUCTION_WEIGHT;
+  return result.radiance * wavelengthToLinearSrgb(wavelengthNm) *
+         CIE_RECONSTRUCTION_WEIGHTS;
 }
 
 [shader("raygeneration")]
@@ -644,24 +776,43 @@ void raygen() {
   radiance /= float(SAMPLES_PER_PIXEL);
 
   output_image[pixel] = float4(radiance, 1.0);
+
+  float4 geometricGuide;
+  float4 materialGuide;
+  tracePrimaryGuides(pixel, extent, geometricGuide, materialGuide);
+  guide_image[pixel] = geometricGuide;
+  material_guide_image[pixel] = materialGuide;
 }
 
 [shader("miss")]
 void miss(inout RayPayload payload) {
   payload.hit = 0u;
   payload.hitT = 100.0;
-  payload.radiance = float3(0.0);
+  payload.radiance = rt_constants.sceneId == SCENE_OUTDOOR
+                         ? proceduralSkyRadiance(WorldRayDirection())
+                         : float3(0.0);
 }
 
 [shader("closesthit")]
 void closest_hit(inout RayPayload payload,
                  in BuiltInTriangleIntersectionAttributes attribs) {
   uint primitive = PrimitiveIndex();
+  TriangleInfo info = triangle_infos[primitive];
+  float3 geometricNormal = normalize(info.normal);
+  float3 normal = geometricNormal;
+  if (info.shape == SHAPE_SPHERE) {
+    float3 p = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+    normal = normalize(p - info.sphereCenter);
+    if (dot(normal, geometricNormal) < 0.0)
+      normal = -normal;
+  }
+
   payload.hit = 1u;
   payload.hitT = RayTCurrent();
-  payload.normal = primitiveNormal(primitive);
-  payload.albedo = primitiveAlbedo(primitive);
-  payload.material = primitiveMaterial(primitive);
-  payload.radiance = primitiveEmission(primitive);
+  payload.normal = normal;
+  payload.geometricNormal = geometricNormal;
+  payload.albedo = info.albedo;
+  payload.material = info.material;
+  payload.radiance = info.emission;
   payload.seed = wangHash(payload.seed ^ primitive);
 }

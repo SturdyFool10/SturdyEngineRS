@@ -2211,14 +2211,37 @@ impl CommandContext {
                             usage.image,
                             usage.subresource,
                         )?;
+                        let explicit_clear = pass
+                            .clear_colors
+                            .iter()
+                            .find(|(handle, _)| *handle == usage.image)
+                            .map(|(_, rgba)| rgba.map(f32::from_bits));
+                        let target_is_read = pass.reads.iter().any(|read| {
+                            read.image == usage.image && read.state == RgState::RenderTarget
+                        });
+                        let desc_clear = match resources.image_desc(usage.image)?.clear_value {
+                            Some(crate::ImageClearValue::ColorFloatBits(rgba)) => {
+                                Some(rgba.map(f32::from_bits))
+                            }
+                            _ => None,
+                        };
+                        let load_op = if explicit_clear.is_some() {
+                            vk::AttachmentLoadOp::CLEAR
+                        } else if target_is_read {
+                            vk::AttachmentLoadOp::LOAD
+                        } else {
+                            vk::AttachmentLoadOp::CLEAR
+                        };
                         Ok(vk::RenderingAttachmentInfo::default()
                             .image_view(image_view)
                             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                            .load_op(vk::AttachmentLoadOp::CLEAR)
+                            .load_op(load_op)
                             .store_op(vk::AttachmentStoreOp::STORE)
                             .clear_value(vk::ClearValue {
                                 color: vk::ClearColorValue {
-                                    float32: [0.05, 0.07, 0.10, 1.0],
+                                    float32: explicit_clear
+                                        .or(desc_clear)
+                                        .unwrap_or([0.05, 0.07, 0.10, 1.0]),
                                 },
                             }))
                     })

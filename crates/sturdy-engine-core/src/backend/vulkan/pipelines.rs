@@ -576,6 +576,14 @@ impl PipelineRegistry {
                         .src_alpha_blend_factor(vk::BlendFactor::ONE)
                         .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
                         .alpha_blend_op(vk::BlendOp::ADD),
+                    crate::BlendMode::Negative => attachment
+                        .blend_enable(true)
+                        .src_color_blend_factor(vk::BlendFactor::ONE_MINUS_DST_COLOR)
+                        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_COLOR)
+                        .color_blend_op(vk::BlendOp::ADD)
+                        .src_alpha_blend_factor(vk::BlendFactor::ZERO)
+                        .dst_alpha_blend_factor(vk::BlendFactor::ONE)
+                        .alpha_blend_op(vk::BlendOp::ADD),
                 }
             })
             .collect::<Vec<_>>();
@@ -1003,7 +1011,9 @@ fn create_render_pass(device: &Device, desc: &GraphicsPipelineDesc) -> Result<vk
                 .samples(vk_samples(desc.samples)?)
                 .load_op(match target.blend {
                     crate::BlendMode::Opaque => vk::AttachmentLoadOp::CLEAR,
-                    crate::BlendMode::Alpha => vk::AttachmentLoadOp::LOAD,
+                    crate::BlendMode::Alpha | crate::BlendMode::Negative => {
+                        vk::AttachmentLoadOp::LOAD
+                    }
                 })
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
@@ -1092,7 +1102,7 @@ fn shader_object_graphics_state(
         .iter()
         .map(|target| match target.blend {
             crate::BlendMode::Opaque => vk::FALSE,
-            crate::BlendMode::Alpha => vk::TRUE,
+            crate::BlendMode::Alpha | crate::BlendMode::Negative => vk::TRUE,
         })
         .collect::<Vec<_>>();
     let color_blend_equations = desc
@@ -1112,6 +1122,13 @@ fn shader_object_graphics_state(
                 .color_blend_op(vk::BlendOp::ADD)
                 .src_alpha_blend_factor(vk::BlendFactor::ONE)
                 .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .alpha_blend_op(vk::BlendOp::ADD),
+            crate::BlendMode::Negative => vk::ColorBlendEquationEXT::default()
+                .src_color_blend_factor(vk::BlendFactor::ONE_MINUS_DST_COLOR)
+                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_COLOR)
+                .color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::ZERO)
+                .dst_alpha_blend_factor(vk::BlendFactor::ONE)
                 .alpha_blend_op(vk::BlendOp::ADD),
         })
         .collect::<Vec<_>>();

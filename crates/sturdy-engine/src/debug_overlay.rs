@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::{
-    DebugDraw2d, DebugDrawStyle, Engine, GraphImage, Mesh, MeshProgram, MeshProgramDesc,
+    BlendMode, DebugDraw2d, DebugDrawStyle, Engine, GraphImage, Mesh, MeshProgram, MeshProgramDesc,
     MeshVertexKind, QuadBatch, RenderFrame, Result, ShaderDesc, ShaderSource, ShaderStage,
     StageMask, TextDrawDesc, TextOverlay, TextPlacement, TextTypography,
 };
@@ -363,12 +363,12 @@ impl DebugOverlayRenderer {
     pub fn new(engine: &Engine) -> Result<Self> {
         Ok(Self {
             text_overlay: TextOverlay::new(engine)?,
-            shape_program: MeshProgram::new(
+            shape_program: MeshProgram::new_with_blend_mode(
                 engine,
                 MeshProgramDesc {
                     fragment: ShaderDesc {
                         source: ShaderSource::File(shader_path(
-                            "debug_overlay_solid_color_fragment.slang",
+                            "debug_overlay_negative_fragment.slang",
                         )),
                         entry_point: "main".to_string(),
                         stage: ShaderStage::Fragment,
@@ -381,13 +381,14 @@ impl DebugOverlayRenderer {
                     alpha_blend: true,
                     uses_depth: false,
                 },
+                BlendMode::Negative,
             )?,
-            ui_shape_program: MeshProgram::new(
+            ui_shape_program: MeshProgram::new_with_blend_mode(
                 engine,
                 MeshProgramDesc {
                     fragment: ShaderDesc {
                         source: ShaderSource::File(shader_path(
-                            "debug_overlay_ui_shape_fragment.slang",
+                            "debug_overlay_negative_ui_shape_fragment.slang",
                         )),
                         entry_point: "main".to_string(),
                         stage: ShaderStage::Fragment,
@@ -400,6 +401,7 @@ impl DebugOverlayRenderer {
                     alpha_blend: true,
                     uses_depth: false,
                 },
+                BlendMode::Negative,
             )?,
         })
     }
@@ -437,7 +439,7 @@ impl DebugOverlayRenderer {
         }
         if !overlay.text.is_empty() {
             self.text_overlay
-                .draw(frame, target, width, height, overlay.text_descs())?;
+                .draw_negative(frame, target, width, height, overlay.text_descs())?;
         }
         Ok(())
     }

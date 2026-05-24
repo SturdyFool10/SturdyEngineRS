@@ -1,16 +1,23 @@
 use std::path::PathBuf;
 
 use crate::{
-    Engine, Extent3d, Format, GraphImage, Image, ImageDesc, ImageDimension, ImageUsage, Mesh,
-    MeshProgram, MeshProgramDesc, MeshVertexKind, QuadBatch, RenderFrame, Result, ShaderDesc,
-    ShaderSource, ShaderStage, TextAtlasContentMode, TextDrawDesc, TextEngine, TextPlacement,
-    TextTypography, TextUiRenderer, TiledTextAtlasPage,
+    BlendMode, Engine, Extent3d, Format, GraphImage, Image, ImageDesc, ImageDimension, ImageUsage,
+    Mesh, MeshProgram, MeshProgramDesc, MeshVertexKind, QuadBatch, RenderFrame, Result, ShaderDesc,
+    ShaderProgram, ShaderSource, ShaderStage, TextAtlasContentMode, TextDrawDesc, TextEngine,
+    TextPlacement, TextTypography, TextUiRenderer, TiledTextAtlasPage,
 };
 
 fn shader_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("shaders")
         .join(name)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextOverlayDrawMode {
+    Color,
+    Negative,
+    Mask,
 }
 
 /// First-party text/debug overlay built on top of `textui`.
@@ -20,6 +27,13 @@ pub struct TextOverlay {
     alpha_program: MeshProgram,
     sdf_program: MeshProgram,
     msdf_program: MeshProgram,
+    negative_alpha_program: MeshProgram,
+    negative_sdf_program: MeshProgram,
+    negative_msdf_program: MeshProgram,
+    mask_alpha_program: MeshProgram,
+    mask_sdf_program: MeshProgram,
+    mask_msdf_program: MeshProgram,
+    mask_clear_program: ShaderProgram,
     atlas_images: Vec<Image>,
     /// Tracks the last-uploaded content hash per atlas image slot to avoid
     /// re-uploading unchanged pages every frame.
@@ -36,6 +50,28 @@ impl TextOverlay {
             alpha_program: text_program(engine, "text_overlay_alpha_fragment.slang")?,
             sdf_program: text_program(engine, "text_overlay_sdf_fragment.slang")?,
             msdf_program: text_program(engine, "text_overlay_msdf_fragment.slang")?,
+            negative_alpha_program: text_program_with_blend(
+                engine,
+                "text_overlay_negative_alpha_fragment.slang",
+                BlendMode::Negative,
+            )?,
+            negative_sdf_program: text_program_with_blend(
+                engine,
+                "text_overlay_negative_sdf_fragment.slang",
+                BlendMode::Negative,
+            )?,
+            negative_msdf_program: text_program_with_blend(
+                engine,
+                "text_overlay_negative_msdf_fragment.slang",
+                BlendMode::Negative,
+            )?,
+            mask_alpha_program: text_program(engine, "text_overlay_mask_alpha_fragment.slang")?,
+            mask_sdf_program: text_program(engine, "text_overlay_mask_sdf_fragment.slang")?,
+            mask_msdf_program: text_program(engine, "text_overlay_mask_msdf_fragment.slang")?,
+            mask_clear_program: ShaderProgram::load_fragment(
+                engine,
+                shader_path("text_mask_clear_fragment.slang"),
+            )?,
             atlas_images: Vec::new(),
             atlas_image_hashes: Vec::new(),
             meshes: Vec::new(),
@@ -50,6 +86,89 @@ impl TextOverlay {
         width: u32,
         height: u32,
         descs: &[TextDrawDesc],
+    ) -> Result<()> {
+        self.draw_inner(
+            frame,
+            target,
+            width,
+            height,
+            descs,
+            TextOverlayDrawMode::Color,
+        )
+    }
+
+    pub fn draw_negative(
+        &mut self,
+        frame: &RenderFrame,
+        target: &GraphImage,
+        width: u32,
+        height: u32,
+        descs: &[TextDrawDesc],
+    ) -> Result<()> {
+        self.draw_inner(
+            frame,
+            target,
+            width,
+            height,
+            descs,
+            TextOverlayDrawMode::Negative,
+        )
+    }
+
+    /// Draw text as a white coverage mask into an existing target.
+    ///
+    /// The glyph coverage is preserved in the output alpha channel, including
+    /// alpha-mask and SDF/MSDF antialiasing. The target should be cleared to
+    /// transparent before the first mask draw unless you intentionally want to
+    /// accumulate multiple masks.
+    pub fn draw_mask(
+        &mut self,
+        frame: &RenderFrame,
+        target: &GraphImage,
+        width: u32,
+        height: u32,
+        descs: &[TextDrawDesc],
+    ) -> Result<()> {
+        self.draw_inner(
+            frame,
+            target,
+            width,
+            height,
+            descs,
+            TextOverlayDrawMode::Mask,
+        )
+    }
+
+    /// Create an off-screen text mask image, clear it to transparent, and draw
+    /// `descs` into it as antialiased white coverage.
+    ///
+    /// The returned image has `SAMPLED | RENDER_TARGET` usage so it can be
+    /// registered under a shader binding name (for example `text_mask`) and
+    /// sampled by a later shader pass.
+    pub fn draw_mask_image(
+        &mut self,
+        frame: &RenderFrame,
+        name: impl Into<String>,
+        width: u32,
+        height: u32,
+        descs: &[TextDrawDesc],
+    ) -> Result<GraphImage> {
+        let width = width.max(1);
+        let height = height.max(1);
+        let target = frame.image(name, text_mask_image_desc(width, height))?;
+        target.execute_shader(&self.mask_clear_program)?;
+        self.draw_mask(frame, &target, width, height, descs)?;
+        Ok(target)
+    }
+
+    fn draw_inner(
+        &mut self,
+        frame: &RenderFrame,
+        target: &GraphImage,
+        width: u32,
+        height: u32,
+        descs: &[TextDrawDesc],
+        draw_mode: TextOverlayDrawMode,
     ) -> Result<()> {
         let tiled_text_frame = self.text_engine.prepare_tiled_frame_with_engine_limits(
             &self.engine,
@@ -164,7 +283,10 @@ impl TextOverlay {
             }
             frame.set_sampler("text_atlas_sampler", crate::SamplerPreset::Linear);
             if let Some(mesh) = self.meshes.get(mesh_index) {
-                target.draw_mesh(mesh, self.program_for_content_mode(page.content_mode))?;
+                target.draw_mesh(
+                    mesh,
+                    self.program_for_content_mode(page.content_mode, draw_mode),
+                )?;
             }
         }
 
@@ -243,17 +365,66 @@ impl TextOverlay {
         Ok(image)
     }
 
-    fn program_for_content_mode(&self, mode: TextAtlasContentMode) -> &MeshProgram {
-        match mode {
-            TextAtlasContentMode::AlphaMask => &self.alpha_program,
-            TextAtlasContentMode::Sdf => &self.sdf_program,
-            TextAtlasContentMode::Msdf => &self.msdf_program,
+    fn program_for_content_mode(
+        &self,
+        mode: TextAtlasContentMode,
+        draw_mode: TextOverlayDrawMode,
+    ) -> &MeshProgram {
+        match (mode, draw_mode) {
+            (TextAtlasContentMode::AlphaMask, TextOverlayDrawMode::Color) => &self.alpha_program,
+            (TextAtlasContentMode::Sdf, TextOverlayDrawMode::Color) => &self.sdf_program,
+            (TextAtlasContentMode::Msdf, TextOverlayDrawMode::Color) => &self.msdf_program,
+            (TextAtlasContentMode::AlphaMask, TextOverlayDrawMode::Negative) => {
+                &self.negative_alpha_program
+            }
+            (TextAtlasContentMode::Sdf, TextOverlayDrawMode::Negative) => {
+                &self.negative_sdf_program
+            }
+            (TextAtlasContentMode::Msdf, TextOverlayDrawMode::Negative) => {
+                &self.negative_msdf_program
+            }
+            (TextAtlasContentMode::AlphaMask, TextOverlayDrawMode::Mask) => {
+                &self.mask_alpha_program
+            }
+            (TextAtlasContentMode::Sdf, TextOverlayDrawMode::Mask) => &self.mask_sdf_program,
+            (TextAtlasContentMode::Msdf, TextOverlayDrawMode::Mask) => &self.mask_msdf_program,
         }
     }
 }
 
+fn text_mask_image_desc(width: u32, height: u32) -> ImageDesc {
+    ImageDesc {
+        dimension: ImageDimension::D2,
+        extent: Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth: 1,
+        },
+        mip_levels: 1,
+        layers: 1,
+        samples: 1,
+        format: Format::Rgba8Unorm,
+        usage: ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET,
+        transient: false,
+        clear_value: None,
+        debug_name: Some("text-mask"),
+        compression: Default::default(),
+        min_lod_bits: None,
+        msaa_resolve_to_single_sampled: false,
+        drm_format_modifier: None,
+    }
+}
+
 fn text_program(engine: &Engine, fragment_file: &str) -> Result<MeshProgram> {
-    MeshProgram::new(
+    text_program_with_blend(engine, fragment_file, BlendMode::Alpha)
+}
+
+fn text_program_with_blend(
+    engine: &Engine,
+    fragment_file: &str,
+    blend_mode: BlendMode,
+) -> Result<MeshProgram> {
+    MeshProgram::new_with_blend_mode(
         engine,
         MeshProgramDesc {
             fragment: ShaderDesc {
@@ -269,5 +440,6 @@ fn text_program(engine: &Engine, fragment_file: &str) -> Result<MeshProgram> {
             alpha_blend: true,
             uses_depth: false,
         },
+        blend_mode,
     )
 }
