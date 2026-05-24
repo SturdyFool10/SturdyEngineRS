@@ -94,10 +94,7 @@ impl RenderWorld {
             return 0;
         }
 
-        let mut states = self
-            .states
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut states = self.lock_states();
 
         for command in commands {
             match command {
@@ -205,22 +202,12 @@ impl RenderWorld {
 
     /// Return a cloned object state snapshot for diagnostics/tests.
     pub fn object(&self, object: GpuObjectId) -> Option<RenderObjectState> {
-        self.states
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&object)
-            .cloned()
+        self.lock_states().get(&object).cloned()
     }
 
     /// Return a cloned snapshot of all staged object states.
     pub fn snapshot(&self) -> Vec<RenderObjectState> {
-        let mut snapshot: Vec<_> = self
-            .states
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .values()
-            .cloned()
-            .collect();
+        let mut snapshot: Vec<_> = self.lock_states().values().cloned().collect();
         snapshot.sort_by_key(|state| state.object);
         snapshot
     }
@@ -250,10 +237,7 @@ impl RenderWorld {
     ) -> Result<RenderWorldGpuSceneStats> {
         self.apply_pending();
 
-        let mut states = self
-            .states
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut states = self.lock_states();
         let snapshot: Vec<_> = states.values().cloned().collect();
         let entries = gpu_scene_entries_from_states(&snapshot, valid_mesh_count);
         let instances: Vec<_> = entries.iter().map(|(_, instance)| *instance).collect();
@@ -263,10 +247,7 @@ impl RenderWorld {
         let batch_count = ranges.len();
         let stride = std::mem::size_of::<GpuInstanceData>();
 
-        let mut gpu_scene = self
-            .gpu_scene
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut gpu_scene = self.lock_gpu_scene();
         let mut reallocated = false;
         if instance_count > gpu_scene.capacity || gpu_scene.buffer.is_none() {
             let new_capacity = instance_count.next_power_of_two().max(4);
@@ -341,36 +322,20 @@ impl RenderWorld {
     }
 
     pub fn gpu_scene_batch_range(&self, mesh_id: u32) -> Option<RenderWorldBatchRange> {
-        self.gpu_scene
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .ranges
-            .get(&mesh_id)
-            .copied()
+        self.lock_gpu_scene().ranges.get(&mesh_id).copied()
     }
 
     pub fn with_gpu_scene_buffer<R>(&self, f: impl FnOnce(Option<&Buffer>) -> R) -> R {
-        let gpu_scene = self
-            .gpu_scene
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        f(gpu_scene.buffer.as_ref())
+        f(self.lock_gpu_scene().buffer.as_ref())
     }
 
     pub fn with_gpu_indirect_buffer<R>(&self, f: impl FnOnce(Option<&Buffer>) -> R) -> R {
-        let gpu_scene = self
-            .gpu_scene
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        f(gpu_scene.indirect_buffer.as_ref())
+        f(self.lock_gpu_scene().indirect_buffer.as_ref())
     }
 
     /// Return and clear all dirty object states.
     pub fn take_dirty(&self) -> Vec<RenderObjectState> {
-        let mut states = self
-            .states
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut states = self.lock_states();
         let mut dirty = Vec::new();
         for state in states.values_mut() {
             if !state.dirty.is_empty() {
@@ -391,6 +356,20 @@ impl RenderWorld {
 
     pub fn pending_command_count(&self) -> usize {
         self.commands.pending_count()
+    }
+
+    // ── Private lock helpers ──────────────────────────────────────────────────
+
+    fn lock_states(&self) -> std::sync::MutexGuard<'_, HashMap<GpuObjectId, RenderObjectState>> {
+        self.states
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn lock_gpu_scene(&self) -> std::sync::MutexGuard<'_, RenderWorldGpuSceneState> {
+        self.gpu_scene
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 

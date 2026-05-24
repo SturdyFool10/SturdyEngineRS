@@ -216,6 +216,82 @@ fn shader_pass_intent_records_compute_sampled_reads_and_named_storage_output() {
 }
 
 #[test]
+fn shader_data_storage_updates_resizes_and_binds_by_reflection() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let program =
+        ComputeProgram::load(&engine, shader_fixtures::SAMPLE_IMAGE_COMPUTE_PATH).unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let source = frame
+        .image(
+            "sampled_image",
+            ImageDesc {
+                usage: ImageUsage::SAMPLED,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+
+    let mut data = ShaderData::storage(&engine, &[[0.0f32; 4]]).unwrap();
+    assert_eq!(data.len(), 1);
+    assert_eq!(data.byte_len(), 16);
+    assert!(data.usage().contains(BufferUsage::STORAGE));
+    assert!(data.usage().contains(BufferUsage::COPY_DST));
+    data.write_slice(&[[1.0f32; 4]]).unwrap();
+    assert!(data.write_slice(&[[1.0f32; 4], [2.0; 4]]).is_err());
+    data.resize_and_write_slice(&engine, &[[1.0f32; 4], [2.0; 4]])
+        .unwrap();
+    assert_eq!(data.len(), 2);
+    assert_eq!(data.byte_len(), 32);
+    assert!(data.capacity_bytes() >= 32);
+
+    #[repr(C)]
+    #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+    struct SamplePush {
+        pixel: [u32; 2],
+        _pad0: u32,
+        _pad1: u32,
+    }
+
+    source.register_as("sampled_image");
+    frame.bind_shader_data("output_buffer", &data);
+    frame
+        .dispatch_compute_auto(
+            "sample-image-with-shader-data",
+            &program,
+            &SamplePush {
+                pixel: [0, 0],
+                _pad0: 0,
+                _pad1: 0,
+            },
+            [1, 1, 1],
+        )
+        .unwrap();
+
+    let report = frame.describe();
+    let pass = report
+        .passes
+        .iter()
+        .find(|pass| pass.name.ends_with("sample-image-with-shader-data"))
+        .expect("sample-image compute pass should be recorded");
+    assert_eq!(pass.buffer_writes, vec!["output_buffer".to_owned()]);
+}
+
+#[test]
+fn shader_data_empty_storage_allocates_valid_buffer() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    assert!(ShaderData::with_usage::<u32>(&engine, BufferUsage::COPY_DST, &[]).is_err());
+
+    let mut data = ShaderData::storage::<u32>(&engine, &[]).unwrap();
+    assert!(data.is_empty());
+    assert_eq!(data.byte_len(), 0);
+    assert_eq!(data.capacity_bytes(), 1);
+
+    data.resize_and_write_slice(&engine, &[1u32, 2, 3]).unwrap();
+    assert_eq!(data.len(), 3);
+    assert_eq!(data.byte_len(), 12);
+}
+
+#[test]
 fn dispatch_compute_auto_records_sampled_image_reads() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     let program =
@@ -806,6 +882,47 @@ mod shader_source_tests {
                 .iter()
                 .map(|d| d.message.as_str())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn typed_push_constants_reject_shader_layout_size_mismatch() {
+        let engine = Engine::with_backend(BackendKind::Null).unwrap();
+        let fragment = shader_fixtures::push_constants_fragment();
+        let program = ShaderProgram::from_inline_fragment(&engine, &fragment).unwrap();
+        let frame = engine.begin_render_frame().unwrap();
+        let target = frame
+            .image(
+                "target",
+                ImageDesc {
+                    usage: ImageUsage::RENDER_TARGET,
+                    ..small_image_desc()
+                },
+            )
+            .unwrap();
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct WrongPc {
+            brightness: f32,
+            extra: f32,
+        }
+
+        let err = target
+            .execute_shader_with_constants_auto(
+                &program,
+                &WrongPc {
+                    brightness: 1.0,
+                    extra: 0.0,
+                },
+            )
+            .expect_err("typed constants should match reflected push-constant size exactly");
+
+        assert!(matches!(err, Error::InvalidInput(_)));
+        assert!(
+            err.to_string().contains("provide 8 bytes")
+                && err.to_string().contains("declares 4 bytes"),
+            "error should describe the byte-size mismatch, got {err}"
         );
     }
 

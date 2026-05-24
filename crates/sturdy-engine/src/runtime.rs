@@ -554,6 +554,19 @@ impl<'a> AppRuntimeFrame<'a> {
         ]
     }
 
+    /// Run the default HDR post chain from scene color through tonemap.
+    ///
+    /// This is the `AppRuntimeFrame` entry point for the runtime-owned post stack:
+    /// optional bloom, anti-aliasing, motion-vector debug visualization, tonemapping,
+    /// debug-image registration, and runtime diagnostics are handled consistently
+    /// without requiring app code to construct a [`ShellFrame`](crate::ShellFrame).
+    pub fn run_default_post_process<T: bytemuck::Pod>(
+        &self,
+        desc: crate::application::RuntimePostProcessDesc<'_, T>,
+    ) -> Result<crate::application::RuntimePostProcessOutput> {
+        self.shell_frame().run_default_post_process(desc)
+    }
+
     /// Create a [`ShellFrame`](crate::ShellFrame) wrapper for use with APIs that
     /// still require the older frame type.
     ///

@@ -224,7 +224,7 @@ impl AnimationPlayer {
             bone_matrices,
             gpu_buffer: Some(gpu_buffer),
         };
-        p.flush_to_gpu();
+        p.flush_to_gpu()?;
         Ok(p)
     }
 
@@ -308,8 +308,7 @@ impl AnimationPlayer {
                 usage: BufferUsage::STORAGE,
             })?);
         }
-        self.flush_to_gpu();
-        Ok(())
+        self.flush_to_gpu()
     }
 
     /// GPU bone matrix buffer. Bind as `"bone_matrices"` before each skinned draw.
@@ -317,11 +316,12 @@ impl AnimationPlayer {
         self.gpu_buffer.as_ref()
     }
 
-    fn flush_to_gpu(&self) {
+    fn flush_to_gpu(&self) -> crate::Result<()> {
         if let Some(buf) = &self.gpu_buffer {
             // Mat4 is #[repr(C)], so we can cast directly.
             let bytes: &[u8] = bytemuck::cast_slice(&self.bone_matrices);
-            let _ = buf.write(0, bytes);
+            buf.write(0, bytes)?;
         }
+        Ok(())
     }
 }

@@ -110,7 +110,6 @@ impl EnvironmentMap {
                 let phi = (x as f32 + 0.5) / W as f32 * std::f32::consts::TAU;
                 let theta = (y as f32 + 0.5) / H as f32 * std::f32::consts::PI;
                 // Sphere direction (Y-up convention)
-                let dx = theta.sin() * phi.cos();
                 let dy = theta.cos(); // 1 at top, -1 at bottom
                 let dz = theta.sin() * phi.sin();
 
@@ -138,7 +137,6 @@ impl EnvironmentMap {
                 let r = key[0] + fill[0] + rim[0] + ground[0];
                 let g = key[1] + fill[1] + rim[1] + ground[1];
                 let b = key[2] + fill[2] + rim[2] + ground[2];
-                let _ = (dx, dz); // used implicitly via phi/theta
                 pixels[y * W + x] = [r, g, b, 1.0];
             }
         }

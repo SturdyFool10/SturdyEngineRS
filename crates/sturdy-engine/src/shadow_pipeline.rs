@@ -44,19 +44,25 @@ impl ShadowPipeline {
     pub fn with_csm_config(engine: &Engine, csm_config: CsmConfig) -> Result<Self> {
         let csm = CsmPass::with_config(engine, csm_config)?;
 
-        let spot_size = std::mem::size_of::<crate::GpuSpotShadowData>();
         let empty_spot_shadow_buf = engine.create_buffer(BufferDesc {
-            size: spot_size as u64,
+            size: std::mem::size_of::<crate::GpuSpotShadowData>() as u64,
             usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
         })?;
-        empty_spot_shadow_buf.write(0, &vec![0u8; spot_size])?;
+        let empty_spot = crate::GpuSpotShadowData {
+            light_indices: [0xFFFFFFFF; crate::spot_shadow_pass::MAX_SPOT_SHADOWS],
+            ..bytemuck::Zeroable::zeroed()
+        };
+        empty_spot_shadow_buf.write(0, bytemuck::bytes_of(&empty_spot))?;
 
-        let pt_size = std::mem::size_of::<crate::GpuPointShadowData>();
         let empty_point_shadow_buf = engine.create_buffer(BufferDesc {
-            size: pt_size as u64,
+            size: std::mem::size_of::<crate::GpuPointShadowData>() as u64,
             usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
         })?;
-        empty_point_shadow_buf.write(0, &vec![0u8; pt_size])?;
+        let empty_point = crate::GpuPointShadowData {
+            light_indices: [0xFFFFFFFF; crate::point_shadow_pass::MAX_POINT_SHADOWS],
+            ..bytemuck::Zeroable::zeroed()
+        };
+        empty_point_shadow_buf.write(0, bytemuck::bytes_of(&empty_point))?;
 
         let black_depth = engine.create_image(ImageDesc {
             dimension: ImageDimension::D2,
@@ -117,9 +123,12 @@ impl ShadowPipeline {
         if let Some(spot) = &mut self.spot {
             if !scene.spot_lights.is_empty() {
                 spot.draw(scene, spot_buf_offset, frame, engine)?;
+                frame.bind_buffer("spot_shadow_data", &spot.shadow_buf);
             } else {
-                // Pass attached but no lights — bind black fallbacks so the
-                // shader's samplers are always satisfied.
+                // Pass attached but no lights — bind black fallbacks and the
+                // zeroed empty buffer so the shader sees count=0 even if a
+                // previous frame left stale data in spot.shadow_buf.
+                frame.bind_buffer("spot_shadow_data", &self.empty_spot_shadow_buf);
                 for name in [
                     "spot_shadow_map_0",
                     "spot_shadow_map_1",
@@ -129,7 +138,6 @@ impl ShadowPipeline {
                     frame.bind_image(name, &self.black_depth);
                 }
             }
-            frame.bind_buffer("spot_shadow_data", &spot.shadow_buf);
         } else {
             frame.bind_buffer("spot_shadow_data", &self.empty_spot_shadow_buf);
             for name in [
@@ -148,7 +156,12 @@ impl ShadowPipeline {
         if let Some(pt) = &mut self.point {
             if !scene.point_lights.is_empty() {
                 pt.draw(scene, point_buf_offset, frame, engine)?;
+                frame.bind_buffer("point_shadow_data", &pt.shadow_buf);
             } else {
+                // Pass attached but no lights — use the zeroed empty buffer so
+                // the shader sees count=0 even if a previous frame left stale
+                // data in pt.shadow_buf.
+                frame.bind_buffer("point_shadow_data", &self.empty_point_shadow_buf);
                 for name in [
                     "point_shadow_front_0",
                     "point_shadow_front_1",
@@ -162,7 +175,6 @@ impl ShadowPipeline {
                     frame.bind_image(name, &self.black_depth);
                 }
             }
-            frame.bind_buffer("point_shadow_data", &pt.shadow_buf);
         } else {
             frame.bind_buffer("point_shadow_data", &self.empty_point_shadow_buf);
             for name in [

@@ -73,6 +73,16 @@ impl Buffer {
         self.device.write_buffer(self.handle, offset, data)
     }
 
+    /// Write one plain-old-data value into this buffer.
+    pub fn write_pod<T: bytemuck::Pod>(&self, offset: u64, value: &T) -> Result<()> {
+        self.write(offset, bytemuck::bytes_of(value))
+    }
+
+    /// Write a typed plain-old-data slice into this buffer.
+    pub fn write_slice<T: bytemuck::Pod>(&self, offset: u64, values: &[T]) -> Result<()> {
+        self.write(offset, bytemuck::cast_slice(values))
+    }
+
     pub fn read(&self, offset: u64, out: &mut [u8]) -> Result<()> {
         self.device.read_buffer(self.handle, offset, out)
     }

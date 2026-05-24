@@ -5,6 +5,7 @@ mod overlay;
 mod path_tracer_camera;
 mod path_tracer_subscene;
 mod shadow_showcase;
+mod tonemap;
 
 use cornell_rt::CornellRtScene;
 use path_tracer_camera::{PathTracerCameraInput, PathTracerCameraRig};
@@ -22,6 +23,7 @@ use sturdy_engine::{
     ShellFrame, SurfaceColorSpace, ToneMappingOp, WindowConfig, init_tracing_with_default_filter,
     push_constants, run_with_runtime, set_log_level,
 };
+use tonemap::{TonemapParams, tone_mapping_id};
 
 #[push_constants]
 struct FrameConstants {
@@ -43,35 +45,6 @@ struct CornellDenoiseParams {
     max_frames: u32,
     output_mode: u32,
     _pad: u32,
-}
-
-#[push_constants]
-struct TonemapParams {
-    tonemap_op: u32,
-    hdr_output: u32,
-    exposure: f32,
-    white_point: f32,
-    display_gain: f32,
-    output_gamma: f32,
-    aces_a: f32,
-    aces_b: f32,
-    aces_c: f32,
-    aces_d: f32,
-    aces_e: f32,
-    reinhard_white: f32,
-    hermite_contrast: f32,
-    linear_white: f32,
-    // PsychoV-11 parameters
-    psycho_peak_value: f32,
-    psycho_highlights: f32,
-    psycho_shadows: f32,
-    psycho_contrast_high: f32,
-    psycho_contrast_low: f32,
-    psycho_purity: f32,
-    psycho_bleaching: f32,
-    psycho_hue_restore: f32,
-    psycho_adapt_contrast: f32,
-    psycho_cone_exp: f32,
 }
 
 const CORNELL_RT_MAX_ACCUMULATION_FRAMES: u32 = 65536;
@@ -105,30 +78,30 @@ struct TonemapSettings {
 
 impl Default for TonemapSettings {
     fn default() -> Self {
+        let params = TonemapParams::default();
         Self {
-            exposure: 1.0,
-            white_point: 4.0,
-            display_gain: 1.0,
-            output_gamma: 2.2,
-            aces_a: 2.51,
-            aces_b: 0.03,
-            aces_c: 2.43,
-            aces_d: 0.59,
-            aces_e: 0.14,
-            reinhard_white: 4.0,
-            hermite_contrast: 1.55,
-            linear_white: 1.25,
-            // 1000 nits / 203 nits (diffuse white reference) = canonical SDR peak
-            psycho_peak_value: 1000.0 / 203.0,
-            psycho_highlights: 1.0,
-            psycho_shadows: 1.0,
-            psycho_contrast_high: 1.0,
-            psycho_contrast_low: 1.0,
-            psycho_purity: 1.0,
-            psycho_bleaching: 0.0,
-            psycho_hue_restore: 1.0,
-            psycho_adapt_contrast: 1.0,
-            psycho_cone_exp: 1.0,
+            exposure: params.exposure,
+            white_point: params.white_point,
+            display_gain: params.display_gain,
+            output_gamma: params.output_gamma,
+            aces_a: params.aces_a,
+            aces_b: params.aces_b,
+            aces_c: params.aces_c,
+            aces_d: params.aces_d,
+            aces_e: params.aces_e,
+            reinhard_white: params.reinhard_white,
+            hermite_contrast: params.hermite_contrast,
+            linear_white: params.linear_white,
+            psycho_peak_value: params.psycho_peak_value,
+            psycho_highlights: params.psycho_highlights,
+            psycho_shadows: params.psycho_shadows,
+            psycho_contrast_high: params.psycho_contrast_high,
+            psycho_contrast_low: params.psycho_contrast_low,
+            psycho_purity: params.psycho_purity,
+            psycho_bleaching: params.psycho_bleaching,
+            psycho_hue_restore: params.psycho_hue_restore,
+            psycho_adapt_contrast: params.psycho_adapt_contrast,
+            psycho_cone_exp: params.psycho_cone_exp,
         }
     }
 }
@@ -1815,19 +1788,6 @@ fn next_tone_mapping(op: ToneMappingOp) -> ToneMappingOp {
         ToneMappingOp::AgX => ToneMappingOp::PsychoV11,
         ToneMappingOp::PsychoV11 => ToneMappingOp::PsychoV17,
         ToneMappingOp::PsychoV17 => ToneMappingOp::Aces,
-    }
-}
-
-fn tone_mapping_id(op: ToneMappingOp) -> u32 {
-    match op {
-        ToneMappingOp::Aces => 0,
-        ToneMappingOp::Reinhard => 1,
-        ToneMappingOp::Hermite => 2,
-        ToneMappingOp::Linear => 3,
-        ToneMappingOp::PbrNeutral => 4,
-        ToneMappingOp::AgX => 5,
-        ToneMappingOp::PsychoV11 => 6,
-        ToneMappingOp::PsychoV17 => 7,
     }
 }
 

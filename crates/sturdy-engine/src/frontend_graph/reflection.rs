@@ -24,6 +24,22 @@ pub(super) fn reflected_push_constant_stages(
     if mask.0 == 0 { fallback } else { mask }
 }
 
+pub(super) fn validate_typed_push_constants_size(
+    reflection: &ShaderReflection,
+    provided_bytes: usize,
+    type_name: &str,
+    shader_label: &str,
+) -> Result<()> {
+    let expected_bytes = reflection.layout.push_constants_bytes as usize;
+    if expected_bytes == 0 || provided_bytes == expected_bytes {
+        return Ok(());
+    }
+
+    Err(Error::InvalidInput(format!(
+        "typed push constants `{type_name}` provide {provided_bytes} bytes for shader `{shader_label}`, but shader reflection declares {expected_bytes} bytes"
+    )))
+}
+
 fn reflected_bindings_of_kind(
     reflection: &ShaderReflection,
     kind: core::BindingKind,

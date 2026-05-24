@@ -81,6 +81,10 @@ pub struct Scene {
     /// Set by `cull_gpu()` each frame; tells the draw path to use `total_count`
     /// rather than `indirect_commands.len()` as the indirect draw count.
     pub(super) gpu_cull_active: bool,
+    /// Elapsed application time in seconds. Written by `set_app_time` and read
+    /// by `draw()` / `draw_gbuffer()` to populate `CameraConstants::time` so
+    /// material expressions that use `cam.time` animate correctly.
+    pub app_time_secs: f32,
 }
 
 impl Scene {
@@ -106,6 +110,7 @@ impl Scene {
             geometry_backend: GeometryBackend::ClassicVertex,
             culling_program: None,
             gpu_cull_active: false,
+            app_time_secs: 0.0,
         }
     }
 
@@ -685,7 +690,7 @@ impl Scene {
         let constants = CameraConstants {
             view_proj: vp,
             previous_view_proj: vp,
-            time: 0.0,
+            time: self.app_time_secs,
             _pad: [0.0; 3],
         };
         assert!(
@@ -741,7 +746,7 @@ impl Scene {
         for camera in &self.cameras {
             let CameraOutput::Offscreen(rt) = &camera.output;
             let target = rt.as_frame_image(frame)?;
-            let constants = CameraConstants::from_camera(camera);
+            let constants = CameraConstants::from_camera(camera).with_time(self.app_time_secs);
             self.draw_batches_classic(&constants, &target, None, frame)?;
         }
         Ok(())
@@ -819,7 +824,7 @@ impl Scene {
         let constants = CameraConstants {
             view_proj: vp_arr,
             previous_view_proj: vp_arr,
-            time: 0.0,
+            time: self.app_time_secs,
             _pad: [0.0; 3],
         };
 
@@ -883,7 +888,7 @@ impl Scene {
         let camera = self.cameras.get(camera_id.0 as usize).ok_or_else(|| {
             crate::Error::InvalidInput(format!("camera {:?} not found in scene", camera_id))
         })?;
-        let constants = CameraConstants::from_camera(camera);
+        let constants = CameraConstants::from_camera(camera).with_time(self.app_time_secs);
         self.draw_batches_classic(&constants, output, None, frame)
     }
 

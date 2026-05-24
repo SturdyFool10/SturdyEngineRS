@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{any::type_name, cell::RefCell, collections::HashMap, rc::Rc};
 
 use sturdy_engine_core as core;
 
@@ -26,7 +26,47 @@ use self::reflection::{
     reflected_buffer_uses, reflected_buffer_write_names, reflected_image_reads,
     reflected_push_constant_stages, reflected_storage_image_reads,
     validate_deferred_reflected_resources, validate_pass_target_usage,
+    validate_typed_push_constants_size,
 };
+
+fn shader_program_label(shader: &ShaderProgram) -> String {
+    shader
+        .source_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<inline/precompiled shader>".to_owned())
+}
+
+fn compute_program_label(program: &ComputeProgram) -> String {
+    program
+        .source_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<compute shader>".to_owned())
+}
+
+fn validate_shader_typed_constants<'a, T: bytemuck::Pod>(
+    shader: &ShaderProgram,
+    constants: &'a T,
+) -> Result<&'a [u8]> {
+    let bytes = bytemuck::bytes_of(constants);
+    let label = shader_program_label(shader);
+    validate_typed_push_constants_size(shader.reflection(), bytes.len(), type_name::<T>(), &label)?;
+    Ok(bytes)
+}
+
+fn validate_compute_typed_constants<'a, T: bytemuck::Pod>(
+    program: &ComputeProgram,
+    constants: &'a T,
+) -> Result<&'a [u8]> {
+    let bytes = bytemuck::bytes_of(constants);
+    let label = compute_program_label(program);
+    validate_typed_push_constants_size(
+        program.reflection(),
+        bytes.len(),
+        type_name::<T>(),
+        &label,
+    )?;
+    Ok(bytes)
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct GraphImageCacheKey {
@@ -474,6 +514,14 @@ impl RenderFrame {
         self
     }
 
+    /// Register typed shader data under a name for the current frame.
+    ///
+    /// This is a convenience wrapper around [`bind_buffer`](Self::bind_buffer)
+    /// for data created with [`ShaderData`](crate::ShaderData).
+    pub fn bind_shader_data(&self, name: impl Into<String>, data: &crate::ShaderData) -> &Self {
+        self.bind_buffer(name, data.buffer())
+    }
+
     /// Register a GPU image under a name for the current frame.
     ///
     /// When the engine auto-creates bind groups from shader reflection, any
@@ -666,10 +714,11 @@ impl RenderFrame {
         groups: [u32; 3],
     ) -> Result<()> {
         let stages = reflected_push_constant_stages(program.reflection(), StageMask::COMPUTE);
+        let bytes = validate_compute_typed_constants(program, constants)?;
         let push = Some(PushConstants {
             offset: 0,
             stages,
-            bytes: bytemuck::bytes_of(constants).to_vec(),
+            bytes: bytes.to_vec(),
         });
 
         let mut inner = self.inner.borrow_mut();
@@ -1596,6 +1645,14 @@ impl<'a> ShaderPassIntent<'a> {
         self
     }
 
+    /// Bind typed shader data for this explicit shader pass.
+    ///
+    /// Use this for larger or variable-length data blocks that would exceed push
+    /// constant limits, e.g. `StructuredBuffer<T>` or uniform-buffer bindings.
+    pub fn shader_data(self, name: impl Into<String>, data: &crate::ShaderData) -> Self {
+        self.buffer(name, data.buffer())
+    }
+
     pub fn push_constants(mut self, stages: StageMask, bytes: &[u8]) -> Self {
         self.push_constants = Some(PushConstants {
             offset: 0,
@@ -1829,7 +1886,8 @@ impl GraphImage {
         stages: StageMask,
         constants: &T,
     ) -> Result<()> {
-        self.execute_shader_with_push_constants(shader, stages, bytemuck::bytes_of(constants))
+        let bytes = validate_shader_typed_constants(shader, constants)?;
+        self.execute_shader_with_push_constants(shader, stages, bytes)
     }
 
     /// Typed variant of [`execute_shader_auto`] that infers the stage from
@@ -1840,7 +1898,8 @@ impl GraphImage {
         constants: &T,
     ) -> Result<()> {
         let stages = reflected_push_constant_stages(shader.reflection(), shader.stage_mask());
-        self.execute_shader_with_push_constants(shader, stages, bytemuck::bytes_of(constants))
+        let bytes = validate_shader_typed_constants(shader, constants)?;
+        self.execute_shader_with_push_constants(shader, stages, bytes)
     }
 
     fn execute_shader_inner(
@@ -2984,12 +3043,8 @@ impl GraphImage {
         constants: &T,
         groups: [u32; 3],
     ) -> Result<()> {
-        self.execute_compute_with_push_constants(
-            program,
-            stages,
-            bytemuck::bytes_of(constants),
-            groups,
-        )
+        let bytes = validate_compute_typed_constants(program, constants)?;
+        self.execute_compute_with_push_constants(program, stages, bytes, groups)
     }
 
     pub fn execute_compute_with_constants_auto<T: bytemuck::Pod>(
@@ -2998,11 +3053,8 @@ impl GraphImage {
         constants: &T,
         groups: [u32; 3],
     ) -> Result<()> {
-        self.execute_compute_with_push_constants_auto(
-            program,
-            bytemuck::bytes_of(constants),
-            groups,
-        )
+        let bytes = validate_compute_typed_constants(program, constants)?;
+        self.execute_compute_with_push_constants_auto(program, bytes, groups)
     }
 
     fn execute_compute_inner(
@@ -3319,7 +3371,8 @@ impl GraphImageView {
         stages: StageMask,
         constants: &T,
     ) -> Result<()> {
-        self.execute_shader_with_push_constants(shader, stages, bytemuck::bytes_of(constants))
+        let bytes = validate_shader_typed_constants(shader, constants)?;
+        self.execute_shader_with_push_constants(shader, stages, bytes)
     }
 
     pub fn execute_shader_with_constants_auto<T: bytemuck::Pod>(
@@ -3328,7 +3381,8 @@ impl GraphImageView {
         constants: &T,
     ) -> Result<()> {
         let stages = reflected_push_constant_stages(shader.reflection(), shader.stage_mask());
-        self.execute_shader_with_push_constants(shader, stages, bytemuck::bytes_of(constants))
+        let bytes = validate_shader_typed_constants(shader, constants)?;
+        self.execute_shader_with_push_constants(shader, stages, bytes)
     }
 
     // ── Explicit mip-level operations ─────────────────────────────────────────
@@ -3568,10 +3622,13 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
                     .as_ref()
                     .map(|(s, h)| (s.as_str(), *h)),
             )
-            .map_err(|error| {
-                Error::ResourceStateCorruption(format!(
-                    "resolving bind group for pass '{pass_name}' failed: {error:?}"
-                ))
+            .map_err(|error| match error {
+                Error::InvalidInput(message) => Error::InvalidInput(format!(
+                    "resolving bind group for pass '{pass_name}' failed: {message}"
+                )),
+                other => Error::ResourceStateCorruption(format!(
+                    "resolving bind group for pass '{pass_name}' failed: {other:?}"
+                )),
             })?;
             desc.bind_groups = bind_groups.iter().map(|bg| bg.handle()).collect();
             inner.held_bind_groups.extend(bind_groups);

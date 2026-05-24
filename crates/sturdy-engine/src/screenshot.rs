@@ -44,7 +44,7 @@ pub struct ScreenshotExportReport {
 impl ScreenshotCapture {
     /// Allocate a readback buffer sized for one full image of `width × height` in `format`.
     ///
-    /// Supports `Rgba8Unorm`, `Bgra8Unorm`, `Rgba8Srgb`, `Bgra8Srgb`, and `Rgba16Float`.
+    /// Supports `Rgba8Unorm`, `Bgra8Unorm`, and `Rgba16Float`.
     pub fn new(engine: &Engine, width: u32, height: u32, format: Format) -> Result<Self> {
         let bytes_per_pixel = bytes_per_pixel(format)?;
         let size = width as u64 * height as u64 * bytes_per_pixel as u64;

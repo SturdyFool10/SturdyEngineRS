@@ -7,6 +7,11 @@ use sturdy_engine::{
     RuntimePostProcessDesc, ShaderProgram, WindowConfig, push_constants, run_with_runtime,
 };
 
+#[path = "../tonemap.rs"]
+mod tonemap;
+
+use tonemap::TonemapParams;
+
 #[push_constants]
 struct PlaygroundConstants {
     time: f32,
@@ -14,24 +19,6 @@ struct PlaygroundConstants {
     paused: u32,
     resolution: [f32; 2],
     aspect: f32,
-}
-
-#[push_constants]
-struct TonemapParams {
-    tonemap_op: u32,
-    hdr_output: u32,
-    exposure: f32,
-    white_point: f32,
-    display_gain: f32,
-    output_gamma: f32,
-    aces_a: f32,
-    aces_b: f32,
-    aces_c: f32,
-    aces_d: f32,
-    aces_e: f32,
-    reinhard_white: f32,
-    hermite_contrast: f32,
-    linear_white: f32,
 }
 
 struct ShaderPlayground {
@@ -143,22 +130,7 @@ impl RuntimeApp for ShaderPlayground {
             aa_mode: AntiAliasingMode::Off,
             swapchain: &swapchain,
             tonemap_program: &self.tonemap_program,
-            tonemap_constants: &TonemapParams {
-                tonemap_op: 0,
-                hdr_output: 0,
-                exposure: 1.0,
-                white_point: 4.0,
-                display_gain: 1.0,
-                output_gamma: 2.2,
-                aces_a: 2.51,
-                aces_b: 0.03,
-                aces_c: 2.43,
-                aces_d: 0.59,
-                aces_e: 0.14,
-                reinhard_white: 4.0,
-                hermite_contrast: 1.55,
-                linear_white: 1.25,
-            },
+            tonemap_constants: &TonemapParams::default(),
         })?;
         shell_frame.publish_runtime_diagnostics("Off", 1, false, false);
         let _ = self

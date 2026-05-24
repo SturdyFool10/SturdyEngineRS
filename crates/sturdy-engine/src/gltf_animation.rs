@@ -215,10 +215,9 @@ pub fn load_skinned_vertices(
     // WEIGHTS_0: 4 blend weights per vertex.
     let weights: Vec<[f32; 4]> = reader.read_weights(0)?.into_f32().collect();
 
-    let tangents: Vec<[f32; 4]> = reader
-        .read_tangents()
-        .map(|it| it.collect())
-        .unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 1.0]; n]);
+    let raw_tangents: Option<Vec<[f32; 4]>> = reader.read_tangents().map(|it| it.collect());
+    let has_tangents = raw_tangents.is_some();
+    let tangents: Vec<[f32; 4]> = raw_tangents.unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 1.0]; n]);
 
     let mut vertices: Vec<crate::mesh::SkinnedVertex3d> = (0..n)
         .map(|i| crate::mesh::SkinnedVertex3d {
@@ -232,7 +231,7 @@ pub fn load_skinned_vertices(
         .collect();
 
     // Generate tangents if GLTF didn't provide them.
-    if reader.read_tangents().is_none() {
+    if !has_tangents {
         let indices: Vec<u32> = reader
             .read_indices()
             .map(|it| it.into_u32().collect())

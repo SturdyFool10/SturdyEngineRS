@@ -159,7 +159,7 @@ impl<'s> SceneView<'s> {
         scene
             .objects
             .get(id.0 as usize)
-            .filter(|o| !matches!(o.kind, _) || true) // all live slots
+            .filter(|o| o.mesh_id != super::object::MeshId::from_raw(u32::MAX))
             .map(|o| o.get_transform())
     }
 

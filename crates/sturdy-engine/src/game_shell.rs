@@ -202,7 +202,7 @@ impl<App: GameApp> GameShell<App> {
             count += 1;
         }
 
-        let alpha = self.accumulator.as_secs_f64() as f32 / step.as_secs_f32();
+        let alpha = (self.accumulator.as_secs_f64() / step.as_secs_f64()) as f32;
         (alpha, count, self.accumulator)
     }
 }

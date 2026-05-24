@@ -167,7 +167,7 @@ impl FrameClock {
     pub fn fixed_alpha(&self) -> f32 {
         match self.fixed_step {
             Some(step) if step > Duration::ZERO => {
-                self.accumulator.as_secs_f64() as f32 / step.as_secs_f32()
+                (self.accumulator.as_secs_f64() / step.as_secs_f64()) as f32
             }
             _ => 0.0,
         }

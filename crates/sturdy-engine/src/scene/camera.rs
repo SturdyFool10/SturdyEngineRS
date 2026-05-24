@@ -46,10 +46,6 @@ impl SceneCamera {
         }
     }
 
-    pub fn offscreen_msaa(view: Mat4, projection: Mat4, target: RenderTarget) -> Self {
-        Self::offscreen(view, projection, target)
-    }
-
     /// The combined view-projection matrix.
     pub fn view_proj(&self) -> Mat4 {
         self.jittered_projection() * self.view

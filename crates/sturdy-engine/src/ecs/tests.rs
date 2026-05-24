@@ -211,6 +211,17 @@ fn compiled_schedule_serial_system_runs() {
     assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
+/// Reads `Pos` without modifying anything — used to test read access behaviour.
+struct ReadPos;
+impl ParallelSystem for ReadPos {
+    fn access() -> SystemAccess {
+        SystemAccess::new().read_component::<Pos>()
+    }
+    fn run(&mut self, world: &WorldView<'_>, _commands: &mut WorldCommands) {
+        let _guard = world.read::<Pos>();
+    }
+}
+
 /// Adds `delta` to the `x` field of every `Pos` component.
 struct Adder(f32);
 impl ParallelSystem for Adder {
@@ -312,16 +323,43 @@ fn schedule_run_downgrades_parallel_to_serial() {
 }
 
 #[test]
-fn resource_unwrap_panics_on_missing() {
+fn resource_returns_none_when_missing() {
     let world = World::new();
-    let result = std::panic::catch_unwind(|| {
-        let w = World::new();
-        // This should panic — borrow the world in a closure.
-        let _ = w.resource::<u32>();
-    });
-    // No panic — just returns None.
-    assert!(result.is_ok());
-    let _ = world; // suppress warning
+    assert!(world.resource::<u32>().is_none());
+}
+
+#[test]
+fn world_view_read_panics_when_storage_missing() {
+    let mut world = World::new();
+    // No entities with Pos and no init_component call.
+    let mut sched = Schedule::new();
+    sched.add_parallel_system("read_pos", ReadPos);
+    let mut compiled = sched.build();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        compiled.run(&mut world);
+    }));
+    assert!(
+        result.is_err(),
+        "expected WorldView::read to panic when storage is missing"
+    );
+    if let Some(msg) = result.unwrap_err().downcast_ref::<String>() {
+        assert!(
+            msg.contains("Pos"),
+            "panic message should name the component type, got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn init_component_prevents_read_panic() {
+    let mut world = World::new();
+    world.init_component::<Pos>();
+    // Storage pre-registered — no entities needed.
+    let mut sched = Schedule::new();
+    sched.add_parallel_system("read_pos", ReadPos);
+    let mut compiled = sched.build();
+    // Must not panic.
+    compiled.run(&mut world);
 }
 
 #[test]

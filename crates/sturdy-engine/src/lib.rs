@@ -61,6 +61,7 @@ mod runtime;
 mod sampler_catalog;
 mod scene;
 mod screenshot;
+mod shader_data;
 mod shader_playground;
 pub mod shader_program;
 mod shader_watcher;
@@ -261,6 +262,7 @@ pub use post_process::{
     AutoExposureConfig, CaConfig, CaPass, GrainConfig, GrainPass, LensConfig, LensPass,
     PostProcessConfig, PostProcessPasses, VignetteConfig, VignettePass,
 };
+pub use shader_data::ShaderData;
 pub use shader_program::{ShaderName, ShaderProgram, ShaderProgramDesc, SlangEntryPoints};
 #[cfg(not(target_arch = "wasm32"))]
 pub use sturdy_engine_core::NativeSurfaceDesc;

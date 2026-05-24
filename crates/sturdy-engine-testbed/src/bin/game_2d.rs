@@ -5,7 +5,7 @@
 //   - Asteroids spawn at arena edges and drift inward
 //   - Axis-aligned bounding box collision detection
 //   - Score increments each second survived; three lives
-//   - Text HUD overlay; colour-coded asteroids
+//   - Text HUD overlay; pooled asteroid quads
 //   - Procedural geometry only — no assets required
 //
 // Run:  cargo run --bin game_2d
@@ -18,9 +18,9 @@ use std::time::Duration;
 
 use glam::{Mat4, Quat, Vec2, Vec3};
 use sturdy_engine::{
-    Engine, FixedUpdateContext, GameApp, GameConfig, GameContext, InputHub, KeyModifier, Keybind,
-    Mesh, MeshId, MeshProgram, ObjectId, ObjectKind, Scene, ShellFrame, Surface, SurfaceImage,
-    Vertex2d, WindowConfig,
+    DebugOverlay, DebugOverlayRenderer, Engine, FixedUpdateContext, GameApp, GameConfig,
+    GameContext, InputHub, KeyModifier, Keybind, Mesh, MeshProgram, ObjectId, ObjectKind, Scene,
+    ShellFrame, Surface, SurfaceImage, Vertex2d, WindowConfig,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -35,13 +35,16 @@ const ASTEROID_SZ: f32 = 0.72;
 const SPAWN_BASE: f32 = 1.1; // initial spawn interval in seconds
 const MAX_ROCKS: usize = 48;
 
+fn inactive_rock_transform() -> Mat4 {
+    Mat4::from_scale_rotation_translation(Vec3::ZERO, Quat::IDENTITY, Vec3::new(0.0, 0.0, -10.0))
+}
+
 // ── Asteroid ──────────────────────────────────────────────────────────────────
 
 struct Rock {
     pos: Vec2,
     vel: Vec2,
     size: f32,
-    color: [f32; 4],
     alive: bool,
     obj: ObjectId,
 }
@@ -51,7 +54,7 @@ struct Rock {
 struct Dodge {
     engine: Engine,
     scene: Scene,
-    quad_id: MeshId,
+    overlay: DebugOverlayRenderer,
     player_obj: ObjectId,
     player_pos: Vec2,
     lives: u32,
@@ -78,9 +81,9 @@ impl Dodge {
     }
 
     fn spawn_rock(&mut self) {
-        if self.rocks.iter().filter(|r| r.alive).count() >= MAX_ROCKS {
+        let Some(slot_idx) = self.rocks.iter().position(|r| !r.alive) else {
             return;
-        }
+        };
 
         let edge = (self.rnd() * 4.0) as u32;
         let (x, y) = match edge {
@@ -96,37 +99,27 @@ impl Dodge {
         );
         let dir = (target - pos).normalize_or_zero();
         let speed = ASTEROID_SPD * self.rnd_range(0.6, 1.6);
-        let hue = self.rnd();
         let size = ASTEROID_SZ * self.rnd_range(0.55, 1.45);
 
-        let (r, g, b) = hsv(hue, 0.7, 0.9);
-        let color = [r, g, b, 1.0];
-
-        let obj = self.scene.add_object(self.quad_id, ObjectKind::Dynamic);
-
-        if let Some(slot) = self.rocks.iter_mut().find(|r| !r.alive) {
-            slot.pos = pos;
-            slot.vel = dir * speed;
-            slot.size = size;
-            slot.color = color;
-            slot.alive = true;
-            slot.obj = obj;
-        } else {
-            self.rocks.push(Rock {
-                pos,
-                vel: dir * speed,
-                size,
-                color,
-                alive: true,
-                obj,
-            });
-        }
+        let slot = &mut self.rocks[slot_idx];
+        slot.pos = pos;
+        slot.vel = dir * speed;
+        slot.size = size;
+        slot.alive = true;
     }
 
     fn overlap(a: Vec2, sa: f32, b: Vec2, sb: f32) -> bool {
         let d = (a - b).abs();
         let r = (sa + sb) * 0.5;
         d.x < r && d.y < r
+    }
+
+    fn deactivate_rock(&mut self, index: usize) {
+        if let Some(rock) = self.rocks.get_mut(index) {
+            rock.alive = false;
+            self.scene
+                .set_transform(rock.obj, inactive_rock_transform());
+        }
     }
 
     fn restart(&mut self) {
@@ -138,8 +131,8 @@ impl Dodge {
         self.invincible = 0.0;
         self.game_over = false;
         self.restart_t = 0.0;
-        for r in &mut self.rocks {
-            r.alive = false;
+        for index in 0..self.rocks.len() {
+            self.deactivate_rock(index);
         }
     }
 }
@@ -180,15 +173,28 @@ impl GameApp for Dodge {
 
         let player_obj = scene.add_object(quad_id, ObjectKind::Dynamic);
 
+        let mut rocks = Vec::with_capacity(MAX_ROCKS);
+        for _ in 0..MAX_ROCKS {
+            let obj = scene.add_object(quad_id, ObjectKind::Dynamic);
+            scene.set_transform(obj, inactive_rock_transform());
+            rocks.push(Rock {
+                pos: Vec2::ZERO,
+                vel: Vec2::ZERO,
+                size: ASTEROID_SZ,
+                alive: false,
+                obj,
+            });
+        }
+
         Ok(Self {
             engine: engine.clone(),
             scene,
-            quad_id,
+            overlay: DebugOverlayRenderer::new(engine)?,
             player_obj,
             player_pos: Vec2::ZERO,
             lives: 3,
             invincible: 0.0,
-            rocks: Vec::new(),
+            rocks,
             spawn_t: 0.0,
             rng: 0xDEADBEEFCAFEBABE,
             score: 0,
@@ -260,31 +266,32 @@ impl GameApp for Dodge {
         }
 
         // ── Move rocks ────────────────────────────────────────────────────────
-        for r in &mut self.rocks {
-            if !r.alive {
+        for index in 0..self.rocks.len() {
+            if !self.rocks[index].alive {
                 continue;
             }
-            r.pos += r.vel * dt;
-            if r.pos.x.abs() > W + 4.0 || r.pos.y.abs() > H + 4.0 {
-                r.alive = false;
+            let outside = {
+                let rock = &mut self.rocks[index];
+                rock.pos += rock.vel * dt;
+                rock.pos.x.abs() > W + 4.0 || rock.pos.y.abs() > H + 4.0
+            };
+            if outside {
+                self.deactivate_rock(index);
             }
         }
 
         // ── Collision ─────────────────────────────────────────────────────────
         self.invincible = (self.invincible - dt).max(0.0);
         if self.invincible <= 0.0 {
-            for r in &mut self.rocks {
-                if !r.alive {
-                    continue;
-                }
-                if Self::overlap(self.player_pos, PLAYER_SZ, r.pos, r.size) {
-                    r.alive = false;
-                    self.lives = self.lives.saturating_sub(1);
-                    self.invincible = 2.0;
-                    if self.lives == 0 {
-                        self.game_over = true;
-                    }
-                    break;
+            let hit = self.rocks.iter().position(|rock| {
+                rock.alive && Self::overlap(self.player_pos, PLAYER_SZ, rock.pos, rock.size)
+            });
+            if let Some(index) = hit {
+                self.deactivate_rock(index);
+                self.lives = self.lives.saturating_sub(1);
+                self.invincible = 2.0;
+                if self.lives == 0 {
+                    self.game_over = true;
                 }
             }
         }
@@ -341,8 +348,6 @@ impl GameApp for Dodge {
         // Draw all quads directly to the swapchain.
         self.scene.draw(view, proj, &swapchain, rf, &self.engine)?;
 
-        rf.present_image(&swapchain)?;
-
         // ── HUD ───────────────────────────────────────────────────────────────
         let lines: Vec<String> = if self.game_over {
             vec![
@@ -362,26 +367,27 @@ impl GameApp for Dodge {
                 "WASD / Arrow keys = move".into(),
             ]
         };
-        frame.set_runtime_overlay_lines(lines);
+        let mut overlay = DebugOverlay::new();
+        overlay.rounded_rectangle_outline_screen(
+            ext.width,
+            ext.height,
+            [16.0, 16.0],
+            [420.0, 120.0],
+            10.0,
+            3.0,
+            [1.0, 1.0, 1.0, 0.9],
+        );
+        for (index, line) in lines.iter().enumerate() {
+            overlay.add_screen_text(line.as_str(), 24.0, 24.0 + index as f32 * 26.0);
+        }
+        frame.run_camera_locked_pass("dodge_hud", &swapchain, |render_frame, target| {
+            self.overlay
+                .draw(render_frame, target, ext.width, ext.height, &overlay)
+        })?;
+
+        rf.present_image(&swapchain)?;
 
         Ok(())
-    }
-}
-
-fn hsv(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
-    let h6 = h * 6.0;
-    let i = h6.floor() as u32 % 6;
-    let f = h6.fract();
-    let p = v * (1.0 - s);
-    let q = v * (1.0 - f * s);
-    let t = v * (1.0 - (1.0 - f) * s);
-    match i {
-        0 => (v, t, p),
-        1 => (q, v, p),
-        2 => (p, v, t),
-        3 => (p, q, v),
-        4 => (t, p, v),
-        _ => (v, p, q),
     }
 }
 

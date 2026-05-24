@@ -385,10 +385,32 @@ impl World {
         if !storage.as_any().is::<ComponentStorage<T>>() {
             *storage = Box::new(ComponentStorage::<T>::new());
         }
-        match storage.as_any_mut().downcast_mut::<ComponentStorage<T>>() {
-            Some(storage) => storage,
-            None => std::process::abort(),
-        }
+        //panic allowed, reason = "TypeId collision/component storage type mismatch is unrecoverable"
+        storage
+            .as_any_mut()
+            .downcast_mut::<ComponentStorage<T>>()
+            .unwrap_or_else(|| {
+                panic!(
+                    "World::storage_mut: TypeId collision for `{}`",
+                    std::any::type_name::<T>()
+                )
+            })
+    }
+
+    /// Ensure the storage for component type `C` exists, so that
+    /// `WorldView::read::<C>()` and `WorldView::write::<C>()` do not panic
+    /// before any entity with `C` has been spawned.
+    ///
+    /// Call this once at startup for every component type your parallel systems
+    /// access, or add at least one entity with `C` before building the schedule.
+    ///
+    /// ```ignore
+    /// world.init_component::<Transform>();
+    /// world.init_component::<Velocity>();
+    /// let schedule = my_schedule.build();
+    /// ```
+    pub fn init_component<C: Component>(&mut self) {
+        self.storage_mut::<C>();
     }
 
     // ── Scene integration ─────────────────────────────────────────────────────
@@ -434,18 +456,6 @@ impl World {
     /// Returns `true` if a resource of type `R` is present.
     pub fn has_resource<R: 'static>(&self) -> bool {
         self.resources.contains_key(&TypeId::of::<R>())
-    }
-
-    /// Borrow a resource when it is present.
-    ///
-    /// Prefer [`World::resource`] in new code; this compatibility alias no longer panics.
-    pub fn resource_unwrap<R: 'static>(&self) -> Option<&R> {
-        self.resource::<R>()
-    }
-
-    /// Mutably borrow a resource when it is present.
-    pub fn resource_unwrap_mut<R: 'static>(&mut self) -> Option<&mut R> {
-        self.resource_mut::<R>()
     }
 
     // ── Scene sync ────────────────────────────────────────────────────────────

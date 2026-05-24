@@ -45,6 +45,40 @@ fn sync_render_world_removes_hidden_mapped_scene_object() {
 }
 
 #[test]
+fn material_expr_swizzles_and_constant_alias_generate_expected_slang() {
+    let scalar = MaterialExpr::<[f32; 4]>::texture("packed").g();
+    assert_eq!(
+        scalar.to_slang_expr(),
+        "(((packed.Sample(material_sampler, v.uv))).g)"
+    );
+
+    let rgb = MaterialExpr::image_sequence("fire_frames", 8, 24.0).rgb3();
+    let rgb_slang = rgb.to_slang_expr();
+    assert!(rgb_slang.contains("fire_frames.Sample"));
+    assert!(rgb_slang.ends_with(".rgb)"));
+
+    let constant = MaterialExpr::constant([0.25f32, 0.5, 0.75, 1.0]);
+    assert_eq!(
+        constant.to_slang_expr(),
+        "float4(0.250000, 0.500000, 0.750000, 1.000000)"
+    );
+}
+
+#[test]
+fn metallic_roughness_texture_uses_single_packed_gltf_texture_channels() {
+    let material = UnifiedMaterial::pbr_metallic_roughness("packed_mr")
+        .metallic_roughness_texture("orm")
+        .build();
+    let source = material.generate_gbuffer_source();
+
+    assert_eq!(source.matches("Texture2D<float4> orm;").count(), 1);
+    assert!(source.contains("float metallic = (((orm.Sample(material_sampler, v.uv))).b);"));
+    assert!(source.contains("float roughness = (((orm.Sample(material_sampler, v.uv))).g);"));
+    assert!(!source.contains("orm__met"));
+    assert!(!source.contains("orm__rou"));
+}
+
+#[test]
 fn scene_object_metadata_preserves_render_world_material_bounds_and_flags() {
     let mut object = SceneObject::new(MeshId::from_raw(2), Mat4::IDENTITY, ObjectKind::Dynamic);
     let bounds = RenderBounds::from_sphere(BoundingSphere {

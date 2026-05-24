@@ -168,6 +168,41 @@ fn upload_one_image(
     )
 }
 
+/// Verify that every accessor in `primitive` references a buffer index that
+/// exists in `buffers`. Returns an error describing the first out-of-range
+/// reference found, naming the offending attribute.
+fn validate_buffer_refs(
+    primitive: &gltf::Primitive<'_>,
+    buffers: &[gltf::buffer::Data],
+    name: &str,
+) -> Result<()> {
+    let n = buffers.len();
+    for (semantic, accessor) in primitive.attributes() {
+        if let Some(view) = accessor.view() {
+            let idx = view.buffer().index();
+            if idx >= n {
+                return Err(crate::Error::Unknown(format!(
+                    "'{name}': attribute {semantic:?} references buffer {idx} but only {n} \
+                     buffer(s) were loaded — file may be corrupt or reference an external \
+                     buffer that failed to load"
+                )));
+            }
+        }
+    }
+    if let Some(accessor) = primitive.indices() {
+        if let Some(view) = accessor.view() {
+            let idx = view.buffer().index();
+            if idx >= n {
+                return Err(crate::Error::Unknown(format!(
+                    "'{name}': index accessor references buffer {idx} but only {n} buffer(s) \
+                     were loaded"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn extract_primitive(
     engine: &Engine,
     primitive: &gltf::Primitive<'_>,
@@ -175,6 +210,13 @@ fn extract_primitive(
     gpu_images: &[Option<Arc<Image>>],
     name: &str,
 ) -> Result<MeshPrimitive> {
+    // Check upfront that every accessor's buffer view references a buffer that
+    // was actually loaded. gltf::import validates document structure but does
+    // not guarantee every accessor's buffer view index is within the loaded
+    // buffers slice (e.g. sparse accessors without a base buffer view, or
+    // externally referenced buffers that failed to load).
+    validate_buffer_refs(primitive, buffers, name)?;
+
     let reader = primitive.reader(|buf| buffers.get(buf.index()).map(|d| d.0.as_slice()));
 
     let positions: Vec<[f32; 3]> = reader
@@ -182,17 +224,52 @@ fn extract_primitive(
         .ok_or_else(|| crate::Error::Unknown(format!("'{name}' has no POSITION attribute")))?
         .collect();
 
-    let normals: Vec<[f32; 3]> = reader
-        .read_normals()
-        .map(|n| n.collect())
-        .unwrap_or_else(|| vec![[0.0, 1.0, 0.0]; positions.len()]);
+    // For optional attributes, distinguish "not present in file" (valid — use
+    // defaults) from "present but unreadable" (corrupt — warn loudly).
+    let claims_normals = primitive
+        .attributes()
+        .any(|(s, _)| s == gltf::Semantic::Normals);
+    let normals: Vec<[f32; 3]> = match reader.read_normals() {
+        Some(n) => n.collect(),
+        None => {
+            if claims_normals {
+                tracing::warn!(
+                    "'{name}': NORMAL attribute present but unreadable — using up-vector fallback"
+                );
+            }
+            vec![[0.0, 1.0, 0.0]; positions.len()]
+        }
+    };
 
-    let uvs: Vec<[f32; 2]> = reader
-        .read_tex_coords(0)
-        .map(|u| u.into_f32().collect())
-        .unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
+    let claims_uvs = primitive
+        .attributes()
+        .any(|(s, _)| s == gltf::Semantic::TexCoords(0));
+    let uvs: Vec<[f32; 2]> = match reader.read_tex_coords(0) {
+        Some(u) => u.into_f32().collect(),
+        None => {
+            if claims_uvs {
+                tracing::warn!(
+                    "'{name}': TEXCOORD_0 attribute present but unreadable — using zero fallback"
+                );
+            }
+            vec![[0.0, 0.0]; positions.len()]
+        }
+    };
 
-    let gltf_tangents: Option<Vec<[f32; 4]>> = reader.read_tangents().map(|t| t.collect());
+    let claims_tangents = primitive
+        .attributes()
+        .any(|(s, _)| s == gltf::Semantic::Tangents);
+    let gltf_tangents: Option<Vec<[f32; 4]>> = match reader.read_tangents() {
+        Some(t) => Some(t.collect()),
+        None => {
+            if claims_tangents {
+                tracing::warn!(
+                    "'{name}': TANGENT attribute present but unreadable — will recompute"
+                );
+            }
+            None
+        }
+    };
 
     let n = positions.len();
     let mut vertices: Vec<Vertex3d> = (0..n)
@@ -208,10 +285,18 @@ fn extract_primitive(
         })
         .collect();
 
-    let indices: Vec<u32> = reader
-        .read_indices()
-        .map(|idx| idx.into_u32().collect())
-        .unwrap_or_else(|| (0u32..n as u32).collect());
+    let claims_indices = primitive.indices().is_some();
+    let indices: Vec<u32> = match reader.read_indices() {
+        Some(idx) => idx.into_u32().collect(),
+        None => {
+            if claims_indices {
+                tracing::warn!(
+                    "'{name}': index buffer present but unreadable — falling back to sequential indices"
+                );
+            }
+            (0u32..n as u32).collect()
+        }
+    };
 
     // Generate tangents when the GLTF file doesn't supply them.
     if gltf_tangents.is_none() {

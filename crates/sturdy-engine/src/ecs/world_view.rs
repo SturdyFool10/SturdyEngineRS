@@ -138,12 +138,19 @@ impl<'w> WorldView<'w> {
     /// building the schedule.
     pub fn read<C: Component>(&self) -> ComponentReadGuard<'_, C> {
         let world = unsafe { self.world.as_ref() };
+        //panic allowed, reason = "missing component storage is a documented ECS schedule setup violation"
         let storage = world
             .components
             .get(&TypeId::of::<C>())
             // SAFETY: Scheduler guarantees no concurrent writer for C in this wave.
             .and_then(|cell| downcast_storage::<C>(unsafe { &*cell.get() }.as_ref()))
-            .unwrap_or_else(|| std::process::abort());
+            .unwrap_or_else(|| {
+                panic!(
+                    "WorldView::read: no ComponentStorage for `{}` — call \
+                     world.init_component::<T>() before building the schedule",
+                    std::any::type_name::<C>()
+                )
+            });
         ComponentReadGuard { storage }
     }
 
@@ -160,19 +167,26 @@ impl<'w> WorldView<'w> {
     /// Same as `read` — panics if `C` has no storage.
     pub fn write<C: Component>(&self) -> ComponentWriteGuard<'_, C> {
         let world = unsafe { self.world.as_ref() };
-        let cell = match world.components.get(&TypeId::of::<C>()) {
-            Some(cell) => cell,
-            None => std::process::abort(),
-        };
+        //panic allowed, reason = "missing component storage is a documented ECS schedule setup violation"
+        let cell = world.components.get(&TypeId::of::<C>()).unwrap_or_else(|| {
+            panic!(
+                "WorldView::write: no ComponentStorage for `{}` — call \
+                 world.init_component::<T>() before building the schedule",
+                std::any::type_name::<C>()
+            )
+        });
         // SAFETY: UnsafeCell::get() is the sanctioned way to get a *mut T from
         // a shared reference. The scheduler guarantees at most one active
         // ComponentWriteGuard<C> per wave (disjoint write sets), making the
         // exclusive borrow sound.
+        //panic allowed, reason = "component storage type mismatch is unrecoverable"
         let storage = unsafe {
-            match downcast_storage_mut::<C>((&mut *cell.get()).as_mut()) {
-                Some(storage) => storage,
-                None => std::process::abort(),
-            }
+            downcast_storage_mut::<C>((&mut *cell.get()).as_mut()).unwrap_or_else(|| {
+                panic!(
+                    "WorldView::write: ComponentStorage type mismatch for `{}`",
+                    std::any::type_name::<C>()
+                )
+            })
         };
         ComponentWriteGuard { storage }
     }
@@ -234,11 +248,6 @@ impl<'w> WorldView<'w> {
     /// Borrow a resource immutably. Returns `None` if not present.
     pub fn resource<R: 'static>(&self) -> Option<&R> {
         unsafe { self.world.as_ref() }.resource::<R>()
-    }
-
-    /// Borrow a resource when it is present.
-    pub fn resource_unwrap<R: 'static>(&self) -> Option<&R> {
-        unsafe { self.world.as_ref() }.resource_unwrap::<R>()
     }
 
     // ── Entity access ─────────────────────────────────────────────────────────

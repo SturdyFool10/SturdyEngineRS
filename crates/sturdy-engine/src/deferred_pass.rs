@@ -316,6 +316,13 @@ impl DeferredPass {
     /// deferred.blend_to_environment_map(outdoor, 90);  // ~1.5 s at 60 fps
     /// ```
     pub fn blend_to_environment_map(&mut self, target: EnvironmentMap, frames: u32) {
+        // If there is no source environment to blend from, skip the transition
+        // entirely — interpolating from "nothing" would produce N frames of black
+        // IBL rather than a smooth fade.
+        if self.environment_map.is_none() {
+            self.set_environment_map(target);
+            return;
+        }
         let frames = frames.max(1);
         self.blend_target = Some(target);
         self.blend_alpha = 0.0;

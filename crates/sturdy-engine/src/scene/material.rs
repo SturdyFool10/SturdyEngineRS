@@ -301,9 +301,20 @@ pub enum MaterialExpr<T: Clone> {
 
     /// Raise to a power: `pow(base, exp)`.
     Pow(Box<MaterialExpr<T>>, f32),
+
+    /// Swizzle a `float4` expression into this expression's target type.
+    Swizzle {
+        expr: Box<MaterialExpr<[f32; 4]>>,
+        fields: &'static str,
+    },
 }
 
 impl<T: Clone> MaterialExpr<T> {
+    /// A fixed value baked as a literal into the generated shader.
+    pub fn constant(value: T) -> Self {
+        Self::Constant(value)
+    }
+
     /// Sample a 2D texture at the default UV (UV0).
     pub fn texture(name: impl Into<String>) -> Self {
         Self::Texture {
@@ -388,11 +399,62 @@ impl<T: Clone> MaterialExpr<T> {
     }
 }
 
+impl MaterialExpr<[f32; 4]> {
+    /// Swizzle the red channel as a scalar expression.
+    pub fn r(self) -> MaterialExpr<f32> {
+        MaterialExpr::Swizzle {
+            expr: Box::new(self),
+            fields: "r",
+        }
+    }
+
+    /// Swizzle the green channel as a scalar expression.
+    pub fn g(self) -> MaterialExpr<f32> {
+        MaterialExpr::Swizzle {
+            expr: Box::new(self),
+            fields: "g",
+        }
+    }
+
+    /// Swizzle the blue channel as a scalar expression.
+    pub fn b(self) -> MaterialExpr<f32> {
+        MaterialExpr::Swizzle {
+            expr: Box::new(self),
+            fields: "b",
+        }
+    }
+
+    /// Swizzle the alpha channel as a scalar expression.
+    pub fn a(self) -> MaterialExpr<f32> {
+        MaterialExpr::Swizzle {
+            expr: Box::new(self),
+            fields: "a",
+        }
+    }
+
+    /// Swizzle the red/green channels as a `float2` expression.
+    pub fn rg2(self) -> MaterialExpr<[f32; 2]> {
+        MaterialExpr::Swizzle {
+            expr: Box::new(self),
+            fields: "rg",
+        }
+    }
+
+    /// Swizzle the RGB channels as a `float3` expression.
+    pub fn rgb3(self) -> MaterialExpr<[f32; 3]> {
+        MaterialExpr::Swizzle {
+            expr: Box::new(self),
+            fields: "rgb",
+        }
+    }
+}
+
 impl<T: Clone> MaterialExpr<T> {
     /// Collect all texture binding names referenced by this expression tree.
     pub(crate) fn collect_textures(&self, out: &mut HashSet<String>) {
         match self {
             Self::Constant(_) | Self::Procedural(_) => {}
+            Self::Swizzle { expr, .. } => expr.collect_textures(out),
             Self::Texture { name, .. } | Self::TextureFactor { name, .. } => {
                 out.insert(name.clone());
             }
@@ -424,6 +486,7 @@ impl<T: Clone> MaterialExpr<T> {
             Self::Multiply(a, b) | Self::Add(a, b) => a.uses_time() || b.uses_time(),
             Self::Mix { a, b, t } => a.uses_time() || b.uses_time() || t.uses_time(),
             Self::Clamp { value, .. } | Self::Pow(value, _) => value.uses_time(),
+            Self::Swizzle { expr, .. } => expr.uses_time(),
             Self::Constant(_) => false,
         }
     }
@@ -548,6 +611,10 @@ impl<T: Clone + SlangType> MaterialExpr<T> {
             Self::Pow(base, exp) => {
                 format!("pow(({b}), {exp:.6})", b = base.to_slang_expr())
             }
+
+            Self::Swizzle { expr, fields } => {
+                format!("(({}).{fields})", expr.to_slang_expr())
+            }
         }
     }
 
@@ -567,6 +634,7 @@ impl<T: Clone + SlangType> MaterialExpr<T> {
                 t.collect_array_textures(out);
             }
             Self::Clamp { value, .. } | Self::Pow(value, _) => value.collect_array_textures(out),
+            Self::Swizzle { expr, .. } => expr.collect_array_textures(out),
             _ => {}
         }
     }
@@ -872,14 +940,9 @@ impl UnifiedMaterialBuilder {
     /// Sample a GLTF-style metallic-roughness texture (B=metallic, G=roughness).
     pub fn metallic_roughness_texture(mut self, name: impl Into<String>) -> Self {
         let n = name.into();
-        self.inner.metallic = MaterialExpr::Texture {
-            name: format!("{n}__met"),
-            uv: UvSource::MeshUv0,
-        };
-        self.inner.roughness = MaterialExpr::Texture {
-            name: format!("{n}__rou"),
-            uv: UvSource::MeshUv0,
-        };
+        let packed = MaterialExpr::<[f32; 4]>::texture(n);
+        self.inner.metallic = packed.clone().b();
+        self.inner.roughness = packed.g();
         self
     }
 

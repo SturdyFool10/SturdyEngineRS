@@ -24,6 +24,13 @@ use sturdy_engine_core::Extent3d;
 /// Maximum number of simultaneously-shadowing spot lights.
 pub const MAX_SPOT_SHADOWS: usize = 4;
 
+static SHADOW_MAP_NAMES: [&str; MAX_SPOT_SHADOWS] = [
+    "spot_shadow_map_0",
+    "spot_shadow_map_1",
+    "spot_shadow_map_2",
+    "spot_shadow_map_3",
+];
+
 // ── GPU data ──────────────────────────────────────────────────────────────────
 
 /// Per-spot-shadow data uploaded to a GPU StructuredBuffer.
@@ -160,9 +167,8 @@ impl SpotShadowPass {
             light_indices[slot] = spot_light_buf_offset + sl_idx as u32;
 
             // Render depth into the slot's shadow map.
-            let map_name = format!("spot_shadow_map_{slot}");
-            let desc = spot_shadow_image_desc(res);
-            let img = frame.image(&map_name, desc)?;
+            let map_name = SHADOW_MAP_NAMES[slot];
+            let img = frame.image(map_name, spot_shadow_image_desc(res, map_name))?;
             draw_spot_shadow_batches(
                 scene,
                 frame,
@@ -171,7 +177,7 @@ impl SpotShadowPass {
                 &self.masked_depth_program,
                 lvp,
             )?;
-            img.register_as(&map_name);
+            img.register_as(map_name);
         }
 
         let gpu_data = GpuSpotShadowData {
@@ -200,7 +206,7 @@ fn spot_light_proj(outer_angle: f32, near: f32, far: f32) -> Mat4 {
     Mat4::perspective_rh(fov, 1.0, near, far.max(near + 0.1))
 }
 
-fn spot_shadow_image_desc(resolution: u32) -> ImageDesc {
+fn spot_shadow_image_desc(resolution: u32, debug_name: &'static str) -> ImageDesc {
     ImageDesc {
         dimension: ImageDimension::D2,
         extent: Extent3d {
@@ -215,7 +221,7 @@ fn spot_shadow_image_desc(resolution: u32) -> ImageDesc {
         usage: ImageUsage::DEPTH_STENCIL | ImageUsage::SAMPLED,
         transient: false,
         clear_value: None,
-        debug_name: None,
+        debug_name: Some(debug_name),
         compression: Default::default(),
         min_lod_bits: None,
         msaa_resolve_to_single_sampled: false,

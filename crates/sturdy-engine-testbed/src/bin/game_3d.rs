@@ -19,10 +19,10 @@ use std::time::Duration;
 
 use glam::{Mat4, Quat, Vec3};
 use sturdy_engine::{
-    DeferredPass, Engine, FixedUpdateContext, GameApp, GameConfig, GameContext, InputHub,
-    KeyModifier, Keybind, MaterialExpr, Mesh, MeshProgram, ObjectKind, OrbitCamera, PointLight,
-    RectLight, Scene, ShaderProgram, ShellFrame, SkyConfig, Surface, SurfaceImage, UnifiedMaterial,
-    WindowConfig,
+    DebugOverlay, DebugOverlayRenderer, DeferredPass, Engine, FixedUpdateContext, GameApp,
+    GameConfig, GameContext, InputHub, KeyModifier, Keybind, MaterialExpr, Mesh, MeshProgram,
+    ObjectKind, OrbitCamera, PointLight, RectLight, Scene, ShaderProgram, ShellFrame, SkyConfig,
+    Surface, SurfaceImage, UnifiedMaterial, WindowConfig,
 };
 
 struct Game3d {
@@ -30,6 +30,7 @@ struct Game3d {
     scene: Scene,
     deferred: DeferredPass,
     passthrough: ShaderProgram, // for blitting deferred output to swapchain
+    overlay: DebugOverlayRenderer,
     camera: OrbitCamera,
     time: f32,
     orbit_n: usize,
@@ -165,6 +166,7 @@ impl GameApp for Game3d {
             scene,
             deferred,
             passthrough,
+            overlay: DebugOverlayRenderer::new(engine)?,
             camera,
             time: 0.0,
             orbit_n,
@@ -264,13 +266,31 @@ impl GameApp for Game3d {
         // Blit HDR scene colour → swapchain (passthrough, no tone-mapping).
         let swapchain = rf.swapchain_image(surface_image)?;
         swapchain.blit_from(&scene_color, &self.passthrough)?;
-        rf.present_image(&swapchain)?;
 
-        frame.set_runtime_overlay_lines(vec![
-            "3D Sample — Orbit Scene".into(),
+        let lines = [
+            "3D Sample — Orbit Scene".to_string(),
             format!("WASD orbit  Q/E zoom  R reset  LMB drag | t={t:.1}s"),
             format!("{} orbiting lights + 1 rect light", self.orbit_n),
-        ]);
+        ];
+        let mut overlay = DebugOverlay::new();
+        overlay.rounded_rectangle_outline_screen(
+            ext.width,
+            ext.height,
+            [16.0, 16.0],
+            [650.0, 120.0],
+            10.0,
+            3.0,
+            [1.0, 1.0, 1.0, 0.9],
+        );
+        for (index, line) in lines.iter().enumerate() {
+            overlay.add_screen_text(line.as_str(), 24.0, 24.0 + index as f32 * 26.0);
+        }
+        frame.run_camera_locked_pass("game_3d_hud", &swapchain, |render_frame, target| {
+            self.overlay
+                .draw(render_frame, target, ext.width, ext.height, &overlay)
+        })?;
+
+        rf.present_image(&swapchain)?;
         Ok(())
     }
 }
