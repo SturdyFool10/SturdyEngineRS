@@ -988,9 +988,12 @@ impl RuntimeApp for Testbed {
                 } else {
                     self.aa.mode
                 },
+                current_jitter_uv: None,
                 swapchain: &swapchain,
                 tonemap_program: &self.tonemap_program,
                 tonemap_constants: &tonemap_constants,
+                auto_exposure_pass: None,
+                auto_exposure_config: None,
             })?;
         }
         shell_frame.publish_runtime_diagnostics(

@@ -1457,6 +1457,12 @@ pub struct RuntimeDiagnostics {
     pub bloom_only: Option<bool>,
     pub motion_validation: Option<String>,
     pub motion_warning: Option<String>,
+    /// True when the auto-exposure histogram + adapt pipeline ran this frame.
+    pub auto_exposure_active: bool,
+    /// Latest readback from the auto-exposure exposure-state buffer, when
+    /// available.  Updated only when [`Self::auto_exposure_active`] is true and
+    /// the runtime polled the readback.
+    pub auto_exposure: Option<AutoExposureDiagnostics>,
     pub native_window_appearance: Option<String>,
     pub windows: RuntimeWindowDiagnostics,
     pub runtime_setting_apply: Option<String>,
@@ -1471,6 +1477,17 @@ pub struct RuntimeDiagnostics {
     pub shader_compile_errors: Vec<ShaderCompileError>,
     /// Asset paths that are missing or stale, surfaced via `RuntimeController::report_asset_state`.
     pub asset_diagnostics: Vec<AssetDiagnostic>,
+}
+
+/// Per-frame snapshot of auto-exposure state surfaced via [`RuntimeDiagnostics`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AutoExposureDiagnostics {
+    /// Currently adapted exposure (EV100) being applied to the scene.
+    pub adapted_ev: f32,
+    /// Last unblended target exposure (EV100) derived from the histogram.
+    pub target_ev: f32,
+    /// Mean linear luminance derived from this frame's histogram.
+    pub avg_luminance: f32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

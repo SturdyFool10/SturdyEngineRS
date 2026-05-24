@@ -12,6 +12,7 @@ mod ao_pass;
 mod application;
 mod asset_loader;
 mod asset_watcher;
+mod auto_exposure;
 mod bind_group;
 mod bindless;
 mod bloom_pass;
@@ -41,6 +42,7 @@ mod headless;
 mod hiz_pass;
 mod input;
 mod light_bvh;
+mod material_table;
 mod mesh;
 mod mesh_loader;
 mod mesh_program;
@@ -54,9 +56,12 @@ mod point_shadow_pass;
 mod post_process;
 mod procedural_texture;
 mod quad_batch;
+mod realtime_gi;
 mod realtime_raytracing;
 pub mod render_world;
+mod renderer_metrics;
 mod resource;
+mod resource_table;
 mod runtime;
 mod sampler_catalog;
 mod scene;
@@ -80,6 +85,7 @@ mod texture;
 mod texture_compression;
 mod ui_renderer;
 mod upload_arena;
+mod virtualized_geometry;
 mod window_registry;
 
 pub use animation::{
@@ -99,6 +105,7 @@ pub use application::{
 };
 pub use asset_loader::{AssetCache, AssetHandle, LoadState};
 pub use asset_watcher::{AssetReloadDiagnostic, AssetWatcher};
+pub use auto_exposure::{AutoExposurePass, AutoExposureReadback};
 pub use bloom_pass::{
     BloomCompositeConstants, BloomConfig, BloomPass, BrightPassConstants, DownsampleConstants,
     UpsampleConstants,
@@ -179,6 +186,10 @@ pub use input::{
     LateSample,
 };
 pub use light_bvh::{BVH_EMPTY, GpuBvhNode, LEAF_FLAG, LightBvhBuilder};
+pub use material_table::{
+    MaterialTableCaps, MaterialTableDirtyRange, MaterialTablePlan, MaterialTableSettings,
+    material_table_dirty_ranges,
+};
 pub use mesh::{Mesh, SkinnedVertex3d, Vertex2d, Vertex3d};
 pub use mesh_loader::{MeshAlphaMode, MeshMaterialParams, MeshPrimitive, MeshTextures};
 pub use mesh_program::{MeshProgram, MeshProgramDesc, MeshVertexKind};
@@ -193,29 +204,46 @@ pub use procedural_texture::{
     CpuProceduralTexture2d, ProceduralTextureRecipe, ProceduralTextureUpdatePolicy,
 };
 pub use quad_batch::QuadBatch;
+pub use realtime_gi::{
+    RealtimeGiCaps, RealtimeGiPath, RealtimeGiPlan, RealtimeGiRequest, RealtimeGiSettings,
+    RealtimeGiSurfaceCachePlan, RealtimeGiSurfaceCacheSettings,
+};
 pub use realtime_raytracing::{
     RealtimeBlas, RealtimeRayTracingDenoiser, RealtimeRayTracingPipeline,
     RealtimeRayTracingShaderDesc, RealtimeRayTracingSupport, RealtimeTlas, RealtimeTlasInstance,
 };
 pub use render_world::{
-    Aabb, GpuObjectAllocator, GpuObjectId, LayerMask, LocalToWorld, LodGroupId, MaterialId,
+    Aabb, GpuObjectAllocator, GpuObjectId, GpuTransformDirtyRange, GpuTransformSourceData,
+    LayerMask, LocalToWorld, LodGroupId, MaterialId, MaterialShaderClass, PipelineClass,
     PreviousTransform, RenderBounds, RenderDirtyFlags, RenderExtractionStats, RenderMaterial,
-    RenderMesh, RenderObjectState, RenderVisibility, RenderWorld, RenderWorldBatchRange,
-    RenderWorldCommand, RenderWorldCommands, RenderWorldGpuSceneData, RenderWorldGpuSceneStats,
-    VisibilityFlags,
+    RenderMesh, RenderObjectState, RenderStateClass, RenderVisibility, RenderWorld,
+    RenderWorldBatchRange, RenderWorldBinKey, RenderWorldCommand, RenderWorldCommands,
+    RenderWorldGpuCullCaps, RenderWorldGpuCullPlan, RenderWorldGpuCullSettings,
+    RenderWorldGpuMatrixCaps, RenderWorldGpuMatrixPlan, RenderWorldGpuMatrixSettings,
+    RenderWorldGpuSceneData, RenderWorldGpuSceneStats, RenderWorldGpuTransformSourceData,
+    RenderWorldPersistentBin, RenderWorldPersistentBinPlan, RenderWorldPersistentBins,
+    VertexLayoutClass, VisibilityFlags, gpu_transform_dirty_ranges,
+};
+pub use renderer_metrics::{
+    RendererWorkloadEvaluation, RendererWorkloadMetrics, RendererWorkloadMetricsBuilder,
+    RendererWorkloadTargets,
 };
 pub use resource::{
     AccelerationStructure, BindGroup, Buffer, Image, Pipeline, PipelineLayout,
     RayTracingShaderBindingTable, Sampler, Shader, Surface, SurfaceImage,
 };
+pub use resource_table::{
+    SceneResourceDirtyRange, SceneResourceId, SceneResourceTableCaps, SceneResourceTableKind,
+    SceneResourceTablePlan, SceneResourceTableSettings, scene_resource_dirty_ranges,
+};
 pub use runtime::{
-    AppLayer, AppRuntime, AppRuntimeFrame, AssetDiagnostic, AssetState, DebugImageRegistry,
-    DefaultSceneTargetConfig, FrameTimingReport, RuntimeApp, RuntimeApplyNotification,
-    RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult, RuntimeController,
-    RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimePassTiming, RuntimeSettingChange,
-    RuntimeSettingDescriptor, RuntimeSettingEntry, RuntimeSettingId, RuntimeSettingKey,
-    RuntimeSettingOption, RuntimeSettingSource, RuntimeSettingSupport, RuntimeSettingValue,
-    RuntimeSettingsSnapshot, RuntimeSettingsTransaction, RuntimeTimingSummary,
+    AppLayer, AppRuntime, AppRuntimeFrame, AssetDiagnostic, AssetState, AutoExposureDiagnostics,
+    DebugImageRegistry, DefaultSceneTargetConfig, FrameTimingReport, RuntimeApp,
+    RuntimeApplyNotification, RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult,
+    RuntimeController, RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimePassTiming,
+    RuntimeSettingChange, RuntimeSettingDescriptor, RuntimeSettingEntry, RuntimeSettingId,
+    RuntimeSettingKey, RuntimeSettingOption, RuntimeSettingSource, RuntimeSettingSupport,
+    RuntimeSettingValue, RuntimeSettingsSnapshot, RuntimeSettingsTransaction, RuntimeTimingSummary,
     RuntimeUserDiagnostic, RuntimeWindowDiagnostics, RuntimeWorkloadDiagnostics,
     SceneRenderContext, ShaderCompileError, UiContext, WindowMode,
 };
@@ -314,4 +342,8 @@ pub use sturdy_engine_platform::{
 pub use texture::{ImageCopyRegion, TextureUploadDesc};
 pub use texture_compression::{CompressedTexture, TextureKind, compress_texture};
 pub use ui_renderer::UiRenderer;
+pub use virtualized_geometry::{
+    DenseGeometryPlan, DenseGeometryResidencyPlan, DenseGeometryResidencySettings,
+    DenseGeometrySettings, VirtualGeometryLodParams,
+};
 pub use window_registry::{WindowHandle, WindowId, WindowRegistry};

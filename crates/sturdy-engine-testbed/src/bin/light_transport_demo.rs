@@ -136,9 +136,12 @@ impl RuntimeApp for LightTransportDemo {
             bloom_only: false,
             aa_pass: &self.aa_pass,
             aa_mode: AntiAliasingMode::Off,
+            current_jitter_uv: None,
             swapchain: &swapchain,
             tonemap_program: &self.tonemap_program,
             tonemap_constants: &TonemapParams::default(),
+            auto_exposure_pass: None,
+            auto_exposure_config: None,
         })?;
         shell_frame.publish_runtime_diagnostics("Off", 1, false, false);
 

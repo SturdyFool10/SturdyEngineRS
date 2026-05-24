@@ -561,9 +561,21 @@ pub struct RuntimePostProcessDesc<'a, T: bytemuck::Pod> {
     pub bloom_only: bool,
     pub aa_pass: &'a AntiAliasingPass,
     pub aa_mode: AntiAliasingMode,
+    /// Current-frame projection jitter in UV space, used to align TAA history
+    /// sampling with the jittered geometry passes.  Pass the same jitter value
+    /// that was added to the camera's projection matrix this frame.  Leave
+    /// `None` when no jitter was applied; the AA pass then falls back to its
+    /// internal Halton-sequence counter (the legacy path).
+    pub current_jitter_uv: Option<[f32; 2]>,
     pub swapchain: &'a GraphImage,
     pub tonemap_program: &'a ShaderProgram,
     pub tonemap_constants: &'a T,
+    /// Optional GPU auto-exposure pipeline.  When supplied alongside an
+    /// `auto_exposure_config` whose `enabled` field is true, the runtime runs
+    /// the histogram + adapt passes against `scene_color` (after bloom) and
+    /// reports the adapted EV in `RuntimeDiagnostics::auto_exposure`.
+    pub auto_exposure_pass: Option<&'a crate::AutoExposurePass>,
+    pub auto_exposure_config: Option<&'a crate::AutoExposureConfig>,
 }
 
 pub struct RuntimePostProcessOutput {
@@ -819,6 +831,21 @@ impl<'a> ShellFrame<'a> {
                 diagnostics.motion_warning.as_deref().unwrap_or("none")
             ),
             format!(
+                "auto-exposure: {} {}",
+                if diagnostics.auto_exposure_active {
+                    "on"
+                } else {
+                    "off"
+                },
+                diagnostics
+                    .auto_exposure
+                    .map(|ae| format!(
+                        "ev={:+.2} target={:+.2} avg_luma={:.4}",
+                        ae.adapted_ev, ae.target_ev, ae.avg_luminance
+                    ))
+                    .unwrap_or_else(|| "no readback".to_string()),
+            ),
+            format!(
                 "native window appearance: {}",
                 diagnostics
                     .native_window_appearance
@@ -970,18 +997,44 @@ impl<'a> ShellFrame<'a> {
                 desc.scene_color.clone()
             };
 
+        let (auto_exposure_active, auto_exposure_readback) = if let (Some(pass), Some(config)) =
+            (desc.auto_exposure_pass, desc.auto_exposure_config)
+            && config.enabled
+        {
+            pass.execute(&self.inner, &hdr_composite, config, self.delta_secs())?;
+            // Read back the previous frame's exposure-state buffer for the
+            // diagnostics overlay.  The fast path for tonemap consumption is
+            // to bind `exposure_state_buffer()` directly in the shader; this
+            // readback is for the debug overlay only.
+            let snapshot =
+                pass.read_back_state()
+                    .ok()
+                    .flatten()
+                    .map(|state| crate::AutoExposureDiagnostics {
+                        adapted_ev: state.adapted_ev,
+                        target_ev: state.target_ev,
+                        avg_luminance: state.avg_luminance,
+                    });
+            (true, snapshot)
+        } else {
+            (false, None)
+        };
+
         let (motion_source, motion_validation, motion_warning) =
             classify_motion_vectors(desc.motion_vectors);
         self.controller.update_diagnostics(|current| {
             current.motion_validation = Some(motion_validation);
             current.motion_warning = motion_warning;
+            current.auto_exposure_active = auto_exposure_active;
+            current.auto_exposure = auto_exposure_readback;
         });
 
-        let anti_aliased = desc.aa_pass.execute_with_motion_vectors(
+        let anti_aliased = desc.aa_pass.execute_with_motion_vectors_and_jitter(
             &self.inner,
             &hdr_composite,
             motion_source,
             desc.aa_mode,
+            desc.current_jitter_uv,
         )?;
 
         let show_motion_debug = self

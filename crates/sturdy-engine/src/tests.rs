@@ -1347,6 +1347,23 @@ fn post_process_passes_construct_builtin_shaders() {
 }
 
 #[test]
+fn auto_exposure_pass_constructs_and_buffers_have_expected_sizes() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let pass = crate::AutoExposurePass::new(&engine).unwrap();
+    // 256 bins × 4 bytes.
+    assert_eq!(pass.histogram_buffer().desc().size, 256 * 4);
+    // [adapted_ev, target_ev, sample_count, avg_luma] × 4 bytes.
+    assert_eq!(pass.exposure_state_buffer().desc().size, 16);
+}
+
+#[test]
+fn auto_exposure_pass_read_back_before_run_returns_none() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let pass = crate::AutoExposurePass::new(&engine).unwrap();
+    assert!(pass.read_back_state().unwrap().is_none());
+}
+
+#[test]
 fn engine_exposes_native_handle_capabilities() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     let capabilities = engine.native_handle_capabilities();

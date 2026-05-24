@@ -39,13 +39,15 @@ use crate::{
 
 // ── Config types ──────────────────────────────────────────────────────────────
 
-/// Reserved auto-exposure (eye adaptation) configuration.
+/// Auto-exposure (eye adaptation) configuration.
 ///
-/// The public fields match the planned luminance-histogram implementation, but
-/// the runtime pass is not executable until the engine has a reduction/history
-/// resource for scene luminance. `PostProcessPasses::execute` returns
-/// `Error::Unsupported` when this is enabled.
-///
+/// The actual histogram + adapt compute pipeline lives in
+/// [`AutoExposurePass`](crate::AutoExposurePass).  Construct one of those
+/// passes once at startup and call its `execute` method each frame, passing
+/// the pre-tonemap HDR scene image; the pass writes the adapted EV100 into a
+/// persistent GPU buffer that the tonemap shader can read.  `PostProcessPasses`
+/// does not run auto-exposure itself — it only carries this config so apps can
+/// keep their post-process settings in one place.
 #[derive(Clone, Debug)]
 pub struct AutoExposureConfig {
     pub enabled: bool,
@@ -201,7 +203,9 @@ impl Default for LensConfig {
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct PostProcessConfig {
-    /// Eye-adaptation auto-exposure (reserved; enabling returns `Unsupported`).
+    /// Eye-adaptation auto-exposure — config carried here so apps can keep
+    /// their post-process settings in one place.  The actual histogram + adapt
+    /// pipeline lives in [`AutoExposurePass`](crate::AutoExposurePass).
     pub auto_exposure: AutoExposureConfig,
     /// Animated film grain added after tone mapping.
     pub grain: GrainConfig,
@@ -478,11 +482,8 @@ impl PostProcessPasses {
         config: &PostProcessConfig,
         time_secs: f32,
     ) -> Result<GraphImage> {
-        if config.auto_exposure.enabled {
-            return Err(crate::Error::Unsupported(
-                "auto-exposure requires luminance histogram/reduction support that is not implemented yet",
-            ));
-        }
+        // `config.auto_exposure` is informational here — the actual exposure
+        // pipeline runs as a separate `AutoExposurePass` before tone-map.
         let after_lens = self.lens.execute(input, frame, &config.lens)?;
         let after_grain = self
             .grain

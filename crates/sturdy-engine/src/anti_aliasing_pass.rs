@@ -72,8 +72,29 @@ impl AntiAliasingPass {
         motion_vectors: Option<&GraphImage>,
         mode: AntiAliasingMode,
     ) -> Result<GraphImage> {
+        self.execute_with_motion_vectors_and_jitter(frame, source, motion_vectors, mode, None)
+    }
+
+    /// Run the AA pass with an explicit current-frame jitter UV.
+    ///
+    /// Pass `current_jitter_uv` when the geometry passes were rendered with a
+    /// jittered projection (the standard TAA pipeline).  The AA pass uses it
+    /// to compute the offset between the previous and current frame's history
+    /// samples so the temporal reprojection stays sub-pixel aligned.
+    ///
+    /// When `current_jitter_uv` is `None`, the pass falls back to its internal
+    /// Halton-sequence frame counter — legacy behaviour for callers that have
+    /// not yet plumbed camera jitter end-to-end.
+    pub fn execute_with_motion_vectors_and_jitter(
+        &self,
+        frame: &RenderFrame,
+        source: &GraphImage,
+        motion_vectors: Option<&GraphImage>,
+        mode: AntiAliasingMode,
+        current_jitter_uv: Option<[f32; 2]>,
+    ) -> Result<GraphImage> {
         let output = self.output_image(frame, source)?;
-        let frame_state = self.next_history_frame(source);
+        let frame_state = self.next_history_frame(source, current_jitter_uv);
         let history_read = self.history_image(frame, source, frame_state.history_index % 2)?;
         let history_write =
             self.history_image(frame, source, (frame_state.history_index + 1) % 2)?;
@@ -156,7 +177,11 @@ impl AntiAliasingPass {
         frame.image(format!("anti_aliasing_history_{index}"), desc)
     }
 
-    fn next_history_frame(&self, source: &GraphImage) -> AntiAliasingFrameState {
+    fn next_history_frame(
+        &self,
+        source: &GraphImage,
+        explicit_jitter: Option<[f32; 2]>,
+    ) -> AntiAliasingFrameState {
         let desc = source.desc();
         let key = AntiAliasingHistoryKey {
             width: desc.extent.width,
@@ -174,11 +199,13 @@ impl AntiAliasingPass {
             history.previous_jitter_uv = [0.0, 0.0];
         }
         let frame_index = history.frame_index;
-        let current_jitter_uv = taa_jitter_uv(
-            frame_index,
-            desc.extent.width.max(1),
-            desc.extent.height.max(1),
-        );
+        let current_jitter_uv = explicit_jitter.unwrap_or_else(|| {
+            taa_jitter_uv(
+                frame_index,
+                desc.extent.width.max(1),
+                desc.extent.height.max(1),
+            )
+        });
         let history_jitter_uv = [
             history.previous_jitter_uv[0] - current_jitter_uv[0],
             history.previous_jitter_uv[1] - current_jitter_uv[1],

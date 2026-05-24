@@ -360,6 +360,35 @@ impl DeferredPass {
         engine: &Engine,
         time: f32,
     ) -> Result<()> {
+        self.draw_with_previous_view_proj(
+            scene,
+            view,
+            proj,
+            proj * view,
+            output,
+            frame,
+            engine,
+            time,
+        )
+    }
+
+    /// Same as [`DeferredPass::draw`] but also receives the previous frame's
+    /// view-projection matrix.  The vertex shader uses this to compute
+    /// per-vertex velocity for motion-vector and TAA passes.  Passing the
+    /// current view-projection matrix here disables motion (the legacy
+    /// behaviour of [`Self::draw`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_with_previous_view_proj(
+        &mut self,
+        scene: &mut Scene,
+        view: Mat4,
+        proj: Mat4,
+        previous_view_proj: Mat4,
+        output: &GraphImage,
+        frame: &RenderFrame,
+        engine: &Engine,
+        time: f32,
+    ) -> Result<()> {
         // ── 1. Upload lighting uniform + build lights buffer ──────────────────
         scene.prepare_deferred_lighting(view, engine, frame)?;
 
