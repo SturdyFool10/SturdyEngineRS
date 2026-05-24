@@ -72,6 +72,8 @@ pub struct CommandContext {
     /// Per-pass GPU timings from the previous frame (name, milliseconds).
     /// Empty until the second `submit_graph` call (first readback).
     pub pass_timings: Vec<(String, f32)>,
+    /// CPU wall time spent waiting on the reused frame slot during the most recent submit.
+    last_submit_gpu_wait_ms: f32,
     acceleration_structure_scratch: Vec<VulkanScratchBuffer>,
     /// AMD buffer marker breadcrumb buffer (debug builds only).
     #[cfg(debug_assertions)]
@@ -198,6 +200,7 @@ impl CommandContext {
             pending_pass_names: Vec::new(),
             pending_pass_count: 0,
             pass_timings: Vec::new(),
+            last_submit_gpu_wait_ms: 0.0,
             acceleration_structure_scratch: Vec::new(),
             #[cfg(debug_assertions)]
             breadcrumb,
@@ -256,8 +259,10 @@ impl CommandContext {
         // Suppress unused warning when debug_assertions are disabled.
         #[cfg(not(debug_assertions))]
         let _ = &diagnostic_checkpoints_nv;
+        self.last_submit_gpu_wait_ms = 0.0;
         // Wait for the previous frame before reusing pools / fence.
         if self.frame_submitted {
+            let wait_start = std::time::Instant::now();
             unsafe {
                 device
                     .wait_for_fences(&[self.frame_fence], true, u64::MAX)
@@ -270,6 +275,7 @@ impl CommandContext {
                             Error::Backend(format!("vkWaitForFences failed: {e:?}"))
                         }
                     })?;
+                self.last_submit_gpu_wait_ms = wait_start.elapsed().as_secs_f32() * 1000.0;
                 device
                     .reset_fences(&[self.frame_fence])
                     .map_err(|e| Error::Backend(format!("vkResetFences failed: {e:?}")))?;
@@ -686,6 +692,10 @@ impl CommandContext {
         self.submission_count += 1;
         self.frame_submitted = true;
         Ok(SubmissionHandle(self.submission_count))
+    }
+
+    pub fn last_submit_gpu_wait_ms(&self) -> f32 {
+        self.last_submit_gpu_wait_ms
     }
 
     /// Block until the GPU finishes the work represented by `token`.
@@ -3541,6 +3551,7 @@ pub struct FramedCommands {
     next_slot: usize,
     /// Monotonically-increasing counter.  The `n`-th submission used slot `(n-1) % N`.
     total_submissions: u64,
+    last_submit_gpu_wait_ms: f32,
 }
 
 impl FramedCommands {
@@ -3567,6 +3578,7 @@ impl FramedCommands {
             contexts,
             next_slot: 0,
             total_submissions: 0,
+            last_submit_gpu_wait_ms: 0.0,
         })
     }
 
@@ -3643,10 +3655,15 @@ impl FramedCommands {
             wait_semaphore,
             signal_semaphore,
         )?;
+        self.last_submit_gpu_wait_ms = self.contexts[slot].last_submit_gpu_wait_ms();
         self.next_slot = (slot + 1) % self.contexts.len();
         // Override the per-context submission handle with the global counter so
         // callers can correlate handles across slots.
         Ok(SubmissionHandle(self.total_submissions))
+    }
+
+    pub fn last_submit_gpu_wait_ms(&self) -> f32 {
+        self.last_submit_gpu_wait_ms
     }
 
     /// Wait for a specific submission.  Uses `handle % N` to identify the slot,

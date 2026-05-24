@@ -786,6 +786,15 @@ pub trait Backend: Send + Sync {
     fn pass_timings(&self) -> Vec<crate::PassTimingReport> {
         Vec::new()
     }
+
+    /// CPU wall time spent waiting for GPU completion during the most recent submit.
+    ///
+    /// This captures implicit slot/fence waits inside `flush` so higher layers can
+    /// report active CPU frame time separately from CPU time blocked on the GPU.
+    fn last_submit_gpu_wait_ms(&self) -> f32 {
+        0.0
+    }
+
     fn present(&self) -> Result<()>;
     fn wait_idle(&self) -> Result<()>;
 }

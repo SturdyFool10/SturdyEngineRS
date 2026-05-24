@@ -2208,6 +2208,14 @@ impl Backend for VulkanBackend {
             .collect()
     }
 
+    fn last_submit_gpu_wait_ms(&self) -> f32 {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .last_submit_gpu_wait_ms()
+    }
+
     fn wait_submission(&self, token: SubmissionHandle) -> Result<()> {
         tracing::trace!(?token, "waiting for GPU submission to complete");
         let result = self

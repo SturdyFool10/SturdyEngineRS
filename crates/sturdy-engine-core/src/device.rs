@@ -402,6 +402,16 @@ impl Device {
             .pass_timings()
     }
 
+    pub fn last_submit_gpu_wait_ms(&self) -> f32 {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .backend
+            .last_submit_gpu_wait_ms()
+    }
+
+    // ── GFX-4a: Video decode/encode session creation ───────────────────────
     pub fn format_capabilities(&self, format: Format) -> FormatCapabilities {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner

@@ -299,6 +299,8 @@ impl AppRuntime {
         let frame_time = self.frame_clock.tick();
         let surface_image = self.surface.acquire_image()?;
         let render_frame = self.engine.begin_render_frame_for(&surface_image)?;
+        let (device, handle) = self.surface.auto_present_info();
+        render_frame.configure_auto_present(device, handle);
         Ok(AppRuntimeFrame {
             runtime: self,
             surface_image,
@@ -493,6 +495,18 @@ impl<'a> AppRuntimeFrame<'a> {
         self.runtime.debug_images.register(image, name);
     }
 
+    /// Save a named graph image from this frame as a PNG.
+    ///
+    /// This is an explicit blocking screenshot/readback helper. It submits and
+    /// waits for the current render graph with `FrameSyncReason::ReadbackCompletion`.
+    pub fn save_named_graph_image_png(
+        &self,
+        name: &str,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<crate::ScreenshotExportReport> {
+        self.shell_frame().save_named_graph_image_png(name, path)
+    }
+
     /// Return the shared runtime settings/diagnostics controller.
     pub fn runtime_controller(&self) -> RuntimeController {
         self.runtime.controller.clone()
@@ -506,52 +520,19 @@ impl<'a> AppRuntimeFrame<'a> {
     /// Format default diagnostics into overlay-friendly lines.
     ///
     /// Equivalent to [`ShellFrame::default_runtime_overlay_lines`] — useful when
-    /// displaying a standard diagnostics overlay without using the shell frame.
+    /// displaying a standard diagnostics overlay without constructing a shell frame.
     pub fn default_runtime_overlay_lines(&self) -> Vec<String> {
-        let diagnostics = self.runtime.controller.diagnostics();
-        let debug_images = if diagnostics.debug_images.is_empty() {
-            "none".to_string()
-        } else {
-            diagnostics.debug_images.join(", ")
-        };
-        vec![
-            format!(
-                "runtime: backend={:?} adapter={}",
-                diagnostics.backend,
-                diagnostics.adapter_name.as_deref().unwrap_or("<unknown>")
-            ),
-            format!(
-                "surface: {:?} {:?}",
-                diagnostics.surface_format, diagnostics.surface_color_space,
-            ),
-            format!(
-                "graph: passes={} images={} warnings={} errors={} timings={}",
-                diagnostics.graph.pass_count,
-                diagnostics.graph.image_count,
-                diagnostics.graph.warning_count,
-                diagnostics.graph.error_count,
-                if diagnostics.timings.available {
-                    "available"
-                } else {
-                    "pending"
-                },
-            ),
-            format!(
-                "cpu: {:.1}ms p95={:.1}ms p99={:.1}ms",
-                diagnostics.timings.cpu_frame_time_ms.unwrap_or(0.0),
-                diagnostics.timings.cpu_p95_ms.unwrap_or(0.0),
-                diagnostics.timings.cpu_p99_ms.unwrap_or(0.0),
-            ),
-            format!(
-                "gpu: {}",
-                diagnostics
-                    .timings
-                    .gpu_frame_time_ms
-                    .map(|ms| format!("{ms:.1}ms"))
-                    .unwrap_or_else(|| "pending".to_string()),
-            ),
-            format!("debug images: {debug_images}"),
-        ]
+        self.shell_frame().default_runtime_overlay_lines()
+    }
+
+    /// Return compact render-graph inspection lines for the frame recorded so far.
+    pub fn runtime_graph_inspection_lines(
+        &self,
+        max_passes: usize,
+        max_images: usize,
+    ) -> Vec<String> {
+        self.shell_frame()
+            .runtime_graph_inspection_lines(max_passes, max_images)
     }
 
     /// Run the default HDR post chain from scene color through tonemap.
@@ -633,19 +614,23 @@ impl<'a> AppRuntimeFrame<'a> {
         {
             Ok(report) => report,
             Err(error) => {
-                tracing::error!("frame flush failed before present: {error:?}");
+                tracing::error!("frame flush/auto-present failed: {error:?}");
                 return Err(error);
             }
         };
+        let submit_gpu_wait_ms = self.runtime.engine.device.last_submit_gpu_wait_ms();
+        let active_cpu_ms =
+            self.runtime.frame_start.as_ref().map(|start| {
+                (start.elapsed().as_secs_f32() * 1000.0 - submit_gpu_wait_ms).max(0.0)
+            });
+        let mut gpu_wait_ms = (submit_gpu_wait_ms > 0.0).then_some(submit_gpu_wait_ms);
         if self.wait_for_gpu_before_present {
+            let wait_start = Instant::now();
             self.render_frame
                 .wait_with_reason(crate::FrameSyncReason::FrameBoundaryPresent)?;
+            let explicit_wait_ms = wait_start.elapsed().as_secs_f32() * 1000.0;
+            gpu_wait_ms = Some(gpu_wait_ms.unwrap_or(0.0) + explicit_wait_ms);
         }
-        if let Err(error) = self.runtime.surface.present() {
-            tracing::error!("surface present failed after successful frame flush: {error:?}");
-            return Err(error);
-        }
-        self.render_frame.mark_presented();
         self.runtime.controller.update_diagnostics(|d| {
             d.frame_sync = Some(format!(
                 "reason={:?} submitted={} waited={} presented=true submission={:?}",
@@ -655,8 +640,8 @@ impl<'a> AppRuntimeFrame<'a> {
                 flush_report.submission
             ));
         });
-        if let Some(start) = self.runtime.frame_start.take() {
-            let cpu_ms = start.elapsed().as_secs_f32() * 1000.0;
+        if self.runtime.frame_start.take().is_some() {
+            let cpu_ms = active_cpu_ms.unwrap_or(0.0);
             self.runtime.cpu_time_history.push(cpu_ms);
             let percentiles = self.runtime.cpu_time_history.percentiles();
             let pass_timings_raw = self.runtime.engine.device.pass_timings();
@@ -680,6 +665,7 @@ impl<'a> AppRuntimeFrame<'a> {
             self.runtime.controller.update_diagnostics(|d| {
                 d.timings.available = true;
                 d.timings.cpu_frame_time_ms = Some(cpu_ms);
+                d.timings.gpu_wait_time_ms = gpu_wait_ms;
                 d.timings.gpu_frame_time_ms = gpu_ms;
                 d.timings.present_to_display_ms = present_to_display_ms;
                 d.timings.total_latency_ms = total_latency_ms;
@@ -1517,8 +1503,11 @@ pub struct RuntimeGraphDiagnostics {
 /// Obtained via [`Engine::frame_timing()`] from any thread at any time.
 #[derive(Clone, Debug)]
 pub struct FrameTimingReport {
+    /// CPU time spent building/submitting the frame, excluding explicit GPU waits.
     pub cpu_ms: f32,
     pub gpu_ms: Option<f32>,
+    /// CPU time intentionally blocked waiting for GPU completion, tracked separately from `cpu_ms`.
+    pub gpu_wait_ms: Option<f32>,
     /// Time from present submission to scan-out/display, when the backend can report it.
     pub present_to_display_ms: Option<f32>,
     /// End-to-end latency estimate from frame CPU start through display, when all measured
@@ -1539,6 +1528,7 @@ impl FrameTimingReport {
         Some(Self {
             cpu_ms,
             gpu_ms: s.gpu_frame_time_ms,
+            gpu_wait_ms: s.gpu_wait_time_ms,
             present_to_display_ms: s.present_to_display_ms,
             total_latency_ms: s.total_latency_ms,
             mean_cpu_ms: mean,
@@ -1610,7 +1600,10 @@ pub struct RuntimeWorkloadDiagnostics {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RuntimeTimingSummary {
     pub available: bool,
+    /// CPU time spent building/submitting the frame, excluding explicit GPU waits.
     pub cpu_frame_time_ms: Option<f32>,
+    /// CPU wall time spent in explicit GPU waits requested by the app/runtime.
+    pub gpu_wait_time_ms: Option<f32>,
     pub gpu_frame_time_ms: Option<f32>,
     pub present_to_display_ms: Option<f32>,
     pub total_latency_ms: Option<f32>,

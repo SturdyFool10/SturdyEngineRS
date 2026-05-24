@@ -1262,7 +1262,9 @@ impl RenderFrame {
         let mut inner = self.inner.borrow_mut();
         inner.flushed = true;
         submit_pending_passes(&mut inner)?;
-        inner.frame.flush()
+        let submission = inner.frame.flush()?;
+        auto_present_if_configured(&mut inner)?;
+        Ok(submission)
     }
 
     pub fn flush_with_reason(
@@ -1551,6 +1553,17 @@ impl RenderFrame {
     }
 }
 
+fn auto_present_if_configured(inner: &mut RenderFrameInner) -> Result<()> {
+    if inner.presented {
+        return Ok(());
+    }
+    if let Some((ref device, handle)) = inner.auto_present {
+        device.present_surface(handle)?;
+        inner.presented = true;
+    }
+    Ok(())
+}
+
 impl Drop for RenderFrame {
     fn drop(&mut self) {
         if Rc::strong_count(&self.inner) != 1 {
@@ -1565,10 +1578,7 @@ impl Drop for RenderFrame {
             let _ = inner.frame.flush();
             inner.flushed = true;
         }
-        if let Some((ref device, handle)) = inner.auto_present {
-            let _ = device.present_surface(handle);
-            inner.presented = true;
-        }
+        let _ = auto_present_if_configured(&mut inner);
     }
 }
 

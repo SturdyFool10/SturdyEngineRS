@@ -748,7 +748,35 @@ impl<'a> ShellFrame<'a> {
                 },
             ),
             format!(
-                "workload: visible_tris={} submitted_tris={} draws={} dispatches={} upload={}",
+                "timing: cpu={} gpu={} gpu-wait={} cpu-p95={} cpu-p99={}",
+                diagnostics
+                    .timings
+                    .cpu_frame_time_ms
+                    .map(|ms| format!("{ms:.2}ms"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                diagnostics
+                    .timings
+                    .gpu_frame_time_ms
+                    .map(|ms| format!("{ms:.2}ms"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                diagnostics
+                    .timings
+                    .gpu_wait_time_ms
+                    .map(|ms| format!("{ms:.2}ms"))
+                    .unwrap_or_else(|| "0.00ms".to_string()),
+                diagnostics
+                    .timings
+                    .cpu_p95_ms
+                    .map(|ms| format!("{ms:.2}ms"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                diagnostics
+                    .timings
+                    .cpu_p99_ms
+                    .map(|ms| format!("{ms:.2}ms"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+            ),
+            format!(
+                "workload: visible_tris={} submitted_tris={} draws={} dispatches={} memory={} upload={}",
                 diagnostics
                     .workload
                     .visible_triangles
@@ -769,10 +797,14 @@ impl<'a> ShellFrame<'a> {
                     .dispatch_count
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "n/a".to_string()),
+                format_memory_budget(
+                    diagnostics.workload.memory_used_bytes,
+                    diagnostics.workload.memory_budget_bytes,
+                ),
                 diagnostics
                     .workload
                     .upload_bytes
-                    .map(|value| format!("{value}B"))
+                    .map(format_bytes)
                     .unwrap_or_else(|| "n/a".to_string()),
             ),
             format!(
@@ -1017,6 +1049,31 @@ impl<'a> ShellFrame<'a> {
             ));
         });
         Ok(())
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.1}GiB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.1}MiB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.1}KiB", bytes / KIB)
+    } else {
+        format!("{bytes:.0}B")
+    }
+}
+
+fn format_memory_budget(used: Option<u64>, budget: Option<u64>) -> String {
+    match (used, budget) {
+        (Some(used), Some(budget)) => format!("{}/{}", format_bytes(used), format_bytes(budget)),
+        (Some(used), None) => format_bytes(used),
+        (None, Some(budget)) => format!("budget {}", format_bytes(budget)),
+        (None, None) => "n/a".to_string(),
     }
 }
 

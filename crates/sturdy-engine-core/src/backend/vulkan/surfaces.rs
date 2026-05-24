@@ -38,6 +38,8 @@ struct VulkanSwapchain {
     extent: vk::Extent2D,
     images: Vec<vk::Image>,
     image_views: Vec<vk::ImageView>,
+    /// Engine usage flags matching the swapchain image usage selected at creation.
+    image_usage: ImageUsage,
     /// One presentation wait semaphore per swapchain image.
     ///
     /// A semaphore waited by presentation cannot be reused until the image it
@@ -299,7 +301,7 @@ impl SurfaceRegistry {
                 layers: 1,
                 samples: 1,
                 format: vk_format_to_engine(surface.swapchain.format)?,
-                usage: ImageUsage::RENDER_TARGET | ImageUsage::PRESENT | ImageUsage::COPY_DST,
+                usage: surface.swapchain.image_usage,
                 transient: false,
                 clear_value: None,
                 debug_name: Some("surface image"),
@@ -542,6 +544,26 @@ fn create_swapchain(
     let extent = choose_extent(&capabilities, size);
     let image_count = choose_image_count(&capabilities);
     let composite_alpha = choose_composite_alpha(&capabilities, transparent);
+    let supports_storage = capabilities
+        .supported_usage_flags
+        .contains(vk::ImageUsageFlags::STORAGE);
+    let storage_vk_usage = if supports_storage {
+        vk::ImageUsageFlags::STORAGE
+    } else {
+        vk::ImageUsageFlags::empty()
+    };
+    let vk_image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
+        | vk::ImageUsageFlags::TRANSFER_DST
+        | storage_vk_usage;
+    let storage_engine_usage = if supports_storage {
+        ImageUsage::STORAGE
+    } else {
+        ImageUsage::empty()
+    };
+    let engine_image_usage = ImageUsage::RENDER_TARGET
+        | ImageUsage::PRESENT
+        | ImageUsage::COPY_DST
+        | storage_engine_usage;
     tracing::info!(
         width = extent.width,
         height = extent.height,
@@ -549,6 +571,7 @@ fn create_swapchain(
         vk_color_space = format.color_space.as_raw(),
         vk_present_mode = present_mode.as_raw(),
         image_count,
+        storage = supports_storage,
         timeline_semaphore = use_timeline,
         "creating swapchain"
     );
@@ -559,7 +582,7 @@ fn create_swapchain(
         .image_color_space(format.color_space)
         .image_extent(extent)
         .image_array_layers(1)
-        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
+        .image_usage(vk_image_usage)
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(capabilities.current_transform)
         .composite_alpha(composite_alpha)
@@ -675,6 +698,7 @@ fn create_swapchain(
         extent,
         images,
         image_views,
+        image_usage: engine_image_usage,
         render_finished,
         render_finished_timeline,
         render_finished_value: 0,

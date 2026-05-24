@@ -52,7 +52,7 @@ The runtime shell should own the common frame pipeline. Testbed/example code sho
 - [x] Add `run_with_runtime<App: RuntimeApp>(config)` and `try_run_with_runtime` as the primary entry points.
 - [x] Create `AppRuntime` before calling app init so the app sees surface/engine state from the start.
 - [x] `AppRuntimeFrame::finish_and_present` records CPU time, P95/P99, and GPU pass timings into `RuntimeDiagnostics`.
-- [x] `AppRuntimeFrame` exposes `window_scale_factor`, `window_logical_size`, `runtime_controller`, `runtime_diagnostics`, `register_debug_image`, `default_runtime_overlay_lines`, and `shell_frame()` bridge.
+- [x] `AppRuntimeFrame` exposes `window_scale_factor`, `window_logical_size`, `runtime_controller`, `runtime_diagnostics`, `register_debug_image`, `save_named_graph_image_png`, `default_runtime_overlay_lines`, `runtime_graph_inspection_lines`, and `shell_frame()` bridge.
 - [x] Migrate testbed main, shader_playground, plot_demo, coordinate_validation, and ui_demo from `EngineApp`/`GameApp` to `RuntimeApp`.
 - [ ] Migrate `game_2d` and `game_3d` testbed binaries from `GameApp` to `RuntimeApp` (or add fixed-step support to RuntimeApp).
 - [x] Expose `AppRuntimeFrame::run_default_post_process` that handles HDR, bloom, AA, tonemapping, and debug images without per-example wiring.
@@ -62,16 +62,16 @@ The runtime shell should own the common frame pipeline. Testbed/example code sho
 - [x] Settings changes are applied via `RuntimeSettingsTransaction`.
 - [x] Surface settings (HDR, present mode, transparency) report `Applied`, `Degraded`, or `Failed` with reason and apply path.
 - [x] Window settings (title, size, decorations, resizable, always-on-top, corner style) apply immediately.
-- [ ] Apply settings changes through the `RuntimeApp::runtime_settings_changed` callback automatically.
+- [x] Apply settings changes through the `RuntimeApp::runtime_settings_changed` callback automatically.
 - [ ] Every setting application must report `Applied`, `Degraded`, or `Rejected` with a reason and apply path — extend to all remaining settings (AA, bloom, AO, shadow quality).
 - [ ] Support apply paths for graph rebuilds and deferred/device-level changes.
 
 ### Debug shell
 
-- [ ] Expose HDR, AA, post stack, render targets, pass timings, memory, graph inspection, backend/capability details, and runtime setting results via a consistent debug overlay.
-- [ ] Support screenshot/export from the shell.
+- [x] Expose HDR, AA, post stack, render targets, pass timings, memory, graph inspection, backend/capability details, and runtime setting results via a consistent debug overlay.
+- [x] Support screenshot/export from the shell.
 - [ ] Support shader and asset hot reload from the shell.
-- [ ] Make debug image registration a renderer/runtime service, not testbed-local state.
+- [x] Make debug image registration a renderer/runtime service, not testbed-local state.
 
 Acceptance: a new graphical app gets the serious renderer, diagnostics, settings, and debug shell by default.
 
@@ -296,7 +296,7 @@ Ray tracing should wait as a visual-feature priority until bindless resources, m
 1. ~~Route existing testbed examples through RuntimeApp instead of GameApp/EngineApp.~~ ✅ Done (main, shader_playground, plot_demo, coordinate_validation, ui_demo migrated).
 2. Migrate `game_2d` and `game_3d` to `RuntimeApp` (needs fixed-step support or InputHub pattern).
 3. ~~Expose `AppRuntimeFrame::run_default_post_process` so new apps don't need per-example bloom/AA/tonemap wiring.~~ ✅ Done.
-4. Add screenshot/export and graph inspection from the debug shell.
+4. ~~Add screenshot/export and graph inspection from the debug shell.~~ ✅ Done.
 5. Implement GPU transform build from compact object buffers.
 6. Replace per-batch culling with one GPU cull pass per view.
 7. Wire Hi-Z into occlusion culling.
