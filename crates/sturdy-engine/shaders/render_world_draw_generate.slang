@@ -1,8 +1,9 @@
 // RenderWorld GPU draw generation v0.
 //
-// One thread scans one persistent bin's object range and writes one indirect
-// command for that bin. This is intentionally conservative: it establishes the
-// GPU-owned draw-generation contract before a later dense compaction pass.
+// One thread scans one persistent bin's object range, compacts visible object
+// slots into a per-bin remap table, and writes one indirect command for that bin.
+// The remap table lets a RenderWorld-aware vertex shader safely handle sparse
+// visibility by mapping SV_InstanceID through render_world_visible_instances.
 
 struct DrawIndexedIndirectCommand {
   uint index_count;
@@ -27,6 +28,7 @@ StructuredBuffer<RenderWorldGpuBinData> render_world_bins;
 StructuredBuffer<uint> visible_object_flags;
 RWStructuredBuffer<DrawIndexedIndirectCommand> render_world_indirect_commands;
 RWStructuredBuffer<uint> render_world_visible_draw_count;
+RWStructuredBuffer<uint> render_world_visible_instances;
 
 struct DrawGenerationConstants {
   uint bin_count;
@@ -46,7 +48,10 @@ void main(uint3 tid: SV_DispatchThreadID) {
   uint visible_count = 0;
   for (uint i = 0; i < bin.object_count; ++i) {
     uint object_slot = bin.first_object_slot + i;
-    visible_count += visible_object_flags[object_slot] != 0u ? 1u : 0u;
+    if (visible_object_flags[object_slot] != 0u) {
+      render_world_visible_instances[bin.first_object_slot + visible_count] = object_slot;
+      visible_count += 1u;
+    }
   }
 
   DrawIndexedIndirectCommand cmd;

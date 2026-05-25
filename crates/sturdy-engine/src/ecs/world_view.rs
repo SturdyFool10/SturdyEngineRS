@@ -246,8 +246,22 @@ impl<'w> WorldView<'w> {
     // ── Resource access ───────────────────────────────────────────────────────
 
     /// Borrow a resource immutably. Returns `None` if not present.
+    ///
+    /// Parallel systems should declare this with [`SystemAccess::read_resource`](super::SystemAccess::read_resource).
     pub fn resource<R: 'static>(&self) -> Option<&R> {
         unsafe { self.world.as_ref() }.resource::<R>()
+    }
+
+    /// Borrow a resource mutably. Returns `None` if not present.
+    ///
+    /// Parallel systems should declare this with [`SystemAccess::write_resource`](super::SystemAccess::write_resource).
+    /// The compiled scheduler guarantees that no other system in the same wave reads or writes
+    /// the same resource type while this mutable borrow is live.
+    pub fn resource_mut<R: 'static>(&self) -> Option<&mut R> {
+        // SAFETY: WorldView is only created while CompiledSchedule::run holds an exclusive
+        // `&mut World`. The scheduler prevents concurrent readers/writers for this resource
+        // type within a wave based on each system's SystemAccess declaration.
+        unsafe { &mut *self.world.as_ptr() }.resource_mut::<R>()
     }
 
     // ── Entity access ─────────────────────────────────────────────────────────

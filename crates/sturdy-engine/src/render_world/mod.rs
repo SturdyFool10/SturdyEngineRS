@@ -36,7 +36,7 @@ pub use aabb::Aabb;
 pub use batch_range::RenderWorldBatchRange;
 pub use dirty_flags::RenderDirtyFlags;
 pub use extraction_stats::RenderExtractionStats;
-pub use gpu_cull_pass::RenderWorldGpuCullPass;
+pub use gpu_cull_pass::{HIZ_MAX_LEVELS, HizOcclusionInput, RenderWorldGpuCullPass};
 pub use gpu_cull_plan::{
     RenderWorldGpuCullCaps, RenderWorldGpuCullPlan, RenderWorldGpuCullSettings,
 };

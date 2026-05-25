@@ -12,10 +12,12 @@ struct GpuTransformSourceData {
   float3 scale;
   uint flags;
   float3 previous_translation;
-  uint _pad0;
+  float local_sphere_radius;    // local bounding sphere radius
   float4 previous_rotation;
   float3 previous_scale;
   uint _pad1;
+  float3 local_sphere_center;   // local bounding sphere center
+  uint _pad2;
 };
 
 struct NormalMatrixData {
@@ -87,8 +89,18 @@ NormalMatrixData normal_matrix_from_trs(float4 rotation, float3 scale) {
   return out_matrix;
 }
 
-float conservative_world_radius(float3 scale) {
-  return max(max(abs(scale.x), abs(scale.y)), abs(scale.z));
+// Compute world-space bounding sphere from local sphere + TRS.
+// The sphere is first scaled (non-uniform scale turns it into an ellipsoid),
+// then rotated and translated. A conservative bounding sphere is recovered by
+// using max(|scale|) as the world radius multiplier.
+float4 world_bounding_sphere(float3 translation, float4 rotation, float3 scale,
+                             float3 local_center, float local_radius) {
+  float3x3 r = rotation_matrix_from_quat(rotation);
+  // Scale then rotate the local center to get world offset, then add translation.
+  float3 world_center = mul(r, scale * local_center) + translation;
+  // Conservative world radius: scale the local radius by the largest scale axis.
+  float world_radius = max(max(abs(scale.x), abs(scale.y)), abs(scale.z)) * local_radius;
+  return float4(world_center, world_radius);
 }
 
 [numthreads(64, 1, 1)]
@@ -107,9 +119,7 @@ void main(uint3 tid: SV_DispatchThreadID) {
   normal_matrices[object_index] =
       normal_matrix_from_trs(source.rotation, source.scale);
 
-  // TODO: replace this placeholder with local render bounds once compact bounds
-  // are moved into the transform source table. For now this still provides a
-  // stable GPU-written bounds table for downstream cull-path integration.
-  world_bounds[object_index] =
-      float4(source.translation, conservative_world_radius(source.scale));
+  world_bounds[object_index] = world_bounding_sphere(
+      source.translation, source.rotation, source.scale,
+      source.local_sphere_center, source.local_sphere_radius);
 }

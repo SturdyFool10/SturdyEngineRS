@@ -15,13 +15,14 @@ use super::{
 };
 use crate::{
     Buffer, BufferDesc, BufferUsage, ComputeProgram, DrawIndexedIndirectCommand, Engine, Error,
-    Format, Frustum, GeometryBackend, GraphImage, ImageDesc, ImageDimension, ImageUsage, Mesh,
-    MeshProgram, RenderFrame, Result,
+    Format, Frustum, GeometryBackend, GraphImage, HizHistory, HizPass, ImageDesc, ImageDimension,
+    ImageUsage, Mesh, MeshProgram, RenderFrame, Result,
     render_world::{
-        GpuObjectId, MaterialShaderClass, PipelineClass, RenderStateClass, RenderWorld,
-        RenderWorldGpuCullPass, RenderWorldGpuCullSettings, RenderWorldGpuDrawGenerationPass,
-        RenderWorldGpuMatrixSettings, RenderWorldGpuMeshDrawInfo, RenderWorldGpuTransformBuildPass,
-        RenderWorldPersistentBins, VertexLayoutClass, VisibilityFlags,
+        GpuObjectId, HizOcclusionInput, MaterialShaderClass, PipelineClass, RenderStateClass,
+        RenderWorld, RenderWorldGpuCullPass, RenderWorldGpuCullSettings,
+        RenderWorldGpuDrawGenerationPass, RenderWorldGpuMatrixSettings, RenderWorldGpuMeshDrawInfo,
+        RenderWorldGpuTransformBuildPass, RenderWorldPersistentBins, VertexLayoutClass,
+        VisibilityFlags,
     },
 };
 use sturdy_engine_core::Extent3d;
@@ -93,6 +94,11 @@ pub struct Scene {
     gpu_draw_bins: RenderWorldPersistentBins,
     /// Set by `prepare_internal()` each frame; tells the draw path to use GPU indirect.
     pub(super) gpu_cull_active: bool,
+    /// Hi-Z depth pyramid builder (lazily created alongside the cull pass).
+    hiz_pass: Option<HizPass>,
+    /// Ping-pong history for the Hi-Z pyramid — retains last frame's levels for
+    /// use as the occlusion input on the next frame.
+    hiz_history: HizHistory,
     /// Elapsed application time in seconds. Written by `set_app_time` and read
     /// by `draw()` / `draw_gbuffer()` to populate `CameraConstants::time` so
     /// material expressions that use `cam.time` animate correctly.
@@ -126,6 +132,8 @@ impl Scene {
             draw_generation_pass: None,
             gpu_draw_bins: RenderWorldPersistentBins::default(),
             gpu_cull_active: false,
+            hiz_pass: None,
+            hiz_history: HizHistory::new(),
             app_time_secs: 0.0,
         }
     }
@@ -175,6 +183,16 @@ impl Scene {
                 RenderWorldGpuMeshDrawInfo::indexed(MeshId::from_raw(mesh_idx as u32), index_count)
             })
             .collect()
+    }
+
+    fn render_world_draw_programs_ready(&self) -> bool {
+        !self.gpu_draw_bins.is_empty()
+            && self.gpu_draw_bins.bins.iter().all(|bin| {
+                self.meshes
+                    .get(bin.key.mesh.index())
+                    .map(|(_, program)| program.uses_render_world_instances())
+                    .unwrap_or(false)
+            })
     }
 
     /// Register a mesh+program pair. Returns a `MeshId` used to spawn objects.
@@ -560,7 +578,7 @@ impl Scene {
             render_world.prepare_gpu_cull_outputs(
                 engine,
                 RenderWorldGpuCullSettings::default(),
-                false,
+                !self.hiz_history.is_empty(),
             )?;
             self.gpu_draw_bins = self.build_render_world_draw_bins(render_world);
             render_world.prepare_gpu_draw_generation(
@@ -575,14 +593,13 @@ impl Scene {
             if self.cull_pass.is_none() {
                 self.cull_pass = Some(RenderWorldGpuCullPass::new(engine)?);
             }
+            if self.hiz_pass.is_none() {
+                self.hiz_pass = Some(HizPass::new(engine)?);
+            }
             if self.draw_generation_pass.is_none() {
                 self.draw_generation_pass = Some(RenderWorldGpuDrawGenerationPass::new(engine)?);
             }
-            // Draw generation is prepared and dispatched below, but the default mesh
-            // shaders still read the legacy per-batch `InstanceData` ABI. Keep the
-            // CPU-authored indirect draw fallback active until visible-instance
-            // compaction/remapping lands for the generated RenderWorld commands.
-            self.gpu_cull_active = false;
+            self.gpu_cull_active = self.render_world_draw_programs_ready();
         } else {
             self.gpu_draw_bins = RenderWorldPersistentBins::default();
         }
@@ -943,6 +960,7 @@ impl Scene {
         )?;
         self.draw_batches(
             &constants,
+            proj,
             view_proj,
             output,
             Some(&depth),
@@ -975,6 +993,7 @@ impl Scene {
     fn draw_batches(
         &mut self,
         constants: &CameraConstants,
+        proj: Mat4,
         view_proj: Mat4,
         output: &GraphImage,
         depth: Option<&GraphImage>,
@@ -990,16 +1009,44 @@ impl Scene {
         // These run unconditionally when a render world is present so the derived GPU
         // tables (matrices, world bounds, visibility flags) are always current, even
         // while the draw path still uses the CPU-generated indirect commands.
-        // gpu_cull_active will be enabled once draw generation is connected.
         if let Some(render_world) = render_world {
             if let Some(build_pass) = &self.transform_build_pass {
                 build_pass.execute(frame, render_world)?;
             }
+
+            // Build Hi-Z pyramid from the current depth image via ping-pong history.
+            // The current frame writes a fresh pyramid; the returned previous-frame
+            // levels are used by the cull pass below for occlusion testing.
+            // `hiz_frame` is kept alive here so the `previous` GraphImages remain valid
+            // when the cull pass dispatches and the render graph records resource reads.
+            let hiz_frame = if let (Some(depth), Some(hiz_pass)) = (depth, &self.hiz_pass) {
+                Some(hiz_pass.execute_history(frame, depth, &mut self.hiz_history)?)
+            } else {
+                None
+            };
+
             if let Some(cull_pass) = &self.cull_pass {
-                cull_pass.execute(frame, render_world, view_proj)?;
+                let out_ext = output.desc().extent;
+                let hiz_ref = hiz_frame
+                    .as_ref()
+                    .and_then(|hf| hf.previous.as_ref())
+                    .map(|prev| HizOcclusionInput {
+                        pyramid: prev,
+                        // proj[1][1]: Y scale = 1/tan(fov_y/2); abs handles y-flip.
+                        proj_y_scale: proj.col(1).y.abs(),
+                        // proj[2][2]: depth scale for near-plane NDC depth derivation.
+                        proj_z_scale: proj.col(2).z,
+                        screen_size: [out_ext.width, out_ext.height],
+                    });
+                cull_pass.execute(frame, render_world, view_proj, hiz_ref)?;
             }
+            let _ = hiz_frame; // keep alive until after the cull dispatch is recorded
+
             if let Some(draw_generation_pass) = &self.draw_generation_pass {
                 draw_generation_pass.execute(frame, render_world)?;
+            }
+            if self.gpu_cull_active {
+                return self.draw_render_world_bins(constants, output, depth, frame, render_world);
             }
         }
 
@@ -1117,6 +1164,57 @@ impl Scene {
             }
         }
         Ok(())
+    }
+
+    fn draw_render_world_bins(
+        &self,
+        constants: &CameraConstants,
+        output: &GraphImage,
+        depth: Option<&GraphImage>,
+        frame: &RenderFrame,
+        render_world: &RenderWorld,
+    ) -> Result<()> {
+        render_world.with_gpu_draw_output(|draw_output| -> Result<()> {
+            let Some(draw_output) = draw_output else {
+                return Ok(());
+            };
+            frame.bind_buffer(
+                "render_world_visible_instances",
+                draw_output.visible_instances,
+            );
+            frame.bind_buffer("current_matrices", draw_output.current_matrices);
+
+            const INDIRECT_STRIDE: u64 = std::mem::size_of::<DrawIndexedIndirectCommand>() as u64;
+            for (bin_index, bin) in self.gpu_draw_bins.bins.iter().enumerate() {
+                let mesh_idx = bin.key.mesh.index();
+                let Some((mesh, program)) = self.meshes.get(mesh_idx) else {
+                    continue;
+                };
+                if !program.uses_render_world_instances() {
+                    continue;
+                }
+                if let Some(light_buf) = &self.light_buffer {
+                    frame.bind_buffer("lighting", light_buf);
+                }
+                if let Some(mat) = self.materials.get(mesh_idx) {
+                    if let Some(mat_buf) = &mat.gpu_buffer {
+                        frame.bind_buffer("material_desc", mat_buf);
+                    }
+                }
+                let effective_depth = if program.uses_depth { depth } else { None };
+                output.draw_mesh_indirect_range_with_push_constants_and_depth(
+                    mesh,
+                    program,
+                    draw_output.current_matrices,
+                    draw_output.indirect_commands,
+                    bin_index as u64 * INDIRECT_STRIDE,
+                    1,
+                    constants,
+                    effective_depth,
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// Classic draw path — no frustum culling, no mutation. Used by offscreen cameras.

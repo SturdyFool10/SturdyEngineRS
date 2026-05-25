@@ -17,10 +17,12 @@
 //   Active         — participation flag (checked by convention, not enforced)
 //   Health         — current/max HP with damage/heal helpers
 //
-// Built-in systems (plain functions, register in your Schedule):
-//   integrate_transforms(world, dt)   — apply Velocity to Transform
-//   propagate_local_transforms(world) — world-space propagation of LocalTransform
-//   despawn_dead(world)               — remove entities whose Health == 0
+// Built-in systems:
+//   IntegrateTransformsSystem         — parallel Velocity → Transform integration
+//   ApplyAccelerationSystem           — parallel Acceleration → Velocity integration
+//   ClearAccelerationSystem           — parallel force-accumulator clear
+//   DespawnDeadSystem                 — deferred despawn through WorldCommands
+//   propagate_local_transforms(world) — serial world-space propagation of LocalTransform
 //
 // # Minimal example
 // ```ignore
@@ -41,9 +43,10 @@
 //
 //         // Register systems.
 //         let fixed_step = Duration::from_secs_f32(1.0 / 60.0);
-//         fixed_schedule.add_system("integrate", move |w| {
-//             integrate_transforms(w, fixed_step.as_secs_f32());
-//         });
+//         fixed_schedule.add_parallel_system(
+//             "integrate",
+//             IntegrateTransformsSystem::new(fixed_step.as_secs_f32()),
+//         );
 //
 //         // Spawn a moving cube.
 //         let mesh_id   = scene.add_mesh(Mesh::cube(engine, 1.0)?, program);
@@ -86,13 +89,19 @@ pub use components::{
     Acceleration,
     // Core transform + physics
     Active,
+    ApplyAccelerationSystem,
+    ClearAccelerationSystem,
+    DespawnDeadSystem,
     Health,
+    IntegrateTransformsSystem,
     LocalTransform,
     Name,
     SceneLink,
     Transform,
     Velocity,
     // Built-in systems
+    apply_acceleration,
+    clear_accelerations,
     despawn_dead,
     integrate_transforms,
     propagate_local_transforms,

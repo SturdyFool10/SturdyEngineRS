@@ -294,23 +294,119 @@ impl Health {
 
 // ── Built-in systems (free functions) ─────────────────────────────────────────
 
-use super::World;
+use super::{ParallelSystem, SystemAccess, World, WorldCommands, WorldView};
 
 /// Integrate `Velocity` into `Transform` over `dt` seconds.
 ///
-/// Register in your `fixed_schedule`:
-/// ```ignore
-/// fixed_schedule.add_system("integrate", move |world| {
-///     integrate_transforms(world, fixed_step.as_secs_f32());
-/// });
-/// ```
+/// Serial compatibility wrapper. Prefer [`IntegrateTransformsSystem`] in compiled
+/// schedules so large worlds can use `WorldView::write_par`.
 pub fn integrate_transforms(world: &mut World, dt: f32) {
     for (_, transform, vel) in world.query2_mut::<Transform, Velocity>() {
-        transform.position += vel.linear * dt;
-        if vel.angular.length_squared() > 1e-12 {
-            transform.rotation =
-                (transform.rotation * Quat::from_scaled_axis(vel.angular * dt)).normalize();
-        }
+        integrate_transform(transform, vel, dt);
+    }
+}
+
+/// Parallel fixed-step system that integrates `Velocity` into `Transform`.
+///
+/// Register with [`Schedule::add_parallel_system`](super::Schedule::add_parallel_system), then
+/// run the compiled schedule. This is the preferred path for serious game workloads.
+#[derive(Clone, Debug)]
+pub struct IntegrateTransformsSystem {
+    pub dt: f32,
+}
+
+impl IntegrateTransformsSystem {
+    pub const fn new(dt: f32) -> Self {
+        Self { dt }
+    }
+}
+
+impl ParallelSystem for IntegrateTransformsSystem {
+    fn access() -> SystemAccess {
+        SystemAccess::new()
+            .write_component::<Transform>()
+            .read_component::<Velocity>()
+    }
+
+    fn run(&mut self, world: &WorldView<'_>, _commands: &mut WorldCommands) {
+        let velocities = world.read::<Velocity>();
+        let dt = self.dt;
+        world.write_par::<Transform>(|entity, transform| {
+            if let Some(velocity) = velocities.get(entity.index) {
+                integrate_transform(transform, velocity, dt);
+            }
+        });
+    }
+}
+
+fn integrate_transform(transform: &mut Transform, velocity: &Velocity, dt: f32) {
+    transform.position += velocity.linear * dt;
+    if velocity.angular.length_squared() > 1e-12 {
+        transform.rotation =
+            (transform.rotation * Quat::from_scaled_axis(velocity.angular * dt)).normalize();
+    }
+}
+
+/// Apply `Acceleration` to `Velocity` over `dt` seconds.
+///
+/// This leaves accelerations intact; run [`ClearAccelerationSystem`] after integration when
+/// accelerations represent one-frame force accumulators.
+pub fn apply_acceleration(world: &mut World, dt: f32) {
+    for (_, velocity, acceleration) in world.query2_mut::<Velocity, Acceleration>() {
+        velocity.linear += acceleration.linear * dt;
+    }
+}
+
+/// Parallel fixed-step system that applies `Acceleration` to `Velocity`.
+#[derive(Clone, Debug)]
+pub struct ApplyAccelerationSystem {
+    pub dt: f32,
+}
+
+impl ApplyAccelerationSystem {
+    pub const fn new(dt: f32) -> Self {
+        Self { dt }
+    }
+}
+
+impl ParallelSystem for ApplyAccelerationSystem {
+    fn access() -> SystemAccess {
+        SystemAccess::new()
+            .write_component::<Velocity>()
+            .read_component::<Acceleration>()
+    }
+
+    fn run(&mut self, world: &WorldView<'_>, _commands: &mut WorldCommands) {
+        let accelerations = world.read::<Acceleration>();
+        let dt = self.dt;
+        world.write_par::<Velocity>(|entity, velocity| {
+            if let Some(acceleration) = accelerations.get(entity.index) {
+                velocity.linear += acceleration.linear * dt;
+            }
+        });
+    }
+}
+
+/// Clear all `Acceleration` accumulators.
+pub fn clear_accelerations(world: &mut World) {
+    for (_, acceleration) in world.query_mut::<Acceleration>() {
+        acceleration.linear = Vec3::ZERO;
+    }
+}
+
+/// Parallel system that clears `Acceleration` accumulators.
+#[derive(Clone, Debug, Default)]
+pub struct ClearAccelerationSystem;
+
+impl ParallelSystem for ClearAccelerationSystem {
+    fn access() -> SystemAccess {
+        SystemAccess::new().write_component::<Acceleration>()
+    }
+
+    fn run(&mut self, world: &WorldView<'_>, _commands: &mut WorldCommands) {
+        world.write_par::<Acceleration>(|_, acceleration| {
+            acceleration.linear = Vec3::ZERO;
+        });
     }
 }
 
@@ -345,6 +441,9 @@ pub fn propagate_local_transforms(world: &mut World) {
 }
 
 /// Despawn entities whose `Health` has dropped to zero.
+///
+/// Serial compatibility wrapper. Prefer [`DespawnDeadSystem`] in compiled schedules so
+/// structural mutations are deferred through `WorldCommands` between parallel waves.
 pub fn despawn_dead(world: &mut World) {
     let dead: Vec<super::Entity> = world
         .query::<Health>()
@@ -353,5 +452,25 @@ pub fn despawn_dead(world: &mut World) {
         .collect();
     for e in dead {
         world.despawn(e);
+    }
+}
+
+/// Parallel-system form of [`despawn_dead`].
+#[derive(Clone, Debug, Default)]
+pub struct DespawnDeadSystem;
+
+impl ParallelSystem for DespawnDeadSystem {
+    fn access() -> SystemAccess {
+        SystemAccess::new().read_component::<Health>()
+    }
+
+    fn run(&mut self, world: &WorldView<'_>, commands: &mut WorldCommands) {
+        let health = world.read::<Health>();
+        let generations = world.generations();
+        for (entity, health) in health.iter_with_entities(generations) {
+            if health.is_dead() {
+                commands.despawn(entity);
+            }
+        }
     }
 }

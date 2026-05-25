@@ -119,8 +119,10 @@ pub struct RenderWorldGpuDrawGenerationStats {
     pub bin_buffer_reallocated: bool,
     pub indirect_buffer_reallocated: bool,
     pub count_buffer_reallocated: bool,
+    pub visible_instance_buffer_reallocated: bool,
     pub uploaded_bin_bytes: u64,
     pub indirect_bytes: u64,
+    pub visible_instance_bytes: u64,
     pub uses_indirect_count: bool,
     pub degraded_reason: Option<String>,
 }
@@ -140,6 +142,13 @@ pub struct RenderWorldGpuDrawGenerationDispatchStats {
 pub struct RenderWorldGpuDrawOutput<'a> {
     pub indirect_commands: &'a crate::Buffer,
     pub visible_draw_count: &'a crate::Buffer,
+    /// Compact per-bin visible object slots written by draw generation.
+    ///
+    /// Generated indirect commands use `first_instance` as an offset into this table.
+    /// A RenderWorld-aware vertex shader can map `SV_InstanceID` through this buffer before
+    /// reading GPU-derived matrices or legacy instance data, making sparse visibility safe.
+    pub visible_instances: &'a crate::Buffer,
+    pub current_matrices: &'a crate::Buffer,
     pub max_draw_count: u32,
     pub use_indirect_count: bool,
 }

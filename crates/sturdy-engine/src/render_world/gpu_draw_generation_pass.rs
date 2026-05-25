@@ -84,6 +84,12 @@ impl RenderWorldGpuDrawGenerationPass {
                 Ok(())
             }
         })?;
+        render_world.with_gpu_visible_instance_buffer(|buffer| match buffer {
+            Some(buffer) => {
+                frame.bind_buffer("render_world_visible_instances", buffer);
+            }
+            None => missing.push("render_world_visible_instances"),
+        });
 
         if !missing.is_empty() {
             return Err(Error::ResourceStateCorruption(format!(

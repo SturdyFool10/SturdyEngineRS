@@ -74,6 +74,7 @@ mod shadow_pass;
 pub(crate) mod shadow_pipeline;
 mod spot_shadow_pass;
 mod sprite_batch;
+mod srd_denoiser;
 mod stl_loader;
 #[cfg(test)]
 mod tests;
@@ -209,8 +210,8 @@ pub use realtime_gi::{
     RealtimeGiSurfaceCachePlan, RealtimeGiSurfaceCacheSettings,
 };
 pub use realtime_raytracing::{
-    RealtimeBlas, RealtimeRayTracingDenoiser, RealtimeRayTracingPipeline,
-    RealtimeRayTracingShaderDesc, RealtimeRayTracingSupport, RealtimeTlas, RealtimeTlasInstance,
+    RealtimeBlas, RealtimeRayTracingPipeline, RealtimeRayTracingShaderDesc,
+    RealtimeRayTracingSupport, RealtimeTlas, RealtimeTlasInstance,
 };
 pub use render_world::{
     Aabb, GpuObjectAllocator, GpuObjectId, GpuTransformDirtyRange, GpuTransformSourceData,
@@ -270,6 +271,19 @@ pub use shadow_pass::{
 pub use shadow_pipeline::ShadowPipeline;
 pub use spot_shadow_pass::{GpuSpotShadowData, MAX_SPOT_SHADOWS, SpotShadowConfig, SpotShadowPass};
 pub use sprite_batch::{Sprite, SpriteBatch, SpriteRenderer};
+#[allow(deprecated)]
+pub use srd_denoiser::{
+    RealtimeRayTracingDenoiser, SRD_TEMPORAL_CONSTANTS_SIZE, SrdCapabilities, SrdCommonSettings,
+    SrdConstantArena, SrdConstantRange, SrdDenoiser, SrdDenoiserDesc, SrdDenoiserId,
+    SrdDenoiserMode, SrdDenoiserSettings, SrdDepthConvention, SrdDescriptorType, SrdDispatchDesc,
+    SrdFamilySettings, SrdHistoryMode, SrdHistoryRejectionSettings, SrdHistoryRing, SrdInstance,
+    SrdInstanceDesc, SrdMotionVectorConvention, SrdNormalPacking, SrdOcclusionSettings,
+    SrdOutlierClampSettings, SrdPassBuilder, SrdPipelineDesc, SrdPoolClass, SrdRadianceSettings,
+    SrdReferenceSettings, SrdReferenceTemporalExecutor, SrdReferenceTemporalPipelines,
+    SrdReferenceTemporalPrograms, SrdResourceDesc, SrdResourceFormatDesc, SrdResourceSlot,
+    SrdShaderContract, SrdShadowSettings, SrdSignalMomentsConstants, SrdSpectralLayout,
+    SrdTemporalBindings, SrdTemporalConstants, SrdTextureDesc, SrdVarianceSettings,
+};
 pub use sturdy_engine_core::{PcFieldKind, PushConstantField};
 pub use text_draw::{
     TextAtlasContentMode, TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput,

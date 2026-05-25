@@ -374,6 +374,10 @@ impl RenderWorld {
         f(self.lock_gpu_scene().draw_count_buffer.as_ref())
     }
 
+    pub fn with_gpu_visible_instance_buffer<R>(&self, f: impl FnOnce(Option<&Buffer>) -> R) -> R {
+        f(self.lock_gpu_scene().visible_instance_buffer.as_ref())
+    }
+
     pub fn with_gpu_draw_output<R>(
         &self,
         f: impl FnOnce(Option<RenderWorldGpuDrawOutput<'_>>) -> R,
@@ -382,16 +386,24 @@ impl RenderWorld {
         let output = match (
             gpu_scene.draw_indirect_buffer.as_ref(),
             gpu_scene.draw_count_buffer.as_ref(),
+            gpu_scene.visible_instance_buffer.as_ref(),
+            gpu_scene.current_matrix_buffer.as_ref(),
             gpu_scene.draw_generation_plan.as_ref(),
         ) {
-            (Some(indirect_commands), Some(visible_draw_count), Some(plan)) => {
-                Some(RenderWorldGpuDrawOutput {
-                    indirect_commands,
-                    visible_draw_count,
-                    max_draw_count: plan.bin_count,
-                    use_indirect_count: plan.uses_indirect_count,
-                })
-            }
+            (
+                Some(indirect_commands),
+                Some(visible_draw_count),
+                Some(visible_instances),
+                Some(current_matrices),
+                Some(plan),
+            ) => Some(RenderWorldGpuDrawOutput {
+                indirect_commands,
+                visible_draw_count,
+                visible_instances,
+                current_matrices,
+                max_draw_count: plan.bin_count,
+                use_indirect_count: plan.uses_indirect_count,
+            }),
             _ => None,
         };
         f(output)
@@ -627,7 +639,9 @@ impl RenderWorld {
 
         let bin_stride = std::mem::size_of::<RenderWorldGpuBinData>();
         let indirect_stride = std::mem::size_of::<crate::DrawIndexedIndirectCommand>();
+        let visible_instance_stride = std::mem::size_of::<u32>();
         let bin_count = gpu_bins.len();
+        let object_count = bins.object_count as usize;
         let mut gpu_scene = self.lock_gpu_scene();
 
         let mut bin_buffer_reallocated = false;
@@ -674,16 +688,32 @@ impl RenderWorld {
             count_buffer_reallocated = true;
         }
 
+        let mut visible_instance_buffer_reallocated = false;
+        if object_count > 0
+            && (object_count > gpu_scene.visible_instance_capacity
+                || gpu_scene.visible_instance_buffer.is_none())
+        {
+            let new_capacity = object_count.next_power_of_two().max(4);
+            gpu_scene.visible_instance_buffer = Some(engine.create_buffer(BufferDesc {
+                size: (new_capacity * visible_instance_stride) as u64,
+                usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            })?);
+            gpu_scene.visible_instance_capacity = new_capacity;
+            visible_instance_buffer_reallocated = true;
+        }
+
         gpu_scene.draw_generation_plan = Some(plan.clone());
 
         Ok(RenderWorldGpuDrawGenerationStats {
             bin_count,
-            object_count: bins.object_count as usize,
+            object_count,
             bin_buffer_reallocated,
             indirect_buffer_reallocated,
             count_buffer_reallocated,
+            visible_instance_buffer_reallocated,
             uploaded_bin_bytes,
             indirect_bytes: (bin_count * indirect_stride) as u64,
+            visible_instance_bytes: (object_count * visible_instance_stride) as u64,
             uses_indirect_count: plan.uses_indirect_count,
             degraded_reason: plan.degraded_reason,
         })

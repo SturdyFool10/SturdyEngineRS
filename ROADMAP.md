@@ -1,6 +1,6 @@
 # Sturdy Engine Roadmap
 
-_Last updated: 2026-05-19_
+_Last updated: 2026-05-25_
 
 ## Product Direction
 
@@ -39,6 +39,155 @@ Initial performance targets:
 - 100k renderable entities with CPU render submission below 1 ms on the bindless/GPU-driven path.
 - 500k mostly-static or mostly-flat entities without per-object CPU submission becoming the bottleneck.
 - Zero per-object draw calls or per-object descriptor sets on the bindless path.
+
+---
+
+## Priority 0 — SRD Engine-Standard Denoiser
+
+SRD (Sturdy Real-Time Denoiser) is now the first-party denoising target. The goal is to complete the SRD design/paper as a Rust-first, legally distinct, engine-native denoiser instead of cloning third-party API names, family names, binding names, or integration shape. SRD should become the default reconstruction path for sparse ray-traced signals, path-traced accumulation, RT shadows, AO, and future GI/reflection features.
+
+### Naming, ownership, and legal-distinction baseline
+
+- [x] Introduce the public `SrdDenoiser` API as the preferred engine denoiser name.
+- [x] Move the reference temporal accumulation denoiser out of `realtime_raytracing.rs` into `srd_denoiser.rs`.
+- [x] Rename shader bindings from generic/vendor-like accumulation names to SRD names: `srd_current_signal`, `srd_history_signal`, `srd_current_sampler`, and `srd_history_sampler`.
+- [x] Rename the Cornell accumulation shader to `srd_temporal_accumulate.slang`.
+- [x] Keep `RealtimeRayTracingDenoiser` only as a deprecated compatibility alias.
+- [ ] Audit public APIs, shader files, docs, examples, and debug labels for accidental vendor-denoiser names or family names.
+- [x] Replace paper-derived placeholder family names with SRD-owned names before exposing them publicly:
+  - `RadianceStabilizer` for radiance reconstruction.
+  - `ShadowStabilizer` for shadow reconstruction.
+  - `OcclusionStabilizer` for AO/directional occlusion reconstruction.
+  - `ReferenceTemporal` for simple accumulation/testing.
+- [x] Add a short `docs/srd.md` identity document that states SRD is SturdyEngine's first-party denoiser, defines accepted terminology, and records what names must not be copied from vendor SDKs.
+
+### SRD crate/module architecture
+
+- [x] Add `crates/sturdy-engine/src/srd_denoiser.rs` as the initial SRD module.
+- [ ] Split SRD into feature files once implementation grows:
+  - `srd/mod.rs`
+  - `srd/api.rs`
+  - `srd/settings.rs`
+  - `srd/resources.rs`
+  - `srd/dispatch.rs`
+  - `srd/pipeline.rs`
+  - `srd/reference_temporal.rs`
+  - `srd/radiance_stabilizer.rs`
+  - `srd/shadow_stabilizer.rs`
+  - `srd/occlusion_stabilizer.rs`
+- [x] Define stable public descriptors for SRD instance creation, denoiser IDs, resource slots, texture pools, pass descriptions, pipelines, and dispatches.
+- [x] Keep the SRD algorithm layer backend-neutral: it may describe GPU work, but renderer/RHI code performs allocation, barriers, binding, and dispatch.
+- [x] Add capability reporting for SRD features: temporal history, compute support, storage textures, half-float support, subgroup/wave support, ray-tracing guide support, and backend shader-model constraints.
+- [x] Add unit tests for descriptor construction, denoiser ID uniqueness, unsupported mode rejection, settings validation, and dispatch generation.
+
+### Public SRD API and settings
+
+- [x] Add `SrdDenoiserSettings` with capped temporal accumulation frame count.
+- [x] Add `SrdDenoiserMode` with SRD-owned mode names.
+- [x] Add `SrdTemporalConstants` with explicit `#[repr(C)]` layout.
+- [x] Add `SrdInstance` / `SrdInstanceDesc` for multi-denoiser instances.
+- [x] Add `SrdDenoiserId` for stable per-instance denoiser routing.
+- [x] Add `SrdCommonSettings` with current/previous matrices, jitter, frame index, dynamic-resolution rectangles, motion-vector scale, depth scale, history mode, split-screen, and validation toggles.
+- [x] Add per-family settings:
+  - `SrdRadianceSettings`
+  - `SrdShadowSettings`
+  - `SrdOcclusionSettings`
+  - `SrdReferenceSettings`
+- [x] Add `SrdHistoryMode::{KeepAccumulating, InvalidateHistory, ZeroHistory}`.
+- [x] Add explicit settings validation with actionable `Error::InvalidInput` messages.
+- [x] Expose runtime settings for SRD quality level / max accumulation frames in the path-tracing testbed.
+- [ ] Expose runtime settings for SRD debug mode, split-screen, and validation output once those paths execute.
+
+### Resource and binding model
+
+- [x] Add `SrdTemporalBindings` for SRD-owned shader binding names.
+- [x] Define SRD resource slots for guide inputs:
+  - motion vectors,
+  - normal/roughness,
+  - view depth,
+  - material ID / material class,
+  - confidence / variance where available.
+- [x] Define SRD resource slots for noisy inputs:
+  - diffuse radiance,
+  - specular radiance,
+  - combined radiance,
+  - AO / directional occlusion,
+  - penumbra,
+  - translucency,
+  - spectral or frequency-binned radiance for the path tracer.
+- [x] Define SRD resource slots for outputs:
+  - denoised diffuse,
+  - denoised specular,
+  - denoised combined radiance,
+  - denoised AO,
+  - denoised directional occlusion,
+  - denoised shadow/translucency,
+  - validation/debug output.
+- [x] Implement permanent history texture pools with persistent previous/current ping-pong resources.
+- [x] Implement transient scratch texture pools with aliasing where lifetimes and formats are compatible.
+- [x] Add resource format validation for guide inputs and outputs.
+- [x] Add renderer debug labels for every SRD texture and pass.
+
+### Pass graph, dispatch, and renderer integration
+
+- [x] Implement the initial SRD reference temporal accumulation pass for progressive samples.
+- [ ] Replace the single fullscreen-fragment accumulation path with a compute-capable SRD pass path where backend support allows it.
+- [x] Add an SRD pass builder for read/write resources, constants, shader program, workgroup size, and debug name.
+- [x] Add per-frame dispatch generation that returns ordered dispatch descriptions instead of directly executing all work inside `SrdDenoiser::accumulate`.
+- [x] Add clear passes for `ClearAndRestart` history resets.
+- [x] Add ping-pong resource metadata so previous/current history swaps are SRD-owned.
+- [x] Add constant-buffer arena/ring allocation for SRD dispatch constants.
+- [x] Add adjacent-constant reuse detection to avoid redundant uploads.
+- [x] Add a graph-backed reference-temporal executor that consumes SRD dispatch/resource/pipeline descriptions and maps them to the current fullscreen render-graph path.
+- [ ] Add renderer integration that consumes SRD dispatch descriptions and performs barriers, binding, constant upload, and compute submission for compute-capable SRD passes.
+- [ ] Add GPU timing markers for SRD passes.
+- [ ] Add graph-inspector output for SRD resources, pass order, and history state.
+
+### Algorithm completion from the SRD design/paper
+
+- [x] Reference temporal accumulation for path-traced samples.
+- [x] Add SRD-owned variance/moment constants and settings for temporal history beyond the current luminance moment stored in alpha.
+- [x] Add SRD-owned history rejection settings using motion vectors, depth, normals, material IDs, and dynamic-resolution rectangles.
+- [ ] History clamping against current-neighborhood statistics.
+- [x] Add SRD-owned anti-firefly / bright outlier suppression settings.
+- [ ] Spatial edge-aware filter pass for radiance.
+- [ ] A-trous wavelet filter path for high-variance radiance reconstruction.
+- [ ] Recurrent blur/post-blur path for stable radiance reconstruction.
+- [ ] Hit-distance or ray-length guide support for ray-traced signals.
+- [ ] Separate diffuse/specular reconstruction paths.
+- [ ] Combined diffuse+specular fast path for simpler integrations.
+- [ ] AO and directional-occlusion denoising path using depth/normal edge stopping.
+- [ ] Shadow penumbra denoising path.
+- [ ] Translucent shadow denoising path.
+- [ ] Spectral path-tracing support using fixed bins or compact spectral coefficients instead of raw stochastic wavelengths.
+- [x] Optional confidence/variance inputs for adaptive accumulation are represented in SRD slots/settings.
+- [x] Split-screen and validation output modes are represented in SRD common settings and slots.
+- [ ] Deterministic test scenes and screenshot comparisons for each SRD mode.
+
+### Shader library and packing contract
+
+- [ ] Add SRD shader helper library for packing/unpacking guide and noisy signal data.
+- [x] Define engine-standard normal/roughness/material packing expected by SRD.
+- [x] Define engine-standard motion-vector convention for SRD and verify it matches TAA/motion-vector debug tools.
+- [x] Define SRD depth convention: linear view depth, scale, and invalid-depth behavior.
+- [x] Add spectral radiance layout metadata for the Cornell/path-tracing path.
+- [x] Generate or validate Rust constant layouts against shader constant layouts.
+- [ ] Add shader tests for SRD helper functions where the shader test harness can cover them.
+
+### Runtime/product integration
+
+- [x] Make SRD the default denoiser option for hardware path-tracing accumulation.
+- [x] Add runtime UI controls for SRD quality preset and explicit accumulation reset in the hardware path-tracing testbed.
+- [ ] Add runtime UI controls for advanced SRD mode selection, split-screen, and validation output once those modes are implemented.
+- [x] Add debug images for SRD current signal, reference-temporal output, and Cornell SRD display output.
+- [ ] Add debug images for SRD history signal, variance/moments, guide rejection, split-screen, and validation output as those passes land.
+- [ ] Reset SRD history on resize, camera cuts, material/lighting mode changes, shader reloads, guide-format changes, and dynamic-resolution incompatibility.
+- [ ] Add benchmark counters for SRD GPU time, dispatch count, history memory, transient memory, and quality preset.
+- [ ] Include SRD in the realistic reference scene once that scene exists.
+
+### Acceptance
+
+SRD is considered complete when SturdyEngine has a legally distinct, Rust-first, backend-neutral denoiser system that covers the design/paper goals: descriptor-driven integration, persistent/transient resource pools, ordered compute dispatches, robust temporal history, radiance/shadow/occlusion modes, shader packing contracts, debug/validation views, runtime controls, and benchmark coverage.
 
 ---
 

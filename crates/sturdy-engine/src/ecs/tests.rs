@@ -7,6 +7,8 @@ use super::*;
 struct Pos(f32, f32);
 #[derive(Debug, Clone, PartialEq)]
 struct Spd(f32);
+#[derive(Debug, Clone, PartialEq)]
+struct FrameCounter(u32);
 
 fn assert_vec3_near(actual: glam::Vec3, expected: glam::Vec3) {
     assert!(
@@ -300,6 +302,55 @@ fn two_conflicting_parallel_systems_form_two_waves() {
     assert_eq!(compiled.wave_count(), 2);
 }
 
+struct CountFrames;
+impl ParallelSystem for CountFrames {
+    fn access() -> SystemAccess {
+        SystemAccess::new().write_resource::<FrameCounter>()
+    }
+
+    fn run(&mut self, world: &WorldView<'_>, _commands: &mut WorldCommands) {
+        world.resource_mut::<FrameCounter>().unwrap().0 += 1;
+    }
+}
+
+struct ReadFrameCounter;
+impl ParallelSystem for ReadFrameCounter {
+    fn access() -> SystemAccess {
+        SystemAccess::new().read_resource::<FrameCounter>()
+    }
+
+    fn run(&mut self, world: &WorldView<'_>, _commands: &mut WorldCommands) {
+        assert!(world.resource::<FrameCounter>().is_some());
+    }
+}
+
+#[test]
+fn resource_write_parallel_system_mutates_world_resource() {
+    let mut world = World::new();
+    world.insert_resource(FrameCounter(0));
+
+    let mut sched = Schedule::new();
+    sched.add_parallel_system("count_frames", CountFrames);
+    let mut compiled = sched.build();
+    compiled.run(&mut world);
+
+    assert_eq!(world.resource::<FrameCounter>(), Some(&FrameCounter(1)));
+}
+
+#[test]
+fn resource_read_write_conflict_splits_parallel_waves() {
+    let mut sched = Schedule::new();
+    sched.add_parallel_system("read_counter", ReadFrameCounter);
+    sched.add_parallel_system("write_counter", CountFrames);
+    let compiled = sched.build();
+
+    assert_eq!(compiled.wave_count(), 2);
+    assert_eq!(
+        compiled.wave_names(),
+        vec![vec!["read_counter"], vec!["write_counter"]]
+    );
+}
+
 #[test]
 fn serial_system_between_parallel_splits_into_three_waves() {
     let mut sched = Schedule::new();
@@ -371,4 +422,87 @@ fn resources_are_independent_of_components() {
     // Resource and component are separate.
     assert_eq!(world.resource::<Pos>(), Some(&Pos(1.0, 2.0)));
     assert_eq!(world.get::<Pos>(e), Some(&Pos(9.0, 9.0)));
+}
+
+#[test]
+fn builtin_parallel_integrate_transforms_matches_serial_system() {
+    let mut serial_world = World::new();
+    let serial_entity = serial_world
+        .spawn()
+        .with(Transform::from_position(glam::Vec3::ZERO))
+        .with(Velocity {
+            linear: glam::Vec3::new(2.0, 0.0, 0.0),
+            angular: glam::Vec3::Y,
+        })
+        .id();
+    integrate_transforms(&mut serial_world, 0.5);
+
+    let mut parallel_world = World::new();
+    let parallel_entity = parallel_world
+        .spawn()
+        .with(Transform::from_position(glam::Vec3::ZERO))
+        .with(Velocity {
+            linear: glam::Vec3::new(2.0, 0.0, 0.0),
+            angular: glam::Vec3::Y,
+        })
+        .id();
+    let mut schedule = Schedule::new();
+    schedule.add_parallel_system("integrate", IntegrateTransformsSystem::new(0.5));
+    let mut compiled = schedule.build();
+    compiled.run(&mut parallel_world);
+
+    let serial = serial_world.get::<Transform>(serial_entity).unwrap();
+    let parallel = parallel_world.get::<Transform>(parallel_entity).unwrap();
+    assert_vec3_near(parallel.position, serial.position);
+    assert!(parallel.rotation.abs_diff_eq(serial.rotation, 1e-5));
+}
+
+#[test]
+fn builtin_parallel_acceleration_pipeline_updates_velocity_and_clears_accumulator() {
+    let mut world = World::new();
+    let entity = world
+        .spawn()
+        .with(Velocity::linear(glam::Vec3::ZERO))
+        .with(Acceleration {
+            linear: glam::Vec3::new(0.0, 4.0, 0.0),
+        })
+        .id();
+
+    let mut schedule = Schedule::new();
+    schedule
+        .add_parallel_system("apply_acceleration", ApplyAccelerationSystem::new(0.25))
+        .add_parallel_system("clear_acceleration", ClearAccelerationSystem);
+    let mut compiled = schedule.build();
+    assert_eq!(compiled.wave_count(), 2);
+    compiled.run(&mut world);
+
+    assert_vec3_near(
+        world.get::<Velocity>(entity).unwrap().linear,
+        glam::Vec3::new(0.0, 1.0, 0.0),
+    );
+    assert_vec3_near(
+        world.get::<Acceleration>(entity).unwrap().linear,
+        glam::Vec3::ZERO,
+    );
+}
+
+#[test]
+fn builtin_parallel_despawn_dead_uses_world_commands() {
+    let mut world = World::new();
+    let alive = world.spawn().with(Health::new(10.0)).id();
+    let dead = world
+        .spawn()
+        .with(Health {
+            current: 0.0,
+            max: 10.0,
+        })
+        .id();
+
+    let mut schedule = Schedule::new();
+    schedule.add_parallel_system("despawn_dead", DespawnDeadSystem);
+    let mut compiled = schedule.build();
+    compiled.run(&mut world);
+
+    assert!(world.is_alive(alive));
+    assert!(!world.is_alive(dead));
 }

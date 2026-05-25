@@ -6,6 +6,12 @@ RaytracingAccelerationStructure scene_tlas;
 RWTexture2D<float4> guide_image;
 [[vk::binding(4, 0)]]
 RWTexture2D<float4> material_guide_image;
+[[vk::binding(6, 0)]]
+RWTexture2D<float4> motion_vector_image;
+[[vk::binding(7, 0)]]
+RWTexture2D<float4> normal_image;
+[[vk::binding(8, 0)]]
+RWTexture2D<float4> depth_image;
 
 struct TriangleInfo {
   float3 normal;
@@ -33,6 +39,10 @@ struct RtConstants {
   float4 cameraForward;
   float4 cameraRight;
   float4 cameraUp;
+  float4 previousCameraOrigin;
+  float4 previousCameraForward;
+  float4 previousCameraRight;
+  float4 previousCameraUp;
 };
 [[vk::binding(2, 0)]]
 ConstantBuffer<RtConstants> rt_constants;
@@ -363,7 +373,8 @@ bool intersectSphere(float3 ro, float3 rd, float3 center, float radius,
 float3 wavelengthToRgbBasis(float wavelengthNm) {
   // Binary three-band basis matching the equal-probability RGB sampling bands.
   // Used by sampleRgbSpectrum for every surface/emission evaluation along the
-  // path; must stay a strict partition of unity so scene colors are energy-correct.
+  // path; must stay a strict partition of unity so scene colors are
+  // energy-correct.
   if (wavelengthNm < 505.0)
     return float3(0.0, 0.0, 1.0);
   if (wavelengthNm < 585.0)
@@ -380,29 +391,30 @@ float3 wavelengthToLinearSrgb(float wavelengthNm) {
   float dX1 = (wl - 442.0) * (wl < 442.0 ? 0.0624 : 0.0374);
   float dX2 = (wl - 599.8) * (wl < 599.8 ? 0.0264 : 0.0323);
   float dX3 = (wl - 501.1) * (wl < 501.1 ? 0.0490 : 0.0382);
-  float X = 0.362 * exp(-0.5*dX1*dX1) + 1.056 * exp(-0.5*dX2*dX2)
-          - 0.065 * exp(-0.5*dX3*dX3);
+  float X = 0.362 * exp(-0.5 * dX1 * dX1) + 1.056 * exp(-0.5 * dX2 * dX2) -
+            0.065 * exp(-0.5 * dX3 * dX3);
 
   float dY1 = (wl - 568.8) * (wl < 568.8 ? 0.0213 : 0.0247);
   float dY2 = (wl - 530.9) * (wl < 530.9 ? 0.0613 : 0.0322);
-  float Y = 0.821 * exp(-0.5*dY1*dY1) + 0.286 * exp(-0.5*dY2*dY2);
+  float Y = 0.821 * exp(-0.5 * dY1 * dY1) + 0.286 * exp(-0.5 * dY2 * dY2);
 
   float dZ1 = (wl - 437.0) * (wl < 437.0 ? 0.0845 : 0.0278);
   float dZ2 = (wl - 459.0) * (wl < 459.0 ? 0.0385 : 0.0725);
-  float Z = 1.217 * exp(-0.5*dZ1*dZ1) + 0.681 * exp(-0.5*dZ2*dZ2);
+  float Z = 1.217 * exp(-0.5 * dZ1 * dZ1) + 0.681 * exp(-0.5 * dZ2 * dZ2);
 
   // Negative sRGB values are wavelengths outside the sRGB gamut (imaginary
-  // primaries). Clamping rather than wrapping keeps violet/cyan from going black.
-  return max(float3(0.0),
-             float3( 3.2406*X - 1.5372*Y - 0.4986*Z,
-                    -0.9689*X + 1.8758*Y + 0.0415*Z,
-                     0.0557*X - 0.2040*Y + 1.0570*Z));
+  // primaries). Clamping rather than wrapping keeps violet/cyan from going
+  // black.
+  return max(float3(0.0), float3(3.2406 * X - 1.5372 * Y - 0.4986 * Z,
+                                 -0.9689 * X + 1.8758 * Y + 0.0415 * Z,
+                                 0.0557 * X - 0.2040 * Y + 1.0570 * Z));
 }
 
 float3 uniformUpperHemisphere(float2 xi) {
   // Uniform sampling of the hemisphere with y > 0. Used for glass entry points
   // because the ceiling light is always above the sphere — lower hemisphere
-  // samples are always rejected, so sampling the full sphere wastes half the budget.
+  // samples are always rejected, so sampling the full sphere wastes half the
+  // budget.
   float z = xi.x;
   float r = sqrt(max(0.0, 1.0 - z * z));
   float phi = 2.0 * PI * xi.y;
@@ -540,7 +552,8 @@ float sampleSpectralPhotonMapCaustics(float3 p, float3 n,
     // Cone kernel K(d) = 2/πR² * max(0, 1 - d²/R²). Compared to the previous
     // Gaussian this is properly area-normalized and gives a sharper peak at the
     // caustic focus while rolling off smoothly to zero at radius R.
-    float kernel = 2.0 * max(0.0, 1.0 - d2 / kernelRadius2) / (PI * kernelRadius2);
+    float kernel =
+        2.0 * max(0.0, 1.0 - d2 / kernelRadius2) / (PI * kernelRadius2);
     float emission = sampleRgbSpectrum(float3(18.0, 14.0, 9.0), wavelengthNm);
     float cosSurface = saturate(dot(n, photon.incidentDirection));
     sum += emission * photon.throughput * photon.geometry * kernel *
@@ -616,8 +629,37 @@ void makeCameraRay(uint2 pixel, uint2 extent, float2 jitterPixels,
                         uv.y * tanHalfFovY, 1.0));
 }
 
+float2 projectWorldToCameraUv(float3 worldPosition, bool previousCamera) {
+  float3 origin = previousCamera ? rt_constants.previousCameraOrigin.xyz
+                                 : rt_constants.cameraOrigin.xyz;
+  float3 forward = previousCamera ? rt_constants.previousCameraForward.xyz
+                                  : rt_constants.cameraForward.xyz;
+  float3 right = previousCamera ? rt_constants.previousCameraRight.xyz
+                                : rt_constants.cameraRight.xyz;
+  float3 up = previousCamera ? rt_constants.previousCameraUp.xyz
+                             : rt_constants.cameraUp.xyz;
+
+  if (rt_constants.sceneId != SCENE_OUTDOOR) {
+    origin = float3(0.0, 1.0, -3.15);
+    forward = float3(0.0, 0.0, 1.0);
+    right = float3(1.0, 0.0, 0.0);
+    up = float3(0.0, 1.0, 0.0);
+  }
+
+  float3 local = worldPosition - origin;
+  float z = max(dot(local, normalize(forward)), 1e-4);
+  float x = dot(local, normalize(right));
+  float y = dot(local, normalize(up));
+  float tanHalfFovY =
+      rt_constants.sceneId == SCENE_OUTDOOR ? rt_constants.tanHalfFovY : 0.42;
+  float2 ndc = float2(x / (z * rt_constants.aspect * tanHalfFovY),
+                      y / (z * tanHalfFovY));
+  return float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+}
+
 void tracePrimaryGuides(uint2 pixel, uint2 extent, out float4 geometricGuide,
-                        out float4 materialGuide) {
+                        out float4 materialGuide, out float4 motionGuide,
+                        out float4 normalGuide, out float4 depthGuide) {
   float3 ro;
   float3 rd;
   makeCameraRay(pixel, extent, float2(0.0), ro, rd);
@@ -628,14 +670,26 @@ void tracePrimaryGuides(uint2 pixel, uint2 extent, out float4 geometricGuide,
   if (payload.hit == 0u) {
     geometricGuide = float4(0.5, 0.5, 0.5, 100.0);
     materialGuide = float4(0.0, 0.0, 0.0, 255.0);
+    motionGuide = float4(0.0, 0.0, 0.0, 0.0);
+    normalGuide = float4(0.5, 0.5, 0.5, 0.0);
+    depthGuide = float4(100.0, 0.0, 0.0, 0.0);
     return;
   }
 
   float3 n = normalize(payload.normal);
   if (dot(n, rd) > 0.0)
     n = -n;
+  float3 worldPosition = ro + rd * payload.hitT;
+  float2 currentUv =
+      (float2(pixel) + 0.5) / float2(max(extent.x, 1u), max(extent.y, 1u));
+  float2 previousUv = projectWorldToCameraUv(worldPosition, true);
+  float2 motionUv = previousUv - currentUv;
+
   geometricGuide = float4(n * 0.5 + 0.5, payload.hitT);
   materialGuide = float4(saturate(payload.albedo), float(payload.material));
+  motionGuide = float4(motionUv, payload.hitT, 1.0);
+  normalGuide = float4(n * 0.5 + 0.5, 1.0);
+  depthGuide = float4(payload.hitT, 0.0, 0.0, 1.0);
 }
 
 SpectralPathResult solveBidirectionalSpectralPath(uint2 pixel, uint2 extent,
@@ -779,9 +833,16 @@ void raygen() {
 
   float4 geometricGuide;
   float4 materialGuide;
-  tracePrimaryGuides(pixel, extent, geometricGuide, materialGuide);
+  float4 motionGuide;
+  float4 normalGuide;
+  float4 depthGuide;
+  tracePrimaryGuides(pixel, extent, geometricGuide, materialGuide, motionGuide,
+                     normalGuide, depthGuide);
   guide_image[pixel] = geometricGuide;
   material_guide_image[pixel] = materialGuide;
+  motion_vector_image[pixel] = motionGuide;
+  normal_image[pixel] = normalGuide;
+  depth_image[pixel] = depthGuide;
 }
 
 [shader("miss")]

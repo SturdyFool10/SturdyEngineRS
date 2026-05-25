@@ -174,6 +174,18 @@ fn shader_pass_intent_records_reflected_fullscreen_resources() {
 }
 
 #[test]
+fn render_world_mesh_programs_expose_required_vertex_buffers() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let unlit = MeshProgram::unlit(&engine).unwrap();
+    let render_world_unlit = MeshProgram::unlit_render_world(&engine).unwrap();
+    let render_world_lit = MeshProgram::lit_render_world(&engine).unwrap();
+
+    assert!(!unlit.uses_render_world_instances());
+    assert!(render_world_unlit.uses_render_world_instances());
+    assert!(render_world_lit.uses_render_world_instances());
+}
+
+#[test]
 fn draw_mesh_indirect_count_records_count_buffer_read() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     let frame = engine.begin_render_frame().unwrap();

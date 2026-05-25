@@ -32,6 +32,9 @@ pub struct CornellRtFrame {
     pub color: GraphImage,
     pub guide: GraphImage,
     pub material_guide: GraphImage,
+    pub motion_vectors: GraphImage,
+    pub normals: GraphImage,
+    pub depth: GraphImage,
 }
 
 impl CornellRtScene {
@@ -50,6 +53,23 @@ impl CornellRtScene {
             "cornell_rt_material_guide",
             Format::Rgba16Float,
         )
+    }
+
+    pub fn motion_vectors_desc(width: u32, height: u32) -> ImageDesc {
+        path_tracer_image_desc(
+            width,
+            height,
+            "cornell_rt_motion_vectors",
+            Format::Rgba16Float,
+        )
+    }
+
+    pub fn normals_desc(width: u32, height: u32) -> ImageDesc {
+        path_tracer_image_desc(width, height, "cornell_rt_normals", Format::Rgba16Float)
+    }
+
+    pub fn depth_desc(width: u32, height: u32) -> ImageDesc {
+        path_tracer_image_desc(width, height, "cornell_rt_depth", Format::Rgba32Float)
     }
 
     pub fn new(engine: &Engine, shader_path: PathBuf) -> Result<Option<Self>> {
@@ -116,6 +136,27 @@ impl CornellRtScene {
                 StageMask::RAY_TRACING,
                 UpdateRate::Frame,
             )
+            .binding(
+                "cornell_rt",
+                "motion_vector_image",
+                BindingKind::StorageImage,
+                StageMask::RAY_TRACING,
+                UpdateRate::Frame,
+            )
+            .binding(
+                "cornell_rt",
+                "normal_image",
+                BindingKind::StorageImage,
+                StageMask::RAY_TRACING,
+                UpdateRate::Frame,
+            )
+            .binding(
+                "cornell_rt",
+                "depth_image",
+                BindingKind::StorageImage,
+                StageMask::RAY_TRACING,
+                UpdateRate::Frame,
+            )
             .build(engine)?;
         tracing::debug!("layout OK, compiling RT pipeline (cornell_rt.slang)");
 
@@ -152,6 +193,7 @@ impl CornellRtScene {
         aspect: f32,
         frame_index: u32,
         camera: PathTracerCameraGpu,
+        previous_camera: PathTracerCameraGpu,
     ) -> Result<CornellRtFrame> {
         let active = self.subscene_gpu(subscene);
         let cache_key = active.subscene.cache_key();
@@ -170,6 +212,12 @@ impl CornellRtScene {
             "cornell_rt_material_guide",
             Self::material_guide_desc(width, height),
         )?;
+        let motion_vectors = frame.image(
+            "cornell_rt_motion_vectors",
+            Self::motion_vectors_desc(width, height),
+        )?;
+        let normals = frame.image("cornell_rt_normals", Self::normals_desc(width, height))?;
+        let depth = frame.image("cornell_rt_depth", Self::depth_desc(width, height))?;
 
         self.constants_buffer.write(
             0,
@@ -186,6 +234,10 @@ impl CornellRtScene {
                 camera_forward: camera.forward,
                 camera_right: camera.right,
                 camera_up: camera.up,
+                previous_camera_origin: previous_camera.origin,
+                previous_camera_forward: previous_camera.forward,
+                previous_camera_right: previous_camera.right,
+                previous_camera_up: previous_camera.up,
             }),
         )?;
         let bind_group = engine
@@ -196,17 +248,30 @@ impl CornellRtScene {
             .entry_binding(0, 3, ResourceBinding::Image(guide.handle()))?
             .entry_binding(0, 4, ResourceBinding::Image(material_guide.handle()))?
             .buffer_binding(0, 5, &active.triangle_info_buffer)?
+            .entry_binding(0, 6, ResourceBinding::Image(motion_vectors.handle()))?
+            .entry_binding(0, 7, ResourceBinding::Image(normals.handle()))?
+            .entry_binding(0, 8, ResourceBinding::Image(depth.handle()))?
             .build()?;
         frame.trace_rays_with_desc_and_writes(
             format!("path_tracer_{cache_key}_hardware_trace"),
             self.pipeline.trace_desc(width.max(1), height.max(1)),
             &[&bind_group],
-            &[&output, &guide, &material_guide],
+            &[
+                &output,
+                &guide,
+                &material_guide,
+                &motion_vectors,
+                &normals,
+                &depth,
+            ],
         )?;
         Ok(CornellRtFrame {
             color: output,
             guide,
             material_guide,
+            motion_vectors,
+            normals,
+            depth,
         })
     }
 
@@ -307,6 +372,10 @@ struct CornellRtConstants {
     camera_forward: [f32; 4],
     camera_right: [f32; 4],
     camera_up: [f32; 4],
+    previous_camera_origin: [f32; 4],
+    previous_camera_forward: [f32; 4],
+    previous_camera_right: [f32; 4],
+    previous_camera_up: [f32; 4],
 }
 
 fn path_tracer_image_desc(

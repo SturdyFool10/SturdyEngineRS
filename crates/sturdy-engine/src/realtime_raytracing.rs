@@ -1,10 +1,10 @@
 use crate::{
     AccelerationStructure, AccelerationStructureBuildMode, AccelerationStructureDesc,
     AccelerationStructureKind, BindGroup, BlasBuildDesc, BlasGeometryDesc, Buffer, BufferDesc,
-    BufferUsage, Engine, Error, GraphImage, GraphImageHistory, ImageDesc, Pipeline, PipelineLayout,
-    RayTracingPipelineDesc, RayTracingShaderBindingTable, RayTracingStageDesc, RenderFrame, Result,
-    RtShaderGroupDesc, Shader, ShaderBindingTableDesc, ShaderDesc, ShaderSource, ShaderStage,
-    StageMask, TlasBuildDesc, TraceRaysDesc,
+    BufferUsage, Engine, Error, Pipeline, PipelineLayout, RayTracingPipelineDesc,
+    RayTracingShaderBindingTable, RayTracingStageDesc, RenderFrame, Result, RtShaderGroupDesc,
+    Shader, ShaderBindingTableDesc, ShaderDesc, ShaderSource, ShaderStage, TlasBuildDesc,
+    TraceRaysDesc,
 };
 
 /// Capabilities relevant to fully featured realtime hardware ray tracing.
@@ -334,74 +334,6 @@ impl RealtimeTlas {
             mode: AccelerationStructureBuildMode::Build,
         }
     }
-}
-
-/// Temporal accumulation denoiser for progressive realtime RT samples.
-pub struct RealtimeRayTracingDenoiser {
-    history: GraphImageHistory,
-    max_frames: u32,
-    current_name: String,
-    history_name: String,
-}
-
-impl RealtimeRayTracingDenoiser {
-    pub fn new(max_frames: u32) -> Self {
-        Self {
-            history: GraphImageHistory::new(),
-            max_frames: max_frames.max(1),
-            current_name: "current_sample".into(),
-            history_name: "accumulation_history".into(),
-        }
-    }
-
-    pub fn reset(&mut self) {
-        self.history.reset();
-    }
-
-    pub fn next_frame_index(&mut self, frame: &RenderFrame, input_desc: ImageDesc) -> u32 {
-        let mut history_desc = input_desc;
-        history_desc.usage |= crate::ImageUsage::RENDER_TARGET;
-        frame
-            .next_history_frame_index(&mut self.history, history_desc)
-            .min(u32::MAX as u64) as u32
-    }
-
-    pub fn accumulate(
-        &mut self,
-        frame: &RenderFrame,
-        input: &GraphImage,
-        output_name: &str,
-        program: &crate::ShaderProgram,
-    ) -> Result<GraphImage> {
-        let mut history_desc = input.desc();
-        history_desc.usage |= crate::ImageUsage::RENDER_TARGET;
-        let history = frame.history_images(&mut self.history, output_name, history_desc)?;
-        input.register_as(&self.current_name);
-        history.read.register_as(&self.history_name);
-        frame.set_sampler("current_sampler", crate::SamplerPreset::Linear);
-        frame.set_sampler("accumulation_sampler", crate::SamplerPreset::Linear);
-        history.write.execute_shader_with_push_constants(
-            program,
-            StageMask::FRAGMENT,
-            bytemuck::bytes_of(&RealtimeRayTracingDenoiserParams {
-                frame_index: history.frame_index.min(u32::MAX as u64) as u32,
-                has_history: history.has_history as u32,
-                max_frames: self.max_frames,
-                _pad: 0,
-            }),
-        )?;
-        history.write.register_as("scene_color");
-        Ok(history.write)
-    }
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct RealtimeRayTracingDenoiserParams {
-    frame_index: u32,
-    has_history: u32,
-    max_frames: u32,
-    _pad: u32,
 }
 
 impl Engine {

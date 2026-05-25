@@ -129,6 +129,39 @@ impl MeshProgram {
         )
     }
 
+    /// Built-in RenderWorld-driven 3D program that colours by world-space normal.
+    ///
+    /// The vertex shader reads `render_world_visible_instances` and `current_matrices`, so it can
+    /// be driven directly by RenderWorld GPU draw-generation output.
+    pub fn unlit_render_world(engine: &Engine) -> Result<Self> {
+        Self::new(
+            engine,
+            MeshProgramDesc {
+                fragment: ShaderDesc {
+                    source: ShaderSource::File(builtin_shader_path("unlit_fragment.slang")),
+                    entry_point: "main".to_owned(),
+                    stage: ShaderStage::Fragment,
+                    requires_ray_query: false,
+                    requires_cooperative_matrix: false,
+                    uses_ser: false,
+                },
+                vertex: Some(ShaderDesc {
+                    source: ShaderSource::File(builtin_shader_path(
+                        "render_world_mesh_vertex_3d.slang",
+                    )),
+                    entry_point: "main".to_owned(),
+                    stage: ShaderStage::Vertex,
+                    requires_ray_query: false,
+                    requires_cooperative_matrix: false,
+                    uses_ser: false,
+                }),
+                vertex_kind: MeshVertexKind::V3d,
+                alpha_blend: false,
+                uses_depth: true,
+            },
+        )
+    }
+
     /// Built-in 3D program with Lambert diffuse + Blinn-Phong specular shading.
     ///
     /// Requires a storage buffer named `"lighting"` containing one [`LightingUniforms`]
@@ -153,6 +186,40 @@ impl MeshProgram {
                     uses_ser: false,
                 },
                 vertex: None,
+                vertex_kind: MeshVertexKind::V3d,
+                alpha_blend: false,
+                uses_depth: true,
+            },
+        )
+    }
+
+    /// RenderWorld-driven variant of [`MeshProgram::lit`].
+    ///
+    /// The vertex shader reads `render_world_visible_instances` and `current_matrices`, so it can
+    /// be driven directly by RenderWorld GPU draw-generation output while reusing the built-in lit
+    /// fragment shader.
+    pub fn lit_render_world(engine: &Engine) -> Result<Self> {
+        Self::new(
+            engine,
+            MeshProgramDesc {
+                fragment: ShaderDesc {
+                    source: ShaderSource::File(builtin_shader_path("lit_fragment.slang")),
+                    entry_point: "main".to_owned(),
+                    stage: ShaderStage::Fragment,
+                    requires_ray_query: false,
+                    requires_cooperative_matrix: false,
+                    uses_ser: false,
+                },
+                vertex: Some(ShaderDesc {
+                    source: ShaderSource::File(builtin_shader_path(
+                        "render_world_mesh_vertex_3d.slang",
+                    )),
+                    entry_point: "main".to_owned(),
+                    stage: ShaderStage::Vertex,
+                    requires_ray_query: false,
+                    requires_cooperative_matrix: false,
+                    uses_ser: false,
+                }),
                 vertex_kind: MeshVertexKind::V3d,
                 alpha_blend: false,
                 uses_depth: true,
@@ -285,6 +352,21 @@ impl MeshProgram {
 
     pub fn reflection(&self) -> &ShaderReflection {
         &self.reflection
+    }
+
+    /// Returns true when the vertex shader can consume RenderWorld draw-generation output.
+    pub fn uses_render_world_instances(&self) -> bool {
+        let has_visible_remap = self
+            .reflection
+            .parameters
+            .iter()
+            .any(|parameter| parameter.name == "render_world_visible_instances");
+        let has_current_matrices = self
+            .reflection
+            .parameters
+            .iter()
+            .any(|parameter| parameter.name == "current_matrices");
+        has_visible_remap && has_current_matrices
     }
 
     /// Return the fragment shader source path if loaded from a file.

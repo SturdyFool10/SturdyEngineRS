@@ -1,6 +1,6 @@
 use crate::ecs::Transform;
 
-use super::{GpuObjectId, PreviousTransform, RenderObjectState};
+use super::{GpuObjectId, PreviousTransform, RenderBounds, RenderObjectState};
 
 /// Compact per-object transform source for GPU matrix generation.
 ///
@@ -8,6 +8,22 @@ use super::{GpuObjectId, PreviousTransform, RenderObjectState};
 /// expand it into current world, previous world, normal matrices, and render
 /// bounds. Keeping this as the uploaded source avoids CPU materializing every
 /// matrix for every renderable every frame.
+///
+/// Layout (112 bytes, 16-byte aligned throughout):
+/// ```text
+///  0..12  translation      [f32; 3]
+/// 12..16  parent_index     u32
+/// 16..32  rotation         [f32; 4]
+/// 32..44  scale            [f32; 3]
+/// 44..48  flags            u32
+/// 48..60  previous_translation [f32; 3]
+/// 60..64  local_sphere_radius  f32       ← local bounding sphere radius
+/// 64..80  previous_rotation    [f32; 4]
+/// 80..92  previous_scale       [f32; 3]
+/// 92..96  _pad1                u32
+/// 96..108 local_sphere_center  [f32; 3]  ← local bounding sphere center
+/// 108..112 _pad2               u32
+/// ```
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuTransformSourceData {
@@ -17,10 +33,12 @@ pub struct GpuTransformSourceData {
     pub scale: [f32; 3],
     pub flags: u32,
     pub previous_translation: [f32; 3],
-    pub _pad0: u32,
+    pub local_sphere_radius: f32,
     pub previous_rotation: [f32; 4],
     pub previous_scale: [f32; 3],
     pub _pad1: u32,
+    pub local_sphere_center: [f32; 3],
+    pub _pad2: u32,
 }
 
 impl GpuTransformSourceData {
@@ -32,6 +50,7 @@ impl GpuTransformSourceData {
         transform: &Transform,
         previous: Option<&PreviousTransform>,
         parent_index: Option<u32>,
+        bounds: Option<&RenderBounds>,
     ) -> Self {
         let previous_transform = previous
             .map(PreviousTransform::to_transform)
@@ -44,6 +63,10 @@ impl GpuTransformSourceData {
             flags |= Self::FLAG_HAS_PARENT;
         }
 
+        let (local_sphere_center, local_sphere_radius) = bounds
+            .map(|b| (b.local_sphere.center.to_array(), b.local_sphere.radius))
+            .unwrap_or(([0.0, 0.0, 0.0], 0.0));
+
         Self {
             translation: transform.position.to_array(),
             parent_index: parent_index.unwrap_or(Self::INVALID_PARENT),
@@ -51,10 +74,12 @@ impl GpuTransformSourceData {
             scale: transform.scale.to_array(),
             flags,
             previous_translation: previous_transform.position.to_array(),
-            _pad0: 0,
+            local_sphere_radius,
             previous_rotation: previous_transform.rotation.to_array(),
             previous_scale: previous_transform.scale.to_array(),
             _pad1: 0,
+            local_sphere_center,
+            _pad2: 0,
         }
     }
 }
@@ -83,6 +108,7 @@ impl RenderWorldGpuTransformSourceData {
                 transform,
                 state.previous_transform.as_ref(),
                 None,
+                state.bounds.as_ref(),
             ));
             object_slots.push((state.object, slot as u32));
         }
@@ -186,7 +212,8 @@ mod tests {
             Vec3::splat(2.0),
         );
         let previous = PreviousTransform::from_transform(&Transform::from_position(Vec3::X));
-        let packed = GpuTransformSourceData::from_transforms(&current, Some(&previous), Some(7));
+        let packed =
+            GpuTransformSourceData::from_transforms(&current, Some(&previous), Some(7), None);
 
         assert_eq!(packed.translation, [1.0, 2.0, 3.0]);
         assert_eq!(packed.scale, [2.0, 2.0, 2.0]);

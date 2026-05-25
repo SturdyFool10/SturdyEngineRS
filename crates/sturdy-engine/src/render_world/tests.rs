@@ -401,7 +401,7 @@ fn gpu_cull_pass_dispatches_scene_wide_after_outputs_are_prepared() {
     let pass = RenderWorldGpuCullPass::new(&engine).unwrap();
     let frame = engine.begin_render_frame().unwrap();
     let stats = pass
-        .execute(&frame, &render_world, glam::Mat4::IDENTITY)
+        .execute(&frame, &render_world, glam::Mat4::IDENTITY, None)
         .unwrap();
 
     assert!(stats.dispatched);
@@ -436,7 +436,7 @@ fn gpu_cull_pass_skips_when_single_dispatch_is_disabled() {
     let pass = RenderWorldGpuCullPass::new(&engine).unwrap();
     let frame = engine.begin_render_frame().unwrap();
     let stats = pass
-        .execute(&frame, &render_world, glam::Mat4::IDENTITY)
+        .execute(&frame, &render_world, glam::Mat4::IDENTITY, None)
         .unwrap();
 
     assert!(!stats.dispatched);
@@ -491,9 +491,14 @@ fn gpu_draw_generation_allocates_bins_indirect_commands_and_count_buffer() {
     assert!(stats.bin_buffer_reallocated);
     assert!(stats.indirect_buffer_reallocated);
     assert!(stats.count_buffer_reallocated);
+    assert!(stats.visible_instance_buffer_reallocated);
     assert_eq!(
         stats.uploaded_bin_bytes,
         2 * std::mem::size_of::<RenderWorldGpuBinData>() as u64
+    );
+    assert_eq!(
+        stats.visible_instance_bytes,
+        2 * std::mem::size_of::<u32>() as u64
     );
     assert!(!stats.uses_indirect_count);
     assert!(
@@ -505,6 +510,16 @@ fn gpu_draw_generation_allocates_bins_indirect_commands_and_count_buffer() {
     render_world.with_gpu_draw_bin_buffer(|buffer| assert!(buffer.is_some()));
     render_world.with_gpu_draw_indirect_buffer(|buffer| assert!(buffer.is_some()));
     render_world.with_gpu_draw_count_buffer(|buffer| assert!(buffer.is_some()));
+    render_world.with_gpu_visible_instance_buffer(|buffer| assert!(buffer.is_some()));
+    render_world.with_gpu_draw_output(|output| {
+        let output = output.expect("draw output should include visible-instance remap");
+        assert_eq!(output.max_draw_count, 2);
+        assert!(!output.use_indirect_count);
+        assert_eq!(
+            output.visible_instances.desc().size,
+            4 * std::mem::size_of::<u32>() as u64
+        );
+    });
 }
 
 #[test]
@@ -541,6 +556,13 @@ fn gpu_draw_generation_pass_dispatches_after_prepare() {
     assert_eq!(stats.workgroup_count, 1);
     assert_eq!(stats.bins_per_workgroup, 64);
     assert_eq!(stats.skipped_reason, None);
+
+    let report = frame.describe();
+    assert!(report.passes.iter().any(|pass| {
+        pass.buffer_writes
+            .iter()
+            .any(|name| name == "render_world_visible_instances")
+    }));
 }
 
 #[test]

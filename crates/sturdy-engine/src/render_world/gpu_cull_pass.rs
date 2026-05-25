@@ -1,28 +1,55 @@
 use glam::Mat4;
 
 use crate::{
-    ComputeProgram, Engine, Error, Frustum, RenderFrame, RenderWorld, Result,
+    ComputeProgram, Engine, Error, HizPyramid, RenderFrame, RenderWorld, Result,
     shader_program::builtin_shader_path,
 };
 
 use super::{RenderWorldGpuCullDispatchStats, RenderWorldGpuCullSettings};
 
+/// Push constants for the render-world cull compute shader.
+///
+/// The view_proj matrix replaces the six pre-computed frustum planes: the
+/// shader extracts them via Gribb-Hartmann and also uses view_proj for the
+/// Hi-Z sphere projection.  Total: 96 bytes.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct RenderWorldCullConstants {
-    frustum_planes: [[f32; 4]; 6],
+    view_proj: [[f32; 4]; 4], // 64 bytes
     object_count: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
+    use_hiz: u32,
+    screen_width: u32,
+    screen_height: u32,
+    hiz_mip_count: u32,
+    proj_y_scale: f32,
+    proj_z_scale: f32,
+    _pad: u32,
 }
+
+/// Optional Hi-Z occlusion data supplied to the cull pass.
+///
+/// Pass the **previous** frame's Hi-Z pyramid (from `HizHistoryFrame::previous`)
+/// so the cull shader can test objects against last-frame's depth hierarchy.
+pub struct HizOcclusionInput<'a> {
+    /// Previous-frame Hi-Z pyramid produced by `HizPass::execute_history`.
+    pub pyramid: &'a HizPyramid,
+    /// `proj[1][1]` from the projection matrix — used to compute screen-space
+    /// sphere radius.
+    pub proj_y_scale: f32,
+    /// `proj[2][2]` from the projection matrix — used to compute near-plane
+    /// NDC depth of the sphere front face.
+    pub proj_z_scale: f32,
+    /// Render-target dimensions in pixels (width, height).
+    pub screen_size: [u32; 2],
+}
+
+/// Maximum number of Hi-Z pyramid levels the cull shader can consume.
+pub const HIZ_MAX_LEVELS: u32 = 8;
 
 /// Scene-wide GPU culling pass for the persistent render world.
 ///
-/// This pass reads the GPU-derived `world_bounds` table produced by
-/// [`RenderWorldGpuTransformBuildPass`](super::RenderWorldGpuTransformBuildPass) and writes one
-/// visibility flag per object. Later draw-generation/compaction passes can consume that compact
-/// visibility result without issuing per-batch cull dispatches.
+/// Performs frustum culling and optional Hi-Z occlusion culling in a single
+/// compute dispatch over all render-world objects.
 pub struct RenderWorldGpuCullPass {
     program: ComputeProgram,
     settings: RenderWorldGpuCullSettings,
@@ -57,6 +84,7 @@ impl RenderWorldGpuCullPass {
         frame: &RenderFrame,
         render_world: &RenderWorld,
         view_proj: Mat4,
+        hiz: Option<HizOcclusionInput<'_>>,
     ) -> Result<RenderWorldGpuCullDispatchStats> {
         let Some(plan) = render_world.gpu_cull_plan() else {
             return Err(Error::InvalidInput(
@@ -130,21 +158,40 @@ impl RenderWorldGpuCullPass {
             )));
         }
 
-        let frustum = Frustum::from_view_proj(view_proj);
-        let raw = frustum.planes_raw();
+        // Bind Hi-Z pyramid levels and collect projection parameters.
+        let (use_hiz, screen_width, screen_height, hiz_mip_count, proj_y_scale, proj_z_scale) =
+            match &hiz {
+                Some(input) => {
+                    let mip_count = input.pyramid.mip_levels().min(HIZ_MAX_LEVELS);
+                    for level in 0..mip_count {
+                        input
+                            .pyramid
+                            .mip(level as usize)
+                            .register_as(format!("hiz_l{level}"));
+                    }
+                    (
+                        1u32,
+                        input.screen_size[0],
+                        input.screen_size[1],
+                        mip_count,
+                        input.proj_y_scale,
+                        input.proj_z_scale,
+                    )
+                }
+                None => (0u32, 0u32, 0u32, 0u32, 0.0f32, 0.0f32),
+            };
+
+        let vp = view_proj.to_cols_array_2d();
         let constants = RenderWorldCullConstants {
-            frustum_planes: [
-                raw[0].to_array(),
-                raw[1].to_array(),
-                raw[2].to_array(),
-                raw[3].to_array(),
-                raw[4].to_array(),
-                raw[5].to_array(),
-            ],
+            view_proj: vp,
             object_count,
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
+            use_hiz,
+            screen_width,
+            screen_height,
+            hiz_mip_count,
+            proj_y_scale,
+            proj_z_scale,
+            _pad: 0,
         };
         frame.dispatch_compute_auto(
             "render_world_cull",
