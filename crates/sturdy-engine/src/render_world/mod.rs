@@ -2,13 +2,19 @@ mod aabb;
 mod batch_range;
 mod dirty_flags;
 mod extraction_stats;
+mod gpu_cull_pass;
 mod gpu_cull_plan;
+mod gpu_cull_stats;
+mod gpu_draw_generation;
+mod gpu_draw_generation_pass;
 mod gpu_matrix_plan;
+mod gpu_matrix_stats;
 mod gpu_object_allocator;
 mod gpu_object_id;
 mod gpu_scene_data;
 mod gpu_scene_state;
 mod gpu_scene_stats;
+mod gpu_transform_build_pass;
 mod gpu_transform_source;
 mod layer_mask;
 mod local_to_world;
@@ -30,17 +36,29 @@ pub use aabb::Aabb;
 pub use batch_range::RenderWorldBatchRange;
 pub use dirty_flags::RenderDirtyFlags;
 pub use extraction_stats::RenderExtractionStats;
+pub use gpu_cull_pass::RenderWorldGpuCullPass;
 pub use gpu_cull_plan::{
     RenderWorldGpuCullCaps, RenderWorldGpuCullPlan, RenderWorldGpuCullSettings,
 };
+pub use gpu_cull_stats::{RenderWorldGpuCullDispatchStats, RenderWorldGpuCullOutputStats};
+pub use gpu_draw_generation::{
+    RenderWorldGpuBinData, RenderWorldGpuDrawGenerationDispatchStats,
+    RenderWorldGpuDrawGenerationPlan, RenderWorldGpuDrawGenerationStats, RenderWorldGpuDrawOutput,
+    RenderWorldGpuMeshDrawInfo,
+};
+pub use gpu_draw_generation_pass::RenderWorldGpuDrawGenerationPass;
 pub use gpu_matrix_plan::{
     RenderWorldGpuMatrixCaps, RenderWorldGpuMatrixPlan, RenderWorldGpuMatrixSettings,
 };
+pub use gpu_matrix_stats::RenderWorldGpuMatrixStats;
 pub use gpu_object_allocator::GpuObjectAllocator;
 pub use gpu_object_id::GpuObjectId;
 pub use gpu_scene_data::RenderWorldGpuSceneData;
 pub(super) use gpu_scene_state::RenderWorldGpuSceneState;
 pub use gpu_scene_stats::RenderWorldGpuSceneStats;
+pub use gpu_transform_build_pass::{
+    RenderWorldGpuTransformBuildPass, RenderWorldGpuTransformBuildStats,
+};
 pub use gpu_transform_source::{
     GpuTransformDirtyRange, GpuTransformSourceData, RenderWorldGpuTransformSourceData,
     gpu_transform_dirty_ranges,

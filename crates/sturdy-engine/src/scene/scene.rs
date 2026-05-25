@@ -17,7 +17,12 @@ use crate::{
     Buffer, BufferDesc, BufferUsage, ComputeProgram, DrawIndexedIndirectCommand, Engine, Error,
     Format, Frustum, GeometryBackend, GraphImage, ImageDesc, ImageDimension, ImageUsage, Mesh,
     MeshProgram, RenderFrame, Result,
-    render_world::{GpuObjectId, RenderWorld, VisibilityFlags},
+    render_world::{
+        GpuObjectId, MaterialShaderClass, PipelineClass, RenderStateClass, RenderWorld,
+        RenderWorldGpuCullPass, RenderWorldGpuCullSettings, RenderWorldGpuDrawGenerationPass,
+        RenderWorldGpuMatrixSettings, RenderWorldGpuMeshDrawInfo, RenderWorldGpuTransformBuildPass,
+        RenderWorldPersistentBins, VertexLayoutClass, VisibilityFlags,
+    },
 };
 use sturdy_engine_core::Extent3d;
 
@@ -78,8 +83,15 @@ pub struct Scene {
     pub(super) geometry_backend: GeometryBackend,
     /// Lazily created GPU frustum culling compute program.
     pub(super) culling_program: Option<ComputeProgram>,
-    /// Set by `cull_gpu()` each frame; tells the draw path to use `total_count`
-    /// rather than `indirect_commands.len()` as the indirect draw count.
+    /// Lazily created GPU transform build compute pass (expands TRS sources → matrices + bounds).
+    transform_build_pass: Option<RenderWorldGpuTransformBuildPass>,
+    /// Lazily created GPU frustum cull pass (writes visibility flags from world_bounds).
+    cull_pass: Option<RenderWorldGpuCullPass>,
+    /// Lazily created GPU draw-generation pass (visibility flags + bins → indirect commands).
+    draw_generation_pass: Option<RenderWorldGpuDrawGenerationPass>,
+    /// Persistent-bin snapshot matching the prepared render-world draw-generation buffers.
+    gpu_draw_bins: RenderWorldPersistentBins,
+    /// Set by `prepare_internal()` each frame; tells the draw path to use GPU indirect.
     pub(super) gpu_cull_active: bool,
     /// Elapsed application time in seconds. Written by `set_app_time` and read
     /// by `draw()` / `draw_gbuffer()` to populate `CameraConstants::time` so
@@ -109,6 +121,10 @@ impl Scene {
             deferred_lights_buffer: None,
             geometry_backend: GeometryBackend::ClassicVertex,
             culling_program: None,
+            transform_build_pass: None,
+            cull_pass: None,
+            draw_generation_pass: None,
+            gpu_draw_bins: RenderWorldPersistentBins::default(),
             gpu_cull_active: false,
             app_time_secs: 0.0,
         }
@@ -130,6 +146,35 @@ impl Scene {
     /// Returns the currently active geometry backend.
     pub fn geometry_backend(&self) -> GeometryBackend {
         self.geometry_backend
+    }
+
+    fn build_render_world_draw_bins(
+        &self,
+        render_world: &RenderWorld,
+    ) -> RenderWorldPersistentBins {
+        RenderWorldPersistentBins::from_states(
+            &render_world.snapshot(),
+            GeometryBackend::ComputeIndirect,
+            PipelineClass::GBuffer,
+            MaterialShaderClass::PbrOpaque,
+            VertexLayoutClass::StaticMesh,
+            RenderStateClass::OpaqueDepthWrite,
+        )
+    }
+
+    fn render_world_mesh_draws(&self) -> Vec<RenderWorldGpuMeshDrawInfo> {
+        self.meshes
+            .iter()
+            .enumerate()
+            .map(|(mesh_idx, (mesh, _))| {
+                let index_count = if mesh.is_indexed() {
+                    mesh.index_count
+                } else {
+                    mesh.vertex_count
+                };
+                RenderWorldGpuMeshDrawInfo::indexed(MeshId::from_raw(mesh_idx as u32), index_count)
+            })
+            .collect()
     }
 
     /// Register a mesh+program pair. Returns a `MeshId` used to spawn objects.
@@ -507,6 +552,39 @@ impl Scene {
         }
         if let Some(render_world) = render_world {
             render_world.prepare_gpu_scene(engine, self.meshes.len())?;
+            render_world.prepare_gpu_transform_sources(
+                engine,
+                self.meshes.len(),
+                RenderWorldGpuMatrixSettings::default(),
+            )?;
+            render_world.prepare_gpu_cull_outputs(
+                engine,
+                RenderWorldGpuCullSettings::default(),
+                false,
+            )?;
+            self.gpu_draw_bins = self.build_render_world_draw_bins(render_world);
+            render_world.prepare_gpu_draw_generation(
+                engine,
+                &self.gpu_draw_bins,
+                self.render_world_mesh_draws(),
+                engine.caps().features.draw_indirect_count,
+            )?;
+            if self.transform_build_pass.is_none() {
+                self.transform_build_pass = Some(RenderWorldGpuTransformBuildPass::new(engine)?);
+            }
+            if self.cull_pass.is_none() {
+                self.cull_pass = Some(RenderWorldGpuCullPass::new(engine)?);
+            }
+            if self.draw_generation_pass.is_none() {
+                self.draw_generation_pass = Some(RenderWorldGpuDrawGenerationPass::new(engine)?);
+            }
+            // Draw generation is prepared and dispatched below, but the default mesh
+            // shaders still read the legacy per-batch `InstanceData` ABI. Keep the
+            // CPU-authored indirect draw fallback active until visible-instance
+            // compaction/remapping lands for the generated RenderWorld commands.
+            self.gpu_cull_active = false;
+        } else {
+            self.gpu_draw_bins = RenderWorldPersistentBins::default();
         }
 
         for batch in self.batches.values_mut() {
@@ -908,49 +986,69 @@ impl Scene {
             return self.draw_batches_classic(constants, output, depth, frame);
         }
 
+        // GPU-driven compute: expand transforms and write visibility flags every frame.
+        // These run unconditionally when a render world is present so the derived GPU
+        // tables (matrices, world bounds, visibility flags) are always current, even
+        // while the draw path still uses the CPU-generated indirect commands.
+        // gpu_cull_active will be enabled once draw generation is connected.
+        if let Some(render_world) = render_world {
+            if let Some(build_pass) = &self.transform_build_pass {
+                build_pass.execute(frame, render_world)?;
+            }
+            if let Some(cull_pass) = &self.cull_pass {
+                cull_pass.execute(frame, render_world, view_proj)?;
+            }
+            if let Some(draw_generation_pass) = &self.draw_generation_pass {
+                draw_generation_pass.execute(frame, render_world)?;
+            }
+        }
+
         // ComputeIndirect path: CPU frustum cull, write one DrawIndexedIndirectCommand
         // per visible instance, upload to GPU, then issue DrawIndirect.
-        let frustum = Frustum::from_view_proj(view_proj);
-        for batch in self.batches.values_mut() {
-            batch.indirect_commands.clear();
-            let total = batch.total_count() as usize;
-            if total == 0 {
-                continue;
-            }
-            let mesh_idx = batch.mesh_idx as usize;
-            let mesh = &self.meshes[mesh_idx].0;
-            let index_count = if mesh.is_indexed() {
-                mesh.index_count
-            } else {
-                mesh.vertex_count
-            };
-
-            for (instance_idx, (inst, metadata)) in batch
-                .static_instances
-                .iter()
-                .zip(batch.static_metadata.iter())
-                .chain(
-                    batch
-                        .dynamic_instances
-                        .iter()
-                        .zip(batch.dynamic_metadata.iter()),
-                )
-                .enumerate()
-            {
-                let model = Mat4::from_cols_array_2d(&inst.model);
-                let world_sphere = metadata.local_sphere.transform(model);
-                if frustum.intersects_sphere(&world_sphere) {
-                    batch.indirect_commands.push(DrawIndexedIndirectCommand {
-                        index_count,
-                        instance_count: 1,
-                        first_index: 0,
-                        vertex_offset: 0,
-                        first_instance: instance_idx as u32,
-                    });
+        // Skipped when gpu_cull_active — the GPU already wrote the indirect buffer.
+        if !self.gpu_cull_active {
+            let frustum = Frustum::from_view_proj(view_proj);
+            for batch in self.batches.values_mut() {
+                batch.indirect_commands.clear();
+                let total = batch.total_count() as usize;
+                if total == 0 {
+                    continue;
                 }
+                let mesh_idx = batch.mesh_idx as usize;
+                let mesh = &self.meshes[mesh_idx].0;
+                let index_count = if mesh.is_indexed() {
+                    mesh.index_count
+                } else {
+                    mesh.vertex_count
+                };
+
+                for (instance_idx, (inst, metadata)) in batch
+                    .static_instances
+                    .iter()
+                    .zip(batch.static_metadata.iter())
+                    .chain(
+                        batch
+                            .dynamic_instances
+                            .iter()
+                            .zip(batch.dynamic_metadata.iter()),
+                    )
+                    .enumerate()
+                {
+                    let model = Mat4::from_cols_array_2d(&inst.model);
+                    let world_sphere = metadata.local_sphere.transform(model);
+                    if frustum.intersects_sphere(&world_sphere) {
+                        batch.indirect_commands.push(DrawIndexedIndirectCommand {
+                            index_count,
+                            instance_count: 1,
+                            first_index: 0,
+                            vertex_offset: 0,
+                            first_instance: instance_idx as u32,
+                        });
+                    }
+                }
+                batch.prepare_indirect(engine)?;
             }
-            batch.prepare_indirect(engine)?;
-        }
+        } // end !gpu_cull_active CPU cull block
 
         for batch in self.batches.values() {
             let instance_buf = match &batch.gpu_buffer {

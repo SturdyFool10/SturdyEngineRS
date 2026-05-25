@@ -5,8 +5,8 @@ use sturdy_engine_core as core;
 use crate::{
     Access, BindGroup, BindGroupDesc, BindGroupEntry, BindingKind, BlasBuildDesc, Buffer,
     BufferDesc, BufferUsage, BufferUse, CopyImageToBufferDesc, DispatchDesc, DrawDesc,
-    DrawIndirectDesc, Engine, Error, Format, ImageDesc, ImageHandle, ImageRef, ImageUse,
-    IndexBufferBinding, PassDesc, PassWork, Pipeline, PushConstants, QueueType,
+    DrawIndirectCountDesc, DrawIndirectDesc, Engine, Error, Format, ImageDesc, ImageHandle,
+    ImageRef, ImageUse, IndexBufferBinding, PassDesc, PassWork, Pipeline, PushConstants, QueueType,
     RayTracingShaderBindingTable, ResolveImageDesc, ResourceBinding, Result, RgState,
     ShaderReflection, StageMask, SubresourceRange, SurfaceImage, TlasBuildDesc, TraceRaysDesc,
     VertexBufferBinding, compute_program::ComputeProgram, mesh::Mesh, mesh_program::MeshProgram,
@@ -2511,6 +2511,64 @@ impl GraphImage {
         )
     }
 
+    pub fn draw_mesh_indirect_count_with_push_constants_and_depth<T: bytemuck::Pod>(
+        &self,
+        mesh: &Mesh,
+        program: &MeshProgram,
+        instances: &crate::Buffer,
+        indirect_commands: &crate::Buffer,
+        count_buffer: &crate::Buffer,
+        max_draw_count: u32,
+        constants: &T,
+        depth: Option<&GraphImage>,
+    ) -> Result<()> {
+        if max_draw_count == 0 {
+            return Ok(());
+        }
+        let stage = reflected_push_constant_stages(
+            program.reflection(),
+            StageMask::VERTEX | StageMask::FRAGMENT,
+        );
+        self.draw_mesh_indirect_count_inner(
+            mesh,
+            program,
+            Some(PushConstants {
+                offset: 0,
+                stages: stage,
+                bytes: bytemuck::bytes_of(constants).to_vec(),
+            }),
+            instances,
+            indirect_commands,
+            count_buffer,
+            max_draw_count,
+            depth,
+        )
+    }
+
+    fn draw_mesh_indirect_count_inner(
+        &self,
+        mesh: &Mesh,
+        program: &MeshProgram,
+        push_constants: Option<PushConstants>,
+        instance_buf: &crate::Buffer,
+        indirect_buf: &crate::Buffer,
+        count_buf: &crate::Buffer,
+        max_draw_count: u32,
+        depth: Option<&GraphImage>,
+    ) -> Result<()> {
+        self.draw_mesh_indirect_common(
+            mesh,
+            program,
+            push_constants,
+            instance_buf,
+            indirect_buf,
+            Some(count_buf),
+            0,
+            max_draw_count,
+            depth,
+        )
+    }
+
     fn draw_mesh_indirect_inner(
         &self,
         mesh: &Mesh,
@@ -2518,6 +2576,31 @@ impl GraphImage {
         push_constants: Option<PushConstants>,
         instance_buf: &crate::Buffer,
         indirect_buf: &crate::Buffer,
+        indirect_offset: u64,
+        draw_count: u32,
+        depth: Option<&GraphImage>,
+    ) -> Result<()> {
+        self.draw_mesh_indirect_common(
+            mesh,
+            program,
+            push_constants,
+            instance_buf,
+            indirect_buf,
+            None,
+            indirect_offset,
+            draw_count,
+            depth,
+        )
+    }
+
+    fn draw_mesh_indirect_common(
+        &self,
+        mesh: &Mesh,
+        program: &MeshProgram,
+        push_constants: Option<PushConstants>,
+        instance_buf: &crate::Buffer,
+        indirect_buf: &crate::Buffer,
+        count_buf: Option<&crate::Buffer>,
         indirect_offset: u64,
         draw_count: u32,
         depth: Option<&GraphImage>,
@@ -2547,6 +2630,12 @@ impl GraphImage {
             .frame
             .inner
             .graph_mut(|g| g.import_buffer(indirect_buf.handle(), indirect_buf.desc()))?;
+        if let Some(count_buf) = count_buf {
+            inner
+                .frame
+                .inner
+                .graph_mut(|g| g.import_buffer(count_buf.handle(), count_buf.desc()))?;
+        }
 
         let pipeline = program.pipeline_handle(self.desc.format, self.desc.samples)?;
 
@@ -2591,6 +2680,15 @@ impl GraphImage {
             offset: 0,
             size: indirect_buf.desc().size,
         });
+        if let Some(count_buf) = count_buf {
+            buffer_reads.push(crate::BufferUse {
+                buffer: count_buf.handle(),
+                access: Access::Read,
+                state: RgState::IndirectRead,
+                offset: 0,
+                size: count_buf.desc().size,
+            });
+        }
 
         inner.buffers_by_name.insert(
             "instances".to_owned(),
@@ -2639,6 +2737,54 @@ impl GraphImage {
         // DrawIndexedIndirectCommand: 5 × u32 = 20 bytes.
         const INDIRECT_STRIDE: u32 = 20;
 
+        let mut buffer_read_names = vec![
+            "mesh_vertex".to_string(),
+            "instances".to_string(),
+            "indirect_commands".to_string(),
+        ];
+        if index_buffer.is_some() {
+            buffer_read_names.push("mesh_index".to_string());
+        }
+        if count_buf.is_some() {
+            buffer_read_names.push("indirect_count".to_string());
+        }
+
+        inner.pass_records.push(PassRecord {
+            name: pass_name.clone(),
+            kind: PassKind::Mesh,
+            queue: crate::QueueType::Graphics,
+            reads: eager_uses.clone(),
+            writes: writes.clone(),
+            buffer_read_names,
+            buffer_write_names: Vec::new(),
+            deferred_read_names: unresolved_read_names.clone(),
+            skip_read_name: self.name.clone(),
+        });
+
+        let work = if let Some(count_buf) = count_buf {
+            PassWork::DrawIndirectCount(DrawIndirectCountDesc {
+                indirect_buffer: indirect_buf.handle(),
+                indirect_offset,
+                count_buffer: count_buf.handle(),
+                count_offset: 0,
+                max_draw_count: draw_count,
+                stride: INDIRECT_STRIDE,
+                indexed: true,
+                vertex_buffer,
+                index_buffer,
+            })
+        } else {
+            PassWork::DrawIndirect(DrawIndirectDesc {
+                indirect_buffer: indirect_buf.handle(),
+                offset: indirect_offset,
+                draw_count,
+                stride: INDIRECT_STRIDE,
+                indexed: true,
+                vertex_buffer,
+                index_buffer,
+            })
+        };
+
         inner.pending_passes.push(PendingPass {
             desc: PassDesc {
                 name: pass_name,
@@ -2648,15 +2794,7 @@ impl GraphImage {
                 bind_groups: Vec::new(),
                 push_constants,
                 pipeline_shading_rate: None,
-                work: PassWork::DrawIndirect(DrawIndirectDesc {
-                    indirect_buffer: indirect_buf.handle(),
-                    offset: indirect_offset,
-                    draw_count,
-                    stride: INDIRECT_STRIDE,
-                    indexed: true,
-                    vertex_buffer,
-                    index_buffer,
-                }),
+                work,
                 reads: eager_uses,
                 writes,
                 buffer_reads,

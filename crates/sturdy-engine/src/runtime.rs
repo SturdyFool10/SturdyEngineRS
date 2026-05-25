@@ -310,6 +310,7 @@ impl AppRuntime {
             window_logical_size: None,
             wait_for_gpu_before_present: false,
             finished: false,
+            fixed_alpha: 0.0,
         })
     }
 
@@ -383,6 +384,8 @@ pub struct AppRuntimeFrame<'a> {
     /// Set to `true` after `finish_and_present` completes to prevent the `Drop`
     /// impl from double-presenting when the user calls it explicitly.
     finished: bool,
+    /// Interpolation alpha in [0, 1] between the last fixed step and the next.
+    fixed_alpha: f32,
 }
 
 impl<'a> AppRuntimeFrame<'a> {
@@ -446,6 +449,15 @@ impl<'a> AppRuntimeFrame<'a> {
 
     pub fn set_wait_for_gpu_before_present(&mut self, wait: bool) {
         self.wait_for_gpu_before_present = wait;
+    }
+
+    /// Interpolation alpha between the last fixed step and the next, in [0, 1].
+    pub fn fixed_alpha(&self) -> f32 {
+        self.fixed_alpha
+    }
+
+    pub(crate) fn set_fixed_alpha(&mut self, alpha: f32) {
+        self.fixed_alpha = alpha.clamp(0.0, 1.0);
     }
 
     /// Return the runtime-owned default HDR scene-target policy for this frame.
@@ -837,6 +849,39 @@ pub trait RuntimeApp: Sized {
         _changes: &[RuntimeSettingChange],
     ) -> std::result::Result<(), Self::Error> {
         Ok(())
+    }
+
+    /// Return the desired fixed simulation step duration.
+    ///
+    /// When `Some`, the shell runs [`fixed_update`](RuntimeApp::fixed_update)
+    /// as many times per render frame as needed to catch up, capped at 8 steps
+    /// to prevent spiral-of-death. The remaining accumulator fraction is exposed
+    /// as [`AppRuntimeFrame::fixed_alpha`] for render-time interpolation.
+    fn fixed_step(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    /// Advance the simulation by one fixed step.
+    ///
+    /// Only called when [`fixed_step`](RuntimeApp::fixed_step) returns `Some`.
+    fn fixed_update(
+        &mut self,
+        _ctx: &RuntimeFixedUpdateContext,
+    ) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+/// Context passed to [`RuntimeApp::fixed_update`] each simulation step.
+pub struct RuntimeFixedUpdateContext {
+    pub step_index: u32,
+    pub fixed_step: std::time::Duration,
+    pub pacing_error: std::time::Duration,
+}
+
+impl RuntimeFixedUpdateContext {
+    pub fn fixed_step_secs(&self) -> f32 {
+        self.fixed_step.as_secs_f32()
     }
 }
 

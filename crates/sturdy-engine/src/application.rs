@@ -2762,6 +2762,7 @@ where
             gamepad_backend: GamepadBackend::new(),
             modifiers: KeyModifiers::default(),
             applied_settings_revision: 0,
+            fixed_accumulator: std::time::Duration::ZERO,
             _config: config,
         })
         .map_err(|error| format!("event loop exited unexpectedly: {error}"))
@@ -2777,6 +2778,7 @@ struct RuntimeAppShell<App: crate::RuntimeApp> {
     gamepad_backend: GamepadBackend,
     modifiers: KeyModifiers,
     applied_settings_revision: u64,
+    fixed_accumulator: std::time::Duration,
     _config: WindowConfig,
 }
 
@@ -3176,6 +3178,30 @@ where
                         runtime_frame.set_window_scale_factor(window_scale_factor);
                         if let Some(size) = window_logical_size {
                             runtime_frame.set_window_logical_size(size);
+                        }
+                        if let Some(step) = self.app_state.fixed_step() {
+                            let delta = runtime_frame.frame_time().delta;
+                            self.fixed_accumulator += delta;
+                            let cap = step * 8;
+                            if self.fixed_accumulator > cap {
+                                self.fixed_accumulator = cap;
+                            }
+                            let mut step_index = 0u32;
+                            while self.fixed_accumulator >= step {
+                                self.fixed_accumulator -= step;
+                                let ctx = crate::runtime::RuntimeFixedUpdateContext {
+                                    step_index,
+                                    fixed_step: step,
+                                    pacing_error: self.fixed_accumulator,
+                                };
+                                if let Err(e) = self.app_state.fixed_update(&ctx) {
+                                    tracing::error!("fixed_update failed: {e:?}");
+                                    std::process::exit(1);
+                                }
+                                step_index += 1;
+                            }
+                            let alpha = self.fixed_accumulator.as_secs_f64() / step.as_secs_f64();
+                            runtime_frame.set_fixed_alpha(alpha as f32);
                         }
                         if let Err(e) = self.app_state.update(&mut runtime_frame) {
                             tracing::error!("update failed: {e:?}");

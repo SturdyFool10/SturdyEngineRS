@@ -9,10 +9,15 @@ use crate::{
 };
 
 use super::{
-    GpuObjectAllocator, GpuObjectId, LocalToWorld, PreviousTransform, RenderBounds,
-    RenderDirtyFlags, RenderExtractionStats, RenderMaterial, RenderMesh, RenderObjectState,
-    RenderVisibility, RenderWorldBatchRange, RenderWorldCommand, RenderWorldCommands,
-    RenderWorldGpuSceneData, RenderWorldGpuSceneState, RenderWorldGpuSceneStats, VisibilityFlags,
+    GpuObjectAllocator, GpuObjectId, GpuTransformSourceData, LocalToWorld, PreviousTransform,
+    RenderBounds, RenderDirtyFlags, RenderExtractionStats, RenderMaterial, RenderMesh,
+    RenderObjectState, RenderVisibility, RenderWorldBatchRange, RenderWorldCommand,
+    RenderWorldCommands, RenderWorldGpuBinData, RenderWorldGpuCullCaps,
+    RenderWorldGpuCullOutputStats, RenderWorldGpuCullSettings, RenderWorldGpuDrawGenerationStats,
+    RenderWorldGpuDrawOutput, RenderWorldGpuMatrixCaps, RenderWorldGpuMatrixSettings,
+    RenderWorldGpuMatrixStats, RenderWorldGpuMeshDrawInfo, RenderWorldGpuSceneData,
+    RenderWorldGpuSceneState, RenderWorldGpuSceneStats, RenderWorldGpuTransformSourceData,
+    RenderWorldPersistentBins, VisibilityFlags,
 };
 
 /// Thread-safe CPU staging world for persistent GPU-renderable objects.
@@ -333,6 +338,357 @@ impl RenderWorld {
         f(self.lock_gpu_scene().indirect_buffer.as_ref())
     }
 
+    pub fn with_gpu_transform_source_buffer<R>(&self, f: impl FnOnce(Option<&Buffer>) -> R) -> R {
+        f(self.lock_gpu_scene().transform_source_buffer.as_ref())
+    }
+
+    pub fn with_gpu_current_matrix_buffer<R>(&self, f: impl FnOnce(Option<&Buffer>) -> R) -> R {
+        f(self.lock_gpu_scene().current_matrix_buffer.as_ref())
+    }
+
+    pub fn with_gpu_previous_matrix_buffer<R>(&self, f: impl FnOnce(Option<&Buffer>) -> R) -> R {
+        f(self.lock_gpu_scene().previous_matrix_buffer.as_ref())
+    }
+
+    pub fn with_gpu_normal_matrix_buffer<R>(&self, f: impl FnOnce(Option<&Buffer>) -> R) -> R {
+        f(self.lock_gpu_scene().normal_matrix_buffer.as_ref())
+    }
+
+    pub fn with_gpu_world_bounds_buffer<R>(&self, f: impl FnOnce(Option<&Buffer>) -> R) -> R {
+        f(self.lock_gpu_scene().world_bounds_buffer.as_ref())
+    }
+
+    pub fn with_gpu_visibility_flags_buffer<R>(&self, f: impl FnOnce(Option<&Buffer>) -> R) -> R {
+        f(self.lock_gpu_scene().visibility_flags_buffer.as_ref())
+    }
+
+    pub fn with_gpu_draw_bin_buffer<R>(&self, f: impl FnOnce(Option<&Buffer>) -> R) -> R {
+        f(self.lock_gpu_scene().draw_bin_buffer.as_ref())
+    }
+
+    pub fn with_gpu_draw_indirect_buffer<R>(&self, f: impl FnOnce(Option<&Buffer>) -> R) -> R {
+        f(self.lock_gpu_scene().draw_indirect_buffer.as_ref())
+    }
+
+    pub fn with_gpu_draw_count_buffer<R>(&self, f: impl FnOnce(Option<&Buffer>) -> R) -> R {
+        f(self.lock_gpu_scene().draw_count_buffer.as_ref())
+    }
+
+    pub fn with_gpu_draw_output<R>(
+        &self,
+        f: impl FnOnce(Option<RenderWorldGpuDrawOutput<'_>>) -> R,
+    ) -> R {
+        let gpu_scene = self.lock_gpu_scene();
+        let output = match (
+            gpu_scene.draw_indirect_buffer.as_ref(),
+            gpu_scene.draw_count_buffer.as_ref(),
+            gpu_scene.draw_generation_plan.as_ref(),
+        ) {
+            (Some(indirect_commands), Some(visible_draw_count), Some(plan)) => {
+                Some(RenderWorldGpuDrawOutput {
+                    indirect_commands,
+                    visible_draw_count,
+                    max_draw_count: plan.bin_count,
+                    use_indirect_count: plan.uses_indirect_count,
+                })
+            }
+            _ => None,
+        };
+        f(output)
+    }
+
+    pub fn gpu_transform_source_slot(&self, object: GpuObjectId) -> Option<u32> {
+        self.lock_gpu_scene()
+            .transform_source_slots
+            .get(&object)
+            .copied()
+    }
+
+    pub fn gpu_matrix_plan(&self) -> Option<super::RenderWorldGpuMatrixPlan> {
+        self.lock_gpu_scene().matrix_plan.clone()
+    }
+
+    pub fn gpu_cull_plan(&self) -> Option<super::RenderWorldGpuCullPlan> {
+        self.lock_gpu_scene().cull_plan.clone()
+    }
+
+    pub fn gpu_draw_generation_plan(&self) -> Option<super::RenderWorldGpuDrawGenerationPlan> {
+        self.lock_gpu_scene().draw_generation_plan.clone()
+    }
+
+    /// Upload compact transform-source data and allocate GPU-derived matrix/bounds buffers.
+    ///
+    /// This is the first-stage GPU-driven render-world path: the CPU uploads compact
+    /// TRS/previous-TRS source data while GPU-visible derived buffers are allocated
+    /// for a later compute expansion pass. The legacy `prepare_gpu_scene` path is
+    /// intentionally left intact as a compatibility draw path.
+    pub fn prepare_gpu_transform_sources(
+        &self,
+        engine: &Engine,
+        valid_mesh_count: usize,
+        settings: RenderWorldGpuMatrixSettings,
+    ) -> Result<RenderWorldGpuMatrixStats> {
+        self.apply_pending();
+
+        let mut states = self.lock_states();
+        let source_states = transform_source_states(&states, valid_mesh_count);
+        let source_data = RenderWorldGpuTransformSourceData::from_states(&source_states);
+        let object_count = source_data.len();
+        let source_stride = std::mem::size_of::<GpuTransformSourceData>();
+        let plan = super::RenderWorldGpuMatrixPlan::plan(
+            object_count,
+            RenderWorldGpuMatrixCaps::from_caps(&engine.caps()),
+            settings,
+        );
+        let source_slots: HashMap<_, _> = source_data.object_slots.iter().copied().collect();
+
+        let structural_dirty = states.values().any(|state| {
+            state.dirty.contains(RenderDirtyFlags::STRUCTURAL)
+                || state.dirty.contains(RenderDirtyFlags::MESH)
+                || state.dirty.contains(RenderDirtyFlags::VISIBILITY)
+        });
+        let dirty_source_slots = states.iter().filter_map(|(object, state)| {
+            let transform_dirty = state.dirty.contains(RenderDirtyFlags::TRANSFORM)
+                || state.dirty.contains(RenderDirtyFlags::PREVIOUS_TRANSFORM);
+            transform_dirty
+                .then(|| source_slots.get(object).copied())
+                .flatten()
+        });
+
+        let mut gpu_scene = self.lock_gpu_scene();
+        let mut source_reallocated = false;
+        if object_count > 0
+            && (object_count > gpu_scene.transform_source_capacity
+                || gpu_scene.transform_source_buffer.is_none())
+        {
+            let new_capacity = object_count.next_power_of_two().max(4);
+            gpu_scene.transform_source_buffer = Some(engine.create_buffer(BufferDesc {
+                size: (new_capacity * source_stride) as u64,
+                usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            })?);
+            gpu_scene.transform_source_capacity = new_capacity;
+            source_reallocated = true;
+        }
+
+        let slots_changed = gpu_scene.transform_source_slots != source_slots;
+        let full_source_upload = source_reallocated || slots_changed || structural_dirty;
+        let mut uploaded_source_ranges = 0usize;
+        let mut uploaded_source_objects = 0usize;
+        let mut uploaded_source_bytes = 0u64;
+
+        if let Some(buffer) = &gpu_scene.transform_source_buffer {
+            if full_source_upload {
+                if !source_data.transforms.is_empty() {
+                    buffer.write_slice(0, &source_data.transforms)?;
+                    uploaded_source_ranges = 1;
+                    uploaded_source_objects = source_data.transforms.len();
+                    uploaded_source_bytes = (uploaded_source_objects * source_stride) as u64;
+                }
+            } else if plan.supports_dirty_source_uploads {
+                let ranges = super::gpu_transform_dirty_ranges(
+                    dirty_source_slots,
+                    object_count.min(u32::MAX as usize) as u32,
+                    1,
+                );
+                for range in ranges {
+                    let start = range.start as usize;
+                    let end = range.end as usize;
+                    buffer.write_slice(range.byte_offset(), &source_data.transforms[start..end])?;
+                    uploaded_source_ranges += 1;
+                    uploaded_source_objects += range.len() as usize;
+                    uploaded_source_bytes += range.byte_len();
+                }
+            } else if states.values().any(|state| !state.dirty.is_empty())
+                && !source_data.transforms.is_empty()
+            {
+                buffer.write_slice(0, &source_data.transforms)?;
+                uploaded_source_ranges = 1;
+                uploaded_source_objects = source_data.transforms.len();
+                uploaded_source_bytes = (uploaded_source_objects * source_stride) as u64;
+            }
+        }
+
+        let mut derived_reallocated = false;
+        derived_reallocated |= ensure_buffer_capacity(
+            engine,
+            &mut gpu_scene.current_matrix_buffer,
+            plan.current_matrix_bytes,
+            BufferUsage::STORAGE | BufferUsage::COPY_DST,
+        )?;
+        derived_reallocated |= ensure_buffer_capacity(
+            engine,
+            &mut gpu_scene.previous_matrix_buffer,
+            plan.previous_matrix_bytes,
+            BufferUsage::STORAGE | BufferUsage::COPY_DST,
+        )?;
+        derived_reallocated |= ensure_buffer_capacity(
+            engine,
+            &mut gpu_scene.normal_matrix_buffer,
+            plan.normal_matrix_bytes,
+            BufferUsage::STORAGE | BufferUsage::COPY_DST,
+        )?;
+        derived_reallocated |= ensure_buffer_capacity(
+            engine,
+            &mut gpu_scene.world_bounds_buffer,
+            plan.bounds_bytes,
+            BufferUsage::STORAGE | BufferUsage::COPY_DST,
+        )?;
+
+        gpu_scene.transform_source_slots = source_slots;
+        gpu_scene.matrix_plan = Some(plan.clone());
+        let source_capacity = gpu_scene.transform_source_capacity;
+
+        for state in states.values_mut() {
+            state.clear_dirty();
+        }
+
+        Ok(RenderWorldGpuMatrixStats {
+            object_count,
+            source_capacity,
+            source_reallocated,
+            derived_reallocated,
+            full_source_upload,
+            uploaded_source_ranges,
+            uploaded_source_objects,
+            uploaded_source_bytes,
+            uses_gpu_generation: plan.uses_gpu_generation,
+            total_derived_bytes: plan.total_derived_bytes,
+            degraded_reason: plan.degraded_reason,
+        })
+    }
+
+    /// Allocate scene-wide GPU culling output buffers for the prepared render world.
+    pub fn prepare_gpu_cull_outputs(
+        &self,
+        engine: &Engine,
+        settings: RenderWorldGpuCullSettings,
+        hiz_occlusion: bool,
+    ) -> Result<RenderWorldGpuCullOutputStats> {
+        let matrix_plan = self.gpu_matrix_plan().ok_or_else(|| {
+            crate::Error::InvalidInput(
+                "RenderWorld GPU cull outputs require prepare_gpu_transform_sources first".into(),
+            )
+        })?;
+        let object_count = matrix_plan.object_count as usize;
+        let batch_count = self.lock_gpu_scene().ranges.len().max(1);
+        let cull_plan = super::RenderWorldGpuCullPlan::plan(
+            object_count,
+            batch_count,
+            RenderWorldGpuCullCaps::from_caps(&engine.caps(), hiz_occlusion),
+            settings,
+        );
+
+        let stride = std::mem::size_of::<u32>();
+        let mut gpu_scene = self.lock_gpu_scene();
+        let mut visibility_reallocated = false;
+        if object_count > 0
+            && (object_count > gpu_scene.visibility_flags_capacity
+                || gpu_scene.visibility_flags_buffer.is_none())
+        {
+            let new_capacity = object_count.next_power_of_two().max(4);
+            gpu_scene.visibility_flags_buffer = Some(engine.create_buffer(BufferDesc {
+                size: (new_capacity * stride) as u64,
+                usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            })?);
+            gpu_scene.visibility_flags_capacity = new_capacity;
+            visibility_reallocated = true;
+        }
+        if object_count == 0 {
+            gpu_scene.cull_plan = Some(cull_plan);
+            return Ok(RenderWorldGpuCullOutputStats::default());
+        }
+        gpu_scene.cull_plan = Some(cull_plan);
+
+        Ok(RenderWorldGpuCullOutputStats {
+            object_count,
+            visibility_capacity: gpu_scene.visibility_flags_capacity,
+            visibility_reallocated,
+            output_bytes: (object_count * stride) as u64,
+        })
+    }
+
+    /// Allocate and upload persistent-bin draw generation inputs/outputs.
+    pub fn prepare_gpu_draw_generation(
+        &self,
+        engine: &Engine,
+        bins: &RenderWorldPersistentBins,
+        mesh_draws: impl IntoIterator<Item = RenderWorldGpuMeshDrawInfo>,
+        use_indirect_count: bool,
+    ) -> Result<RenderWorldGpuDrawGenerationStats> {
+        if self.lock_gpu_scene().visibility_flags_buffer.is_none() && !bins.is_empty() {
+            return Err(crate::Error::InvalidInput(
+                "RenderWorld GPU draw generation requires prepare_gpu_cull_outputs first".into(),
+            ));
+        }
+
+        let gpu_bins = RenderWorldGpuBinData::from_bins(bins, mesh_draws)
+            .map_err(crate::Error::InvalidInput)?;
+        let plan = super::RenderWorldGpuDrawGenerationPlan::plan(bins, use_indirect_count, 64);
+
+        let bin_stride = std::mem::size_of::<RenderWorldGpuBinData>();
+        let indirect_stride = std::mem::size_of::<crate::DrawIndexedIndirectCommand>();
+        let bin_count = gpu_bins.len();
+        let mut gpu_scene = self.lock_gpu_scene();
+
+        let mut bin_buffer_reallocated = false;
+        if bin_count > 0
+            && (bin_count > gpu_scene.draw_bin_capacity || gpu_scene.draw_bin_buffer.is_none())
+        {
+            let new_capacity = bin_count.next_power_of_two().max(4);
+            gpu_scene.draw_bin_buffer = Some(engine.create_buffer(BufferDesc {
+                size: (new_capacity * bin_stride) as u64,
+                usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            })?);
+            gpu_scene.draw_bin_capacity = new_capacity;
+            bin_buffer_reallocated = true;
+        }
+
+        let mut uploaded_bin_bytes = 0;
+        if let Some(buffer) = &gpu_scene.draw_bin_buffer {
+            if !gpu_bins.is_empty() {
+                buffer.write_slice(0, &gpu_bins)?;
+                uploaded_bin_bytes = (gpu_bins.len() * bin_stride) as u64;
+            }
+        }
+
+        let mut indirect_buffer_reallocated = false;
+        if bin_count > 0
+            && (bin_count > gpu_scene.draw_indirect_capacity
+                || gpu_scene.draw_indirect_buffer.is_none())
+        {
+            let new_capacity = bin_count.next_power_of_two().max(4);
+            gpu_scene.draw_indirect_buffer = Some(engine.create_buffer(BufferDesc {
+                size: (new_capacity * indirect_stride) as u64,
+                usage: BufferUsage::INDIRECT | BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            })?);
+            gpu_scene.draw_indirect_capacity = new_capacity;
+            indirect_buffer_reallocated = true;
+        }
+
+        let mut count_buffer_reallocated = false;
+        if gpu_scene.draw_count_buffer.is_none() {
+            gpu_scene.draw_count_buffer = Some(engine.create_buffer(BufferDesc {
+                size: std::mem::size_of::<u32>() as u64,
+                usage: BufferUsage::INDIRECT | BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            })?);
+            count_buffer_reallocated = true;
+        }
+
+        gpu_scene.draw_generation_plan = Some(plan.clone());
+
+        Ok(RenderWorldGpuDrawGenerationStats {
+            bin_count,
+            object_count: bins.object_count as usize,
+            bin_buffer_reallocated,
+            indirect_buffer_reallocated,
+            count_buffer_reallocated,
+            uploaded_bin_bytes,
+            indirect_bytes: (bin_count * indirect_stride) as u64,
+            uses_indirect_count: plan.uses_indirect_count,
+            degraded_reason: plan.degraded_reason,
+        })
+    }
+
     /// Return and clear all dirty object states.
     pub fn take_dirty(&self) -> Vec<RenderObjectState> {
         let mut states = self.lock_states();
@@ -386,6 +742,48 @@ fn state_for(
     states
         .entry(object)
         .or_insert_with(|| RenderObjectState::new(object))
+}
+
+fn ensure_buffer_capacity(
+    engine: &Engine,
+    buffer: &mut Option<Buffer>,
+    required_bytes: u64,
+    usage: BufferUsage,
+) -> Result<bool> {
+    if required_bytes == 0 {
+        *buffer = None;
+        return Ok(false);
+    }
+
+    let needs_reallocate = buffer
+        .as_ref()
+        .map(|buffer| buffer.desc().size < required_bytes)
+        .unwrap_or(true);
+    if needs_reallocate {
+        *buffer = Some(engine.create_buffer(BufferDesc {
+            size: required_bytes.next_power_of_two(),
+            usage,
+        })?);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+fn transform_source_states(
+    states: &HashMap<GpuObjectId, RenderObjectState>,
+    valid_mesh_count: usize,
+) -> Vec<RenderObjectState> {
+    states
+        .values()
+        .filter(|state| state.visibility.flags.contains(VisibilityFlags::VISIBLE))
+        .filter(|state| {
+            state
+                .mesh
+                .is_some_and(|mesh| mesh.mesh.index() < valid_mesh_count)
+        })
+        .cloned()
+        .collect()
 }
 
 fn gpu_scene_entries_from_states(

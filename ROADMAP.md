@@ -54,7 +54,7 @@ The runtime shell should own the common frame pipeline. Testbed/example code sho
 - [x] `AppRuntimeFrame::finish_and_present` records CPU time, P95/P99, and GPU pass timings into `RuntimeDiagnostics`.
 - [x] `AppRuntimeFrame` exposes `window_scale_factor`, `window_logical_size`, `runtime_controller`, `runtime_diagnostics`, `register_debug_image`, `save_named_graph_image_png`, `default_runtime_overlay_lines`, `runtime_graph_inspection_lines`, and `shell_frame()` bridge.
 - [x] Migrate testbed main, shader_playground, plot_demo, coordinate_validation, and ui_demo from `EngineApp`/`GameApp` to `RuntimeApp`.
-- [ ] Migrate `game_2d` and `game_3d` testbed binaries from `GameApp` to `RuntimeApp` (or add fixed-step support to RuntimeApp).
+- [x] Remove obsolete `game_2d` and `game_3d` testbed binaries; fixed-step samples should return later through `RuntimeApp` when needed.
 - [x] Expose `AppRuntimeFrame::run_default_post_process` that handles HDR, bloom, AA, tonemapping, and debug images without per-example wiring.
 
 ### Runtime settings
@@ -294,7 +294,7 @@ Ray tracing should wait as a visual-feature priority until bindless resources, m
 ## Best Immediate Commit Sequence
 
 1. ~~Route existing testbed examples through RuntimeApp instead of GameApp/EngineApp.~~ ✅ Done (main, shader_playground, plot_demo, coordinate_validation, ui_demo migrated).
-2. Migrate `game_2d` and `game_3d` to `RuntimeApp` (needs fixed-step support or InputHub pattern).
+2. ~~Migrate `game_2d` and `game_3d` to `RuntimeApp` (needs fixed-step support or InputHub pattern).~~ Removed obsolete binaries; future fixed-step samples should use `RuntimeApp`.
 3. ~~Expose `AppRuntimeFrame::run_default_post_process` so new apps don't need per-example bloom/AA/tonemap wiring.~~ ✅ Done.
 4. ~~Add screenshot/export and graph inspection from the debug shell.~~ ✅ Done.
 5. Implement GPU transform build from compact object buffers.

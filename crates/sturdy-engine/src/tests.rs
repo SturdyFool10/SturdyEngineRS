@@ -174,6 +174,158 @@ fn shader_pass_intent_records_reflected_fullscreen_resources() {
 }
 
 #[test]
+fn draw_mesh_indirect_count_records_count_buffer_read() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let target = frame
+        .image(
+            "indirect_count_target",
+            ImageDesc {
+                usage: ImageUsage::RENDER_TARGET,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+    let mesh = Mesh::indexed_2d(
+        &engine,
+        &[
+            Vertex2d {
+                position: [-0.5, -0.5],
+                uv: [0.0, 0.0],
+                color: [1.0; 4],
+            },
+            Vertex2d {
+                position: [0.5, -0.5],
+                uv: [1.0, 0.0],
+                color: [1.0; 4],
+            },
+            Vertex2d {
+                position: [0.0, 0.5],
+                uv: [0.5, 1.0],
+                color: [1.0; 4],
+            },
+        ],
+        &[0, 1, 2],
+    )
+    .unwrap();
+    let program = MeshProgram::unlit(&engine).unwrap();
+    let instances = engine
+        .create_buffer(BufferDesc {
+            size: 256,
+            usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+        })
+        .unwrap();
+    let indirect = engine
+        .create_buffer(BufferDesc {
+            size: 80,
+            usage: BufferUsage::INDIRECT | BufferUsage::STORAGE,
+        })
+        .unwrap();
+    let count = engine
+        .create_buffer(BufferDesc {
+            size: 4,
+            usage: BufferUsage::INDIRECT | BufferUsage::STORAGE | BufferUsage::COPY_DST,
+        })
+        .unwrap();
+
+    target
+        .draw_mesh_indirect_count_with_push_constants_and_depth(
+            &mesh,
+            &program,
+            &instances,
+            &indirect,
+            &count,
+            4,
+            &[0u32; 16],
+            None,
+        )
+        .unwrap();
+
+    let report = frame.describe();
+    let pass = report
+        .passes
+        .iter()
+        .find(|pass| pass.name.contains("draw-indirect-indirect_count_target"))
+        .expect("indirect-count draw pass should be recorded");
+    assert_eq!(pass.kind, PassKind::Mesh);
+    assert!(pass.buffer_reads.contains(&"indirect_commands".to_string()));
+    assert!(pass.buffer_reads.contains(&"indirect_count".to_string()));
+}
+
+#[test]
+fn draw_mesh_indirect_fixed_range_omits_count_buffer_read() {
+    let engine = Engine::with_backend(BackendKind::Null).unwrap();
+    let frame = engine.begin_render_frame().unwrap();
+    let target = frame
+        .image(
+            "indirect_fixed_target",
+            ImageDesc {
+                usage: ImageUsage::RENDER_TARGET,
+                ..small_image_desc()
+            },
+        )
+        .unwrap();
+    let mesh = Mesh::indexed_2d(
+        &engine,
+        &[
+            Vertex2d {
+                position: [-0.5, -0.5],
+                uv: [0.0, 0.0],
+                color: [1.0; 4],
+            },
+            Vertex2d {
+                position: [0.5, -0.5],
+                uv: [1.0, 0.0],
+                color: [1.0; 4],
+            },
+            Vertex2d {
+                position: [0.0, 0.5],
+                uv: [0.5, 1.0],
+                color: [1.0; 4],
+            },
+        ],
+        &[0, 1, 2],
+    )
+    .unwrap();
+    let program = MeshProgram::unlit(&engine).unwrap();
+    let instances = engine
+        .create_buffer(BufferDesc {
+            size: 256,
+            usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+        })
+        .unwrap();
+    let indirect = engine
+        .create_buffer(BufferDesc {
+            size: 80,
+            usage: BufferUsage::INDIRECT | BufferUsage::STORAGE,
+        })
+        .unwrap();
+
+    target
+        .draw_mesh_indirect_range_with_push_constants_and_depth(
+            &mesh,
+            &program,
+            &instances,
+            &indirect,
+            0,
+            4,
+            &[0u32; 16],
+            None,
+        )
+        .unwrap();
+
+    let report = frame.describe();
+    let pass = report
+        .passes
+        .iter()
+        .find(|pass| pass.name.contains("draw-indirect-indirect_fixed_target"))
+        .expect("fixed indirect draw pass should be recorded");
+    assert_eq!(pass.kind, PassKind::Mesh);
+    assert!(pass.buffer_reads.contains(&"indirect_commands".to_string()));
+    assert!(!pass.buffer_reads.contains(&"indirect_count".to_string()));
+}
+
+#[test]
 fn shader_pass_intent_records_compute_sampled_reads_and_named_storage_output() {
     let engine = Engine::with_backend(BackendKind::Null).unwrap();
     let program =
