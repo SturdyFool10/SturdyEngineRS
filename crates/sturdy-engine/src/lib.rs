@@ -273,16 +273,25 @@ pub use spot_shadow_pass::{GpuSpotShadowData, MAX_SPOT_SHADOWS, SpotShadowConfig
 pub use sprite_batch::{Sprite, SpriteBatch, SpriteRenderer};
 #[allow(deprecated)]
 pub use srd_denoiser::{
-    RealtimeRayTracingDenoiser, SRD_TEMPORAL_CONSTANTS_SIZE, SrdCapabilities, SrdCommonSettings,
-    SrdConstantArena, SrdConstantRange, SrdDenoiser, SrdDenoiserDesc, SrdDenoiserId,
-    SrdDenoiserMode, SrdDenoiserSettings, SrdDepthConvention, SrdDescriptorType, SrdDispatchDesc,
-    SrdFamilySettings, SrdHistoryMode, SrdHistoryRejectionSettings, SrdHistoryRing, SrdInstance,
-    SrdInstanceDesc, SrdMotionVectorConvention, SrdNormalPacking, SrdOcclusionSettings,
-    SrdOutlierClampSettings, SrdPassBuilder, SrdPipelineDesc, SrdPoolClass, SrdRadianceSettings,
-    SrdReferenceSettings, SrdReferenceTemporalExecutor, SrdReferenceTemporalPipelines,
-    SrdReferenceTemporalPrograms, SrdResourceDesc, SrdResourceFormatDesc, SrdResourceSlot,
-    SrdShaderContract, SrdShadowSettings, SrdSignalMomentsConstants, SrdSpectralLayout,
-    SrdTemporalBindings, SrdTemporalConstants, SrdTextureDesc, SrdVarianceSettings,
+    RealtimeRayTracingDenoiser, SRD_CLEAR_HISTORY_WORKGROUP_SIZE,
+    SRD_RADIANCE_SURFACE_MASK_TILE_SIZE, SRD_TEMPORAL_CONSTANTS_SIZE, SrdCapabilities,
+    SrdClearConstants, SrdCommonSettings, SrdConstantArena, SrdConstantRange, SrdDenoiser,
+    SrdDenoiserDesc, SrdDenoiserId, SrdDenoiserMode, SrdDenoiserSettings, SrdDepthConvention,
+    SrdDescriptorType, SrdDispatchDesc, SrdFamilySettings, SrdHistoryMode,
+    SrdHistoryRejectionSettings, SrdHistoryRing, SrdInstance, SrdInstanceDesc,
+    SrdMotionVectorConvention, SrdNormalPacking, SrdOcclusionSettings, SrdOutlierClampSettings,
+    SrdPassBuilder, SrdPipelineDesc, SrdPoolClass, SrdRadianceAccumulateConstants,
+    SrdRadianceAccumulateResources, SrdRadianceOutlierSuppressConstants,
+    SrdRadianceOutlierSuppressResources, SrdRadianceOutputResource,
+    SrdRadianceReconstructConstants, SrdRadianceReconstructResources,
+    SrdRadianceReprojectConstants, SrdRadianceReprojectResources, SrdRadianceSettings,
+    SrdRadianceStabilizerExecutor, SrdRadianceStabilizerInputs, SrdRadianceStabilizerPlan,
+    SrdRadianceStabilizerPrograms, SrdRadianceStabilizerResources, SrdRadianceSurfaceMaskConstants,
+    SrdRadianceSurfaceMaskResources, SrdReferenceSettings, SrdReferenceTemporalExecutor,
+    SrdReferenceTemporalPipelines, SrdReferenceTemporalPrograms, SrdResourceDesc,
+    SrdResourceFormatDesc, SrdResourceSlot, SrdShaderContract, SrdShadowSettings,
+    SrdSignalMomentsConstants, SrdSpectralLayout, SrdTemporalBindings, SrdTemporalConstants,
+    SrdTextureDesc, SrdVarianceSettings,
 };
 pub use sturdy_engine_core::{PcFieldKind, PushConstantField};
 pub use text_draw::{

@@ -53,7 +53,7 @@ SRD (Sturdy Real-Time Denoiser) is now the first-party denoising target. The goa
 - [x] Rename shader bindings from generic/vendor-like accumulation names to SRD names: `srd_current_signal`, `srd_history_signal`, `srd_current_sampler`, and `srd_history_sampler`.
 - [x] Rename the Cornell accumulation shader to `srd_temporal_accumulate.slang`.
 - [x] Keep `RealtimeRayTracingDenoiser` only as a deprecated compatibility alias.
-- [ ] Audit public APIs, shader files, docs, examples, and debug labels for accidental vendor-denoiser names or family names.
+- [x] Audit public APIs, shader files, docs, examples, and debug labels for accidental vendor-denoiser names or family names.
 - [x] Replace paper-derived placeholder family names with SRD-owned names before exposing them publicly:
   - `RadianceStabilizer` for radiance reconstruction.
   - `ShadowStabilizer` for shadow reconstruction.
@@ -64,17 +64,16 @@ SRD (Sturdy Real-Time Denoiser) is now the first-party denoising target. The goa
 ### SRD crate/module architecture
 
 - [x] Add `crates/sturdy-engine/src/srd_denoiser.rs` as the initial SRD module.
-- [ ] Split SRD into feature files once implementation grows:
-  - `srd/mod.rs`
-  - `srd/api.rs`
-  - `srd/settings.rs`
-  - `srd/resources.rs`
-  - `srd/dispatch.rs`
-  - `srd/pipeline.rs`
-  - `srd/reference_temporal.rs`
-  - `srd/radiance_stabilizer.rs`
-  - `srd/shadow_stabilizer.rs`
-  - `srd/occlusion_stabilizer.rs`
+- [x] Split SRD into feature files once implementation grows:
+  - `srd_denoiser.rs` (thin aggregator)
+  - `srd_denoiser/api.rs`
+  - `srd_denoiser/settings.rs`
+  - `srd_denoiser/resources.rs`
+  - `srd_denoiser/dispatch.rs`
+  - `srd_denoiser/pipeline.rs`
+  - `srd_denoiser/reference_temporal_executor.rs`
+  - `srd_denoiser/radiance_stabilizer.rs`
+  - (shadow_stabilizer, occlusion_stabilizer pending algorithm implementation)
 - [x] Define stable public descriptors for SRD instance creation, denoiser IDs, resource slots, texture pools, pass descriptions, pipelines, and dispatches.
 - [x] Keep the SRD algorithm layer backend-neutral: it may describe GPU work, but renderer/RHI code performs allocation, barriers, binding, and dispatch.
 - [x] Add capability reporting for SRD features: temporal history, compute support, storage textures, half-float support, subgroup/wave support, ray-tracing guide support, and backend shader-model constraints.

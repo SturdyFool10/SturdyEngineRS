@@ -1,11 +1,7 @@
+use crate::{GraphImage, RenderFrame, Result, StageMask};
 use super::*;
-use crate::StageMask;
 
 /// Shader programs used by the current graph-backed SRD reference executor.
-///
-/// The SRD instance still describes pipelines by `SrdPipelineDesc`; this struct is
-/// the renderer-side mapping from those pipeline descriptions to concrete engine
-/// shader programs.
 #[derive(Copy, Clone)]
 pub struct SrdReferenceTemporalPrograms<'a> {
     pub temporal: &'a crate::ShaderProgram,
@@ -26,8 +22,7 @@ impl<'a> SrdReferenceTemporalPrograms<'a> {
 /// This is intentionally a renderer bridge, not the SRD algorithm itself. It
 /// consumes `SrdDispatchDesc` values, resolves their SRD resource descriptors to
 /// graph images, binds SRD-owned shader names, and emits the current fullscreen
-/// implementation. Future compute backends can implement the same descriptor
-/// contract without changing `SrdInstance` planning.
+/// implementation.
 pub struct SrdReferenceTemporalExecutor<'a> {
     programs: SrdReferenceTemporalPrograms<'a>,
     bindings: SrdTemporalBindings,
@@ -46,11 +41,11 @@ impl<'a> SrdReferenceTemporalExecutor<'a> {
         frame: &RenderFrame,
         input: &GraphImage,
         output_name: &str,
-        history_state: &mut GraphImageHistory,
+        history_state: &mut crate::GraphImageHistory,
         settings: SrdDenoiserSettings,
     ) -> Result<GraphImage> {
         if settings.mode != SrdDenoiserMode::ReferenceTemporal {
-            return Err(Error::InvalidInput(format!(
+            return Err(crate::Error::InvalidInput(format!(
                 "SRD graph executor only supports ReferenceTemporal, got {:?}",
                 settings.mode
             )));
@@ -134,7 +129,7 @@ impl<'a> SrdReferenceTemporalExecutor<'a> {
         } else if dispatch.pipeline_index == pipelines.temporal {
             self.execute_temporal_dispatch(dispatch, instance, resources, frame, settings)
         } else {
-            Err(Error::InvalidInput(format!(
+            Err(crate::Error::InvalidInput(format!(
                 "SRD dispatch '{}' references an unknown reference-temporal pipeline {}",
                 dispatch.name, dispatch.pipeline_index
             )))
@@ -154,7 +149,7 @@ impl<'a> SrdReferenceTemporalExecutor<'a> {
             return Ok(());
         };
         let Some(target) = reference_dispatch_storage_target(dispatch, resources)? else {
-            return Err(Error::InvalidInput(format!(
+            return Err(crate::Error::InvalidInput(format!(
                 "SRD clear dispatch '{}' has no storage target",
                 dispatch.name
             )));
@@ -172,7 +167,7 @@ impl<'a> SrdReferenceTemporalExecutor<'a> {
     ) -> Result<()> {
         validate_reference_temporal_resources(dispatch)?;
         let Some(constants_range) = dispatch.constants_range else {
-            return Err(Error::InvalidInput(format!(
+            return Err(crate::Error::InvalidInput(format!(
                 "SRD temporal dispatch '{}' is missing constants",
                 dispatch.name
             )));
@@ -223,7 +218,7 @@ fn validate_reference_temporal_resources(dispatch: &SrdDispatchDesc) -> Result<(
                 has_history_write = true;
             }
             (descriptor_type, slot, pool_index) => {
-                return Err(Error::InvalidInput(format!(
+                return Err(crate::Error::InvalidInput(format!(
                     "SRD reference temporal dispatch '{}' contains unsupported resource {descriptor_type:?} {slot:?} pool {pool_index:?}",
                     dispatch.name
                 )));
@@ -232,7 +227,7 @@ fn validate_reference_temporal_resources(dispatch: &SrdDispatchDesc) -> Result<(
     }
 
     if !has_current_signal || !has_history_read || !has_combined_output || !has_history_write {
-        return Err(Error::InvalidInput(format!(
+        return Err(crate::Error::InvalidInput(format!(
             "SRD reference temporal dispatch '{}' is missing required resources: current={}, history_read={}, output={}, history_write={}",
             dispatch.name,
             has_current_signal,
@@ -258,7 +253,7 @@ fn reference_dispatch_storage_target<'a>(
             (SrdResourceSlot::HistoryPool, Some(0)) => Some(resources.history_read),
             (SrdResourceSlot::HistoryPool, Some(1)) => Some(resources.history_write),
             (slot, pool_index) => {
-                return Err(Error::InvalidInput(format!(
+                return Err(crate::Error::InvalidInput(format!(
                     "SRD reference executor cannot resolve storage resource {slot:?} pool {pool_index:?}"
                 )));
             }
@@ -266,7 +261,7 @@ fn reference_dispatch_storage_target<'a>(
         if let Some(existing) = target
             && resolved.map(GraphImage::handle) != Some(existing.handle())
         {
-            return Err(Error::InvalidInput(format!(
+            return Err(crate::Error::InvalidInput(format!(
                 "SRD dispatch '{}' maps to multiple graph storage targets",
                 dispatch.name
             )));
