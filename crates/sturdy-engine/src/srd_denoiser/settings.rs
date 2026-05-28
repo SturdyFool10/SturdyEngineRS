@@ -431,6 +431,172 @@ impl SrdReferenceSettings {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SrdSpatialFilterSettings {
+    pub enabled: bool,
+    /// Multiplies the cross-5 kernel offsets. 1 = tight (touches neighbours
+    /// directly), 2 = looser. Higher strides degrade detail; prefer disabling
+    /// over raising stride above 3.
+    pub stride: u32,
+    /// Luminance edge-stopping sensitivity (sigma in the exp(-(d/sigma)^2)
+    /// weight). Lower values reject differing taps harder.
+    pub luminance_sigma: f32,
+    /// Normal-angle edge-stopping power. Higher = tighter.
+    pub normal_sharpness: f32,
+}
+
+impl Default for SrdSpatialFilterSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stride: 1,
+            luminance_sigma: 1.0,
+            normal_sharpness: 16.0,
+        }
+    }
+}
+
+impl SrdSpatialFilterSettings {
+    pub fn validate(self) -> Result<()> {
+        if self.stride == 0 {
+            return Err(Error::InvalidInput(
+                "SRD spatial_filter stride must be at least 1".into(),
+            ));
+        }
+        validate_positive_finite("spatial_filter luminance_sigma", self.luminance_sigma)?;
+        validate_positive_finite("spatial_filter normal_sharpness", self.normal_sharpness)
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SrdAtrousSettings {
+    pub enabled: bool,
+    /// Number of wavelet iterations (typical: 3–5). Each iteration doubles
+    /// the kernel stride. Must be at least 1 when enabled.
+    pub iterations: u32,
+    /// Luminance edge-stopping sensitivity.
+    pub luminance_sigma: f32,
+    /// Normal-angle edge-stopping power.
+    pub normal_sharpness: f32,
+}
+
+impl Default for SrdAtrousSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            iterations: 3,
+            luminance_sigma: 1.0,
+            normal_sharpness: 16.0,
+        }
+    }
+}
+
+impl SrdAtrousSettings {
+    pub const MAX_ITERATIONS: u32 = 6;
+
+    pub fn validate(self) -> Result<()> {
+        if self.enabled && self.iterations == 0 {
+            return Err(Error::InvalidInput(
+                "SRD atrous iterations must be at least 1 when enabled".into(),
+            ));
+        }
+        if self.iterations > Self::MAX_ITERATIONS {
+            return Err(Error::InvalidInput(format!(
+                "SRD atrous iterations must be at most {}, got {}",
+                Self::MAX_ITERATIONS,
+                self.iterations
+            )));
+        }
+        validate_positive_finite("atrous luminance_sigma", self.luminance_sigma)?;
+        validate_positive_finite("atrous normal_sharpness", self.normal_sharpness)
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SrdHistoryClampSettings {
+    pub enabled: bool,
+    /// k in mean ± k·sigma neighbourhood AABB (typical range 1.0–2.0).
+    pub sigma_scale: f32,
+}
+
+impl Default for SrdHistoryClampSettings {
+    fn default() -> Self {
+        Self { enabled: true, sigma_scale: 1.5 }
+    }
+}
+
+impl SrdHistoryClampSettings {
+    pub fn validate(self) -> Result<()> {
+        validate_positive_finite("history_clamp sigma_scale", self.sigma_scale)
+    }
+}
+
+/// Optional ray hit-distance guide for improving reprojection validity.
+///
+/// When enabled, the reproject pass compares the current and previous hit
+/// distances and reduces reprojection confidence when they diverge beyond
+/// `relative_threshold`. This catches disocclusion events that depth and
+/// normal comparisons alone may miss (e.g. a foreground object sliding off
+/// screen revealing a far background).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SrdHitDistanceSettings {
+    pub enabled: bool,
+    /// Maximum tolerated relative change in hit distance before validity is
+    /// downgraded. Typical range: 0.05–0.20.
+    pub relative_threshold: f32,
+}
+
+impl Default for SrdHitDistanceSettings {
+    fn default() -> Self {
+        Self { enabled: false, relative_threshold: 0.1 }
+    }
+}
+
+impl SrdHitDistanceSettings {
+    pub fn validate(self) -> Result<()> {
+        validate_positive_finite("hit_distance relative_threshold", self.relative_threshold)
+    }
+}
+
+/// Post-denoising adaptive Gaussian blur for residual noise.
+///
+/// Applied as the final pass after atrous / spatial filter. Blur sigma is
+/// scaled by `max_blur_sigma / sqrt(history_length + 1)` so pixels with
+/// longer history receive progressively less additional smoothing.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SrdPostBlurSettings {
+    pub enabled: bool,
+    /// Half-radius of the kernel in pixels (1 = 3×3, 2 = 5×5).
+    pub blur_radius: u32,
+    /// Gaussian σ at history_length = 0. Decays as 1/√(history+1).
+    pub max_blur_sigma: f32,
+    /// Normal edge-stopping power.
+    pub normal_sharpness: f32,
+}
+
+impl Default for SrdPostBlurSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            blur_radius: 1,
+            max_blur_sigma: 1.0,
+            normal_sharpness: 16.0,
+        }
+    }
+}
+
+impl SrdPostBlurSettings {
+    pub fn validate(self) -> Result<()> {
+        if self.blur_radius == 0 {
+            return Err(Error::InvalidInput(
+                "SRD post_blur blur_radius must be at least 1".into(),
+            ));
+        }
+        validate_positive_finite("post_blur max_blur_sigma", self.max_blur_sigma)?;
+        validate_positive_finite("post_blur normal_sharpness", self.normal_sharpness)
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct SrdRadianceSettings {
     pub history_frame_budget: u32,
     pub fast_history_budget: u32,
@@ -438,6 +604,11 @@ pub struct SrdRadianceSettings {
     pub variance: SrdVarianceSettings,
     pub history_rejection: SrdHistoryRejectionSettings,
     pub outlier_clamp: SrdOutlierClampSettings,
+    pub history_clamp: SrdHistoryClampSettings,
+    pub spatial_filter: SrdSpatialFilterSettings,
+    pub atrous: SrdAtrousSettings,
+    pub post_blur: SrdPostBlurSettings,
+    pub hit_distance: SrdHitDistanceSettings,
 }
 
 impl Default for SrdRadianceSettings {
@@ -449,6 +620,11 @@ impl Default for SrdRadianceSettings {
             variance: SrdVarianceSettings::default(),
             history_rejection: SrdHistoryRejectionSettings::default(),
             outlier_clamp: SrdOutlierClampSettings::default(),
+            history_clamp: SrdHistoryClampSettings::default(),
+            spatial_filter: SrdSpatialFilterSettings::default(),
+            atrous: SrdAtrousSettings::default(),
+            post_blur: SrdPostBlurSettings::default(),
+            hit_distance: SrdHitDistanceSettings::default(),
         }
     }
 }
@@ -460,7 +636,12 @@ impl SrdRadianceSettings {
         validate_nonnegative_finite("radiance spatial_radius", self.spatial_radius)?;
         self.variance.validate()?;
         self.history_rejection.validate()?;
-        self.outlier_clamp.validate()
+        self.outlier_clamp.validate()?;
+        self.history_clamp.validate()?;
+        self.spatial_filter.validate()?;
+        self.atrous.validate()?;
+        self.post_blur.validate()?;
+        self.hit_distance.validate()
     }
 }
 

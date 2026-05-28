@@ -11,6 +11,8 @@
 //           srd_prev_guide_view_depth     (Texture2D<float>)
 //           srd_prev_guide_normal_roughness (Texture2D<float4>)
 //           srd_radiance_surface_mask     (Texture2D<float>, tile-resolution, R8Unorm)
+//           srd_guide_hit_distance        (Texture2D<float>, optional, only when use_hit_distance != 0)
+//           srd_prev_guide_hit_distance   (Texture2D<float>, optional, only when use_hit_distance != 0)
 // Writes:   srd_radiance_reproject_out    (RWTexture2D<float4>: prev_x, prev_y, validity, fallback)
 // Constants: SrdRadianceReprojectConstants
 // Dispatch: 8x8x1 thread groups covering the rect extent
@@ -25,6 +27,8 @@ Texture2D<float4> srd_guide_normal_roughness;
 Texture2D<float>  srd_prev_guide_view_depth;
 Texture2D<float4> srd_prev_guide_normal_roughness;
 Texture2D<float>  srd_radiance_surface_mask;
+Texture2D<float>  srd_guide_hit_distance;
+Texture2D<float>  srd_prev_guide_hit_distance;
 RWTexture2D<float4> srd_radiance_reproject_out;
 
 struct SrdRadianceReprojectConstants {
@@ -36,7 +40,8 @@ struct SrdRadianceReprojectConstants {
     float normal_cos_threshold;
     uint  use_surface_mask;
     uint  tile_size;
-    uint  _pad;
+    uint  use_hit_distance;
+    float hit_distance_relative_threshold;
 };
 uniform SrdRadianceReprojectConstants push;
 
@@ -88,6 +93,21 @@ void main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID, uint3 tid : SV_D
             prev_nr.normal,
             push.normal_cos_threshold,
             /* material_match */ true);
+
+        // Optional hit-distance consistency check. A large relative change in
+        // ray hit distance indicates the surface reflected/occluded a different
+        // object than the previous frame, so we downgrade validity.
+        if (push.use_hit_distance != 0u && projected.validity > 0.0f) {
+            float current_hit = srd_guide_hit_distance.Load(int3(tid.xy, 0));
+            float prev_hit    = srd_prev_guide_hit_distance.Load(int3(prev_pixel, 0));
+            float denom       = max(current_hit, prev_hit);
+            if (denom > 0.0f) {
+                float rel_diff = abs(current_hit - prev_hit) / denom;
+                if (rel_diff > push.hit_distance_relative_threshold) {
+                    projected.validity = 0.0f;
+                }
+            }
+        }
     }
 
     srd_radiance_reproject_out[tid.xy] = float4(

@@ -5,12 +5,15 @@ use std::{collections::HashSet, mem};
 use super::clear_history;
 use super::dispatch::{
     SrdConstantArena, SrdConstantRange, SrdDispatchDesc, SrdPassBuilder, SrdRadianceAccumulateConstants,
-    SrdRadianceReconstructConstants, SrdRadianceReprojectConstants, SrdRadianceSurfaceMaskConstants,
-    SRD_RADIANCE_SURFACE_MASK_TILE_SIZE, reference_grid_size,
+    SrdRadianceAtrousConstants, SrdRadianceClampConstants, SrdRadiancePostBlurConstants,
+    SrdRadianceReconstructConstants, SrdRadianceReprojectConstants, SrdRadianceSpatialFilterConstants,
+    SrdRadianceSurfaceMaskConstants, SRD_RADIANCE_SURFACE_MASK_TILE_SIZE, reference_grid_size,
 };
 use super::pipeline::{
     SrdPipelineDesc, SrdReferenceTemporalPipelines, SrdRadianceAccumulateResources,
-    SrdRadianceSurfaceMaskResources, SrdRadianceReconstructResources, SrdRadianceReprojectResources,
+    SrdRadianceAtrousResources, SrdRadianceClampResources, SrdRadiancePostBlurResources,
+    SrdRadianceSpatialFilterResources, SrdRadianceSurfaceMaskResources,
+    SrdRadianceReconstructResources, SrdRadianceReprojectResources,
 };
 use super::reference_temporal_executor::SrdReferenceTemporalPrograms;
 use super::resources::{
@@ -403,9 +406,12 @@ impl SrdInstance {
         &mut self,
         denoiser_id: SrdDenoiserId,
     ) -> Result<SrdRadianceSurfaceMaskResources> {
-        if self.mode_for_id(denoiser_id) != Some(SrdDenoiserMode::RadianceStabilizer) {
+        if !matches!(
+            self.mode_for_id(denoiser_id),
+            Some(SrdDenoiserMode::RadianceStabilizer | SrdDenoiserMode::OcclusionStabilizer)
+        ) {
             return Err(Error::InvalidInput(format!(
-                "SRD denoiser id {} is not a RadianceStabilizer denoiser",
+                "SRD denoiser id {} is not a RadianceStabilizer or OcclusionStabilizer denoiser",
                 denoiser_id.get()
             )));
         }
@@ -439,9 +445,12 @@ impl SrdInstance {
         &mut self,
         denoiser_id: SrdDenoiserId,
     ) -> Result<SrdRadianceReprojectResources> {
-        if self.mode_for_id(denoiser_id) != Some(SrdDenoiserMode::RadianceStabilizer) {
+        if !matches!(
+            self.mode_for_id(denoiser_id),
+            Some(SrdDenoiserMode::RadianceStabilizer | SrdDenoiserMode::OcclusionStabilizer)
+        ) {
             return Err(Error::InvalidInput(format!(
-                "SRD denoiser id {} is not a RadianceStabilizer denoiser",
+                "SRD denoiser id {} is not a RadianceStabilizer or OcclusionStabilizer denoiser",
                 denoiser_id.get()
             )));
         }
@@ -467,9 +476,12 @@ impl SrdInstance {
         surface_mask: Option<SrdRadianceSurfaceMaskResources>,
         rect_size: UVec2,
     ) -> Result<&[SrdDispatchDesc]> {
-        if self.mode_for_id(denoiser_id) != Some(SrdDenoiserMode::RadianceStabilizer) {
+        if !matches!(
+            self.mode_for_id(denoiser_id),
+            Some(SrdDenoiserMode::RadianceStabilizer | SrdDenoiserMode::OcclusionStabilizer)
+        ) {
             return Err(Error::InvalidInput(format!(
-                "SRD denoiser id {} is not a RadianceStabilizer denoiser",
+                "SRD denoiser id {} is not a RadianceStabilizer or OcclusionStabilizer denoiser",
                 denoiser_id.get()
             )));
         }
@@ -495,6 +507,10 @@ impl SrdInstance {
             rect_size.y.div_ceil(tile).max(1),
         );
         let motion_scale = self.common_settings.motion_vector_scale.to_array();
+        let hit_distance_settings = match self.denoiser_settings(denoiser_id) {
+            Some(SrdFamilySettings::Radiance(s)) => s.hit_distance,
+            _ => super::settings::SrdHitDistanceSettings::default(),
+        };
         let constants = SrdRadianceReprojectConstants {
             rect_extent: [rect_size.x.max(1), rect_size.y.max(1)],
             mask_extent: [mask_extent.x, mask_extent.y],
@@ -504,7 +520,8 @@ impl SrdInstance {
             normal_cos_threshold: (1.0 - rejection.normal_threshold).clamp(0.0, 1.0),
             use_surface_mask: surface_mask.is_some() as u32,
             tile_size: tile,
-            _pad: 0,
+            use_hit_distance: hit_distance_settings.enabled as u32,
+            hit_distance_relative_threshold: hit_distance_settings.relative_threshold,
         };
         let constants_range = self.push_typed_constants(&constants);
         let mut builder =
@@ -514,6 +531,11 @@ impl SrdInstance {
                 .read(SrdResourceSlot::NormalRoughnessInput)
                 .read(SrdResourceSlot::PrevLinearDepthInput)
                 .read(SrdResourceSlot::PrevNormalRoughnessInput);
+        if hit_distance_settings.enabled {
+            builder = builder
+                .read(SrdResourceSlot::HitDistanceInput)
+                .read(SrdResourceSlot::PrevHitDistanceInput);
+        }
         if let Some(mask) = surface_mask {
             if (mask.scratch_index as usize) >= self.scratch_pool.len() {
                 return Err(Error::InvalidInput(format!(
@@ -623,6 +645,28 @@ impl SrdInstance {
                 denoiser_id.get()
             )));
         }
+        self.push_radiance_accumulate_dispatch(
+            denoiser_id,
+            resources,
+            reproject,
+            surface_mask,
+            rect_size,
+            SrdResourceSlot::CombinedRadianceInput,
+            "SRD Radiance Accumulate",
+        )?;
+        Ok(self.dispatches())
+    }
+
+    pub(super) fn push_radiance_accumulate_dispatch(
+        &mut self,
+        denoiser_id: SrdDenoiserId,
+        resources: SrdRadianceAccumulateResources,
+        reproject: SrdRadianceReprojectResources,
+        surface_mask: Option<SrdRadianceSurfaceMaskResources>,
+        rect_size: UVec2,
+        radiance_input_slot: SrdResourceSlot,
+        pass_name: &str,
+    ) -> Result<()> {
         if resources.pipeline >= self.pipelines.len() {
             return Err(Error::InvalidInput(format!(
                 "SRD radiance accumulate references missing pipeline index {}",
@@ -667,10 +711,9 @@ impl SrdInstance {
             tile_size: tile,
         };
         let constants_range = self.push_typed_constants(&constants);
-        let mut builder =
-            SrdPassBuilder::new("SRD Radiance Accumulate", denoiser_id, resources.pipeline)
-                .read(SrdResourceSlot::CombinedRadianceInput)
-                .read_pool(SrdPoolClass::Scratch, reproject.scratch_index);
+        let mut builder = SrdPassBuilder::new(pass_name, denoiser_id, resources.pipeline)
+            .read(radiance_input_slot)
+            .read_pool(SrdPoolClass::Scratch, reproject.scratch_index);
         if let Some(mask) = surface_mask {
             if (mask.scratch_index as usize) >= self.scratch_pool.len() {
                 return Err(Error::InvalidInput(format!(
@@ -691,7 +734,155 @@ impl SrdInstance {
             ])
             .build()?;
         self.push_dispatch(dispatch)?;
+        Ok(())
+    }
+
+    pub fn register_radiance_clamp_pipeline(&mut self) -> Result<usize> {
+        self.register_pipeline(SrdPipelineDesc {
+            name: "SRD Radiance Clamp".into(),
+            debug_label: "SRD Radiance Clamp".into(),
+            shader_label: "srd_radiance_clamp".into(),
+            has_constants: true,
+            workgroup_size: [8, 8, 1],
+        })
+    }
+
+    pub fn prepare_radiance_clamp(
+        &mut self,
+        denoiser_id: SrdDenoiserId,
+    ) -> Result<SrdRadianceClampResources> {
+        if self.mode_for_id(denoiser_id) != Some(SrdDenoiserMode::RadianceStabilizer) {
+            return Err(Error::InvalidInput(format!(
+                "SRD denoiser id {} is not a RadianceStabilizer denoiser",
+                denoiser_id.get()
+            )));
+        }
+        let scratch_index = self.add_unique_scratch_texture(SrdTextureDesc {
+            name: format!("radiance_clamp_{}", denoiser_id.get()),
+            debug_label: format!("SRD Radiance Clamp {}", denoiser_id.get()),
+            slot: SrdResourceSlot::ClampedRadianceInput,
+            format: Format::Rgba16Float,
+            pool: Some(SrdPoolClass::Scratch),
+            downsample_factor: 1,
+        })?;
+        let pipeline = self.register_radiance_clamp_pipeline()?;
+        Ok(SrdRadianceClampResources { scratch_index, pipeline })
+    }
+
+    /// Emit the radiance History Clamp dispatch.
+    ///
+    /// The pass is only appended when `SrdRadianceSettings::history_clamp.enabled`
+    /// is true; disabled settings return the existing dispatch list unchanged.
+    pub fn plan_radiance_clamp_passes(
+        &mut self,
+        denoiser_id: SrdDenoiserId,
+        resources: SrdRadianceClampResources,
+        accumulate: SrdRadianceAccumulateResources,
+        surface_mask: Option<SrdRadianceSurfaceMaskResources>,
+        rect_size: UVec2,
+    ) -> Result<&[SrdDispatchDesc]> {
+        if self.mode_for_id(denoiser_id) != Some(SrdDenoiserMode::RadianceStabilizer) {
+            return Err(Error::InvalidInput(format!(
+                "SRD denoiser id {} is not a RadianceStabilizer denoiser",
+                denoiser_id.get()
+            )));
+        }
+        let radiance_settings = match self.denoiser_settings(denoiser_id) {
+            Some(SrdFamilySettings::Radiance(settings)) => *settings,
+            _ => SrdRadianceSettings::default(),
+        };
+        if !radiance_settings.history_clamp.enabled {
+            return Ok(self.dispatches());
+        }
+        self.push_radiance_clamp_dispatch(
+            denoiser_id,
+            resources,
+            accumulate,
+            surface_mask,
+            rect_size,
+            SrdResourceSlot::CombinedRadianceInput,
+            "SRD Radiance Clamp",
+        )?;
         Ok(self.dispatches())
+    }
+
+    pub(super) fn push_radiance_clamp_dispatch(
+        &mut self,
+        denoiser_id: SrdDenoiserId,
+        resources: SrdRadianceClampResources,
+        accumulate: SrdRadianceAccumulateResources,
+        surface_mask: Option<SrdRadianceSurfaceMaskResources>,
+        rect_size: UVec2,
+        radiance_input_slot: SrdResourceSlot,
+        pass_name: &str,
+    ) -> Result<()> {
+        let radiance_settings = match self.denoiser_settings(denoiser_id) {
+            Some(SrdFamilySettings::Radiance(settings)) => *settings,
+            _ => SrdRadianceSettings::default(),
+        };
+        if resources.pipeline >= self.pipelines.len() {
+            return Err(Error::InvalidInput(format!(
+                "SRD radiance clamp references missing pipeline index {}",
+                resources.pipeline
+            )));
+        }
+        if (resources.scratch_index as usize) >= self.scratch_pool.len() {
+            return Err(Error::InvalidInput(format!(
+                "SRD radiance clamp references missing scratch index {}",
+                resources.scratch_index
+            )));
+        }
+        if accumulate.history_ring_index >= self.history_rings.len() {
+            return Err(Error::InvalidInput(format!(
+                "SRD radiance clamp references missing history ring {}",
+                accumulate.history_ring_index
+            )));
+        }
+        let ring = self.history_rings[accumulate.history_ring_index].clone();
+        if ring.denoiser_id != denoiser_id {
+            return Err(Error::InvalidInput(format!(
+                "SRD radiance clamp ring belongs to denoiser id {} not {}",
+                ring.denoiser_id.get(),
+                denoiser_id.get()
+            )));
+        }
+        let tile = SRD_RADIANCE_SURFACE_MASK_TILE_SIZE;
+        let mask_extent = UVec2::new(
+            rect_size.x.div_ceil(tile).max(1),
+            rect_size.y.div_ceil(tile).max(1),
+        );
+        let constants = SrdRadianceClampConstants {
+            rect_extent: [rect_size.x.max(1), rect_size.y.max(1)],
+            mask_extent: [mask_extent.x, mask_extent.y],
+            sigma_scale: radiance_settings.history_clamp.sigma_scale,
+            use_surface_mask: surface_mask.is_some() as u32,
+            tile_size: tile,
+            _pad: 0,
+        };
+        let constants_range = self.push_typed_constants(&constants);
+        let mut builder = SrdPassBuilder::new(pass_name, denoiser_id, resources.pipeline)
+            .read_pool(SrdPoolClass::History, ring.write_index)
+            .read(radiance_input_slot);
+        if let Some(mask) = surface_mask {
+            if (mask.scratch_index as usize) >= self.scratch_pool.len() {
+                return Err(Error::InvalidInput(format!(
+                    "SRD radiance clamp references missing surface-mask scratch {}",
+                    mask.scratch_index
+                )));
+            }
+            builder = builder.read_pool(SrdPoolClass::Scratch, mask.scratch_index);
+        }
+        let dispatch = builder
+            .write_pool(SrdPoolClass::Scratch, resources.scratch_index)
+            .constants_range(constants_range)
+            .grid_size([
+                rect_size.x.div_ceil(8).max(1),
+                rect_size.y.div_ceil(8).max(1),
+                1,
+            ])
+            .build()?;
+        self.push_dispatch(dispatch)?;
+        Ok(())
     }
 
     pub fn register_radiance_reconstruct_pipeline(&mut self) -> Result<usize> {
@@ -729,11 +920,17 @@ impl SrdInstance {
         })
     }
 
+    /// Plan the spatial reconstruct pass.
+    ///
+    /// When `clamp` is `Some`, the reconstruct reads from the clamped-history
+    /// scratch texture instead of the raw accumulated history ring, reducing
+    /// temporal ghosting. When `None`, it reads the history ring directly.
     pub fn plan_radiance_reconstruct_passes(
         &mut self,
         denoiser_id: SrdDenoiserId,
         resources: SrdRadianceReconstructResources,
         accumulate: SrdRadianceAccumulateResources,
+        clamp: Option<SrdRadianceClampResources>,
         surface_mask: Option<SrdRadianceSurfaceMaskResources>,
         rect_size: UVec2,
     ) -> Result<&[SrdDispatchDesc]> {
@@ -761,13 +958,24 @@ impl SrdInstance {
                 accumulate.history_ring_index
             )));
         }
-        let ring = self.history_rings[accumulate.history_ring_index].clone();
-        if ring.denoiser_id != denoiser_id {
-            return Err(Error::InvalidInput(format!(
-                "SRD radiance reconstruct ring belongs to denoiser id {} not {}",
-                ring.denoiser_id.get(),
-                denoiser_id.get()
-            )));
+        let ring_write_index = {
+            let ring = &self.history_rings[accumulate.history_ring_index];
+            if ring.denoiser_id != denoiser_id {
+                return Err(Error::InvalidInput(format!(
+                    "SRD radiance reconstruct ring belongs to denoiser id {} not {}",
+                    ring.denoiser_id.get(),
+                    denoiser_id.get()
+                )));
+            }
+            ring.write_index
+        };
+        if let Some(c) = clamp {
+            if (c.scratch_index as usize) >= self.scratch_pool.len() {
+                return Err(Error::InvalidInput(format!(
+                    "SRD radiance reconstruct references missing clamp scratch {}",
+                    c.scratch_index
+                )));
+            }
         }
         let radiance_settings = match self.denoiser_settings(denoiser_id) {
             Some(SrdFamilySettings::Radiance(settings)) => *settings,
@@ -795,10 +1003,15 @@ impl SrdInstance {
         };
         let constants_range = self.push_typed_constants(&constants);
         let mut builder =
-            SrdPassBuilder::new("SRD Radiance Reconstruct", denoiser_id, resources.pipeline)
-                .read_pool(SrdPoolClass::History, ring.write_index)
-                .read(SrdResourceSlot::LinearDepthInput)
-                .read(SrdResourceSlot::NormalRoughnessInput);
+            SrdPassBuilder::new("SRD Radiance Reconstruct", denoiser_id, resources.pipeline);
+        if let Some(c) = clamp {
+            builder = builder.read_slot(SrdResourceSlot::ClampedRadianceInput, Some(c.scratch_index));
+        } else {
+            builder = builder.read_pool(SrdPoolClass::History, ring_write_index);
+        }
+        builder = builder
+            .read(SrdResourceSlot::LinearDepthInput)
+            .read(SrdResourceSlot::NormalRoughnessInput);
         if let Some(mask) = surface_mask {
             if (mask.scratch_index as usize) >= self.scratch_pool.len() {
                 return Err(Error::InvalidInput(format!(
@@ -827,9 +1040,12 @@ impl SrdInstance {
         resources: SrdRadianceSurfaceMaskResources,
         rect_size: UVec2,
     ) -> Result<&[SrdDispatchDesc]> {
-        if self.mode_for_id(denoiser_id) != Some(SrdDenoiserMode::RadianceStabilizer) {
+        if !matches!(
+            self.mode_for_id(denoiser_id),
+            Some(SrdDenoiserMode::RadianceStabilizer | SrdDenoiserMode::OcclusionStabilizer)
+        ) {
             return Err(Error::InvalidInput(format!(
-                "SRD denoiser id {} is not a RadianceStabilizer denoiser",
+                "SRD denoiser id {} is not a RadianceStabilizer or OcclusionStabilizer denoiser",
                 denoiser_id.get()
             )));
         }
@@ -865,6 +1081,403 @@ impl SrdInstance {
                 .constants_range(constants_range)
                 .grid_size([mask_extent.x, mask_extent.y, 1])
                 .build()?;
+        self.push_dispatch(dispatch)?;
+        Ok(self.dispatches())
+    }
+
+    pub fn register_radiance_spatial_filter_pipeline(&mut self) -> Result<usize> {
+        self.register_pipeline(SrdPipelineDesc {
+            name: "SRD Radiance Spatial Filter".into(),
+            debug_label: "SRD Radiance Spatial Filter".into(),
+            shader_label: "srd_radiance_spatial_filter".into(),
+            has_constants: true,
+            workgroup_size: [8, 8, 1],
+        })
+    }
+
+    pub fn prepare_radiance_spatial_filter(
+        &mut self,
+        denoiser_id: SrdDenoiserId,
+    ) -> Result<SrdRadianceSpatialFilterResources> {
+        if self.mode_for_id(denoiser_id) != Some(SrdDenoiserMode::RadianceStabilizer) {
+            return Err(Error::InvalidInput(format!(
+                "SRD denoiser id {} is not a RadianceStabilizer denoiser",
+                denoiser_id.get()
+            )));
+        }
+        let scratch_index = self.add_unique_scratch_texture(SrdTextureDesc {
+            name: format!("radiance_spatial_filter_{}", denoiser_id.get()),
+            debug_label: format!("SRD Radiance Spatial Filter {}", denoiser_id.get()),
+            slot: SrdResourceSlot::ScratchPool,
+            format: Format::Rgba16Float,
+            pool: Some(SrdPoolClass::Scratch),
+            downsample_factor: 1,
+        })?;
+        let pipeline = self.register_radiance_spatial_filter_pipeline()?;
+        Ok(SrdRadianceSpatialFilterResources { scratch_index, pipeline })
+    }
+
+    /// Emit the optional radiance Spatial Filter dispatch.
+    ///
+    /// `input_scratch_index` names the scratch texture produced by the
+    /// previous final pass (reconstruct or outlier suppress). The pass is only
+    /// appended when `SrdRadianceSettings::spatial_filter.enabled` is true.
+    pub fn plan_radiance_spatial_filter_passes(
+        &mut self,
+        denoiser_id: SrdDenoiserId,
+        resources: SrdRadianceSpatialFilterResources,
+        input_scratch_index: u16,
+        surface_mask: Option<SrdRadianceSurfaceMaskResources>,
+        rect_size: UVec2,
+    ) -> Result<&[SrdDispatchDesc]> {
+        if self.mode_for_id(denoiser_id) != Some(SrdDenoiserMode::RadianceStabilizer) {
+            return Err(Error::InvalidInput(format!(
+                "SRD denoiser id {} is not a RadianceStabilizer denoiser",
+                denoiser_id.get()
+            )));
+        }
+        let radiance_settings = match self.denoiser_settings(denoiser_id) {
+            Some(SrdFamilySettings::Radiance(settings)) => *settings,
+            _ => SrdRadianceSettings::default(),
+        };
+        let filter = radiance_settings.spatial_filter;
+        if !filter.enabled {
+            return Ok(self.dispatches());
+        }
+        if resources.pipeline >= self.pipelines.len() {
+            return Err(Error::InvalidInput(format!(
+                "SRD radiance spatial filter references missing pipeline index {}",
+                resources.pipeline
+            )));
+        }
+        if (resources.scratch_index as usize) >= self.scratch_pool.len() {
+            return Err(Error::InvalidInput(format!(
+                "SRD radiance spatial filter references missing scratch index {}",
+                resources.scratch_index
+            )));
+        }
+        if (input_scratch_index as usize) >= self.scratch_pool.len() {
+            return Err(Error::InvalidInput(format!(
+                "SRD radiance spatial filter references missing input scratch {input_scratch_index}"
+            )));
+        }
+        let history_rejection = radiance_settings.history_rejection;
+        let tile = SRD_RADIANCE_SURFACE_MASK_TILE_SIZE;
+        let mask_extent = UVec2::new(
+            rect_size.x.div_ceil(tile).max(1),
+            rect_size.y.div_ceil(tile).max(1),
+        );
+        let constants = SrdRadianceSpatialFilterConstants {
+            rect_extent: [rect_size.x.max(1), rect_size.y.max(1)],
+            mask_extent: [mask_extent.x, mask_extent.y],
+            depth_tolerance_relative: history_rejection.depth_threshold,
+            depth_tolerance_absolute: history_rejection.depth_threshold.max(0.01),
+            normal_sharpness: filter.normal_sharpness,
+            roughness_tolerance: history_rejection.roughness_threshold,
+            luminance_sigma: filter.luminance_sigma,
+            stride: filter.stride,
+            use_surface_mask: surface_mask.is_some() as u32,
+            tile_size: tile,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        let constants_range = self.push_typed_constants(&constants);
+        let mut builder =
+            SrdPassBuilder::new("SRD Radiance Spatial Filter", denoiser_id, resources.pipeline)
+                .read_pool(SrdPoolClass::Scratch, input_scratch_index)
+                .read(SrdResourceSlot::LinearDepthInput)
+                .read(SrdResourceSlot::NormalRoughnessInput);
+        if let Some(mask) = surface_mask {
+            if (mask.scratch_index as usize) >= self.scratch_pool.len() {
+                return Err(Error::InvalidInput(format!(
+                    "SRD radiance spatial filter references missing surface-mask scratch {}",
+                    mask.scratch_index
+                )));
+            }
+            builder = builder.read_pool(SrdPoolClass::Scratch, mask.scratch_index);
+        }
+        let dispatch = builder
+            .write_pool(SrdPoolClass::Scratch, resources.scratch_index)
+            .constants_range(constants_range)
+            .grid_size([
+                rect_size.x.div_ceil(8).max(1),
+                rect_size.y.div_ceil(8).max(1),
+                1,
+            ])
+            .build()?;
+        self.push_dispatch(dispatch)?;
+        Ok(self.dispatches())
+    }
+
+    pub fn register_radiance_atrous_pipeline(&mut self) -> Result<usize> {
+        self.register_pipeline(SrdPipelineDesc {
+            name: "SRD Radiance Atrous".into(),
+            debug_label: "SRD Radiance Atrous".into(),
+            shader_label: "srd_radiance_atrous".into(),
+            has_constants: true,
+            workgroup_size: [8, 8, 1],
+        })
+    }
+
+    pub fn prepare_radiance_atrous(
+        &mut self,
+        denoiser_id: SrdDenoiserId,
+    ) -> Result<SrdRadianceAtrousResources> {
+        if self.mode_for_id(denoiser_id) != Some(SrdDenoiserMode::RadianceStabilizer) {
+            return Err(Error::InvalidInput(format!(
+                "SRD denoiser id {} is not a RadianceStabilizer denoiser",
+                denoiser_id.get()
+            )));
+        }
+        let ping_index = self.add_unique_scratch_texture(SrdTextureDesc {
+            name: format!("radiance_atrous_ping_{}", denoiser_id.get()),
+            debug_label: format!("SRD Radiance Atrous Ping {}", denoiser_id.get()),
+            slot: SrdResourceSlot::ScratchPool,
+            format: Format::Rgba16Float,
+            pool: Some(SrdPoolClass::Scratch),
+            downsample_factor: 1,
+        })?;
+        let pong_index = self.add_unique_scratch_texture(SrdTextureDesc {
+            name: format!("radiance_atrous_pong_{}", denoiser_id.get()),
+            debug_label: format!("SRD Radiance Atrous Pong {}", denoiser_id.get()),
+            slot: SrdResourceSlot::ScratchPool,
+            format: Format::Rgba16Float,
+            pool: Some(SrdPoolClass::Scratch),
+            downsample_factor: 1,
+        })?;
+        let pipeline = self.register_radiance_atrous_pipeline()?;
+        Ok(SrdRadianceAtrousResources {
+            ping_index,
+            pong_index,
+            pipeline,
+        })
+    }
+
+    /// Emit the optional radiance À-Trous wavelet filter dispatches.
+    ///
+    /// `input_scratch_index` names the scratch produced by the previous final
+    /// pass (reconstruct / outlier suppress / spatial filter). Returns the
+    /// scratch index of the final iteration's output, or `input_scratch_index`
+    /// itself when the pass is disabled.
+    pub fn plan_radiance_atrous_passes(
+        &mut self,
+        denoiser_id: SrdDenoiserId,
+        resources: SrdRadianceAtrousResources,
+        input_scratch_index: u16,
+        surface_mask: Option<SrdRadianceSurfaceMaskResources>,
+        rect_size: UVec2,
+    ) -> Result<u16> {
+        if self.mode_for_id(denoiser_id) != Some(SrdDenoiserMode::RadianceStabilizer) {
+            return Err(Error::InvalidInput(format!(
+                "SRD denoiser id {} is not a RadianceStabilizer denoiser",
+                denoiser_id.get()
+            )));
+        }
+        let radiance_settings = match self.denoiser_settings(denoiser_id) {
+            Some(SrdFamilySettings::Radiance(settings)) => *settings,
+            _ => SrdRadianceSettings::default(),
+        };
+        let atrous = radiance_settings.atrous;
+        if !atrous.enabled || atrous.iterations == 0 {
+            return Ok(input_scratch_index);
+        }
+        if resources.pipeline >= self.pipelines.len() {
+            return Err(Error::InvalidInput(format!(
+                "SRD radiance atrous references missing pipeline index {}",
+                resources.pipeline
+            )));
+        }
+        for idx in [resources.ping_index, resources.pong_index, input_scratch_index] {
+            if (idx as usize) >= self.scratch_pool.len() {
+                return Err(Error::InvalidInput(format!(
+                    "SRD radiance atrous references missing scratch index {idx}"
+                )));
+            }
+        }
+        let history_rejection = radiance_settings.history_rejection;
+        let tile = SRD_RADIANCE_SURFACE_MASK_TILE_SIZE;
+        let mask_extent = UVec2::new(
+            rect_size.x.div_ceil(tile).max(1),
+            rect_size.y.div_ceil(tile).max(1),
+        );
+        if let Some(mask) = surface_mask {
+            if (mask.scratch_index as usize) >= self.scratch_pool.len() {
+                return Err(Error::InvalidInput(format!(
+                    "SRD radiance atrous references missing surface-mask scratch {}",
+                    mask.scratch_index
+                )));
+            }
+        }
+        let grid_size = [
+            rect_size.x.div_ceil(8).max(1),
+            rect_size.y.div_ceil(8).max(1),
+            1,
+        ];
+        let mut current_input = input_scratch_index;
+        let mut last_output = input_scratch_index;
+        for iteration in 0..atrous.iterations {
+            let output = if iteration % 2 == 0 {
+                resources.ping_index
+            } else {
+                resources.pong_index
+            };
+            let stride: u32 = 1u32 << iteration;
+            let constants = SrdRadianceAtrousConstants {
+                rect_extent: [rect_size.x.max(1), rect_size.y.max(1)],
+                mask_extent: [mask_extent.x, mask_extent.y],
+                depth_tolerance_relative: history_rejection.depth_threshold,
+                depth_tolerance_absolute: history_rejection.depth_threshold.max(0.01),
+                normal_sharpness: atrous.normal_sharpness,
+                roughness_tolerance: history_rejection.roughness_threshold,
+                luminance_sigma: atrous.luminance_sigma,
+                stride,
+                use_surface_mask: surface_mask.is_some() as u32,
+                tile_size: tile,
+                _pad0: 0,
+                _pad1: 0,
+            };
+            let constants_range = self.push_typed_constants(&constants);
+            let mut builder = SrdPassBuilder::new(
+                format!("SRD Radiance Atrous Iter {iteration}"),
+                denoiser_id,
+                resources.pipeline,
+            )
+            .read_pool(SrdPoolClass::Scratch, current_input)
+            .read(SrdResourceSlot::LinearDepthInput)
+            .read(SrdResourceSlot::NormalRoughnessInput);
+            if let Some(mask) = surface_mask {
+                builder = builder.read_pool(SrdPoolClass::Scratch, mask.scratch_index);
+            }
+            let dispatch = builder
+                .write_pool(SrdPoolClass::Scratch, output)
+                .constants_range(constants_range)
+                .grid_size(grid_size)
+                .build()?;
+            self.push_dispatch(dispatch)?;
+            current_input = output;
+            last_output = output;
+        }
+        Ok(last_output)
+    }
+
+    pub fn register_radiance_post_blur_pipeline(&mut self) -> Result<usize> {
+        self.register_pipeline(SrdPipelineDesc {
+            name: "SRD Radiance Post Blur".into(),
+            debug_label: "SRD Radiance Post Blur".into(),
+            shader_label: "srd_radiance_post_blur".into(),
+            has_constants: true,
+            workgroup_size: [8, 8, 1],
+        })
+    }
+
+    pub fn prepare_radiance_post_blur(
+        &mut self,
+        denoiser_id: SrdDenoiserId,
+    ) -> Result<SrdRadiancePostBlurResources> {
+        if self.mode_for_id(denoiser_id) != Some(SrdDenoiserMode::RadianceStabilizer) {
+            return Err(Error::InvalidInput(format!(
+                "SRD denoiser id {} is not a RadianceStabilizer denoiser",
+                denoiser_id.get()
+            )));
+        }
+        let scratch_index = self.add_unique_scratch_texture(SrdTextureDesc {
+            name: format!("radiance_post_blur_{}", denoiser_id.get()),
+            debug_label: format!("SRD Radiance Post Blur {}", denoiser_id.get()),
+            slot: SrdResourceSlot::ScratchPool,
+            format: Format::Rgba16Float,
+            pool: Some(SrdPoolClass::Scratch),
+            downsample_factor: 1,
+        })?;
+        let pipeline = self.register_radiance_post_blur_pipeline()?;
+        Ok(SrdRadiancePostBlurResources { scratch_index, pipeline })
+    }
+
+    /// Emit the optional radiance Post-Blur dispatch.
+    ///
+    /// `input_scratch_index` names the scratch produced by the previous final
+    /// pass. The pass is only appended when `SrdPostBlurSettings::enabled` is
+    /// true; disabled settings return the existing dispatch list unchanged.
+    pub fn plan_radiance_post_blur_passes(
+        &mut self,
+        denoiser_id: SrdDenoiserId,
+        resources: SrdRadiancePostBlurResources,
+        input_scratch_index: u16,
+        surface_mask: Option<SrdRadianceSurfaceMaskResources>,
+        rect_size: UVec2,
+    ) -> Result<&[SrdDispatchDesc]> {
+        if self.mode_for_id(denoiser_id) != Some(SrdDenoiserMode::RadianceStabilizer) {
+            return Err(Error::InvalidInput(format!(
+                "SRD denoiser id {} is not a RadianceStabilizer denoiser",
+                denoiser_id.get()
+            )));
+        }
+        let radiance_settings = match self.denoiser_settings(denoiser_id) {
+            Some(SrdFamilySettings::Radiance(settings)) => *settings,
+            _ => SrdRadianceSettings::default(),
+        };
+        let post_blur = radiance_settings.post_blur;
+        if !post_blur.enabled {
+            return Ok(self.dispatches());
+        }
+        if resources.pipeline >= self.pipelines.len() {
+            return Err(Error::InvalidInput(format!(
+                "SRD radiance post blur references missing pipeline index {}",
+                resources.pipeline
+            )));
+        }
+        if (resources.scratch_index as usize) >= self.scratch_pool.len() {
+            return Err(Error::InvalidInput(format!(
+                "SRD radiance post blur references missing scratch index {}",
+                resources.scratch_index
+            )));
+        }
+        if (input_scratch_index as usize) >= self.scratch_pool.len() {
+            return Err(Error::InvalidInput(format!(
+                "SRD radiance post blur references missing input scratch {input_scratch_index}"
+            )));
+        }
+        let history_rejection = radiance_settings.history_rejection;
+        let tile = SRD_RADIANCE_SURFACE_MASK_TILE_SIZE;
+        let mask_extent = UVec2::new(
+            rect_size.x.div_ceil(tile).max(1),
+            rect_size.y.div_ceil(tile).max(1),
+        );
+        let constants = SrdRadiancePostBlurConstants {
+            rect_extent: [rect_size.x.max(1), rect_size.y.max(1)],
+            mask_extent: [mask_extent.x, mask_extent.y],
+            depth_tolerance_relative: history_rejection.depth_threshold,
+            depth_tolerance_absolute: history_rejection.depth_threshold.max(0.01),
+            normal_sharpness: post_blur.normal_sharpness,
+            roughness_tolerance: history_rejection.roughness_threshold,
+            max_blur_sigma: post_blur.max_blur_sigma,
+            blur_radius: post_blur.blur_radius,
+            use_surface_mask: surface_mask.is_some() as u32,
+            tile_size: tile,
+        };
+        let constants_range = self.push_typed_constants(&constants);
+        let mut builder =
+            SrdPassBuilder::new("SRD Radiance Post Blur", denoiser_id, resources.pipeline)
+                .read_pool(SrdPoolClass::Scratch, input_scratch_index)
+                .read(SrdResourceSlot::LinearDepthInput)
+                .read(SrdResourceSlot::NormalRoughnessInput);
+        if let Some(mask) = surface_mask {
+            if (mask.scratch_index as usize) >= self.scratch_pool.len() {
+                return Err(Error::InvalidInput(format!(
+                    "SRD radiance post blur references missing surface-mask scratch {}",
+                    mask.scratch_index
+                )));
+            }
+            builder = builder.read_pool(SrdPoolClass::Scratch, mask.scratch_index);
+        }
+        let dispatch = builder
+            .write_pool(SrdPoolClass::Scratch, resources.scratch_index)
+            .constants_range(constants_range)
+            .grid_size([
+                rect_size.x.div_ceil(8).max(1),
+                rect_size.y.div_ceil(8).max(1),
+                1,
+            ])
+            .build()?;
         self.push_dispatch(dispatch)?;
         Ok(self.dispatches())
     }

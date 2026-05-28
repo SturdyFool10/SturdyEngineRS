@@ -14,8 +14,12 @@ pub struct SrdRadianceStabilizerPrograms {
     pub surface_mask: ComputeProgram,
     pub reproject: ComputeProgram,
     pub accumulate: ComputeProgram,
+    pub clamp: ComputeProgram,
     pub reconstruct: ComputeProgram,
     pub outlier_suppress: ComputeProgram,
+    pub spatial_filter: ComputeProgram,
+    pub atrous: ComputeProgram,
+    pub post_blur: ComputeProgram,
 }
 
 impl SrdRadianceStabilizerPrograms {
@@ -34,6 +38,10 @@ impl SrdRadianceStabilizerPrograms {
                 engine,
                 srd_engine_shader("srd_radiance_accumulate.slang"),
             )?,
+            clamp: ComputeProgram::load(
+                engine,
+                srd_engine_shader("srd_radiance_clamp.slang"),
+            )?,
             reconstruct: ComputeProgram::load(
                 engine,
                 srd_engine_shader("srd_radiance_reconstruct.slang"),
@@ -41,6 +49,18 @@ impl SrdRadianceStabilizerPrograms {
             outlier_suppress: ComputeProgram::load(
                 engine,
                 srd_engine_shader("srd_radiance_outlier_suppress.slang"),
+            )?,
+            spatial_filter: ComputeProgram::load(
+                engine,
+                srd_engine_shader("srd_radiance_spatial_filter.slang"),
+            )?,
+            atrous: ComputeProgram::load(
+                engine,
+                srd_engine_shader("srd_radiance_atrous.slang"),
+            )?,
+            post_blur: ComputeProgram::load(
+                engine,
+                srd_engine_shader("srd_radiance_post_blur.slang"),
             )?,
         })
     }
@@ -51,8 +71,12 @@ impl SrdRadianceStabilizerPrograms {
             "srd_radiance_surface_mask" => Some(&self.surface_mask),
             "srd_radiance_reproject" => Some(&self.reproject),
             "srd_radiance_accumulate" => Some(&self.accumulate),
+            "srd_radiance_clamp" => Some(&self.clamp),
             "srd_radiance_reconstruct" => Some(&self.reconstruct),
             "srd_radiance_outlier_suppress" => Some(&self.outlier_suppress),
+            "srd_radiance_spatial_filter" => Some(&self.spatial_filter),
+            "srd_radiance_atrous" => Some(&self.atrous),
+            "srd_radiance_post_blur" => Some(&self.post_blur),
             _ => None,
         }
     }
@@ -66,6 +90,10 @@ pub struct SrdRadianceStabilizerInputs<'a> {
     pub normal_roughness: &'a GraphImage,
     pub prev_linear_depth: Option<&'a GraphImage>,
     pub prev_normal_roughness: Option<&'a GraphImage>,
+    pub hit_distance: Option<&'a GraphImage>,
+    pub prev_hit_distance: Option<&'a GraphImage>,
+    pub diffuse_radiance: Option<&'a GraphImage>,
+    pub specular_radiance: Option<&'a GraphImage>,
 }
 
 /// Renderer-side executor for SRD Radiance Stabilizer compute dispatches.
@@ -194,9 +222,9 @@ impl<'a> SrdRadianceStabilizerExecutor<'a> {
     }
 }
 
-struct SrdRadianceGraphResources {
-    history: Vec<GraphImage>,
-    scratch: Vec<GraphImage>,
+pub(super) struct SrdRadianceGraphResources {
+    pub(super) history: Vec<GraphImage>,
+    pub(super) scratch: Vec<GraphImage>,
 }
 
 impl SrdRadianceGraphResources {
@@ -219,10 +247,7 @@ impl SrdRadianceGraphResources {
     }
 
     fn final_output(&self, output: SrdRadianceOutputResource) -> Result<&GraphImage> {
-        let index = match output {
-            SrdRadianceOutputResource::Reconstruct { scratch_index }
-            | SrdRadianceOutputResource::OutlierSuppress { scratch_index } => scratch_index,
-        };
+        let index = output.scratch_index();
         self.scratch.get(index as usize).ok_or_else(|| {
             crate::Error::InvalidInput(format!(
                 "SRD radiance final output references missing scratch index {index}"
@@ -231,7 +256,7 @@ impl SrdRadianceGraphResources {
     }
 }
 
-fn build_pool_images(
+pub(super) fn build_pool_images(
     frame: &crate::RenderFrame,
     common_settings: &SrdCommonSettings,
     output_name: &str,
@@ -249,7 +274,7 @@ fn build_pool_images(
         .collect()
 }
 
-fn image_desc_for_srd_texture(
+pub(super) fn image_desc_for_srd_texture(
     common_settings: &SrdCommonSettings,
     texture: &SrdTextureDesc,
 ) -> ImageDesc {
@@ -277,7 +302,7 @@ fn image_desc_for_srd_texture(
     }
 }
 
-fn single_storage_resource(dispatch: &SrdDispatchDesc) -> Result<&SrdResourceDesc> {
+pub(super) fn single_storage_resource(dispatch: &SrdDispatchDesc) -> Result<&SrdResourceDesc> {
     let mut storage_resources = dispatch
         .resources
         .iter()
@@ -313,11 +338,41 @@ fn resolve_graph_resource<'a>(
         (SrdResourceSlot::PrevNormalRoughnessInput, None) => Ok(inputs
             .prev_normal_roughness
             .unwrap_or(inputs.normal_roughness)),
+        (SrdResourceSlot::HitDistanceInput, None) => {
+            inputs.hit_distance.ok_or_else(|| {
+                crate::Error::InvalidInput(
+                    "SRD radiance executor: HitDistanceInput requested but not provided".into(),
+                )
+            })
+        }
+        (SrdResourceSlot::PrevHitDistanceInput, None) => {
+            let img = inputs.prev_hit_distance.or(inputs.hit_distance).ok_or_else(|| {
+                crate::Error::InvalidInput(
+                    "SRD radiance executor: PrevHitDistanceInput requested but not provided".into(),
+                )
+            })?;
+            Ok(img)
+        }
+        (SrdResourceSlot::DiffuseRadianceInput, None) => {
+            inputs.diffuse_radiance.ok_or_else(|| {
+                crate::Error::InvalidInput(
+                    "SRD radiance executor: DiffuseRadianceInput requested but not provided".into(),
+                )
+            })
+        }
+        (SrdResourceSlot::SpecularRadianceInput, None) => {
+            inputs.specular_radiance.ok_or_else(|| {
+                crate::Error::InvalidInput(
+                    "SRD radiance executor: SpecularRadianceInput requested but not provided".into(),
+                )
+            })
+        }
         (SrdResourceSlot::HistoryPool, Some(index)) => graph_resources
             .history
             .get(index as usize)
             .ok_or_else(|| missing_pool_resource(resource)),
-        (SrdResourceSlot::ScratchPool, Some(index)) => graph_resources
+        (SrdResourceSlot::ScratchPool, Some(index))
+        | (SrdResourceSlot::ClampedRadianceInput, Some(index)) => graph_resources
             .scratch
             .get(index as usize)
             .ok_or_else(|| missing_pool_resource(resource)),
@@ -349,12 +404,20 @@ pub(super) fn srd_storage_binding_for_resource(
         ("srd_radiance_accumulate", SrdResourceSlot::HistoryPool) => {
             Ok("srd_radiance_history_write")
         }
+        ("srd_radiance_clamp", SrdResourceSlot::ScratchPool) => Ok("srd_radiance_clamped_out"),
         ("srd_radiance_reconstruct", SrdResourceSlot::ScratchPool) => {
             Ok("srd_radiance_reconstruct_out")
         }
         ("srd_radiance_outlier_suppress", SrdResourceSlot::ScratchPool) => {
             Ok("srd_radiance_clamped_out")
         }
+        ("srd_radiance_spatial_filter", SrdResourceSlot::ScratchPool) => {
+            Ok("srd_radiance_filtered_out")
+        }
+        ("srd_radiance_atrous", SrdResourceSlot::ScratchPool) => Ok("srd_radiance_atrous_out"),
+        ("srd_radiance_post_blur", SrdResourceSlot::ScratchPool) => Ok("srd_radiance_post_blur_out"),
+        ("srd_occlusion_accumulate", SrdResourceSlot::HistoryPool) => Ok("srd_occlusion_history_write"),
+        ("srd_occlusion_filter", SrdResourceSlot::ScratchPool) => Ok("srd_occlusion_out"),
         _ => Err(crate::Error::InvalidInput(format!(
             "SRD shader '{shader_label}' has no storage binding for {:?}",
             resource.slot
@@ -374,9 +437,18 @@ pub(super) fn srd_sampled_binding_for_resource(
         SrdResourceSlot::NormalRoughnessInput => Ok("srd_guide_normal_roughness"),
         SrdResourceSlot::PrevLinearDepthInput => Ok("srd_prev_guide_view_depth"),
         SrdResourceSlot::PrevNormalRoughnessInput => Ok("srd_prev_guide_normal_roughness"),
+        SrdResourceSlot::HitDistanceInput => Ok("srd_guide_hit_distance"),
+        SrdResourceSlot::PrevHitDistanceInput => Ok("srd_prev_guide_hit_distance"),
+        SrdResourceSlot::DiffuseRadianceInput => Ok("srd_radiance_input"),
+        SrdResourceSlot::SpecularRadianceInput => Ok("srd_radiance_input"),
+        SrdResourceSlot::OcclusionInput => Ok("srd_occlusion_input"),
+        SrdResourceSlot::ClampedRadianceInput => Ok("srd_radiance_accumulated"),
         SrdResourceSlot::HistoryPool => match shader_label {
             "srd_radiance_accumulate" => Ok("srd_radiance_history_read"),
+            "srd_radiance_clamp" => Ok("srd_radiance_accumulated"),
             "srd_radiance_reconstruct" => Ok("srd_radiance_accumulated"),
+            "srd_occlusion_accumulate" => Ok("srd_occlusion_history_read"),
+            "srd_occlusion_filter" => Ok("srd_occlusion_accumulated"),
             _ => Err(crate::Error::InvalidInput(format!(
                 "SRD shader '{shader_label}' has no sampled history binding"
             ))),
@@ -385,9 +457,19 @@ pub(super) fn srd_sampled_binding_for_resource(
             ("srd_radiance_reproject", 1) => Ok("srd_radiance_surface_mask"),
             ("srd_radiance_accumulate", 1) => Ok("srd_radiance_reproject"),
             ("srd_radiance_accumulate", 2) => Ok("srd_radiance_surface_mask"),
+            ("srd_radiance_clamp", 1) => Ok("srd_radiance_surface_mask"),
             ("srd_radiance_reconstruct", 1) => Ok("srd_radiance_surface_mask"),
             ("srd_radiance_outlier_suppress", 1) => Ok("srd_radiance_input"),
             ("srd_radiance_outlier_suppress", 2) => Ok("srd_radiance_surface_mask"),
+            ("srd_radiance_spatial_filter", 1) => Ok("srd_radiance_input"),
+            ("srd_radiance_spatial_filter", 2) => Ok("srd_radiance_surface_mask"),
+            ("srd_radiance_atrous", 1) => Ok("srd_radiance_input"),
+            ("srd_radiance_atrous", 2) => Ok("srd_radiance_surface_mask"),
+            ("srd_radiance_post_blur", 1) => Ok("srd_radiance_input"),
+            ("srd_radiance_post_blur", 2) => Ok("srd_radiance_surface_mask"),
+            ("srd_occlusion_accumulate", 1) => Ok("srd_occlusion_reproject"),
+            ("srd_occlusion_accumulate", 2) => Ok("srd_radiance_surface_mask"),
+            ("srd_occlusion_filter", 1) => Ok("srd_radiance_surface_mask"),
             _ => Err(crate::Error::InvalidInput(format!(
                 "SRD shader '{shader_label}' has no sampled scratch binding for ordinal {scratch_texture_ordinal}"
             ))),

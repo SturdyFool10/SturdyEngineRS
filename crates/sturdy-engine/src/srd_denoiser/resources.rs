@@ -27,6 +27,8 @@ pub enum SrdResourceSlot {
     PrevNormalRoughnessInput,
     PrevLinearDepthInput,
     MaterialInput,
+    HitDistanceInput,
+    PrevHitDistanceInput,
     ConfidenceInput,
     DiffuseRadianceInput,
     SpecularRadianceInput,
@@ -46,6 +48,9 @@ pub enum SrdResourceSlot {
     SurfaceMaskOutput,
     HistoryPool,
     ScratchPool,
+    /// Clamped accumulated history scratch texture fed into the spatial reconstruct.
+    /// Carries `pool_index` pointing into the scratch pool.
+    ClampedRadianceInput,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -183,6 +188,10 @@ pub(super) fn validate_slot_format(slot: SrdResourceSlot, format: Format) -> Res
             format,
             Format::R8Unorm | Format::Rgba16Float | Format::Rgba32Float | Format::Depth32Float
         ),
+        SrdResourceSlot::HitDistanceInput | SrdResourceSlot::PrevHitDistanceInput => matches!(
+            format,
+            Format::R8Unorm | Format::Rgba16Float | Format::Rgba32Float
+        ),
         SrdResourceSlot::ConfidenceInput
         | SrdResourceSlot::OcclusionInput
         | SrdResourceSlot::DirectionalOcclusionInput
@@ -201,7 +210,8 @@ pub(super) fn validate_slot_format(slot: SrdResourceSlot, format: Format) -> Res
         | SrdResourceSlot::ShadowTranslucencyOutput
         | SrdResourceSlot::ValidationOutput
         | SrdResourceSlot::HistoryPool
-        | SrdResourceSlot::ScratchPool => matches!(
+        | SrdResourceSlot::ScratchPool
+        | SrdResourceSlot::ClampedRadianceInput => matches!(
             format,
             Format::Rgba16Float | Format::Rgba32Float | Format::Rgba8Unorm
         ),

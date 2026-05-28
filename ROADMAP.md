@@ -147,15 +147,15 @@ SRD (Sturdy Real-Time Denoiser) is now the first-party denoising target. The goa
 - [x] Reference temporal accumulation for path-traced samples.
 - [x] Add SRD-owned variance/moment constants and settings for temporal history beyond the current luminance moment stored in alpha.
 - [x] Add SRD-owned history rejection settings using motion vectors, depth, normals, material IDs, and dynamic-resolution rectangles.
-- [ ] History clamping against current-neighborhood statistics.
+- [x] History clamping against current-neighborhood statistics.
 - [x] Add SRD-owned anti-firefly / bright outlier suppression settings.
-- [ ] Spatial edge-aware filter pass for radiance.
-- [ ] A-trous wavelet filter path for high-variance radiance reconstruction.
-- [ ] Recurrent blur/post-blur path for stable radiance reconstruction.
-- [ ] Hit-distance or ray-length guide support for ray-traced signals.
-- [ ] Separate diffuse/specular reconstruction paths.
-- [ ] Combined diffuse+specular fast path for simpler integrations.
-- [ ] AO and directional-occlusion denoising path using depth/normal edge stopping.
+- [x] Spatial edge-aware filter pass for radiance.
+- [x] A-trous wavelet filter path for high-variance radiance reconstruction.
+- [x] Recurrent blur/post-blur path for stable radiance reconstruction.
+- [x] Hit-distance or ray-length guide support for ray-traced signals.
+- [x] Separate diffuse/specular reconstruction paths.
+- [x] Combined diffuse+specular fast path for simpler integrations.
+- [x] AO and directional-occlusion denoising path using depth/normal edge stopping.
 - [ ] Shadow penumbra denoising path.
 - [ ] Translucent shadow denoising path.
 - [ ] Spectral path-tracing support using fixed bins or compact spectral coefficients instead of raw stochastic wavelengths.
@@ -165,7 +165,7 @@ SRD (Sturdy Real-Time Denoiser) is now the first-party denoising target. The goa
 
 ### Shader library and packing contract
 
-- [ ] Add SRD shader helper library for packing/unpacking guide and noisy signal data.
+- [x] Add SRD shader helper library for packing/unpacking guide and noisy signal data.
 - [x] Define engine-standard normal/roughness/material packing expected by SRD.
 - [x] Define engine-standard motion-vector convention for SRD and verify it matches TAA/motion-vector debug tools.
 - [x] Define SRD depth convention: linear view depth, scale, and invalid-depth behavior.

@@ -69,6 +69,40 @@ pub struct SrdRadianceAccumulateResources {
     pub pipeline: usize,
 }
 
+/// Per-instance handles returned by `SrdInstance::prepare_radiance_atrous`.
+///
+/// `ping_index` and `pong_index` name two full-resolution RGBA16F scratch
+/// textures the À-Trous wavelet filter alternates between across iterations.
+/// The final filtered radiance lives in whichever scratch was written by the
+/// last iteration — callers receive that index from
+/// `plan_radiance_atrous_passes` so the next stage can read it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdRadianceAtrousResources {
+    pub ping_index: u16,
+    pub pong_index: u16,
+    pub pipeline: usize,
+}
+
+/// Per-instance handles returned by `SrdInstance::prepare_radiance_spatial_filter`.
+///
+/// `scratch_index` names a full-resolution RGBA16F scratch texture that holds
+/// the bilateral-filtered final radiance.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdRadianceSpatialFilterResources {
+    pub scratch_index: u16,
+    pub pipeline: usize,
+}
+
+/// Per-instance handles returned by `SrdInstance::prepare_radiance_clamp`.
+///
+/// `scratch_index` names a full-resolution RGBA16F scratch texture that holds
+/// the de-ghosted accumulated radiance fed into the spatial reconstruct.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdRadianceClampResources {
+    pub scratch_index: u16,
+    pub pipeline: usize,
+}
+
 /// Per-instance handles returned by `SrdInstance::prepare_radiance_reconstruct`.
 ///
 /// `scratch_index` names a full-resolution RGBA16F scratch texture that holds
@@ -78,4 +112,73 @@ pub struct SrdRadianceAccumulateResources {
 pub struct SrdRadianceReconstructResources {
     pub scratch_index: u16,
     pub pipeline: usize,
+}
+
+/// Per-instance handles returned by `SrdInstance::prepare_radiance_post_blur`.
+///
+/// `scratch_index` names a full-resolution RGBA16F scratch texture that holds
+/// the final post-blurred radiance output.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdRadiancePostBlurResources {
+    pub scratch_index: u16,
+    pub pipeline: usize,
+}
+
+/// Per-instance handles for the occlusion temporal accumulate pass.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdOcclusionAccumulateResources {
+    pub history_ring_index: usize,
+    pub pipeline: usize,
+}
+
+/// Per-instance handles for the occlusion spatial filter pass.
+///
+/// `scratch_index` names a full-resolution RGBA16F scratch texture that holds
+/// the spatially-filtered occlusion output.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdOcclusionFilterResources {
+    pub scratch_index: u16,
+    pub pipeline: usize,
+}
+
+/// All occlusion stabilizer pipelines and SRD-owned resources for one denoiser.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdOcclusionResources {
+    pub clear_pipeline: usize,
+    pub surface_mask: SrdRadianceSurfaceMaskResources,
+    pub reproject: SrdRadianceReprojectResources,
+    pub accumulate: SrdOcclusionAccumulateResources,
+    pub filter: SrdOcclusionFilterResources,
+}
+
+/// Per-instance handles returned by `SrdInstance::prepare_radiance_combined`.
+///
+/// The combined fast path handles a single `CombinedRadianceInput` through the
+/// core five passes (surface mask, reproject, accumulate, clamp, reconstruct)
+/// without optional tail passes, giving simpler integrations a low-overhead entry.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdRadianceCombinedResources {
+    pub clear_pipeline: usize,
+    pub surface_mask: SrdRadianceSurfaceMaskResources,
+    pub reproject: SrdRadianceReprojectResources,
+    pub accumulate: SrdRadianceAccumulateResources,
+    pub clamp: SrdRadianceClampResources,
+    pub reconstruct: SrdRadianceReconstructResources,
+}
+
+/// Per-instance handles returned by `SrdInstance::prepare_radiance_diffuse_specular`.
+///
+/// Holds independent accumulate/clamp/reconstruct resource sets for diffuse and
+/// specular channels, sharing a single surface-mask and reproject pipeline.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdRadianceDiffuseSpecularResources {
+    pub clear_pipeline: usize,
+    pub surface_mask: SrdRadianceSurfaceMaskResources,
+    pub reproject: SrdRadianceReprojectResources,
+    pub diffuse_accumulate: SrdRadianceAccumulateResources,
+    pub diffuse_clamp: SrdRadianceClampResources,
+    pub diffuse_reconstruct: SrdRadianceReconstructResources,
+    pub specular_accumulate: SrdRadianceAccumulateResources,
+    pub specular_clamp: SrdRadianceClampResources,
+    pub specular_reconstruct: SrdRadianceReconstructResources,
 }

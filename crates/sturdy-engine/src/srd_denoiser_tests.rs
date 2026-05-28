@@ -968,6 +968,7 @@ fn radiance_reconstruct_plan_reads_history_write_slot_with_guides() {
             SrdDenoiserId::new(51),
             reconstruct,
             accumulate,
+            None,
             Some(mask),
             UVec2::new(64, 32),
         )
@@ -1021,6 +1022,7 @@ fn radiance_reconstruct_plan_rejects_ring_owned_by_other_denoiser() {
             SrdDenoiserId::new(53),
             reconstruct,
             foreign_accumulate,
+            None,
             None,
             UVec2::new(8, 8),
         )
@@ -1189,14 +1191,22 @@ fn radiance_outlier_suppress_plan_appends_when_enabled() {
 fn radiance_constants_layout_stays_shader_compatible() {
     assert_eq!(mem::size_of::<SrdRadianceSurfaceMaskConstants>(), 32);
     assert_eq!(mem::align_of::<SrdRadianceSurfaceMaskConstants>(), 4);
-    assert_eq!(mem::size_of::<SrdRadianceReprojectConstants>(), 48);
+    assert_eq!(mem::size_of::<SrdRadianceReprojectConstants>(), 52);
     assert_eq!(mem::align_of::<SrdRadianceReprojectConstants>(), 4);
     assert_eq!(mem::size_of::<SrdRadianceAccumulateConstants>(), 32);
     assert_eq!(mem::align_of::<SrdRadianceAccumulateConstants>(), 4);
+    assert_eq!(mem::size_of::<SrdRadianceClampConstants>(), 32);
+    assert_eq!(mem::align_of::<SrdRadianceClampConstants>(), 4);
     assert_eq!(mem::size_of::<SrdRadianceReconstructConstants>(), 48);
     assert_eq!(mem::align_of::<SrdRadianceReconstructConstants>(), 4);
     assert_eq!(mem::size_of::<SrdRadianceOutlierSuppressConstants>(), 32);
     assert_eq!(mem::align_of::<SrdRadianceOutlierSuppressConstants>(), 4);
+    assert_eq!(mem::size_of::<SrdRadianceSpatialFilterConstants>(), 56);
+    assert_eq!(mem::align_of::<SrdRadianceSpatialFilterConstants>(), 4);
+    assert_eq!(mem::size_of::<SrdRadianceAtrousConstants>(), 56);
+    assert_eq!(mem::align_of::<SrdRadianceAtrousConstants>(), 4);
+    assert_eq!(mem::size_of::<SrdRadiancePostBlurConstants>(), 48);
+    assert_eq!(mem::align_of::<SrdRadiancePostBlurConstants>(), 4);
 }
 
 #[test]
@@ -1256,12 +1266,24 @@ fn radiance_stabilizer_prepare_registers_v0_resources_and_pipelines() {
         "srd_radiance_accumulate"
     );
     assert_eq!(
+        instance.pipelines()[resources.clamp.pipeline].shader_label,
+        "srd_radiance_clamp"
+    );
+    assert_eq!(
         instance.pipelines()[resources.reconstruct.pipeline].shader_label,
         "srd_radiance_reconstruct"
     );
     assert_eq!(
         instance.pipelines()[resources.outlier_suppress.pipeline].shader_label,
         "srd_radiance_outlier_suppress"
+    );
+    assert_ne!(
+        resources.clamp.scratch_index,
+        resources.reconstruct.scratch_index
+    );
+    assert_ne!(
+        resources.clamp.scratch_index,
+        resources.outlier_suppress.scratch_index
     );
 }
 
@@ -1302,7 +1324,7 @@ fn radiance_stabilizer_plan_orders_v0_dispatches_with_clear_and_outlier() {
         .plan_radiance_stabilizer_passes(SrdDenoiserId::new(71), resources, UVec2::new(64, 32))
         .unwrap();
 
-    assert_eq!(plan.dispatch_count, 6);
+    assert_eq!(plan.dispatch_count, 7);
     assert_eq!(
         plan.final_output,
         SrdRadianceOutputResource::OutlierSuppress {
@@ -1321,6 +1343,7 @@ fn radiance_stabilizer_plan_orders_v0_dispatches_with_clear_and_outlier() {
             "SRD Radiance Surface Mask",
             "SRD Radiance Reproject",
             "SRD Radiance Accumulate",
+            "SRD Radiance Clamp",
             "SRD Radiance Reconstruct",
             "SRD Radiance Outlier Suppress",
         ]
@@ -1363,7 +1386,7 @@ fn radiance_stabilizer_plan_skips_outlier_when_disabled() {
         .plan_radiance_stabilizer_passes(SrdDenoiserId::new(72), resources, UVec2::new(16, 16))
         .unwrap();
 
-    assert_eq!(plan.dispatch_count, 4);
+    assert_eq!(plan.dispatch_count, 5);
     assert_eq!(
         plan.final_output,
         SrdRadianceOutputResource::Reconstruct {
@@ -1496,6 +1519,34 @@ fn radiance_stabilizer_executor_binding_map_matches_v0_shaders() {
         .unwrap(),
         "srd_guide_motion"
     );
+    let hit_distance = SrdResourceDesc {
+        descriptor_type: SrdDescriptorType::Texture,
+        slot: SrdResourceSlot::HitDistanceInput,
+        pool_index: None,
+    };
+    let prev_hit_distance = SrdResourceDesc {
+        descriptor_type: SrdDescriptorType::Texture,
+        slot: SrdResourceSlot::PrevHitDistanceInput,
+        pool_index: None,
+    };
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_sampled_binding_for_resource(
+            "srd_radiance_reproject",
+            &hit_distance,
+            0,
+        )
+        .unwrap(),
+        "srd_guide_hit_distance"
+    );
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_sampled_binding_for_resource(
+            "srd_radiance_reproject",
+            &prev_hit_distance,
+            0,
+        )
+        .unwrap(),
+        "srd_prev_guide_hit_distance"
+    );
     assert_eq!(
         super::radiance_stabilizer_executor::srd_sampled_binding_for_resource(
             "srd_radiance_accumulate",
@@ -1541,4 +1592,1662 @@ fn radiance_stabilizer_executor_binding_map_matches_v0_shaders() {
         .unwrap(),
         "srd_radiance_surface_mask"
     );
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_storage_binding_for_resource(
+            "srd_radiance_clamp",
+            &scratch_write,
+        )
+        .unwrap(),
+        "srd_radiance_clamped_out"
+    );
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_sampled_binding_for_resource(
+            "srd_radiance_clamp",
+            &history_read,
+            0,
+        )
+        .unwrap(),
+        "srd_radiance_accumulated"
+    );
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_sampled_binding_for_resource(
+            "srd_radiance_clamp",
+            &scratch_read,
+            1,
+        )
+        .unwrap(),
+        "srd_radiance_surface_mask"
+    );
+    let clamped_read = SrdResourceDesc {
+        descriptor_type: SrdDescriptorType::Texture,
+        slot: SrdResourceSlot::ClampedRadianceInput,
+        pool_index: Some(0),
+    };
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_sampled_binding_for_resource(
+            "srd_radiance_reconstruct",
+            &clamped_read,
+            0,
+        )
+        .unwrap(),
+        "srd_radiance_accumulated"
+    );
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_storage_binding_for_resource(
+            "srd_radiance_spatial_filter",
+            &scratch_write,
+        )
+        .unwrap(),
+        "srd_radiance_filtered_out"
+    );
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_sampled_binding_for_resource(
+            "srd_radiance_spatial_filter",
+            &scratch_read,
+            1,
+        )
+        .unwrap(),
+        "srd_radiance_input"
+    );
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_sampled_binding_for_resource(
+            "srd_radiance_spatial_filter",
+            &scratch_read,
+            2,
+        )
+        .unwrap(),
+        "srd_radiance_surface_mask"
+    );
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_storage_binding_for_resource(
+            "srd_radiance_atrous",
+            &scratch_write,
+        )
+        .unwrap(),
+        "srd_radiance_atrous_out"
+    );
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_sampled_binding_for_resource(
+            "srd_radiance_atrous",
+            &scratch_read,
+            1,
+        )
+        .unwrap(),
+        "srd_radiance_input"
+    );
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_sampled_binding_for_resource(
+            "srd_radiance_atrous",
+            &scratch_read,
+            2,
+        )
+        .unwrap(),
+        "srd_radiance_surface_mask"
+    );
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_storage_binding_for_resource(
+            "srd_radiance_post_blur",
+            &scratch_write,
+        )
+        .unwrap(),
+        "srd_radiance_post_blur_out"
+    );
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_sampled_binding_for_resource(
+            "srd_radiance_post_blur",
+            &scratch_read,
+            1,
+        )
+        .unwrap(),
+        "srd_radiance_input"
+    );
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_sampled_binding_for_resource(
+            "srd_radiance_post_blur",
+            &scratch_read,
+            2,
+        )
+        .unwrap(),
+        "srd_radiance_surface_mask"
+    );
+}
+
+#[test]
+fn radiance_post_blur_prepare_allocates_scratch_and_pipeline() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(110),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    let resources = instance
+        .prepare_radiance_post_blur(SrdDenoiserId::new(110))
+        .unwrap();
+
+    let texture = &instance.scratch_pool()[resources.scratch_index as usize];
+    assert_eq!(texture.format, Format::Rgba16Float);
+    assert_eq!(texture.downsample_factor, 1);
+    let pipeline = &instance.pipelines()[resources.pipeline];
+    assert_eq!(pipeline.shader_label, "srd_radiance_post_blur");
+    assert_eq!(pipeline.workgroup_size, [8, 8, 1]);
+    assert!(pipeline.has_constants);
+}
+
+#[test]
+fn radiance_post_blur_plan_skips_when_disabled() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(111),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    let reconstruct = instance
+        .prepare_radiance_reconstruct(SrdDenoiserId::new(111))
+        .unwrap();
+    let post_blur = instance
+        .prepare_radiance_post_blur(SrdDenoiserId::new(111))
+        .unwrap();
+
+    let dispatches = instance
+        .plan_radiance_post_blur_passes(
+            SrdDenoiserId::new(111),
+            post_blur,
+            reconstruct.scratch_index,
+            None,
+            UVec2::new(16, 16),
+        )
+        .unwrap();
+    assert!(dispatches.is_empty());
+}
+
+#[test]
+fn radiance_post_blur_plan_emits_dispatch_with_adaptive_sigma_constants() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(112),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_denoiser_settings(
+            SrdDenoiserId::new(112),
+            SrdFamilySettings::Radiance(SrdRadianceSettings {
+                post_blur: SrdPostBlurSettings {
+                    enabled: true,
+                    blur_radius: 2,
+                    max_blur_sigma: 1.5,
+                    normal_sharpness: 20.0,
+                },
+                ..SrdRadianceSettings::default()
+            }),
+        )
+        .unwrap();
+    let mask = instance
+        .prepare_radiance_surface_mask(SrdDenoiserId::new(112))
+        .unwrap();
+    let reconstruct = instance
+        .prepare_radiance_reconstruct(SrdDenoiserId::new(112))
+        .unwrap();
+    let post_blur = instance
+        .prepare_radiance_post_blur(SrdDenoiserId::new(112))
+        .unwrap();
+
+    let d = {
+        let dispatches = instance
+            .plan_radiance_post_blur_passes(
+                SrdDenoiserId::new(112),
+                post_blur,
+                reconstruct.scratch_index,
+                Some(mask),
+                UVec2::new(64, 32),
+            )
+            .unwrap();
+        assert_eq!(dispatches.len(), 1);
+        dispatches[0].clone()
+    };
+    assert_eq!(d.name, "SRD Radiance Post Blur");
+    assert_eq!(d.pipeline_index, post_blur.pipeline);
+    assert_eq!(d.grid_size, [8, 4, 1]);
+    // input + depth + normal/roughness + mask + write
+    assert_eq!(d.resources.len(), 5);
+    assert_eq!(d.resources[0].pool_index, Some(reconstruct.scratch_index));
+    assert_eq!(d.resources[1].slot, SrdResourceSlot::LinearDepthInput);
+    assert_eq!(d.resources[2].slot, SrdResourceSlot::NormalRoughnessInput);
+    assert_eq!(d.resources[3].pool_index, Some(mask.scratch_index));
+    assert_eq!(d.resources[4].descriptor_type, SrdDescriptorType::StorageTexture);
+    assert_eq!(d.resources[4].pool_index, Some(post_blur.scratch_index));
+    assert_eq!(d.constants_size, mem::size_of::<SrdRadiancePostBlurConstants>());
+    let constants = bytemuck::from_bytes::<SrdRadiancePostBlurConstants>(
+        instance.constant_bytes(d.constants_range.unwrap()),
+    );
+    assert_eq!(constants.rect_extent, [64, 32]);
+    assert_eq!(constants.blur_radius, 2);
+    assert_eq!(constants.max_blur_sigma, 1.5);
+    assert_eq!(constants.normal_sharpness, 20.0);
+    assert_eq!(constants.use_surface_mask, 1);
+    assert_eq!(constants.tile_size, SRD_RADIANCE_SURFACE_MASK_TILE_SIZE);
+}
+
+#[test]
+fn radiance_stabilizer_plan_appends_post_blur_as_final_when_enabled() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(113),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_common_settings(SrdCommonSettings {
+            history_mode: SrdHistoryMode::KeepAccumulating,
+            rect_size: UVec2::new(16, 16),
+            ..SrdCommonSettings::default()
+        })
+        .unwrap();
+    instance
+        .set_denoiser_settings(
+            SrdDenoiserId::new(113),
+            SrdFamilySettings::Radiance(SrdRadianceSettings {
+                outlier_clamp: SrdOutlierClampSettings {
+                    enabled: false,
+                    ..SrdOutlierClampSettings::default()
+                },
+                post_blur: SrdPostBlurSettings {
+                    enabled: true,
+                    ..SrdPostBlurSettings::default()
+                },
+                ..SrdRadianceSettings::default()
+            }),
+        )
+        .unwrap();
+    let resources = instance
+        .prepare_radiance_stabilizer(SrdDenoiserId::new(113))
+        .unwrap();
+    let plan = instance
+        .plan_radiance_stabilizer_passes(SrdDenoiserId::new(113), resources, UVec2::new(16, 16))
+        .unwrap();
+
+    // Surface Mask, Reproject, Accumulate, Clamp, Reconstruct, Post Blur = 6
+    assert_eq!(plan.dispatch_count, 6);
+    assert_eq!(
+        plan.final_output,
+        SrdRadianceOutputResource::PostBlur {
+            scratch_index: resources.post_blur.scratch_index
+        }
+    );
+    let last = instance.dispatches().last().unwrap();
+    assert_eq!(last.name, "SRD Radiance Post Blur");
+}
+
+#[test]
+fn post_blur_settings_validate_ranges() {
+    SrdPostBlurSettings::default().validate().unwrap();
+
+    let err = SrdPostBlurSettings {
+        blur_radius: 0,
+        ..SrdPostBlurSettings::default()
+    }
+    .validate()
+    .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(format!("{err}").contains("blur_radius"));
+
+    let err = SrdPostBlurSettings {
+        max_blur_sigma: 0.0,
+        ..SrdPostBlurSettings::default()
+    }
+    .validate()
+    .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(format!("{err}").contains("max_blur_sigma"));
+}
+
+#[test]
+fn radiance_clamp_prepare_allocates_unique_scratch_and_pipeline() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(80),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    let resources = instance
+        .prepare_radiance_clamp(SrdDenoiserId::new(80))
+        .unwrap();
+
+    let texture = &instance.scratch_pool()[resources.scratch_index as usize];
+    assert_eq!(texture.format, Format::Rgba16Float);
+    assert_eq!(texture.downsample_factor, 1);
+    assert_eq!(texture.slot, SrdResourceSlot::ClampedRadianceInput);
+    let pipeline = &instance.pipelines()[resources.pipeline];
+    assert_eq!(pipeline.shader_label, "srd_radiance_clamp");
+    assert_eq!(pipeline.workgroup_size, [8, 8, 1]);
+    assert!(pipeline.has_constants);
+}
+
+#[test]
+fn radiance_clamp_plan_skips_when_disabled() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(81),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_denoiser_settings(
+            SrdDenoiserId::new(81),
+            SrdFamilySettings::Radiance(SrdRadianceSettings {
+                history_clamp: SrdHistoryClampSettings {
+                    enabled: false,
+                    ..SrdHistoryClampSettings::default()
+                },
+                ..SrdRadianceSettings::default()
+            }),
+        )
+        .unwrap();
+    let accumulate = instance
+        .prepare_radiance_accumulate(SrdDenoiserId::new(81))
+        .unwrap();
+    let clamp = instance
+        .prepare_radiance_clamp(SrdDenoiserId::new(81))
+        .unwrap();
+
+    let dispatches = instance
+        .plan_radiance_clamp_passes(
+            SrdDenoiserId::new(81),
+            clamp,
+            accumulate,
+            None,
+            UVec2::new(32, 16),
+        )
+        .unwrap();
+
+    assert!(dispatches.is_empty());
+}
+
+#[test]
+fn radiance_clamp_plan_emits_dispatch_with_correct_resources() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(82),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_denoiser_settings(
+            SrdDenoiserId::new(82),
+            SrdFamilySettings::Radiance(SrdRadianceSettings {
+                history_clamp: SrdHistoryClampSettings {
+                    enabled: true,
+                    sigma_scale: 1.25,
+                },
+                ..SrdRadianceSettings::default()
+            }),
+        )
+        .unwrap();
+    let mask = instance
+        .prepare_radiance_surface_mask(SrdDenoiserId::new(82))
+        .unwrap();
+    let accumulate = instance
+        .prepare_radiance_accumulate(SrdDenoiserId::new(82))
+        .unwrap();
+    let clamp = instance
+        .prepare_radiance_clamp(SrdDenoiserId::new(82))
+        .unwrap();
+    let write_index = instance.history_rings()[accumulate.history_ring_index].write_index;
+
+    let d = {
+        let dispatches = instance
+            .plan_radiance_clamp_passes(
+                SrdDenoiserId::new(82),
+                clamp,
+                accumulate,
+                Some(mask),
+                UVec2::new(64, 32),
+            )
+            .unwrap();
+        assert_eq!(dispatches.len(), 1);
+        dispatches[0].clone()
+    };
+    assert_eq!(d.name, "SRD Radiance Clamp");
+    assert_eq!(d.pipeline_index, clamp.pipeline);
+    assert_eq!(d.grid_size, [8, 4, 1]);
+    // history_read + CombinedRadianceInput + surface_mask + clamp_write = 4
+    assert_eq!(d.resources.len(), 4);
+    assert_eq!(d.resources[0].slot, SrdResourceSlot::HistoryPool);
+    assert_eq!(d.resources[0].pool_index, Some(write_index));
+    assert_eq!(d.resources[1].slot, SrdResourceSlot::CombinedRadianceInput);
+    assert_eq!(d.resources[2].slot, SrdResourceSlot::ScratchPool);
+    assert_eq!(d.resources[2].pool_index, Some(mask.scratch_index));
+    assert_eq!(d.resources[3].descriptor_type, SrdDescriptorType::StorageTexture);
+    assert_eq!(d.resources[3].pool_index, Some(clamp.scratch_index));
+    assert_eq!(d.constants_size, mem::size_of::<SrdRadianceClampConstants>());
+    let constants = bytemuck::from_bytes::<SrdRadianceClampConstants>(
+        instance.constant_bytes(d.constants_range.unwrap()),
+    );
+    assert_eq!(constants.rect_extent, [64, 32]);
+    assert_eq!(constants.mask_extent, [8, 4]);
+    assert_eq!(constants.sigma_scale, 1.25);
+    assert_eq!(constants.use_surface_mask, 1);
+    assert_eq!(constants.tile_size, SRD_RADIANCE_SURFACE_MASK_TILE_SIZE);
+}
+
+#[test]
+fn radiance_reconstruct_with_clamp_reads_clamped_scratch() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(83),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    let accumulate = instance
+        .prepare_radiance_accumulate(SrdDenoiserId::new(83))
+        .unwrap();
+    let clamp = instance
+        .prepare_radiance_clamp(SrdDenoiserId::new(83))
+        .unwrap();
+    let reconstruct = instance
+        .prepare_radiance_reconstruct(SrdDenoiserId::new(83))
+        .unwrap();
+
+    let dispatches = instance
+        .plan_radiance_reconstruct_passes(
+            SrdDenoiserId::new(83),
+            reconstruct,
+            accumulate,
+            Some(clamp),
+            None,
+            UVec2::new(16, 16),
+        )
+        .unwrap();
+
+    assert_eq!(dispatches.len(), 1);
+    let d = &dispatches[0];
+    // First read must be the clamped scratch, not raw history
+    assert_eq!(d.resources[0].slot, SrdResourceSlot::ClampedRadianceInput);
+    assert_eq!(d.resources[0].pool_index, Some(clamp.scratch_index));
+    assert_ne!(d.resources[0].slot, SrdResourceSlot::HistoryPool);
+}
+
+#[test]
+fn radiance_spatial_filter_prepare_allocates_scratch_and_pipeline() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(90),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    let resources = instance
+        .prepare_radiance_spatial_filter(SrdDenoiserId::new(90))
+        .unwrap();
+
+    let texture = &instance.scratch_pool()[resources.scratch_index as usize];
+    assert_eq!(texture.format, Format::Rgba16Float);
+    assert_eq!(texture.downsample_factor, 1);
+    let pipeline = &instance.pipelines()[resources.pipeline];
+    assert_eq!(pipeline.shader_label, "srd_radiance_spatial_filter");
+    assert_eq!(pipeline.workgroup_size, [8, 8, 1]);
+    assert!(pipeline.has_constants);
+}
+
+#[test]
+fn radiance_spatial_filter_plan_skips_when_disabled() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(91),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    let reconstruct = instance
+        .prepare_radiance_reconstruct(SrdDenoiserId::new(91))
+        .unwrap();
+    let filter = instance
+        .prepare_radiance_spatial_filter(SrdDenoiserId::new(91))
+        .unwrap();
+
+    let dispatches = instance
+        .plan_radiance_spatial_filter_passes(
+            SrdDenoiserId::new(91),
+            filter,
+            reconstruct.scratch_index,
+            None,
+            UVec2::new(16, 16),
+        )
+        .unwrap();
+    // Disabled by default
+    assert!(dispatches.is_empty());
+}
+
+#[test]
+fn radiance_spatial_filter_plan_emits_dispatch_with_bilateral_inputs() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(92),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_denoiser_settings(
+            SrdDenoiserId::new(92),
+            SrdFamilySettings::Radiance(SrdRadianceSettings {
+                spatial_filter: SrdSpatialFilterSettings {
+                    enabled: true,
+                    stride: 2,
+                    luminance_sigma: 0.75,
+                    normal_sharpness: 24.0,
+                },
+                ..SrdRadianceSettings::default()
+            }),
+        )
+        .unwrap();
+    let mask = instance
+        .prepare_radiance_surface_mask(SrdDenoiserId::new(92))
+        .unwrap();
+    let reconstruct = instance
+        .prepare_radiance_reconstruct(SrdDenoiserId::new(92))
+        .unwrap();
+    let filter = instance
+        .prepare_radiance_spatial_filter(SrdDenoiserId::new(92))
+        .unwrap();
+
+    let d = {
+        let dispatches = instance
+            .plan_radiance_spatial_filter_passes(
+                SrdDenoiserId::new(92),
+                filter,
+                reconstruct.scratch_index,
+                Some(mask),
+                UVec2::new(64, 32),
+            )
+            .unwrap();
+        assert_eq!(dispatches.len(), 1);
+        dispatches[0].clone()
+    };
+    assert_eq!(d.name, "SRD Radiance Spatial Filter");
+    assert_eq!(d.pipeline_index, filter.pipeline);
+    assert_eq!(d.grid_size, [8, 4, 1]);
+    // input + depth + normal/roughness + mask + write
+    assert_eq!(d.resources.len(), 5);
+    assert_eq!(d.resources[0].pool_index, Some(reconstruct.scratch_index));
+    assert_eq!(d.resources[1].slot, SrdResourceSlot::LinearDepthInput);
+    assert_eq!(d.resources[2].slot, SrdResourceSlot::NormalRoughnessInput);
+    assert_eq!(d.resources[3].pool_index, Some(mask.scratch_index));
+    assert_eq!(d.resources[4].descriptor_type, SrdDescriptorType::StorageTexture);
+    assert_eq!(d.resources[4].pool_index, Some(filter.scratch_index));
+    let constants = bytemuck::from_bytes::<SrdRadianceSpatialFilterConstants>(
+        instance.constant_bytes(d.constants_range.unwrap()),
+    );
+    assert_eq!(constants.rect_extent, [64, 32]);
+    assert_eq!(constants.stride, 2);
+    assert_eq!(constants.luminance_sigma, 0.75);
+    assert_eq!(constants.normal_sharpness, 24.0);
+    assert_eq!(constants.use_surface_mask, 1);
+}
+
+#[test]
+fn radiance_stabilizer_plan_appends_spatial_filter_when_enabled() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(93),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_common_settings(SrdCommonSettings {
+            history_mode: SrdHistoryMode::KeepAccumulating,
+            rect_size: UVec2::new(16, 16),
+            ..SrdCommonSettings::default()
+        })
+        .unwrap();
+    instance
+        .set_denoiser_settings(
+            SrdDenoiserId::new(93),
+            SrdFamilySettings::Radiance(SrdRadianceSettings {
+                outlier_clamp: SrdOutlierClampSettings {
+                    enabled: false,
+                    ..SrdOutlierClampSettings::default()
+                },
+                spatial_filter: SrdSpatialFilterSettings {
+                    enabled: true,
+                    ..SrdSpatialFilterSettings::default()
+                },
+                ..SrdRadianceSettings::default()
+            }),
+        )
+        .unwrap();
+    let resources = instance
+        .prepare_radiance_stabilizer(SrdDenoiserId::new(93))
+        .unwrap();
+    let plan = instance
+        .plan_radiance_stabilizer_passes(SrdDenoiserId::new(93), resources, UVec2::new(16, 16))
+        .unwrap();
+
+    // Surface Mask, Reproject, Accumulate, Clamp, Reconstruct, Spatial Filter = 6
+    assert_eq!(plan.dispatch_count, 6);
+    assert_eq!(
+        plan.final_output,
+        SrdRadianceOutputResource::SpatialFilter {
+            scratch_index: resources.spatial_filter.scratch_index
+        }
+    );
+    let last = instance.dispatches().last().unwrap();
+    assert_eq!(last.name, "SRD Radiance Spatial Filter");
+}
+
+#[test]
+fn spatial_filter_settings_validate_ranges() {
+    SrdSpatialFilterSettings::default().validate().unwrap();
+
+    let err = SrdSpatialFilterSettings {
+        stride: 0,
+        ..SrdSpatialFilterSettings::default()
+    }
+    .validate()
+    .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(format!("{err}").contains("stride"));
+
+    let err = SrdSpatialFilterSettings {
+        luminance_sigma: 0.0,
+        ..SrdSpatialFilterSettings::default()
+    }
+    .validate()
+    .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(format!("{err}").contains("luminance_sigma"));
+}
+
+#[test]
+fn radiance_atrous_prepare_allocates_ping_pong_scratch_and_pipeline() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(100),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    let resources = instance
+        .prepare_radiance_atrous(SrdDenoiserId::new(100))
+        .unwrap();
+
+    assert_ne!(resources.ping_index, resources.pong_index);
+    let ping = &instance.scratch_pool()[resources.ping_index as usize];
+    let pong = &instance.scratch_pool()[resources.pong_index as usize];
+    assert_eq!(ping.format, Format::Rgba16Float);
+    assert_eq!(pong.format, Format::Rgba16Float);
+    let pipeline = &instance.pipelines()[resources.pipeline];
+    assert_eq!(pipeline.shader_label, "srd_radiance_atrous");
+}
+
+#[test]
+fn radiance_atrous_plan_skips_when_disabled() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(101),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    let reconstruct = instance
+        .prepare_radiance_reconstruct(SrdDenoiserId::new(101))
+        .unwrap();
+    let atrous = instance
+        .prepare_radiance_atrous(SrdDenoiserId::new(101))
+        .unwrap();
+    let before = instance.dispatches().len();
+    let returned = instance
+        .plan_radiance_atrous_passes(
+            SrdDenoiserId::new(101),
+            atrous,
+            reconstruct.scratch_index,
+            None,
+            UVec2::new(16, 16),
+        )
+        .unwrap();
+    assert_eq!(instance.dispatches().len(), before);
+    // Disabled → returns input unchanged
+    assert_eq!(returned, reconstruct.scratch_index);
+}
+
+#[test]
+fn radiance_atrous_plan_emits_one_dispatch_per_iteration_with_doubling_stride() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(102),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_denoiser_settings(
+            SrdDenoiserId::new(102),
+            SrdFamilySettings::Radiance(SrdRadianceSettings {
+                atrous: SrdAtrousSettings {
+                    enabled: true,
+                    iterations: 4,
+                    luminance_sigma: 2.0,
+                    normal_sharpness: 12.0,
+                },
+                ..SrdRadianceSettings::default()
+            }),
+        )
+        .unwrap();
+    let reconstruct = instance
+        .prepare_radiance_reconstruct(SrdDenoiserId::new(102))
+        .unwrap();
+    let atrous = instance
+        .prepare_radiance_atrous(SrdDenoiserId::new(102))
+        .unwrap();
+
+    let final_idx = instance
+        .plan_radiance_atrous_passes(
+            SrdDenoiserId::new(102),
+            atrous,
+            reconstruct.scratch_index,
+            None,
+            UVec2::new(32, 16),
+        )
+        .unwrap();
+
+    let dispatches = instance.dispatches();
+    assert_eq!(dispatches.len(), 4);
+    // Iteration 0: reads input, writes ping. iter1: reads ping, writes pong.
+    // iter2: reads pong, writes ping. iter3: reads ping, writes pong.
+    // With 4 iterations the final output is pong.
+    assert_eq!(final_idx, atrous.pong_index);
+
+    let expected_strides = [1u32, 2, 4, 8];
+    for (i, dispatch) in dispatches.iter().enumerate() {
+        assert!(dispatch.name.starts_with("SRD Radiance Atrous Iter"));
+        let constants = bytemuck::from_bytes::<SrdRadianceAtrousConstants>(
+            instance.constant_bytes(dispatch.constants_range.unwrap()),
+        );
+        assert_eq!(constants.stride, expected_strides[i]);
+        assert_eq!(constants.luminance_sigma, 2.0);
+        assert_eq!(constants.normal_sharpness, 12.0);
+    }
+}
+
+#[test]
+fn radiance_atrous_plan_ping_pongs_inputs_across_iterations() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(103),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_denoiser_settings(
+            SrdDenoiserId::new(103),
+            SrdFamilySettings::Radiance(SrdRadianceSettings {
+                atrous: SrdAtrousSettings {
+                    enabled: true,
+                    iterations: 3,
+                    ..SrdAtrousSettings::default()
+                },
+                ..SrdRadianceSettings::default()
+            }),
+        )
+        .unwrap();
+    let reconstruct = instance
+        .prepare_radiance_reconstruct(SrdDenoiserId::new(103))
+        .unwrap();
+    let atrous = instance
+        .prepare_radiance_atrous(SrdDenoiserId::new(103))
+        .unwrap();
+
+    let final_idx = instance
+        .plan_radiance_atrous_passes(
+            SrdDenoiserId::new(103),
+            atrous,
+            reconstruct.scratch_index,
+            None,
+            UVec2::new(8, 8),
+        )
+        .unwrap();
+
+    // 3 iterations: final lands in ping (idx 0=ping, 1=pong, 2=ping).
+    assert_eq!(final_idx, atrous.ping_index);
+    let dispatches = instance.dispatches();
+    assert_eq!(dispatches.len(), 3);
+    // No dispatch may read and write the same texture.
+    for dispatch in dispatches {
+        for r in &dispatch.resources {
+            for w in &dispatch.resources {
+                if r.descriptor_type == SrdDescriptorType::Texture
+                    && w.descriptor_type == SrdDescriptorType::StorageTexture
+                {
+                    assert_ne!(r.pool_index, w.pool_index);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn radiance_stabilizer_plan_uses_atrous_as_final_when_enabled() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(104),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_common_settings(SrdCommonSettings {
+            history_mode: SrdHistoryMode::KeepAccumulating,
+            rect_size: UVec2::new(16, 16),
+            ..SrdCommonSettings::default()
+        })
+        .unwrap();
+    instance
+        .set_denoiser_settings(
+            SrdDenoiserId::new(104),
+            SrdFamilySettings::Radiance(SrdRadianceSettings {
+                outlier_clamp: SrdOutlierClampSettings {
+                    enabled: false,
+                    ..SrdOutlierClampSettings::default()
+                },
+                atrous: SrdAtrousSettings {
+                    enabled: true,
+                    iterations: 2,
+                    ..SrdAtrousSettings::default()
+                },
+                ..SrdRadianceSettings::default()
+            }),
+        )
+        .unwrap();
+    let resources = instance
+        .prepare_radiance_stabilizer(SrdDenoiserId::new(104))
+        .unwrap();
+    let plan = instance
+        .plan_radiance_stabilizer_passes(SrdDenoiserId::new(104), resources, UVec2::new(16, 16))
+        .unwrap();
+
+    // Surface Mask, Reproject, Accumulate, Clamp, Reconstruct, Atrous*2 = 7
+    assert_eq!(plan.dispatch_count, 7);
+    // 2 iterations → final lands in pong (iter 0 writes ping, iter 1 writes pong).
+    assert_eq!(
+        plan.final_output,
+        SrdRadianceOutputResource::Atrous {
+            scratch_index: resources.atrous.pong_index
+        }
+    );
+}
+
+#[test]
+fn atrous_settings_validate_ranges() {
+    SrdAtrousSettings::default().validate().unwrap();
+
+    let err = SrdAtrousSettings {
+        enabled: true,
+        iterations: 0,
+        ..SrdAtrousSettings::default()
+    }
+    .validate()
+    .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(format!("{err}").contains("iterations"));
+
+    let err = SrdAtrousSettings {
+        iterations: SrdAtrousSettings::MAX_ITERATIONS + 1,
+        ..SrdAtrousSettings::default()
+    }
+    .validate()
+    .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+
+    let err = SrdAtrousSettings {
+        luminance_sigma: 0.0,
+        ..SrdAtrousSettings::default()
+    }
+    .validate()
+    .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(format!("{err}").contains("luminance_sigma"));
+}
+
+#[test]
+fn history_clamp_settings_validate_sigma_scale() {
+    SrdHistoryClampSettings::default().validate().unwrap();
+
+    let err = SrdHistoryClampSettings {
+        sigma_scale: 0.0,
+        ..SrdHistoryClampSettings::default()
+    }
+    .validate()
+    .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(format!("{err}").contains("sigma_scale"));
+}
+
+#[test]
+fn hit_distance_settings_validate_threshold() {
+    SrdHitDistanceSettings::default().validate().unwrap();
+
+    let err = SrdHitDistanceSettings {
+        relative_threshold: 0.0,
+        ..SrdHitDistanceSettings::default()
+    }
+    .validate()
+    .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(format!("{err}").contains("relative_threshold"));
+}
+
+#[test]
+fn radiance_reproject_plan_with_hit_distance_adds_two_extra_reads() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(120),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_denoiser_settings(
+            SrdDenoiserId::new(120),
+            SrdFamilySettings::Radiance(SrdRadianceSettings {
+                hit_distance: SrdHitDistanceSettings {
+                    enabled: true,
+                    relative_threshold: 0.15,
+                },
+                ..SrdRadianceSettings::default()
+            }),
+        )
+        .unwrap();
+    let reproject = instance
+        .prepare_radiance_reproject(SrdDenoiserId::new(120))
+        .unwrap();
+    let d = {
+        let dispatches = instance
+            .plan_radiance_reproject_passes(
+                SrdDenoiserId::new(120),
+                reproject,
+                None,
+                UVec2::new(16, 16),
+            )
+            .unwrap();
+        dispatches[0].clone()
+    };
+    // Five base guide reads + HitDistance + PrevHitDistance + scratch write = 8
+    assert_eq!(d.resources.len(), 8);
+    assert!(d.resources.iter().any(|r| r.slot == SrdResourceSlot::HitDistanceInput));
+    assert!(d.resources.iter().any(|r| r.slot == SrdResourceSlot::PrevHitDistanceInput));
+
+    let constants = bytemuck::from_bytes::<SrdRadianceReprojectConstants>(
+        instance.constant_bytes(d.constants_range.unwrap()),
+    );
+    assert_eq!(constants.use_hit_distance, 1);
+    assert_eq!(constants.hit_distance_relative_threshold, 0.15);
+}
+
+#[test]
+fn radiance_combined_prepare_allocates_core_five_resources() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(140),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+
+    let resources = instance
+        .prepare_radiance_combined(SrdDenoiserId::new(140))
+        .unwrap();
+
+    assert_eq!(instance.history_rings().len(), 1);
+    assert_eq!(instance.history_pool().len(), 2);
+    assert_eq!(instance.scratch_pool().len(), 3); // surface_mask + reproject/reconstruct (aliased) + clamp
+    assert_eq!(
+        instance.pipelines()[resources.reconstruct.pipeline].shader_label,
+        "srd_radiance_reconstruct"
+    );
+    assert_eq!(
+        instance.pipelines()[resources.accumulate.pipeline].shader_label,
+        "srd_radiance_accumulate"
+    );
+}
+
+#[test]
+fn radiance_combined_plan_emits_five_core_passes() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(141),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_common_settings(SrdCommonSettings {
+            rect_size: UVec2::new(32, 16),
+            history_mode: SrdHistoryMode::KeepAccumulating,
+            ..SrdCommonSettings::default()
+        })
+        .unwrap();
+
+    let resources = instance
+        .prepare_radiance_combined(SrdDenoiserId::new(141))
+        .unwrap();
+    let plan = instance
+        .plan_radiance_combined_passes(SrdDenoiserId::new(141), resources, UVec2::new(32, 16))
+        .unwrap();
+
+    assert_eq!(plan.dispatch_count, 5);
+    let names: Vec<&str> = instance
+        .dispatches()
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "SRD Radiance Surface Mask",
+            "SRD Radiance Reproject",
+            "SRD Radiance Accumulate",
+            "SRD Radiance Clamp",
+            "SRD Radiance Reconstruct",
+        ]
+    );
+    assert_eq!(
+        plan.final_output,
+        SrdRadianceOutputResource::Reconstruct {
+            scratch_index: resources.reconstruct.scratch_index
+        }
+    );
+}
+
+#[test]
+fn radiance_combined_plan_clear_uses_zero_history_mode() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(142),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_common_settings(SrdCommonSettings {
+            rect_size: UVec2::new(8, 8),
+            history_mode: SrdHistoryMode::ZeroHistory,
+            ..SrdCommonSettings::default()
+        })
+        .unwrap();
+
+    let resources = instance
+        .prepare_radiance_combined(SrdDenoiserId::new(142))
+        .unwrap();
+    let plan = instance
+        .plan_radiance_combined_passes(SrdDenoiserId::new(142), resources, UVec2::new(8, 8))
+        .unwrap();
+
+    // 1 clear + 5 passes = 6
+    assert_eq!(plan.dispatch_count, 6);
+    assert!(instance.dispatches()[0].name.starts_with("SRD Clear"));
+}
+
+#[test]
+fn radiance_diffuse_specular_prepare_allocates_independent_history_rings() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(130),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+
+    let resources = instance
+        .prepare_radiance_diffuse_specular(SrdDenoiserId::new(130))
+        .unwrap();
+
+    // Two independent history rings (diffuse + specular)
+    assert_eq!(instance.history_rings().len(), 2);
+    assert_ne!(
+        resources.diffuse_accumulate.history_ring_index,
+        resources.specular_accumulate.history_ring_index
+    );
+    assert_eq!(instance.history_pool().len(), 4); // 2 per ring
+    // Clamp and reconstruct are unique scratch slots
+    assert_ne!(
+        resources.diffuse_clamp.scratch_index,
+        resources.specular_clamp.scratch_index
+    );
+    assert_ne!(
+        resources.diffuse_reconstruct.scratch_index,
+        resources.specular_reconstruct.scratch_index
+    );
+    // Pipelines are shared
+    assert_eq!(
+        resources.diffuse_accumulate.pipeline,
+        resources.specular_accumulate.pipeline
+    );
+    assert_eq!(
+        resources.diffuse_clamp.pipeline,
+        resources.specular_clamp.pipeline
+    );
+    assert_eq!(
+        resources.diffuse_reconstruct.pipeline,
+        resources.specular_reconstruct.pipeline
+    );
+}
+
+#[test]
+fn radiance_diffuse_specular_plan_orders_shared_then_per_channel_passes() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(131),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_common_settings(SrdCommonSettings {
+            rect_size: UVec2::new(32, 16),
+            history_mode: SrdHistoryMode::KeepAccumulating,
+            ..SrdCommonSettings::default()
+        })
+        .unwrap();
+
+    let resources = instance
+        .prepare_radiance_diffuse_specular(SrdDenoiserId::new(131))
+        .unwrap();
+    let plan = instance
+        .plan_radiance_diffuse_specular_passes(
+            SrdDenoiserId::new(131),
+            resources,
+            UVec2::new(32, 16),
+        )
+        .unwrap();
+
+    // Surface Mask + Reproject + Diffuse(Acc+Clamp+Reconstruct) + Specular(Acc+Clamp+Reconstruct) = 8
+    assert_eq!(plan.dispatch_count, 8);
+    let names: Vec<&str> = instance
+        .dispatches()
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "SRD Radiance Surface Mask",
+            "SRD Radiance Reproject",
+            "SRD Radiance Diffuse Accumulate",
+            "SRD Radiance Diffuse Clamp",
+            "SRD Radiance Reconstruct",
+            "SRD Radiance Specular Accumulate",
+            "SRD Radiance Specular Clamp",
+            "SRD Radiance Reconstruct",
+        ]
+    );
+    // Outputs are independent scratch indices
+    assert_ne!(
+        plan.diffuse_output.scratch_index(),
+        plan.specular_output.scratch_index()
+    );
+}
+
+#[test]
+fn radiance_diffuse_specular_plan_clear_emits_four_clears_for_zero_history() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(132),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_common_settings(SrdCommonSettings {
+            rect_size: UVec2::new(8, 8),
+            history_mode: SrdHistoryMode::ZeroHistory,
+            ..SrdCommonSettings::default()
+        })
+        .unwrap();
+
+    let resources = instance
+        .prepare_radiance_diffuse_specular(SrdDenoiserId::new(132))
+        .unwrap();
+    let plan = instance
+        .plan_radiance_diffuse_specular_passes(
+            SrdDenoiserId::new(132),
+            resources,
+            UVec2::new(8, 8),
+        )
+        .unwrap();
+
+    // 4 clears (2 rings × 2 write slots) + 8 passes = 12? No: clear dispatches use write slots
+    // only. Each ring has one write slot that needs clearing. So 2 clears + 8 = 10... wait.
+    // Actually push_clear_dispatches_for clears all rings for this denoiser (2 rings, each with
+    // one history write index). So 2 clears + 8 passes = 10 total.
+    assert_eq!(plan.dispatch_count, 10);
+    let clear_count = instance
+        .dispatches()
+        .iter()
+        .filter(|d| d.name.starts_with("SRD Clear"))
+        .count();
+    assert_eq!(clear_count, 2);
+}
+
+#[test]
+fn radiance_accumulate_passes_with_diffuse_slot_uses_diffuse_input_binding() {
+    let diffuse_input = SrdResourceDesc {
+        descriptor_type: SrdDescriptorType::Texture,
+        slot: SrdResourceSlot::DiffuseRadianceInput,
+        pool_index: None,
+    };
+    let specular_input = SrdResourceDesc {
+        descriptor_type: SrdDescriptorType::Texture,
+        slot: SrdResourceSlot::SpecularRadianceInput,
+        pool_index: None,
+    };
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_sampled_binding_for_resource(
+            "srd_radiance_accumulate",
+            &diffuse_input,
+            0,
+        )
+        .unwrap(),
+        "srd_radiance_input"
+    );
+    assert_eq!(
+        super::radiance_stabilizer_executor::srd_sampled_binding_for_resource(
+            "srd_radiance_clamp",
+            &specular_input,
+            0,
+        )
+        .unwrap(),
+        "srd_radiance_input"
+    );
+}
+
+#[test]
+fn radiance_reproject_plan_without_hit_distance_leaves_fields_zero() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(121),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    let reproject = instance
+        .prepare_radiance_reproject(SrdDenoiserId::new(121))
+        .unwrap();
+    let d = {
+        let dispatches = instance
+            .plan_radiance_reproject_passes(
+                SrdDenoiserId::new(121),
+                reproject,
+                None,
+                UVec2::new(16, 16),
+            )
+            .unwrap();
+        dispatches[0].clone()
+    };
+    // No hit-distance slots in resources
+    assert!(d.resources.iter().all(|r| r.slot != SrdResourceSlot::HitDistanceInput));
+    assert!(d.resources.iter().all(|r| r.slot != SrdResourceSlot::PrevHitDistanceInput));
+
+    let constants = bytemuck::from_bytes::<SrdRadianceReprojectConstants>(
+        instance.constant_bytes(d.constants_range.unwrap()),
+    );
+    assert_eq!(constants.use_hit_distance, 0);
+}
+
+// ─── Occlusion Stabilizer ────────────────────────────────────────────────────
+
+#[test]
+fn occlusion_constants_layout_stays_shader_compatible() {
+    assert_eq!(mem::size_of::<SrdOcclusionAccumulateConstants>(), 32);
+    assert_eq!(mem::align_of::<SrdOcclusionAccumulateConstants>(), 4);
+    assert_eq!(mem::size_of::<SrdOcclusionFilterConstants>(), 32);
+    assert_eq!(mem::align_of::<SrdOcclusionFilterConstants>(), 4);
+}
+
+#[test]
+fn occlusion_prepare_requires_occlusion_stabilizer_mode() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(200),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    let err = instance
+        .prepare_radiance_occlusion(SrdDenoiserId::new(200))
+        .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(format!("{err}").contains("OcclusionStabilizer"));
+}
+
+#[test]
+fn occlusion_prepare_allocates_correct_resources() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(201),
+        mode: SrdDenoiserMode::OcclusionStabilizer,
+    }]))
+    .unwrap();
+
+    let resources = instance
+        .prepare_radiance_occlusion(SrdDenoiserId::new(201))
+        .unwrap();
+
+    // surface_mask scratch + reproject scratch + filter scratch = 3 scratch textures
+    assert_eq!(instance.scratch_pool().len(), 3);
+    // 2 history textures (ring write + read)
+    assert_eq!(instance.history_pool().len(), 2);
+    assert_eq!(instance.history_rings().len(), 1);
+
+    let acc_ring = &instance.history_rings()[resources.accumulate.history_ring_index];
+    assert_ne!(acc_ring.write_index, acc_ring.read_index);
+    assert!(acc_ring.label.contains("occlusion_history"));
+
+    let filter_tex = &instance.scratch_pool()[resources.filter.scratch_index as usize];
+    assert_eq!(filter_tex.format, Format::Rgba16Float);
+    assert_eq!(filter_tex.downsample_factor, 1);
+    assert_eq!(filter_tex.slot, SrdResourceSlot::OcclusionOutput);
+
+    let acc_pipeline = &instance.pipelines()[resources.accumulate.pipeline];
+    assert_eq!(acc_pipeline.shader_label, "srd_occlusion_accumulate");
+    assert_eq!(acc_pipeline.workgroup_size, [8, 8, 1]);
+    assert!(acc_pipeline.has_constants);
+
+    let flt_pipeline = &instance.pipelines()[resources.filter.pipeline];
+    assert_eq!(flt_pipeline.shader_label, "srd_occlusion_filter");
+    assert_eq!(flt_pipeline.workgroup_size, [8, 8, 1]);
+    assert!(flt_pipeline.has_constants);
+}
+
+#[test]
+fn occlusion_plan_emits_four_core_passes_with_keep_accumulating() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(202),
+        mode: SrdDenoiserMode::OcclusionStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_common_settings(SrdCommonSettings {
+            history_mode: SrdHistoryMode::KeepAccumulating,
+            rect_size: UVec2::new(64, 32),
+            ..SrdCommonSettings::default()
+        })
+        .unwrap();
+
+    let resources = instance
+        .prepare_radiance_occlusion(SrdDenoiserId::new(202))
+        .unwrap();
+    let plan = instance
+        .plan_radiance_occlusion_passes(SrdDenoiserId::new(202), resources, UVec2::new(64, 32))
+        .unwrap();
+
+    // Surface Mask, Reproject, Accumulate, Filter = 4
+    assert_eq!(plan.dispatch_count, 4);
+    assert_eq!(plan.final_output_scratch_index, resources.filter.scratch_index);
+
+    let dispatches = instance.dispatches();
+    assert_eq!(dispatches[0].name, "SRD Radiance Surface Mask");
+    assert_eq!(dispatches[1].name, "SRD Radiance Reproject");
+    assert_eq!(dispatches[2].name, "SRD Occlusion Accumulate");
+    assert_eq!(dispatches[3].name, "SRD Occlusion Filter");
+}
+
+#[test]
+fn occlusion_plan_with_zero_history_emits_two_clears_plus_four_passes() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(203),
+        mode: SrdDenoiserMode::OcclusionStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_common_settings(SrdCommonSettings {
+            history_mode: SrdHistoryMode::ZeroHistory,
+            rect_size: UVec2::new(16, 16),
+            ..SrdCommonSettings::default()
+        })
+        .unwrap();
+
+    let resources = instance
+        .prepare_radiance_occlusion(SrdDenoiserId::new(203))
+        .unwrap();
+    let plan = instance
+        .plan_radiance_occlusion_passes(SrdDenoiserId::new(203), resources, UVec2::new(16, 16))
+        .unwrap();
+
+    // 1 clear (1 ring) + 4 core = 5
+    assert_eq!(plan.dispatch_count, 5);
+    assert!(instance.dispatches()[0].name.starts_with("SRD Clear"));
+    assert_eq!(instance.dispatches()[1].name, "SRD Radiance Surface Mask");
+    assert_eq!(instance.dispatches()[4].name, "SRD Occlusion Filter");
+}
+
+#[test]
+fn occlusion_accumulate_dispatch_reads_occlusion_input_and_history() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(204),
+        mode: SrdDenoiserMode::OcclusionStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_common_settings(SrdCommonSettings {
+            history_mode: SrdHistoryMode::KeepAccumulating,
+            rect_size: UVec2::new(32, 16),
+            ..SrdCommonSettings::default()
+        })
+        .unwrap();
+
+    let resources = instance
+        .prepare_radiance_occlusion(SrdDenoiserId::new(204))
+        .unwrap();
+    instance
+        .plan_radiance_occlusion_passes(SrdDenoiserId::new(204), resources, UVec2::new(32, 16))
+        .unwrap();
+
+    let acc_dispatch = &instance.dispatches()[2];
+    assert_eq!(acc_dispatch.name, "SRD Occlusion Accumulate");
+    // OcclusionInput + reproject scratch + surface_mask scratch + history_read + history_write = 5
+    assert_eq!(acc_dispatch.resources.len(), 5);
+    assert_eq!(acc_dispatch.resources[0].slot, SrdResourceSlot::OcclusionInput);
+    assert_eq!(acc_dispatch.resources[0].descriptor_type, SrdDescriptorType::Texture);
+    assert_eq!(acc_dispatch.resources[1].slot, SrdResourceSlot::ScratchPool);
+    assert_eq!(acc_dispatch.resources[1].pool_index, Some(resources.reproject.scratch_index));
+    assert_eq!(acc_dispatch.resources[2].slot, SrdResourceSlot::ScratchPool);
+    assert_eq!(acc_dispatch.resources[2].pool_index, Some(resources.surface_mask.scratch_index));
+    assert_eq!(acc_dispatch.resources[3].descriptor_type, SrdDescriptorType::Texture);
+    assert_eq!(acc_dispatch.resources[3].slot, SrdResourceSlot::HistoryPool);
+    assert_eq!(acc_dispatch.resources[4].descriptor_type, SrdDescriptorType::StorageTexture);
+    assert_eq!(acc_dispatch.resources[4].slot, SrdResourceSlot::HistoryPool);
+    assert_ne!(acc_dispatch.resources[3].pool_index, acc_dispatch.resources[4].pool_index);
+    assert_eq!(acc_dispatch.grid_size, [4, 2, 1]);
+    assert_eq!(acc_dispatch.constants_size, mem::size_of::<SrdOcclusionAccumulateConstants>());
+}
+
+#[test]
+fn occlusion_filter_dispatch_reads_accumulated_history_and_guide_buffers() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(205),
+        mode: SrdDenoiserMode::OcclusionStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_common_settings(SrdCommonSettings {
+            history_mode: SrdHistoryMode::KeepAccumulating,
+            rect_size: UVec2::new(32, 16),
+            ..SrdCommonSettings::default()
+        })
+        .unwrap();
+
+    let resources = instance
+        .prepare_radiance_occlusion(SrdDenoiserId::new(205))
+        .unwrap();
+    instance
+        .plan_radiance_occlusion_passes(SrdDenoiserId::new(205), resources, UVec2::new(32, 16))
+        .unwrap();
+
+    let flt_dispatch = &instance.dispatches()[3];
+    assert_eq!(flt_dispatch.name, "SRD Occlusion Filter");
+    // history_write (accumulated) + depth + normal + surface_mask + filter_out = 5
+    assert_eq!(flt_dispatch.resources.len(), 5);
+    assert_eq!(flt_dispatch.resources[0].descriptor_type, SrdDescriptorType::Texture);
+    assert_eq!(flt_dispatch.resources[0].slot, SrdResourceSlot::HistoryPool);
+    assert_eq!(flt_dispatch.resources[1].slot, SrdResourceSlot::LinearDepthInput);
+    assert_eq!(flt_dispatch.resources[2].slot, SrdResourceSlot::NormalRoughnessInput);
+    assert_eq!(flt_dispatch.resources[3].slot, SrdResourceSlot::ScratchPool);
+    assert_eq!(flt_dispatch.resources[3].pool_index, Some(resources.surface_mask.scratch_index));
+    assert_eq!(flt_dispatch.resources[4].descriptor_type, SrdDescriptorType::StorageTexture);
+    assert_eq!(flt_dispatch.resources[4].pool_index, Some(resources.filter.scratch_index));
+    assert_eq!(flt_dispatch.constants_size, mem::size_of::<SrdOcclusionFilterConstants>());
+}
+
+#[test]
+fn occlusion_accumulate_constants_reflect_settings() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(206),
+        mode: SrdDenoiserMode::OcclusionStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_common_settings(SrdCommonSettings {
+            history_mode: SrdHistoryMode::KeepAccumulating,
+            rect_size: UVec2::new(64, 32),
+            ..SrdCommonSettings::default()
+        })
+        .unwrap();
+    instance
+        .set_denoiser_settings(
+            SrdDenoiserId::new(206),
+            SrdFamilySettings::Occlusion(SrdOcclusionSettings {
+                history_frame_budget: 48,
+                ..SrdOcclusionSettings::default()
+            }),
+        )
+        .unwrap();
+
+    let resources = instance
+        .prepare_radiance_occlusion(SrdDenoiserId::new(206))
+        .unwrap();
+    instance
+        .plan_radiance_occlusion_passes(SrdDenoiserId::new(206), resources, UVec2::new(64, 32))
+        .unwrap();
+
+    let d = &instance.dispatches()[2];
+    let constants = bytemuck::from_bytes::<SrdOcclusionAccumulateConstants>(
+        instance.constant_bytes(d.constants_range.unwrap()),
+    );
+    assert_eq!(constants.rect_extent, [64, 32]);
+    assert_eq!(constants.mask_extent, [8, 4]);
+    assert_eq!(constants.history_frame_budget, 48.0);
+    assert_eq!(constants.use_surface_mask, 1);
+    assert_eq!(constants.tile_size, SRD_RADIANCE_SURFACE_MASK_TILE_SIZE);
+}
+
+#[test]
+fn occlusion_filter_constants_reflect_settings() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(207),
+        mode: SrdDenoiserMode::OcclusionStabilizer,
+    }]))
+    .unwrap();
+    instance
+        .set_common_settings(SrdCommonSettings {
+            history_mode: SrdHistoryMode::KeepAccumulating,
+            rect_size: UVec2::new(64, 32),
+            ..SrdCommonSettings::default()
+        })
+        .unwrap();
+    instance
+        .set_denoiser_settings(
+            SrdDenoiserId::new(207),
+            SrdFamilySettings::Occlusion(SrdOcclusionSettings {
+                spatial_radius: 3.0,
+                normal_weight_power: 16.0,
+                ..SrdOcclusionSettings::default()
+            }),
+        )
+        .unwrap();
+
+    let resources = instance
+        .prepare_radiance_occlusion(SrdDenoiserId::new(207))
+        .unwrap();
+    instance
+        .plan_radiance_occlusion_passes(SrdDenoiserId::new(207), resources, UVec2::new(64, 32))
+        .unwrap();
+
+    let d = &instance.dispatches()[3];
+    let constants = bytemuck::from_bytes::<SrdOcclusionFilterConstants>(
+        instance.constant_bytes(d.constants_range.unwrap()),
+    );
+    assert_eq!(constants.rect_extent, [64, 32]);
+    assert_eq!(constants.mask_extent, [8, 4]);
+    assert_eq!(constants.spatial_radius, 3.0);
+    assert_eq!(constants.normal_weight_power, 16.0);
+    assert_eq!(constants.use_surface_mask, 1);
+    assert_eq!(constants.tile_size, SRD_RADIANCE_SURFACE_MASK_TILE_SIZE);
+}
+
+#[test]
+fn occlusion_executor_binding_map_resolves_occlusion_slots() {
+    use super::radiance_stabilizer_executor::{
+        srd_sampled_binding_for_resource, srd_storage_binding_for_resource,
+    };
+    use super::resources::{SrdDescriptorType, SrdResourceDesc, SrdResourceSlot};
+
+    let occlusion_input = SrdResourceDesc {
+        descriptor_type: SrdDescriptorType::Texture,
+        slot: SrdResourceSlot::OcclusionInput,
+        pool_index: None,
+    };
+    assert_eq!(
+        srd_sampled_binding_for_resource("srd_occlusion_accumulate", &occlusion_input, 0).unwrap(),
+        "srd_occlusion_input"
+    );
+
+    let history_storage = SrdResourceDesc {
+        descriptor_type: SrdDescriptorType::StorageTexture,
+        slot: SrdResourceSlot::HistoryPool,
+        pool_index: Some(0),
+    };
+    assert_eq!(
+        srd_storage_binding_for_resource("srd_occlusion_accumulate", &history_storage).unwrap(),
+        "srd_occlusion_history_write"
+    );
+
+    let scratch_storage = SrdResourceDesc {
+        descriptor_type: SrdDescriptorType::StorageTexture,
+        slot: SrdResourceSlot::ScratchPool,
+        pool_index: Some(0),
+    };
+    assert_eq!(
+        srd_storage_binding_for_resource("srd_occlusion_filter", &scratch_storage).unwrap(),
+        "srd_occlusion_out"
+    );
+
+    let history_read = SrdResourceDesc {
+        descriptor_type: SrdDescriptorType::Texture,
+        slot: SrdResourceSlot::HistoryPool,
+        pool_index: Some(0),
+    };
+    assert_eq!(
+        srd_sampled_binding_for_resource("srd_occlusion_accumulate", &history_read, 0).unwrap(),
+        "srd_occlusion_history_read"
+    );
+    assert_eq!(
+        srd_sampled_binding_for_resource("srd_occlusion_filter", &history_read, 0).unwrap(),
+        "srd_occlusion_accumulated"
+    );
+
+    let scratch_read = SrdResourceDesc {
+        descriptor_type: SrdDescriptorType::Texture,
+        slot: SrdResourceSlot::ScratchPool,
+        pool_index: Some(0),
+    };
+    assert_eq!(
+        srd_sampled_binding_for_resource("srd_occlusion_accumulate", &scratch_read, 1).unwrap(),
+        "srd_occlusion_reproject"
+    );
+    assert_eq!(
+        srd_sampled_binding_for_resource("srd_occlusion_accumulate", &scratch_read, 2).unwrap(),
+        "srd_radiance_surface_mask"
+    );
+    assert_eq!(
+        srd_sampled_binding_for_resource("srd_occlusion_filter", &scratch_read, 1).unwrap(),
+        "srd_radiance_surface_mask"
+    );
+}
+
+#[test]
+fn occlusion_surface_mask_and_reproject_accept_occlusion_mode() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(208),
+        mode: SrdDenoiserMode::OcclusionStabilizer,
+    }]))
+    .unwrap();
+    // Both prepare functions must succeed for OcclusionStabilizer
+    instance
+        .prepare_radiance_surface_mask(SrdDenoiserId::new(208))
+        .unwrap();
+    instance
+        .prepare_radiance_reproject(SrdDenoiserId::new(208))
+        .unwrap();
+}
+
+#[test]
+fn occlusion_plan_rejects_wrong_mode() {
+    let mut instance = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(209),
+        mode: SrdDenoiserMode::OcclusionStabilizer,
+    }]))
+    .unwrap();
+    let resources = instance
+        .prepare_radiance_occlusion(SrdDenoiserId::new(209))
+        .unwrap();
+
+    // Create a second instance with a radiance denoiser — the resources from
+    // denoiser 209 must not be usable there.
+    let mut other = SrdInstance::new(SrdInstanceDesc::new(vec![SrdDenoiserDesc {
+        id: SrdDenoiserId::new(210),
+        mode: SrdDenoiserMode::RadianceStabilizer,
+    }]))
+    .unwrap();
+    let err = other
+        .plan_radiance_occlusion_passes(SrdDenoiserId::new(210), resources, UVec2::new(8, 8))
+        .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)));
+    assert!(format!("{err}").contains("OcclusionStabilizer"));
 }

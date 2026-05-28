@@ -91,6 +91,15 @@ impl SrdPassBuilder {
         }
     }
 
+    pub fn read_slot(mut self, slot: SrdResourceSlot, pool_index: Option<u16>) -> Self {
+        self.dispatch.resources.push(SrdResourceDesc {
+            descriptor_type: SrdDescriptorType::Texture,
+            slot,
+            pool_index,
+        });
+        self
+    }
+
     pub fn read(mut self, slot: SrdResourceSlot) -> Self {
         self.dispatch.resources.push(SrdResourceDesc {
             descriptor_type: SrdDescriptorType::Texture,
@@ -221,6 +230,107 @@ pub struct SrdRadianceAccumulateConstants {
     pub tile_size: u32,
 }
 
+/// Push constants for the radiance History Clamp pass.
+///
+/// Matches `SrdRadianceClampConstants` in `shaders/srd_radiance_clamp.slang`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SrdRadianceClampConstants {
+    pub rect_extent: [u32; 2],
+    pub mask_extent: [u32; 2],
+    pub sigma_scale: f32,
+    pub use_surface_mask: u32,
+    pub tile_size: u32,
+    pub _pad: u32,
+}
+
+/// Push constants for one iteration of the radiance À-Trous wavelet filter.
+///
+/// Matches `SrdRadianceAtrousConstants` in `shaders/srd_radiance_atrous.slang`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SrdRadianceAtrousConstants {
+    pub rect_extent: [u32; 2],
+    pub mask_extent: [u32; 2],
+    pub depth_tolerance_relative: f32,
+    pub depth_tolerance_absolute: f32,
+    pub normal_sharpness: f32,
+    pub roughness_tolerance: f32,
+    pub luminance_sigma: f32,
+    pub stride: u32,
+    pub use_surface_mask: u32,
+    pub tile_size: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
+/// Push constants for the radiance Spatial Filter pass.
+///
+/// Matches `SrdRadianceSpatialFilterConstants` in
+/// `shaders/srd_radiance_spatial_filter.slang`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SrdRadianceSpatialFilterConstants {
+    pub rect_extent: [u32; 2],
+    pub mask_extent: [u32; 2],
+    pub depth_tolerance_relative: f32,
+    pub depth_tolerance_absolute: f32,
+    pub normal_sharpness: f32,
+    pub roughness_tolerance: f32,
+    pub luminance_sigma: f32,
+    pub stride: u32,
+    pub use_surface_mask: u32,
+    pub tile_size: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
+/// Push constants for the radiance Post-Blur pass.
+///
+/// Matches `SrdRadiancePostBlurConstants` in `shaders/srd_radiance_post_blur.slang`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SrdRadiancePostBlurConstants {
+    pub rect_extent: [u32; 2],
+    pub mask_extent: [u32; 2],
+    pub depth_tolerance_relative: f32,
+    pub depth_tolerance_absolute: f32,
+    pub normal_sharpness: f32,
+    pub roughness_tolerance: f32,
+    pub max_blur_sigma: f32,
+    pub blur_radius: u32,
+    pub use_surface_mask: u32,
+    pub tile_size: u32,
+}
+
+/// Push constants for the occlusion Accumulate pass.
+///
+/// Matches `SrdOcclusionAccumulateConstants` in `shaders/srd_occlusion_accumulate.slang`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SrdOcclusionAccumulateConstants {
+    pub rect_extent: [u32; 2],
+    pub mask_extent: [u32; 2],
+    pub history_frame_budget: f32,
+    pub use_surface_mask: u32,
+    pub tile_size: u32,
+    pub _pad: u32,
+}
+
+/// Push constants for the occlusion spatial Filter pass.
+///
+/// Matches `SrdOcclusionFilterConstants` in `shaders/srd_occlusion_filter.slang`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SrdOcclusionFilterConstants {
+    pub rect_extent: [u32; 2],
+    pub mask_extent: [u32; 2],
+    pub normal_weight_power: f32,
+    pub spatial_radius: f32,
+    pub use_surface_mask: u32,
+    pub tile_size: u32,
+}
+
 /// Push constants for the radiance Reproject pass.
 ///
 /// Matches `SrdRadianceReprojectConstants` in `shaders/srd_radiance_reproject.slang`.
@@ -235,5 +345,8 @@ pub struct SrdRadianceReprojectConstants {
     pub normal_cos_threshold: f32,
     pub use_surface_mask: u32,
     pub tile_size: u32,
-    pub _pad: u32,
+    /// Non-zero when the shader should read and validate hit-distance textures.
+    pub use_hit_distance: u32,
+    /// Maximum tolerated relative hit-distance change before validity is downgraded.
+    pub hit_distance_relative_threshold: f32,
 }

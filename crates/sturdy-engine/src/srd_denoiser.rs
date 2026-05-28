@@ -1,6 +1,7 @@
 mod api;
 mod clear_history;
 mod dispatch;
+mod occlusion;
 mod pipeline;
 mod radiance_outlier;
 mod radiance_stabilizer;
@@ -13,17 +14,27 @@ pub use api::{SrdDenoiser, SrdDenoiserDesc, SrdInstance, SrdInstanceDesc};
 pub use clear_history::{SRD_CLEAR_HISTORY_WORKGROUP_SIZE, SrdClearConstants};
 pub use dispatch::{
     SrdConstantArena, SrdConstantRange, SrdDispatchDesc, SrdPassBuilder,
-    SrdRadianceAccumulateConstants, SrdRadianceReconstructConstants,
-    SrdRadianceReprojectConstants, SrdRadianceSurfaceMaskConstants,
+    SrdOcclusionAccumulateConstants, SrdOcclusionFilterConstants,
+    SrdRadianceAccumulateConstants, SrdRadianceAtrousConstants, SrdRadianceClampConstants,
+    SrdRadiancePostBlurConstants, SrdRadianceReconstructConstants, SrdRadianceReprojectConstants,
+    SrdRadianceSpatialFilterConstants, SrdRadianceSurfaceMaskConstants,
     SRD_RADIANCE_SURFACE_MASK_TILE_SIZE, SrdSignalMomentsConstants,
 };
+pub use occlusion::{
+    SrdOcclusionPlan, SrdOcclusionStabilizerExecutor, SrdOcclusionStabilizerInputs,
+    SrdOcclusionStabilizerPrograms,
+};
 pub use pipeline::{
-    SrdPipelineDesc, SrdRadianceAccumulateResources, SrdRadianceReconstructResources,
-    SrdRadianceReprojectResources, SrdRadianceSurfaceMaskResources, SrdReferenceTemporalPipelines,
+    SrdOcclusionAccumulateResources, SrdOcclusionFilterResources, SrdOcclusionResources,
+    SrdPipelineDesc, SrdRadianceAccumulateResources, SrdRadianceAtrousResources,
+    SrdRadianceClampResources, SrdRadianceCombinedResources, SrdRadianceDiffuseSpecularResources,
+    SrdRadiancePostBlurResources, SrdRadianceReconstructResources, SrdRadianceReprojectResources,
+    SrdRadianceSpatialFilterResources, SrdRadianceSurfaceMaskResources, SrdReferenceTemporalPipelines,
 };
 pub use radiance_outlier::{SrdRadianceOutlierSuppressConstants, SrdRadianceOutlierSuppressResources};
 pub use radiance_stabilizer::{
-    SrdRadianceOutputResource, SrdRadianceStabilizerPlan, SrdRadianceStabilizerResources,
+    SrdRadianceCombinedPlan, SrdRadianceDiffuseSpecularPlan, SrdRadianceOutputResource,
+    SrdRadianceStabilizerPlan, SrdRadianceStabilizerResources,
 };
 pub use radiance_stabilizer_executor::{
     SrdRadianceStabilizerExecutor, SrdRadianceStabilizerInputs, SrdRadianceStabilizerPrograms,
@@ -34,11 +45,13 @@ pub use resources::{
     SrdResourceFormatDesc, SrdResourceSlot, SrdTextureDesc,
 };
 pub use settings::{
-    SrdCapabilities, SrdCommonSettings, SrdDenoiserMode, SrdDenoiserSettings, SrdDepthConvention,
-    SrdFamilySettings, SrdHistoryMode, SrdHistoryRejectionSettings, SrdMotionVectorConvention,
-    SrdNormalPacking, SrdOcclusionSettings, SrdOutlierClampSettings, SrdRadianceSettings,
-    SrdReferenceSettings, SrdShadowSettings, SrdShaderContract, SrdSpectralLayout,
-    SRD_TEMPORAL_CONSTANTS_SIZE, SrdTemporalBindings, SrdTemporalConstants, SrdVarianceSettings,
+    SrdAtrousSettings, SrdCapabilities, SrdCommonSettings, SrdDenoiserMode, SrdDenoiserSettings,
+    SrdDepthConvention, SrdFamilySettings, SrdHistoryClampSettings, SrdHistoryMode,
+    SrdHistoryRejectionSettings, SrdHitDistanceSettings, SrdMotionVectorConvention, SrdNormalPacking,
+    SrdOcclusionSettings, SrdOutlierClampSettings, SrdPostBlurSettings, SrdRadianceSettings,
+    SrdReferenceSettings, SrdShadowSettings, SrdShaderContract, SrdSpatialFilterSettings,
+    SrdSpectralLayout, SRD_TEMPORAL_CONSTANTS_SIZE, SrdTemporalBindings, SrdTemporalConstants,
+    SrdVarianceSettings,
 };
 
 #[deprecated(
