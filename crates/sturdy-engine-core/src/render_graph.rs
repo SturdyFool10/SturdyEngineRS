@@ -16,8 +16,9 @@ pub use alias_plan::{
     AliasCompatibilityClass, AliasPlacement, AliasPlan, AliasResourceKind, ResourceLifetime,
 };
 
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub enum QueueType {
+    #[default]
     Graphics,
     Compute,
     Transfer,
@@ -628,6 +629,18 @@ pub enum PushDescriptorBinding {
         offset: u64,
         range: u64,
     },
+    /// Bind a buffer slice as a uniform (constant) buffer.
+    ///
+    /// `offset` and `range` must satisfy the device's
+    /// `minUniformBufferOffsetAlignment` requirement. Use
+    /// `RenderFrame::upload_uniform` to allocate from the per-frame
+    /// transient pool and get a correctly aligned binding.
+    UniformBuffer {
+        binding: u32,
+        buffer: BufferHandle,
+        offset: u64,
+        range: u64,
+    },
 }
 
 /// GPU-driven predicate: skip all commands in this pass when the `u32` at
@@ -998,12 +1011,22 @@ impl RenderGraph {
                 ));
             }
             for binding in &push_descriptors.bindings {
-                if let PushDescriptorBinding::StorageBuffer { range, .. } = binding {
-                    if *range == 0 {
-                        return Err(Error::InvalidInput(
-                            "push descriptor storage buffer range must be non-zero".into(),
-                        ));
+                match binding {
+                    PushDescriptorBinding::StorageBuffer { range, .. } => {
+                        if *range == 0 {
+                            return Err(Error::InvalidInput(
+                                "push descriptor storage buffer range must be non-zero".into(),
+                            ));
+                        }
                     }
+                    PushDescriptorBinding::UniformBuffer { range, .. } => {
+                        if *range == 0 {
+                            return Err(Error::InvalidInput(
+                                "push descriptor uniform buffer range must be non-zero".into(),
+                            ));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }

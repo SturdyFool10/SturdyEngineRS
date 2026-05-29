@@ -118,6 +118,7 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
             .descriptor_indexing
             .descriptor_binding_storage_buffer_update_after_bind
             == vk::TRUE;
+    let sampler_anisotropy = core_features.sampler_anisotropy == vk::TRUE;
     let shader_fp16 = feature_chain.shader_float16_int8.shader_float16 == vk::TRUE;
     let shader_fp64 = core_features.shader_float64 == vk::TRUE;
     let multi_draw_indirect = core_features.multi_draw_indirect == vk::TRUE;
@@ -322,6 +323,7 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         device_address_binding_report,
         device_memory_report,
         host_image_copy,
+        sampler_anisotropy,
         push_descriptors,
         conditional_rendering,
         extended_dynamic_state3,

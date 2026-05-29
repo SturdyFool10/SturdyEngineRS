@@ -54,6 +54,10 @@ pub enum SrdDenoiserMode {
     ShadowStabilizer = 2,
     /// Reserved for the engine-standard AO/directional-occlusion stabilizer family.
     OcclusionStabilizer = 3,
+    /// Reserved for the engine-standard translucent-shadow stabilizer family.
+    TranslucentShadowStabilizer = 4,
+    /// Reserved for the engine-standard spectral radiance stabilizer family.
+    SpectralRadianceStabilizer = 5,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -124,6 +128,18 @@ pub enum SrdSpectralLayout {
     Rgb,
     FixedBins { bins: u8 },
     CompactCoefficients { coefficients: u8 },
+}
+
+impl SrdSpectralLayout {
+    /// Number of spectral channels in the active layout (0 when disabled).
+    pub fn channel_count(self) -> u8 {
+        match self {
+            Self::Disabled => 0,
+            Self::Rgb => 3,
+            Self::FixedBins { bins } => bins,
+            Self::CompactCoefficients { coefficients } => coefficients,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -373,6 +389,8 @@ pub enum SrdFamilySettings {
     Radiance(SrdRadianceSettings),
     Shadow(SrdShadowSettings),
     Occlusion(SrdOcclusionSettings),
+    TranslucentShadow(SrdTranslucentShadowSettings),
+    SpectralRadiance(SrdSpectralRadianceSettings),
 }
 
 impl SrdFamilySettings {
@@ -384,6 +402,12 @@ impl SrdFamilySettings {
             SrdDenoiserMode::OcclusionStabilizer => {
                 Self::Occlusion(SrdOcclusionSettings::default())
             }
+            SrdDenoiserMode::TranslucentShadowStabilizer => {
+                Self::TranslucentShadow(SrdTranslucentShadowSettings::default())
+            }
+            SrdDenoiserMode::SpectralRadianceStabilizer => {
+                Self::SpectralRadiance(SrdSpectralRadianceSettings::default())
+            }
         }
     }
 
@@ -393,6 +417,8 @@ impl SrdFamilySettings {
             Self::Radiance(_) => SrdDenoiserMode::RadianceStabilizer,
             Self::Shadow(_) => SrdDenoiserMode::ShadowStabilizer,
             Self::Occlusion(_) => SrdDenoiserMode::OcclusionStabilizer,
+            Self::TranslucentShadow(_) => SrdDenoiserMode::TranslucentShadowStabilizer,
+            Self::SpectralRadiance(_) => SrdDenoiserMode::SpectralRadianceStabilizer,
         }
     }
 
@@ -402,6 +428,8 @@ impl SrdFamilySettings {
             Self::Radiance(settings) => settings.validate(),
             Self::Shadow(settings) => settings.validate(),
             Self::Occlusion(settings) => settings.validate(),
+            Self::TranslucentShadow(settings) => settings.validate(),
+            Self::SpectralRadiance(settings) => settings.validate(),
         }
     }
 }
@@ -650,6 +678,10 @@ pub struct SrdShadowSettings {
     pub stabilization_frame_budget: u32,
     pub plane_offset_tolerance: f32,
     pub sun_direction: [f32; 3],
+    /// Disc radius in pixels for the bilateral spatial filter.
+    pub spatial_radius: f32,
+    /// Normal edge-stopping power for the bilateral filter.
+    pub normal_weight_power: f32,
 }
 
 impl Default for SrdShadowSettings {
@@ -658,6 +690,8 @@ impl Default for SrdShadowSettings {
             stabilization_frame_budget: 16,
             plane_offset_tolerance: 0.02,
             sun_direction: [0.0, -1.0, 0.0],
+            spatial_radius: 2.0,
+            normal_weight_power: 8.0,
         }
     }
 }
@@ -670,7 +704,8 @@ impl SrdShadowSettings {
                 "SRD shadow sun_direction must contain finite components".into(),
             ));
         }
-        Ok(())
+        validate_nonnegative_finite("shadow spatial_radius", self.spatial_radius)?;
+        validate_positive_finite("shadow normal_weight_power", self.normal_weight_power)
     }
 }
 
@@ -696,6 +731,64 @@ impl SrdOcclusionSettings {
         validate_frame_count("occlusion history_frame_budget", self.history_frame_budget)?;
         validate_nonnegative_finite("occlusion spatial_radius", self.spatial_radius)?;
         validate_positive_finite("occlusion normal_weight_power", self.normal_weight_power)
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SrdTranslucentShadowSettings {
+    pub history_frame_budget: u32,
+    pub spatial_radius: f32,
+    pub normal_weight_power: f32,
+}
+
+impl Default for SrdTranslucentShadowSettings {
+    fn default() -> Self {
+        Self {
+            history_frame_budget: 16,
+            spatial_radius: 2.0,
+            normal_weight_power: 8.0,
+        }
+    }
+}
+
+impl SrdTranslucentShadowSettings {
+    pub fn validate(self) -> Result<()> {
+        validate_frame_count("translucent_shadow history_frame_budget", self.history_frame_budget)?;
+        validate_nonnegative_finite("translucent_shadow spatial_radius", self.spatial_radius)?;
+        validate_positive_finite("translucent_shadow normal_weight_power", self.normal_weight_power)
+    }
+}
+
+/// Settings for the spectral radiance stabilizer.
+///
+/// The spectral stabilizer denoises spectral radiance represented via fixed
+/// wavelength bins or compact spectral coefficients (see `SrdSpectralLayout` in
+/// `SrdShaderContract`). Each pass handles up to 3 spectral channels packed
+/// into the RGB channels of the RGBA16F history ring; `channel_count` is
+/// derived from the active `SrdSpectralLayout` at planning time (1–3 channels
+/// per pass).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SrdSpectralRadianceSettings {
+    pub history_frame_budget: u32,
+    pub spatial_radius: f32,
+    pub normal_weight_power: f32,
+}
+
+impl Default for SrdSpectralRadianceSettings {
+    fn default() -> Self {
+        Self {
+            history_frame_budget: 32,
+            spatial_radius: 2.0,
+            normal_weight_power: 8.0,
+        }
+    }
+}
+
+impl SrdSpectralRadianceSettings {
+    pub fn validate(self) -> Result<()> {
+        validate_frame_count("spectral_radiance history_frame_budget", self.history_frame_budget)?;
+        validate_nonnegative_finite("spectral_radiance spatial_radius", self.spatial_radius)?;
+        validate_positive_finite("spectral_radiance normal_weight_power", self.normal_weight_power)
     }
 }
 

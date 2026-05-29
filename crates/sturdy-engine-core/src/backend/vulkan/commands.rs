@@ -64,14 +64,14 @@ pub struct CommandContext {
     timestamp_pool: vk::QueryPool,
     /// Nanoseconds per GPU timestamp tick (from physical device limits).
     timestamp_period_ns: f32,
-    /// Pass names recorded during the most-recently-submitted frame.
+    /// Pass names and queue types recorded during the most-recently-submitted frame.
     /// Populated during recording; used to label the readback results.
-    pending_pass_names: Vec<String>,
+    pending_pass_names: Vec<(String, crate::QueueType)>,
     /// How many passes were submitted in the last frame.
     pending_pass_count: u32,
-    /// Per-pass GPU timings from the previous frame (name, milliseconds).
+    /// Per-pass GPU timings from the previous frame (name, queue_type, milliseconds).
     /// Empty until the second `submit_graph` call (first readback).
-    pub pass_timings: Vec<(String, f32)>,
+    pub pass_timings: Vec<(String, crate::QueueType, f32)>,
     /// CPU wall time spent waiting on the reused frame slot during the most recent submit.
     last_submit_gpu_wait_ms: f32,
     acceleration_structure_scratch: Vec<VulkanScratchBuffer>,
@@ -93,6 +93,14 @@ pub struct CommandContext {
     /// Track 11a: Per-frame transient buffer pool for uniforms and small staging copies.
     /// Reset to offset 0 each frame after the fence fires.
     pub transient_buffer_pool: Option<super::buffer_pool::BufferPool>,
+    /// Handle registered in the resource registry for the transient pool buffer.
+    /// Set once when the pool is installed; used to bind transient allocations as
+    /// uniform or storage descriptors via `PushDescriptorBinding::UniformBuffer`.
+    pub transient_buffer_handle: Option<crate::BufferHandle>,
+    /// Draw calls recorded in the most recently submitted frame.
+    pub frame_draw_calls: u32,
+    /// Compute dispatches recorded in the most recently submitted frame.
+    pub frame_dispatch_calls: u32,
 }
 
 impl CommandContext {
@@ -210,13 +218,22 @@ impl CommandContext {
             chain_value: 0,
             transient_framebuffers: Vec::new(),
             transient_buffer_pool: None,
+            transient_buffer_handle: None,
+            frame_draw_calls: 0,
+            frame_dispatch_calls: 0,
         })
     }
 
     /// Track 11a: Install a pre-created `BufferPool` into this context.
     /// Called once at device creation after the pool is allocated.
+    /// The `transient_buffer_handle` is set later by `register_transient_buffer_handles`.
     pub fn set_buffer_pool(&mut self, pool: super::buffer_pool::BufferPool) {
         self.transient_buffer_pool = Some(pool);
+    }
+
+    /// Returns the `BufferHandle` for this frame slot's transient pool buffer, if available.
+    pub fn transient_buffer_handle(&self) -> Option<crate::BufferHandle> {
+        self.transient_buffer_handle
     }
 
     /// Record and submit one command buffer per graph batch, then return
@@ -260,6 +277,8 @@ impl CommandContext {
         #[cfg(not(debug_assertions))]
         let _ = &diagnostic_checkpoints_nv;
         self.last_submit_gpu_wait_ms = 0.0;
+        self.frame_draw_calls = 0;
+        self.frame_dispatch_calls = 0;
         // Wait for the previous frame before reusing pools / fence.
         if self.frame_submitted {
             let wait_start = std::time::Instant::now();
@@ -298,11 +317,11 @@ impl CommandContext {
                         .pending_pass_names
                         .iter()
                         .enumerate()
-                        .map(|(i, name)| {
+                        .map(|(i, (name, queue))| {
                             let start = raw[i * 2];
                             let end = raw[i * 2 + 1];
                             let ms = (end.saturating_sub(start)) as f32 * period / 1_000_000.0;
-                            (name.clone(), ms)
+                            (name.clone(), *queue, ms)
                         })
                         .collect();
                 }
@@ -511,7 +530,7 @@ impl CommandContext {
                                     );
                                 }
                             }
-                            self.pending_pass_names.push(pass.name.clone());
+                            self.pending_pass_names.push((pass.name.clone(), pass.queue));
                             ts_query_idx += 1;
                         }
                         // GFX-1g breadcrumbs at pass end: NV checkpoint + AMD buffer marker.
@@ -792,7 +811,9 @@ impl CommandContext {
         if let Some(predicate) = pass.predicate {
             let conditional_rendering = conditional_rendering.ok_or_else(|| {
                 Error::Unsupported(
-                    "conditional rendering requires VK_EXT_conditional_rendering".into(),
+                    "pass predicate requires VK_EXT_conditional_rendering — \
+                     add \"conditional_rendering\" to VulkanBackendConfig::optional_features"
+                        .into(),
                 )
             })?;
             let buffer = resources.buffer(predicate.buffer)?;
@@ -877,7 +898,9 @@ impl CommandContext {
         if let Some(rate) = pass.pipeline_shading_rate {
             let fragment_shading_rate = fragment_shading_rate.ok_or_else(|| {
                 Error::Unsupported(
-                    "pipeline shading rate requires VK_KHR_fragment_shading_rate".into(),
+                    "pass pipeline shading rate requires VK_KHR_fragment_shading_rate — \
+                     add \"pipeline_fragment_shading_rate\" to VulkanBackendConfig::optional_features"
+                        .into(),
                 )
             })?;
             let extent = vk_fragment_shading_rate(rate);
@@ -908,6 +931,7 @@ impl CommandContext {
                 unsafe {
                     device.cmd_dispatch(command_buffer, dispatch.x, dispatch.y, dispatch.z);
                 }
+                self.frame_dispatch_calls += 1;
             }
             PassWork::Draw(draw) => {
                 let binding = bound_binding.as_ref().ok_or_else(|| {
@@ -988,6 +1012,7 @@ impl CommandContext {
                         }
                     },
                 )?;
+                self.frame_draw_calls += 1;
             }
             PassWork::CopyImageToBuffer(copy) => unsafe {
                 let image_desc = resources.image_desc(copy.image)?;
@@ -1055,6 +1080,7 @@ impl CommandContext {
                 unsafe {
                     device.cmd_dispatch_indirect(command_buffer, indirect_buf, desc.offset);
                 }
+                self.frame_dispatch_calls += 1;
             }
             PassWork::DrawIndirect(desc) => {
                 let binding = bound_binding.as_ref().ok_or_else(|| {
@@ -1126,6 +1152,7 @@ impl CommandContext {
                         }
                     },
                 )?;
+                self.frame_draw_calls += 1;
             }
             PassWork::DrawIndirectCount(desc) => {
                 let binding = bound_binding.as_ref().ok_or_else(|| {
@@ -1203,6 +1230,7 @@ impl CommandContext {
                         }
                     },
                 )?;
+                self.frame_draw_calls += 1;
             }
             PassWork::DrawMeshShader(desc) => {
                 let binding = bound_binding.as_ref().ok_or_else(|| {
@@ -1220,7 +1248,9 @@ impl CommandContext {
                     prepare_shader_object_mesh_draw(command_buffer, binding, shader_object_ext)?;
                 let mesh_shader_ext = mesh_shader_ext.ok_or_else(|| {
                     Error::Unsupported(
-                        "mesh shader draw pass requires VK_EXT_mesh_shader to be enabled".into(),
+                        "DrawMeshShader pass requires VK_EXT_mesh_shader — \
+                         add \"mesh_shader\" to VulkanBackendConfig::optional_features"
+                            .into(),
                     )
                 })?;
                 self.record_draw_pass(
@@ -1243,6 +1273,7 @@ impl CommandContext {
                         );
                     },
                 )?;
+                self.frame_draw_calls += 1;
             }
             PassWork::DrawMeshShaderIndirect(desc) => {
                 let binding = bound_binding.as_ref().ok_or_else(|| {
@@ -1266,7 +1297,8 @@ impl CommandContext {
                 }
                 let mesh_shader_ext = mesh_shader_ext.ok_or_else(|| {
                     Error::Unsupported(
-                        "indirect mesh shader draw pass requires VK_EXT_mesh_shader to be enabled"
+                        "DrawMeshShaderIndirect pass requires VK_EXT_mesh_shader — \
+                         add \"mesh_shader\" to VulkanBackendConfig::optional_features"
                             .into(),
                     )
                 })?;
@@ -1294,6 +1326,7 @@ impl CommandContext {
                         );
                     },
                 )?;
+                self.frame_draw_calls += 1;
             }
             PassWork::GenerateMipmaps {
                 image: img_handle,
@@ -1671,7 +1704,11 @@ impl CommandContext {
 
             PassWork::BuildBlas(ref build) => {
                 let as_ext = as_khr.ok_or_else(|| {
-                    Error::Unsupported("BLAS build requires VK_KHR_acceleration_structure".into())
+                    Error::Unsupported(
+                        "BuildBlas pass requires VK_KHR_acceleration_structure — \
+                         add \"acceleration_structure\" to VulkanBackendConfig::optional_features"
+                            .into(),
+                    )
                 })?;
                 let dst_as = resources.acceleration_structure(build.dst)?;
                 let src_as = build
@@ -1802,8 +1839,8 @@ impl CommandContext {
                         device_address: scratch_addr,
                     });
 
-                    let range_slices: Vec<&[vk::AccelerationStructureBuildRangeInfoKHR]> =
-                        vec![build_range_infos.as_slice()];
+                    let range_slices: Vec<Option<&[vk::AccelerationStructureBuildRangeInfoKHR]>> =
+                        vec![Some(build_range_infos.as_slice())];
                     unsafe {
                         as_ext.cmd_build_acceleration_structures(
                             command_buffer,
@@ -1817,7 +1854,11 @@ impl CommandContext {
 
             PassWork::BuildTlas(ref build) => {
                 let as_ext = as_khr.ok_or_else(|| {
-                    Error::Unsupported("TLAS build requires VK_KHR_acceleration_structure".into())
+                    Error::Unsupported(
+                        "BuildTlas pass requires VK_KHR_acceleration_structure — \
+                         add \"acceleration_structure\" to VulkanBackendConfig::optional_features"
+                            .into(),
+                    )
                 })?;
                 let dst_as = resources.acceleration_structure(build.dst)?;
                 let src_as = build
@@ -1895,8 +1936,8 @@ impl CommandContext {
                     build_info = build_info.scratch_data(vk::DeviceOrHostAddressKHR {
                         device_address: scratch_addr,
                     });
-                    let range_slices: Vec<&[vk::AccelerationStructureBuildRangeInfoKHR]> =
-                        vec![range_info.as_slice()];
+                    let range_slices: Vec<Option<&[vk::AccelerationStructureBuildRangeInfoKHR]>> =
+                        vec![Some(range_info.as_slice())];
                     unsafe {
                         as_ext.cmd_build_acceleration_structures(
                             command_buffer,
@@ -1910,7 +1951,11 @@ impl CommandContext {
 
             PassWork::TraceRays(ref trace) => {
                 let rt_ext = rt_khr.ok_or_else(|| {
-                    Error::Unsupported("TraceRays requires VK_KHR_ray_tracing_pipeline".into())
+                    Error::Unsupported(
+                        "TraceRays pass requires VK_KHR_ray_tracing_pipeline — \
+                         add \"ray_tracing_pipeline\" to VulkanBackendConfig::optional_features"
+                            .into(),
+                    )
                 })?;
                 let pipeline = pipelines.pipeline(trace.pipeline)?;
                 if pipeline.bind_point != vk::PipelineBindPoint::RAY_TRACING_KHR {
@@ -1985,7 +2030,9 @@ impl CommandContext {
             PassWork::ExecuteGeneratedCommands(ref exec) => {
                 let dgc = dgc_nv.ok_or_else(|| {
                     Error::Unsupported(
-                        "ExecuteGeneratedCommands requires VK_NV_device_generated_commands".into(),
+                        "ExecuteGeneratedCommands pass requires VK_NV_device_generated_commands — \
+                         add \"device_generated_commands_nv\" to VulkanBackendConfig::optional_features"
+                            .into(),
                     )
                 })?;
                 let layouts = indirect_command_layouts.ok_or_else(|| {
@@ -2022,7 +2069,8 @@ impl CommandContext {
             PassWork::PreprocessGeneratedCommands(ref prep) => {
                 let dgc = dgc_nv.ok_or_else(|| {
                     Error::Unsupported(
-                        "PreprocessGeneratedCommands requires VK_NV_device_generated_commands"
+                        "PreprocessGeneratedCommands pass requires VK_NV_device_generated_commands — \
+                         add \"device_generated_commands_nv\" to VulkanBackendConfig::optional_features"
                             .into(),
                     )
                 })?;
@@ -2063,7 +2111,9 @@ impl CommandContext {
             PassWork::BuildClusterAccelerationStructure(desc) => {
                 let ext = cluster_as_nv.ok_or_else(|| {
                     Error::Unsupported(
-                        "cluster AS build requires VK_NV_cluster_acceleration_structure",
+                        "BuildClusterAccelerationStructure pass requires \
+                         VK_NV_cluster_acceleration_structure — add \
+                         \"cluster_acceleration_structure\" to VulkanBackendConfig::optional_features",
                     )
                 })?;
                 let input_info = ash::vk::ClusterAccelerationStructureInputInfoNV::default()
@@ -2767,7 +2817,7 @@ fn build_scratch_size(
         as_ext.get_acceleration_structure_build_sizes(
             vk::AccelerationStructureBuildTypeKHR::DEVICE,
             build_info,
-            &primitive_counts,
+            Some(&primitive_counts),
             &mut sizes,
         );
     }
@@ -2881,7 +2931,9 @@ fn bind_shader_object_binding(
     let Some(shader_object_ext) = shader_object_ext else {
         let fallback = pass.pipeline.ok_or_else(|| {
             Error::Unsupported(
-                "shader object binding requires VK_EXT_shader_object or a fallback pipeline".into(),
+                "shader object binding requires VK_EXT_shader_object (or a fallback pipeline) — \
+                 add \"shader_object\" to VulkanBackendConfig::optional_features"
+                    .into(),
             )
         })?;
         return bind_pipeline_shader_binding(device, command_buffer, pipelines, fallback);
@@ -3104,7 +3156,11 @@ fn record_bound_resources(
 
     if let Some(push_descriptor_set) = &pass.push_descriptor_set {
         let push_descriptor = push_descriptor.ok_or_else(|| {
-            Error::Unsupported("push descriptors require VK_KHR_push_descriptor".into())
+            Error::Unsupported(
+            "push descriptor set requires VK_KHR_push_descriptor — \
+             add \"push_descriptor\" to VulkanBackendConfig::optional_features"
+                .into(),
+        )
         })?;
         for push_binding in &push_descriptor_set.bindings {
             record_push_descriptor_binding(
@@ -3150,7 +3206,11 @@ fn prepare_shader_object_draw<'a>(
         ));
     }
     let shader_object_ext = shader_object_ext.ok_or_else(|| {
-        Error::Unsupported("graphics shader-object draws require VK_EXT_shader_object".into())
+        Error::Unsupported(
+            "graphics shader-object draw requires VK_EXT_shader_object — \
+             add \"shader_object\" to VulkanBackendConfig::optional_features"
+                .into(),
+        )
     })?;
     let state = binding.graphics_state.as_ref().ok_or_else(|| {
         Error::InvalidInput("graphics shader-object draws require graphics dynamic state".into())
@@ -3184,7 +3244,11 @@ fn prepare_shader_object_mesh_draw<'a>(
         ));
     }
     let shader_object_ext = shader_object_ext.ok_or_else(|| {
-        Error::Unsupported("mesh shader-object draws require VK_EXT_shader_object".into())
+        Error::Unsupported(
+            "mesh shader-object draw requires VK_EXT_shader_object — \
+             add \"shader_object\" to VulkanBackendConfig::optional_features"
+                .into(),
+        )
     })?;
     let state = binding.graphics_state.as_ref().ok_or_else(|| {
         Error::InvalidInput("mesh shader-object draws require graphics dynamic state".into())
@@ -3367,6 +3431,30 @@ fn record_push_descriptor_binding(
                 );
             }
         }
+        PushDescriptorBinding::UniformBuffer {
+            binding,
+            buffer,
+            offset,
+            range,
+        } => {
+            let info = [vk::DescriptorBufferInfo::default()
+                .buffer(resources.buffer(*buffer)?)
+                .offset(*offset)
+                .range(*range)];
+            let write = [vk::WriteDescriptorSet::default()
+                .dst_binding(*binding)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(&info)];
+            unsafe {
+                push_descriptor.cmd_push_descriptor_set(
+                    command_buffer,
+                    binding_state.bind_point,
+                    binding_state.layout,
+                    set,
+                    &write,
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -3465,8 +3553,13 @@ fn record_optical_flow_estimate(
     optical_flow: Option<&ash::nv::optical_flow::Device>,
     sessions: Option<&HashMap<OpticalFlowSessionHandle, vk::OpticalFlowSessionNV>>,
 ) -> Result<()> {
-    let optical_flow = optical_flow
-        .ok_or_else(|| Error::Unsupported("VK_NV_optical_flow is not enabled".into()))?;
+    let optical_flow = optical_flow.ok_or_else(|| {
+        Error::Unsupported(
+            "EstimateOpticalFlow pass requires VK_NV_optical_flow — \
+             add \"optical_flow_nv\" to VulkanBackendConfig::optional_features"
+                .into(),
+        )
+    })?;
     let session = sessions
         .and_then(|sessions| sessions.get(&desc.session).copied())
         .ok_or(Error::InvalidHandle)?;
@@ -3552,6 +3645,10 @@ pub struct FramedCommands {
     /// Monotonically-increasing counter.  The `n`-th submission used slot `(n-1) % N`.
     total_submissions: u64,
     last_submit_gpu_wait_ms: f32,
+    /// Draw call count from the most recently submitted frame.
+    last_frame_draw_calls: u32,
+    /// Dispatch call count from the most recently submitted frame.
+    last_frame_dispatch_calls: u32,
 }
 
 impl FramedCommands {
@@ -3579,6 +3676,8 @@ impl FramedCommands {
             next_slot: 0,
             total_submissions: 0,
             last_submit_gpu_wait_ms: 0.0,
+            last_frame_draw_calls: 0,
+            last_frame_dispatch_calls: 0,
         })
     }
 
@@ -3656,6 +3755,8 @@ impl FramedCommands {
             signal_semaphore,
         )?;
         self.last_submit_gpu_wait_ms = self.contexts[slot].last_submit_gpu_wait_ms();
+        self.last_frame_draw_calls = self.contexts[slot].frame_draw_calls;
+        self.last_frame_dispatch_calls = self.contexts[slot].frame_dispatch_calls;
         self.next_slot = (slot + 1) % self.contexts.len();
         // Override the per-context submission handle with the global counter so
         // callers can correlate handles across slots.
@@ -3664,6 +3765,14 @@ impl FramedCommands {
 
     pub fn last_submit_gpu_wait_ms(&self) -> f32 {
         self.last_submit_gpu_wait_ms
+    }
+
+    pub fn last_frame_draw_calls(&self) -> u32 {
+        self.last_frame_draw_calls
+    }
+
+    pub fn last_frame_dispatch_calls(&self) -> u32 {
+        self.last_frame_dispatch_calls
     }
 
     /// Wait for a specific submission.  Uses `handle % N` to identify the slot,
@@ -3705,6 +3814,10 @@ impl FramedCommands {
     }
 
     /// Return mutable access to the context that will be used on the NEXT submission.
+    pub fn current_context(&self) -> Option<&CommandContext> {
+        self.contexts.get(self.next_slot)
+    }
+
     pub fn current_context_mut(&mut self) -> &mut CommandContext {
         &mut self.contexts[self.next_slot]
     }
@@ -3736,8 +3849,8 @@ impl FramedCommands {
 
     /// Per-pass GPU timings from the most recently completed frame.
     ///
-    /// Each entry is `(pass_name, gpu_ms)`. Empty until the second frame.
-    pub fn pass_timings(&self) -> &[(String, f32)] {
+    /// Each entry is `(pass_name, queue_type, gpu_ms)`. Empty until the second frame.
+    pub fn pass_timings(&self) -> &[(String, crate::QueueType, f32)] {
         // Return timings from the context that last completed (previous slot).
         let n = self.contexts.len();
         let prev_slot = self.next_slot.wrapping_sub(1).min(n - 1);

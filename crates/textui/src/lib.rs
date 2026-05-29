@@ -393,12 +393,10 @@ impl TextUi {
         );
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
         buffer.set_size(
-            &mut self.font_system,
             width_points_opt.map(|w| (w * scale).max(1.0)),
             None,
         );
         buffer.set_wrap(
-            &mut self.font_system,
             if options.wrap {
                 Wrap::WordOrGlyph
             } else {
@@ -406,7 +404,7 @@ impl TextUi {
             },
         );
         let attrs = attrs_for_options(options);
-        buffer.set_text(&mut self.font_system, text, &attrs, Shaping::Advanced, None);
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, true);
 
         let mut quads = Vec::new();
@@ -494,12 +492,10 @@ impl TextUi {
         );
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
         buffer.set_size(
-            &mut self.font_system,
             width_points_opt.map(|w| (w * scale).max(1.0)),
             None,
         );
         buffer.set_wrap(
-            &mut self.font_system,
             if options.wrap {
                 Wrap::WordOrGlyph
             } else {
@@ -507,7 +503,7 @@ impl TextUi {
             },
         );
         let attrs = attrs_for_options(options);
-        buffer.set_text(&mut self.font_system, text, &attrs, Shaping::Advanced, None);
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, true);
 
         let [width_px, height_px] = measure_buffer_layout_pixels(&buffer);

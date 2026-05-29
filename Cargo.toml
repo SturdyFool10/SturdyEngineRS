@@ -26,8 +26,8 @@ repository = "https://example.invalid/sturdy-engine"
 rust-version = "1.85"
 
 [workspace.dependencies]
-cosmic-text = "0.18"
-glam = { version = "0.32", features = ["bytemuck"] }
+cosmic-text = "0.19"
+glam = { version = "0.33", features = ["bytemuck"] }
 winit = "0.30"
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1.44"

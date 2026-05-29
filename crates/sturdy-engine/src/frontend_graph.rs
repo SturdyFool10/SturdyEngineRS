@@ -199,6 +199,37 @@ struct PendingPass {
 // `pub use crate::shader_program::{...}`.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// A transient-buffer binding produced by `RenderFrame::upload_uniform`.
+///
+/// Pass this to `PushDescriptorSetDesc::bindings` as
+/// `PushDescriptorBinding::UniformBuffer { binding: b.binding, buffer: b.buffer, offset: b.offset, range: b.size }`.
+/// Or use `UniformBinding::into_push_descriptor()` for the conversion.
+#[derive(Copy, Clone, Debug)]
+pub struct UniformBinding {
+    /// Descriptor set the binding targets.
+    pub set: u32,
+    /// Binding slot within the set.
+    pub binding: u32,
+    /// Handle to the transient pool buffer (valid for the current frame).
+    pub buffer: core::BufferHandle,
+    /// Byte offset within the buffer where this allocation begins.
+    pub offset: u64,
+    /// Allocation size in bytes (matches the uploaded struct's size).
+    pub size: u64,
+}
+
+impl UniformBinding {
+    /// Convert into the `PushDescriptorBinding` form expected by `PushDescriptorSetDesc`.
+    pub fn into_push_descriptor(self) -> core::PushDescriptorBinding {
+        core::PushDescriptorBinding::UniformBuffer {
+            binding: self.binding,
+            buffer: self.buffer,
+            offset: self.offset,
+            range: self.size,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RenderFrame {
     inner: Rc<RefCell<RenderFrameInner>>,
@@ -285,6 +316,35 @@ impl RenderFrame {
 
     pub fn engine(&self) -> Engine {
         self.inner.borrow().engine.clone()
+    }
+
+    /// Write `value` into the per-frame transient buffer pool and return a binding descriptor
+    /// that can be passed to `PushDescriptorSetDesc` as a `UniformBuffer` entry.
+    ///
+    /// The transient pool is HOST_VISIBLE + HOST_COHERENT: the write is immediately visible
+    /// to the GPU without an explicit flush. The allocation is valid until the next frame.
+    ///
+    /// Returns `None` when the transient pool is full or unavailable on this backend.
+    pub fn upload_uniform<T: bytemuck::Pod>(
+        &self,
+        set: u32,
+        binding: u32,
+        value: &T,
+    ) -> Option<UniformBinding> {
+        let engine = self.inner.borrow().engine.clone();
+        let size = std::mem::size_of::<T>() as u64;
+        let alloc = engine.device.alloc_transient(size, 256)?;
+        unsafe {
+            alloc.write(value);
+        }
+        let buffer = alloc.buffer?;
+        Some(UniformBinding {
+            set,
+            binding,
+            buffer,
+            offset: alloc.offset,
+            size,
+        })
     }
 
     pub(crate) fn swapchain_slot(&self) -> u64 {
@@ -1918,14 +1978,43 @@ impl GraphImage {
         push_constants: Option<PushConstants>,
         target_subresource: SubresourceRange,
     ) -> Result<()> {
+        self.execute_shader_inner_named(None, shader, push_constants, target_subresource)
+    }
+
+    fn execute_shader_inner_named(
+        &self,
+        name: Option<String>,
+        shader: &ShaderProgram,
+        push_constants: Option<PushConstants>,
+        target_subresource: SubresourceRange,
+    ) -> Result<()> {
         record_fullscreen_shader_pass(
             &self.frame,
-            None,
+            name,
             self,
             shader,
             push_constants,
             target_subresource,
             ExplicitPassResources::default(),
+        )
+    }
+
+    pub fn execute_named_shader_with_push_constants(
+        &self,
+        name: &str,
+        shader: &ShaderProgram,
+        stages: StageMask,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.execute_shader_inner_named(
+            Some(name.to_string()),
+            shader,
+            Some(PushConstants {
+                offset: 0,
+                stages,
+                bytes: bytes.to_vec(),
+            }),
+            single_subresource(),
         )
     }
 
@@ -2418,6 +2507,288 @@ impl GraphImage {
                     index_buffer,
                     viewport: None,
                 }),
+                reads: eager_uses,
+                writes,
+                buffer_reads,
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth,
+                push_descriptor_set: None,
+                predicate: None,
+                shader_binding: None,
+                shading_rate_image: None,
+                perf_counters: None,
+            },
+            deferred: Some(DeferredPassResolve {
+                layout_handle: program.pipeline_layout.handle(),
+                reflection: program.reflection().clone(),
+                eager_bindings,
+                eager_samplers: HashMap::new(),
+                eager_buffers: HashMap::new(),
+                unresolved_read_names,
+                skip_name: self.name.clone(),
+                storage_output: None,
+            }),
+        });
+
+        Ok(())
+    }
+
+    /// MRT indirect draw — like `draw_mesh_instanced_mrt_with_push_constants_and_depth`
+    /// but uses a GPU indirect command buffer instead of a fixed instance count.
+    ///
+    /// Issues one DrawIndexedIndirect call reading from `indirect_buf` at
+    /// `indirect_offset` (stride = 20 bytes per DrawIndexedIndirectCommand).
+    /// All MRT color targets write the G-Buffer in one pass.  The vertex shader
+    /// must read instance data from named GPU buffers (e.g. `render_world_visible_instances`
+    /// / `current_matrices`) previously bound via `frame.bind_buffer`.
+    pub fn draw_mesh_indirect_mrt_with_push_constants_and_depth<T: bytemuck::Pod>(
+        &self,
+        additional_targets: &[&GraphImage],
+        mesh: &Mesh,
+        program: &MeshProgram,
+        indirect_buf: &crate::Buffer,
+        indirect_offset: u64,
+        draw_count: u32,
+        constants: &T,
+        depth: Option<&GraphImage>,
+    ) -> Result<()> {
+        let stage = reflected_push_constant_stages(
+            program.reflection(),
+            StageMask::VERTEX | StageMask::FRAGMENT,
+        );
+        self.draw_mesh_indirect_mrt_inner(
+            additional_targets,
+            mesh,
+            program,
+            Some(PushConstants {
+                offset: 0,
+                stages: stage,
+                bytes: bytemuck::bytes_of(constants).to_vec(),
+            }),
+            indirect_buf,
+            None,
+            indirect_offset,
+            draw_count,
+            depth,
+        )
+    }
+
+    /// MRT indirect-count draw — like `draw_mesh_indirect_mrt_with_push_constants_and_depth`
+    /// but reads the draw count from a GPU buffer instead of a fixed CPU value.
+    pub fn draw_mesh_indirect_count_mrt_with_push_constants_and_depth<T: bytemuck::Pod>(
+        &self,
+        additional_targets: &[&GraphImage],
+        mesh: &Mesh,
+        program: &MeshProgram,
+        indirect_buf: &crate::Buffer,
+        count_buf: &crate::Buffer,
+        max_draw_count: u32,
+        constants: &T,
+        depth: Option<&GraphImage>,
+    ) -> Result<()> {
+        let stage = reflected_push_constant_stages(
+            program.reflection(),
+            StageMask::VERTEX | StageMask::FRAGMENT,
+        );
+        self.draw_mesh_indirect_mrt_inner(
+            additional_targets,
+            mesh,
+            program,
+            Some(PushConstants {
+                offset: 0,
+                stages: stage,
+                bytes: bytemuck::bytes_of(constants).to_vec(),
+            }),
+            indirect_buf,
+            Some(count_buf),
+            0,
+            max_draw_count,
+            depth,
+        )
+    }
+
+    fn draw_mesh_indirect_mrt_inner(
+        &self,
+        additional_targets: &[&GraphImage],
+        mesh: &Mesh,
+        program: &MeshProgram,
+        push_constants: Option<PushConstants>,
+        indirect_buf: &crate::Buffer,
+        count_buf: Option<&crate::Buffer>,
+        indirect_offset: u64,
+        draw_count: u32,
+        depth: Option<&GraphImage>,
+    ) -> Result<()> {
+        if draw_count == 0 {
+            return Ok(());
+        }
+        let mut inner = self.frame.borrow_mut();
+        let declaration_index = inner.declaration_index;
+        inner.declaration_index = inner.declaration_index.saturating_add(1);
+
+        // Import images.
+        inner
+            .frame
+            .inner
+            .graph_mut(|g| g.import_image(self.handle, self.desc))?;
+        for t in additional_targets {
+            inner
+                .frame
+                .inner
+                .graph_mut(|g| g.import_image(t.handle, t.desc))?;
+        }
+        // Import mesh geometry buffers.
+        inner.frame.inner.graph_mut(|g| {
+            g.import_buffer(mesh.vertex_buffer.handle(), mesh.vertex_buffer.desc())
+        })?;
+        if let Some(ib) = &mesh.index_buffer {
+            inner
+                .frame
+                .inner
+                .graph_mut(|g| g.import_buffer(ib.handle(), ib.desc()))?;
+        }
+        // Import indirect / count buffers.
+        inner
+            .frame
+            .inner
+            .graph_mut(|g| g.import_buffer(indirect_buf.handle(), indirect_buf.desc()))?;
+        if let Some(count_buf) = count_buf {
+            inner
+                .frame
+                .inner
+                .graph_mut(|g| g.import_buffer(count_buf.handle(), count_buf.desc()))?;
+        }
+        if let Some(d) = depth {
+            inner
+                .frame
+                .inner
+                .graph_mut(|g| g.import_image(d.handle, d.desc))?;
+        }
+
+        // MRT pipeline keyed on all color formats.
+        let mut color_formats = vec![self.desc.format];
+        for t in additional_targets {
+            color_formats.push(t.desc.format);
+        }
+        let pipeline = program.pipeline_handle_mrt(&color_formats, self.desc.samples)?;
+
+        let vertex_buffer = Some(VertexBufferBinding {
+            buffer: mesh.vertex_buffer.handle(),
+            binding: 0,
+            offset: 0,
+        });
+        let index_buffer = mesh.index_buffer.as_ref().map(|ib| IndexBufferBinding {
+            buffer: ib.handle(),
+            offset: 0,
+            format: mesh.index_format,
+        });
+
+        // Buffer reads: vertex, optional index, indirect, optional count.
+        let mut buffer_reads = vec![crate::BufferUse {
+            buffer: mesh.vertex_buffer.handle(),
+            access: Access::Read,
+            state: RgState::VertexRead,
+            offset: 0,
+            size: mesh.vertex_buffer.desc().size,
+        }];
+        if let Some(ib) = &mesh.index_buffer {
+            buffer_reads.push(crate::BufferUse {
+                buffer: ib.handle(),
+                access: Access::Read,
+                state: RgState::IndexRead,
+                offset: 0,
+                size: ib.desc().size,
+            });
+        }
+        buffer_reads.push(crate::BufferUse {
+            buffer: indirect_buf.handle(),
+            access: Access::Read,
+            state: RgState::IndirectRead,
+            offset: 0,
+            size: indirect_buf.desc().size,
+        });
+        if let Some(count_buf) = count_buf {
+            buffer_reads.push(crate::BufferUse {
+                buffer: count_buf.handle(),
+                access: Access::Read,
+                state: RgState::IndirectRead,
+                offset: 0,
+                size: count_buf.desc().size,
+            });
+        }
+
+        // All color targets are RenderTarget writes.
+        let mut writes: Vec<crate::ImageUse> = std::iter::once(self)
+            .chain(additional_targets.iter().copied())
+            .map(|t| crate::ImageUse {
+                image: t.handle,
+                access: Access::Write,
+                state: RgState::RenderTarget,
+                subresource: single_subresource(),
+            })
+            .collect();
+        let mut clear_depth = None;
+        if let Some(d) = depth {
+            writes.push(crate::ImageUse {
+                image: d.handle,
+                access: Access::Write,
+                state: RgState::DepthWrite,
+                subresource: single_subresource(),
+            });
+            clear_depth = Some((d.handle, f32::to_bits(1.0), 0u8));
+        }
+
+        let pass_name = format!("{declaration_index:04}-draw-indirect-mrt-{}", self.name);
+        let mesh_read_names = reflected_image_reads(program.reflection());
+        for name in &mesh_read_names {
+            if name != &self.name {
+                if let Some(record) = inner.images_by_name.get(name.as_str()).copied() {
+                    inner
+                        .frame
+                        .inner
+                        .graph_mut(|g| g.import_image(record.handle, record.desc))?;
+                }
+            }
+        }
+        let (eager_bindings, unresolved_read_names, eager_uses) =
+            split_read_names(&mesh_read_names, &self.name, &inner.images_by_name);
+
+        const INDIRECT_STRIDE: u32 = 20;
+        let work = if let Some(count_buf) = count_buf {
+            PassWork::DrawIndirectCount(DrawIndirectCountDesc {
+                indirect_buffer: indirect_buf.handle(),
+                indirect_offset,
+                count_buffer: count_buf.handle(),
+                count_offset: 0,
+                max_draw_count: draw_count,
+                stride: INDIRECT_STRIDE,
+                indexed: true,
+                vertex_buffer,
+                index_buffer,
+            })
+        } else {
+            PassWork::DrawIndirect(DrawIndirectDesc {
+                indirect_buffer: indirect_buf.handle(),
+                offset: indirect_offset,
+                draw_count,
+                stride: INDIRECT_STRIDE,
+                indexed: true,
+                vertex_buffer,
+                index_buffer,
+            })
+        };
+
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                name: pass_name,
+                queue: crate::QueueType::Graphics,
+                shader: Some(program.fragment.handle()),
+                pipeline: Some(pipeline),
+                bind_groups: Vec::new(),
+                push_constants,
+                pipeline_shading_rate: None,
+                work,
                 reads: eager_uses,
                 writes,
                 buffer_reads,
@@ -3503,6 +3874,25 @@ impl GraphImageView {
         bytes: &[u8],
     ) -> Result<()> {
         self.as_image().execute_shader_inner(
+            shader,
+            Some(PushConstants {
+                offset: 0,
+                stages,
+                bytes: bytes.to_vec(),
+            }),
+            self.subresource,
+        )
+    }
+
+    pub fn execute_named_shader_with_push_constants(
+        &self,
+        name: &str,
+        shader: &ShaderProgram,
+        stages: StageMask,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.as_image().execute_shader_inner_named(
+            Some(name.to_string()),
             shader,
             Some(PushConstants {
                 offset: 0,

@@ -1,4 +1,4 @@
-use crate::{BackendFeatures, Limits};
+use crate::{BackendFeatures, Limits, QueueType};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Caps {
@@ -111,6 +111,8 @@ pub struct PassTimingReport {
     pub name: String,
     /// GPU execution time in milliseconds (one-frame delay — reflects the previous frame).
     pub gpu_ms: f32,
+    /// Queue the pass was submitted to, matching `PassDesc::queue`.
+    pub queue_type: QueueType,
     /// Hardware performance counter values recorded during this pass, keyed by `PerfCounterHandle`.
     ///
     /// Populated only for passes that set `PassDesc::perf_counters` and when
@@ -122,7 +124,7 @@ pub struct PassTimingReport {
 ///
 /// Returned by `Device::gpu_timeline()`. Gives a coarse view of how busy each
 /// hardware queue was during the previous frame.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct GpuTimeline {
     /// Total GPU time spent on graphics passes in the previous frame (milliseconds).
     pub graphics_ms: f32,
@@ -142,7 +144,8 @@ pub struct GpuTimeline {
 /// Track 11a: A bump-allocated region from the per-frame transient `BufferPool`.
 ///
 /// Valid only until the next frame boundary (i.e. `Device::flush()` for the current frame).
-/// The backing buffer is accessed via `Device::transient_buffer()`.
+/// Write CPU data to `mapped_ptr`, then bind `buffer` at `offset` for GPU reads via
+/// `PushDescriptorBinding::UniformBuffer` or `PushDescriptorBinding::StorageBuffer`.
 #[derive(Copy, Clone, Debug)]
 pub struct TransientAllocation {
     /// Byte offset of this allocation within the pool's backing buffer.
@@ -151,6 +154,9 @@ pub struct TransientAllocation {
     pub mapped_ptr: *mut u8,
     /// Size of this allocation in bytes.
     pub size: u64,
+    /// Handle to the pool's backing buffer for use as a descriptor binding.
+    /// `None` only on backends that don't support a transient pool.
+    pub buffer: Option<crate::BufferHandle>,
 }
 
 // SAFETY: the mapped pointer is valid for the frame lifetime and only accessed through

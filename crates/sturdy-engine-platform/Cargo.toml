@@ -14,16 +14,16 @@ path = "src/lib.rs"
 raw-window-handle = "0.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.5.2"
-objc2-foundation = { version = "0.2.2", features = ["NSGeometry"] }
-objc2-app-kit = { version = "0.2.2", features = [
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", features = ["NSGeometry"] }
+objc2-app-kit = { version = "0.3.2", features = [
     "NSColor",
     "NSGraphics",
     "NSResponder",

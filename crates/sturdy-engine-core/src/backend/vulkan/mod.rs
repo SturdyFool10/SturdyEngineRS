@@ -389,7 +389,8 @@ impl VulkanBackend {
             descriptors_reg.buffer_device_address_enabled = true;
         }
 
-        let debug_utils = debug::DebugUtils::new(&instance, &logical.device);
+        let debug_utils =
+            debug::DebugUtils::new(&instance, &logical.device, &logical.enabled_extension_names);
         // Validation messenger: routes VK_LAYER_KHRONOS_validation output to stderr.
         // Active in debug builds; a no-op in release builds or when the layer is absent.
         let validation_messenger = debug::ValidationMessenger::create(&entry, &instance);
@@ -728,7 +729,7 @@ impl VulkanBackend {
             resource_registry.pageable_memory_ext = Some(pm.clone());
         }
 
-        Ok(Self {
+        let backend = Self {
             _entry: entry,
             instance,
             physical_device: selection.physical_device,
@@ -796,7 +797,28 @@ impl VulkanBackend {
             external_fence_fd_khr,
             exportable_fences: Mutex::new(HashMap::new()),
             exportable_fence_handles: Mutex::new(crate::handles::HandleAllocator::default()),
-        })
+        };
+        // Name queues for GPU debuggers (RenderDoc, NVIDIA Nsight, etc.).
+        // Safe: DebugUtils::new only activates the loader when VK_EXT_debug_utils is
+        // in the enabled extension list, so these are no-ops when the extension is absent.
+        backend.debug.set_name(&backend.device, backend.queues.graphics, "queue:graphics");
+        if backend.queues.compute != backend.queues.graphics {
+            backend.debug.set_name(&backend.device, backend.queues.compute, "queue:compute");
+        }
+        if backend.queues.transfer != backend.queues.graphics {
+            backend.debug.set_name(&backend.device, backend.queues.transfer, "queue:transfer");
+        }
+        if backend.queues.async_compute != backend.queues.compute {
+            backend.debug.set_name(
+                &backend.device,
+                backend.queues.async_compute,
+                "queue:async_compute",
+            );
+        }
+        if backend.queues.dma != backend.queues.transfer {
+            backend.debug.set_name(&backend.device, backend.queues.dma, "queue:dma");
+        }
+        Ok(backend)
     }
 
     pub fn physical_device_name(&self) -> String {
@@ -919,6 +941,34 @@ impl VulkanBackend {
 
     pub fn bindless_supported(&self) -> bool {
         self.bindless_heap.is_some()
+    }
+
+    /// Register each frame slot's transient pool buffer as a `BufferHandle` in the resource
+    /// registry. Called once after device creation when handle IDs are available.
+    pub fn register_transient_buffer_handles(&self, handles: &[crate::BufferHandle]) {
+        let mut commands = self
+            .commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut resources = self
+            .resources
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (ctx, &handle) in commands.contexts_mut().iter_mut().zip(handles.iter()) {
+            if let Some(pool) = &ctx.transient_buffer_pool {
+                resources.register_raw_buffer(handle, pool.raw_buffer());
+                ctx.transient_buffer_handle = Some(handle);
+            }
+        }
+    }
+
+    /// Returns the number of frame-in-flight context slots.
+    pub fn transient_pool_slot_count(&self) -> usize {
+        self.commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contexts_mut()
+            .len()
     }
 }
 
@@ -1421,12 +1471,30 @@ impl Backend for VulkanBackend {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let ctx = commands.current_context_mut();
         let pool = ctx.transient_buffer_pool.as_mut()?;
+        let handle = ctx.transient_buffer_handle;
         let alloc = pool.alloc(size, alignment)?;
         Some(crate::TransientAllocation {
             offset: alloc.offset,
             mapped_ptr: alloc.mapped_ptr,
             size: alloc.size,
+            buffer: handle,
         })
+    }
+
+    fn register_transient_buffer_handles(&self, handles: &[crate::BufferHandle]) {
+        VulkanBackend::register_transient_buffer_handles(self, handles);
+    }
+
+    fn transient_pool_slot_count(&self) -> usize {
+        VulkanBackend::transient_pool_slot_count(self)
+    }
+
+    fn current_transient_buffer_handle(&self) -> Option<crate::BufferHandle> {
+        self.commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .current_context()
+            .and_then(|ctx| ctx.transient_buffer_handle())
     }
 
     fn register_bindless_sampled_image(&self, handle: ImageHandle) -> Option<u32> {
@@ -1537,7 +1605,11 @@ impl Backend for VulkanBackend {
         desc: AccelerationStructureDesc,
     ) -> Result<()> {
         let as_ext = self.acceleration_structure_khr.as_ref().ok_or_else(|| {
-            Error::Unsupported("VK_KHR_acceleration_structure is not enabled".into())
+            Error::Unsupported(
+                "VK_KHR_acceleration_structure is not enabled — \
+                 add \"acceleration_structure\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            )
         })?;
         let ty = match desc.kind {
             AccelerationStructureKind::BottomLevel => {
@@ -1553,7 +1625,11 @@ impl Backend for VulkanBackend {
 
     fn destroy_acceleration_structure(&self, handle: AccelerationStructureHandle) -> Result<()> {
         let as_ext = self.acceleration_structure_khr.as_ref().ok_or_else(|| {
-            Error::Unsupported("VK_KHR_acceleration_structure is not enabled".into())
+            Error::Unsupported(
+                "VK_KHR_acceleration_structure is not enabled — \
+                 add \"acceleration_structure\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            )
         })?;
         self.resources
             .write()
@@ -1566,7 +1642,11 @@ impl Backend for VulkanBackend {
         handle: AccelerationStructureHandle,
     ) -> Result<u64> {
         let as_ext = self.acceleration_structure_khr.as_ref().ok_or_else(|| {
-            Error::Unsupported("VK_KHR_acceleration_structure is not enabled".into())
+            Error::Unsupported(
+                "VK_KHR_acceleration_structure is not enabled — \
+                 add \"acceleration_structure\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            )
         })?;
         self.resources
             .read()
@@ -1576,7 +1656,11 @@ impl Backend for VulkanBackend {
 
     fn blas_build_sizes(&self, desc: &BlasBuildDesc) -> Result<AccelerationStructureBuildSizes> {
         let as_ext = self.acceleration_structure_khr.as_ref().ok_or_else(|| {
-            Error::Unsupported("VK_KHR_acceleration_structure is not enabled".into())
+            Error::Unsupported(
+                "VK_KHR_acceleration_structure is not enabled — \
+                 add \"acceleration_structure\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            )
         })?;
         if desc.mode == AccelerationStructureBuildMode::Compact {
             let src = desc.src.ok_or_else(|| {
@@ -1598,7 +1682,11 @@ impl Backend for VulkanBackend {
 
     fn tlas_build_sizes(&self, desc: &TlasBuildDesc) -> Result<AccelerationStructureBuildSizes> {
         let as_ext = self.acceleration_structure_khr.as_ref().ok_or_else(|| {
-            Error::Unsupported("VK_KHR_acceleration_structure is not enabled".into())
+            Error::Unsupported(
+                "VK_KHR_acceleration_structure is not enabled — \
+                 add \"acceleration_structure\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            )
         })?;
         if desc.mode == AccelerationStructureBuildMode::Compact {
             let src = desc.src.ok_or_else(|| {
@@ -1792,7 +1880,11 @@ impl Backend for VulkanBackend {
         desc: &RayTracingPipelineDesc,
     ) -> Result<()> {
         let rt_ext = self.ray_tracing_pipeline_khr.as_ref().ok_or_else(|| {
-            Error::Unsupported("VK_KHR_ray_tracing_pipeline is not enabled".into())
+            Error::Unsupported(
+                "VK_KHR_ray_tracing_pipeline is not enabled — \
+                 add \"ray_tracing_pipeline\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            )
         })?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut pipelines = self
@@ -1821,7 +1913,11 @@ impl Backend for VulkanBackend {
 
     fn shader_binding_table_properties(&self) -> Result<ShaderBindingTableProperties> {
         self.ray_tracing_sbt_properties
-            .ok_or_else(|| Error::Unsupported("VK_KHR_ray_tracing_pipeline is not enabled".into()))
+            .ok_or_else(|| Error::Unsupported(
+                "VK_KHR_ray_tracing_pipeline is not enabled — \
+                 add \"ray_tracing_pipeline\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            ))
     }
 
     fn ray_tracing_shader_group_handles(
@@ -1831,7 +1927,11 @@ impl Backend for VulkanBackend {
         group_count: u32,
     ) -> Result<Vec<u8>> {
         let rt_ext = self.ray_tracing_pipeline_khr.as_ref().ok_or_else(|| {
-            Error::Unsupported("VK_KHR_ray_tracing_pipeline is not enabled".into())
+            Error::Unsupported(
+                "VK_KHR_ray_tracing_pipeline is not enabled — \
+                 add \"ray_tracing_pipeline\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            )
         })?;
         let props = self.shader_binding_table_properties()?;
         let pipeline = self
@@ -2200,9 +2300,10 @@ impl Backend for VulkanBackend {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .pass_timings()
             .iter()
-            .map(|(name, gpu_ms)| crate::PassTimingReport {
+            .map(|(name, queue_type, gpu_ms)| crate::PassTimingReport {
                 name: name.clone(),
                 gpu_ms: *gpu_ms,
+                queue_type: *queue_type,
                 perf_counters: std::collections::HashMap::new(),
             })
             .collect()
@@ -2214,6 +2315,15 @@ impl Backend for VulkanBackend {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .last_submit_gpu_wait_ms()
+    }
+
+    fn frame_draw_dispatch_counts(&self) -> (u32, u32) {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let cmds = self
+            .commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (cmds.last_frame_draw_calls(), cmds.last_frame_dispatch_calls())
     }
 
     fn wait_submission(&self, token: SubmissionHandle) -> Result<()> {
@@ -2254,7 +2364,11 @@ impl Backend for VulkanBackend {
         desc: VideoSessionDesc,
     ) -> Result<()> {
         let video = self.video_queue_khr.as_ref().ok_or_else(|| {
-            Error::Unsupported("VK_KHR_video_queue is required for video sessions".into())
+            Error::Unsupported(
+                "video sessions require VK_KHR_video_queue — \
+                 add \"video_queue\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            )
         })?;
         if desc.width == 0 || desc.height == 0 {
             return Err(Error::InvalidInput(
@@ -2363,7 +2477,11 @@ impl Backend for VulkanBackend {
 
     fn destroy_video_session(&self, handle: VideoSessionHandle) -> Result<()> {
         let video = self.video_queue_khr.as_ref().ok_or_else(|| {
-            Error::Unsupported("VK_KHR_video_queue is required for video sessions".into())
+            Error::Unsupported(
+                "video sessions require VK_KHR_video_queue — \
+                 add \"video_queue\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            )
         })?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         if let Some(session) = self
@@ -2500,7 +2618,11 @@ impl Backend for VulkanBackend {
         let ext = self
             .optical_flow_nv_ext
             .as_ref()
-            .ok_or_else(|| Error::Unsupported("VK_NV_optical_flow is not available".into()))?;
+            .ok_or_else(|| Error::Unsupported(
+                "VK_NV_optical_flow is not available — \
+                 add \"optical_flow_nv\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            ))?;
         if desc.width == 0 || desc.height == 0 {
             return Err(Error::InvalidInput(
                 "optical flow session dimensions must be non-zero".into(),
@@ -2547,7 +2669,11 @@ impl Backend for VulkanBackend {
         let ext = self
             .optical_flow_nv_ext
             .as_ref()
-            .ok_or_else(|| Error::Unsupported("VK_NV_optical_flow is not available".into()))?;
+            .ok_or_else(|| Error::Unsupported(
+                "VK_NV_optical_flow is not available — \
+                 add \"optical_flow_nv\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            ))?;
         if let Some(session) = self
             .optical_flow_sessions
             .lock()
@@ -2577,7 +2703,11 @@ impl Backend for VulkanBackend {
         let ext = self
             .host_image_copy_ext
             .as_ref()
-            .ok_or_else(|| Error::Unsupported("VK_EXT_host_image_copy is not available".into()))?;
+            .ok_or_else(|| Error::Unsupported(
+                "VK_EXT_host_image_copy is not available — \
+                 add \"host_image_copy\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            ))?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let resources = self
             .resources
@@ -2620,7 +2750,11 @@ impl Backend for VulkanBackend {
         let ext = self
             .host_image_copy_ext
             .as_ref()
-            .ok_or_else(|| Error::Unsupported("VK_EXT_host_image_copy is not available".into()))?;
+            .ok_or_else(|| Error::Unsupported(
+                "VK_EXT_host_image_copy is not available — \
+                 add \"host_image_copy\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            ))?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let resources = self
             .resources
@@ -2810,7 +2944,11 @@ impl Backend for VulkanBackend {
         desc: crate::BufferDesc,
     ) -> Result<()> {
         let ext = self.external_memory_fd_khr.as_ref().ok_or_else(|| {
-            Error::Unsupported("exportable buffers require VK_KHR_external_memory_fd".into())
+            Error::Unsupported(
+                "exportable buffers require VK_KHR_external_memory_fd — \
+                 add \"external_memory_fd\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            )
         })?;
         let mut export_info = ash::vk::ExportMemoryAllocateInfo::default()
             .handle_types(ash::vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
@@ -2876,7 +3014,11 @@ impl Backend for VulkanBackend {
 
     fn create_exportable_image(&self, handle: ImageHandle, desc: crate::ImageDesc) -> Result<()> {
         self.external_memory_fd_khr.as_ref().ok_or_else(|| {
-            Error::Unsupported("exportable images require VK_KHR_external_memory_fd".into())
+            Error::Unsupported(
+                "exportable images require VK_KHR_external_memory_fd — \
+                 add \"external_memory_fd\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            )
         })?;
         let mut export_info = ash::vk::ExportMemoryAllocateInfo::default()
             .handle_types(ash::vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD);
@@ -2952,7 +3094,11 @@ impl Backend for VulkanBackend {
 
     fn export_buffer_fd(&self, handle: BufferHandle) -> Result<i32> {
         let ext = self.external_memory_fd_khr.as_ref().ok_or_else(|| {
-            Error::Unsupported("buffer fd export requires VK_KHR_external_memory_fd".into())
+            Error::Unsupported(
+                "buffer fd export requires VK_KHR_external_memory_fd — \
+                 add \"external_memory_fd\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            )
         })?;
         let memory = *self
             .exportable_buffer_memories
@@ -2971,7 +3117,11 @@ impl Backend for VulkanBackend {
 
     fn export_image_fd(&self, handle: ImageHandle) -> Result<i32> {
         let ext = self.external_memory_fd_khr.as_ref().ok_or_else(|| {
-            Error::Unsupported("image fd export requires VK_KHR_external_memory_fd".into())
+            Error::Unsupported(
+                "image fd export requires VK_KHR_external_memory_fd — \
+                 add \"external_memory_fd\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            )
         })?;
         let memory = *self
             .exportable_image_memories
@@ -2990,7 +3140,11 @@ impl Backend for VulkanBackend {
 
     fn create_exportable_semaphore(&self, handle: crate::SemaphoreHandle) -> Result<()> {
         self.external_semaphore_fd_khr.as_ref().ok_or_else(|| {
-            Error::Unsupported("exportable semaphores require VK_KHR_external_semaphore_fd".into())
+            Error::Unsupported(
+                "exportable semaphores require VK_KHR_external_semaphore_fd — \
+                 add \"external_semaphore_fd\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            )
         })?;
         let mut export_info = ash::vk::ExportSemaphoreCreateInfo::default()
             .handle_types(ash::vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
@@ -3009,7 +3163,11 @@ impl Backend for VulkanBackend {
 
     fn export_semaphore_fd(&self, handle: crate::SemaphoreHandle) -> Result<i32> {
         let ext = self.external_semaphore_fd_khr.as_ref().ok_or_else(|| {
-            Error::Unsupported("semaphore fd export requires VK_KHR_external_semaphore_fd".into())
+            Error::Unsupported(
+                "semaphore fd export requires VK_KHR_external_semaphore_fd — \
+                 add \"external_semaphore_fd\" to VulkanBackendConfig::optional_features"
+                    .into(),
+            )
         })?;
         let semaphore = *self
             .exportable_semaphores
@@ -3516,7 +3674,7 @@ fn query_blas_build_sizes(
         as_ext.get_acceleration_structure_build_sizes(
             vk::AccelerationStructureBuildTypeKHR::DEVICE,
             &build_info,
-            &primitive_counts,
+            Some(&primitive_counts),
             &mut sizes,
         )
     };
@@ -3553,7 +3711,7 @@ fn query_tlas_build_sizes(
         as_ext.get_acceleration_structure_build_sizes(
             vk::AccelerationStructureBuildTypeKHR::DEVICE,
             &build_info,
-            &primitive_counts,
+            Some(&primitive_counts),
             &mut sizes,
         )
     };

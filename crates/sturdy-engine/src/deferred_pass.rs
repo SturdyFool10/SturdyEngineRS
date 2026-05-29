@@ -36,8 +36,8 @@ use helpers::{engine_shader, extract_near_far};
 use crate::scene::CameraConstants;
 use crate::{
     Buffer, BufferDesc, BufferUsage, Engine, Error, Format, GraphImage, ImageDesc, ImageDimension,
-    ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind, RenderFrame, Result, ShaderDesc,
-    ShaderProgram, ShaderSource, ShaderStage,
+    ImageUsage, MeshProgram, MeshProgramDesc, MeshVertexKind, RenderFrame, RenderWorld, Result,
+    ShaderDesc, ShaderProgram, ShaderSource, ShaderStage,
     ao_pass::AoPass,
     environment_map::{EnvironmentMap, SPECULAR_LAYER_COUNT, compute_brdf_lut, compute_e_avg_lut},
     light_bvh::LightBvhBuilder,
@@ -110,6 +110,10 @@ pub struct DeferredPass {
     white_ao: crate::Image,
     /// Watches the engine shader files and drives hot-reload + cache invalidation.
     shader_watcher: crate::ShaderWatcher,
+    /// G-Buffer program using the render-world vertex shader (render_world_mesh_vertex_3d.slang).
+    /// Reads `render_world_visible_instances` / `current_matrices` instead of `instances`.
+    /// Lazily compiled on first call to `draw_gpu_driven`.
+    render_world_gbuffer_program: Option<MeshProgram>,
     /// Pending environment map being blended toward. `None` when not blending.
     blend_target: Option<EnvironmentMap>,
     /// Current blend alpha [0, 1]. 0 = fully current, 1 = fully target.
@@ -259,6 +263,7 @@ impl DeferredPass {
             sky: SkyConfig::default(),
             render_path: RenderPath::DeferredThenForward,
             shader_watcher,
+            render_world_gbuffer_program: None,
             blend_target: None,
             blend_alpha: 0.0,
             blend_step: 0.0,
@@ -372,6 +377,117 @@ impl DeferredPass {
         )
     }
 
+    /// GPU-driven variant of [`DeferredPass::draw`].
+    ///
+    /// When `scene.gpu_cull_active` is true (i.e. `scene.prepare_with_render_world`
+    /// was called this frame), this path:
+    /// 1. Dispatches transform-build, frustum-cull, and draw-generation compute passes.
+    /// 2. Fills the G-Buffer using one GPU indirect draw per persistent render bin
+    ///    instead of one per-batch CPU call.
+    ///
+    /// Falls back to the legacy path automatically when GPU culling is not active.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_gpu_driven(
+        &mut self,
+        scene: &mut Scene,
+        render_world: &RenderWorld,
+        view: Mat4,
+        proj: Mat4,
+        output: &GraphImage,
+        frame: &RenderFrame,
+        engine: &Engine,
+        time: f32,
+    ) -> Result<()> {
+        self.draw_gpu_driven_with_previous_view_proj(
+            scene,
+            render_world,
+            view,
+            proj,
+            proj * view,
+            output,
+            frame,
+            engine,
+            time,
+        )
+    }
+
+    /// GPU-driven variant of [`DeferredPass::draw_with_previous_view_proj`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_gpu_driven_with_previous_view_proj(
+        &mut self,
+        scene: &mut Scene,
+        render_world: &RenderWorld,
+        view: Mat4,
+        proj: Mat4,
+        previous_view_proj: Mat4,
+        output: &GraphImage,
+        frame: &RenderFrame,
+        engine: &Engine,
+        time: f32,
+    ) -> Result<()> {
+        // Lazily compile the render-world G-Buffer program the first time.
+        if self.render_world_gbuffer_program.is_none() && scene.gpu_cull_active() {
+            match MeshProgram::new(
+                engine,
+                MeshProgramDesc {
+                    fragment: ShaderDesc {
+                        source: ShaderSource::File(helpers::engine_shader(
+                            "gbuffer_fragment.slang",
+                        )),
+                        entry_point: "main".to_owned(),
+                        stage: ShaderStage::Fragment,
+                        requires_ray_query: false,
+                        requires_cooperative_matrix: false,
+                        uses_ser: false,
+                    },
+                    vertex: Some(ShaderDesc {
+                        source: ShaderSource::File(helpers::engine_shader(
+                            "render_world_mesh_vertex_3d.slang",
+                        )),
+                        entry_point: "main".to_owned(),
+                        stage: ShaderStage::Vertex,
+                        requires_ray_query: false,
+                        requires_cooperative_matrix: false,
+                        uses_ser: false,
+                    }),
+                    vertex_kind: MeshVertexKind::V3d,
+                    alpha_blend: false,
+                    uses_depth: true,
+                },
+            ) {
+                Ok(prog) => self.render_world_gbuffer_program = Some(prog),
+                Err(e) => {
+                    tracing::warn!(
+                        "render-world G-Buffer program compile failed, falling back to legacy: {e}"
+                    );
+                }
+            }
+        }
+
+        // If GPU-driven path is ready, dispatch compute passes before the G-buffer fill.
+        let use_gpu_driven = self.render_world_gbuffer_program.is_some() && scene.gpu_cull_active();
+        if use_gpu_driven {
+            scene.dispatch_render_world_gpu_passes(frame, render_world, proj * view)?;
+        }
+
+        let rw_for_gbuffer = if use_gpu_driven {
+            Some(render_world)
+        } else {
+            None
+        };
+        self.draw_impl(
+            scene,
+            rw_for_gbuffer,
+            view,
+            proj,
+            previous_view_proj,
+            output,
+            frame,
+            engine,
+            time,
+        )
+    }
+
     /// Same as [`DeferredPass::draw`] but also receives the previous frame's
     /// view-projection matrix.  The vertex shader uses this to compute
     /// per-vertex velocity for motion-vector and TAA passes.  Passing the
@@ -381,6 +497,22 @@ impl DeferredPass {
     pub fn draw_with_previous_view_proj(
         &mut self,
         scene: &mut Scene,
+        view: Mat4,
+        proj: Mat4,
+        previous_view_proj: Mat4,
+        output: &GraphImage,
+        frame: &RenderFrame,
+        engine: &Engine,
+        time: f32,
+    ) -> Result<()> {
+        self.draw_impl(scene, None, view, proj, previous_view_proj, output, frame, engine, time)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_impl(
+        &mut self,
+        scene: &mut Scene,
+        render_world: Option<&RenderWorld>,
         view: Mat4,
         proj: Mat4,
         previous_view_proj: Mat4,
@@ -469,7 +601,7 @@ impl DeferredPass {
         let view_proj = (proj * view).to_cols_array_2d();
         let constants = CameraConstants {
             view_proj,
-            previous_view_proj: view_proj,
+            previous_view_proj: previous_view_proj.to_cols_array_2d(),
             time,
             _pad: [0.0; 3],
         };
@@ -533,46 +665,61 @@ impl DeferredPass {
             }
 
             // Step C: draw each opaque batch into the G-Buffer.
-            for (mesh_idx, instance_buf_opt, instance_count) in scene.drawable_batches() {
-                let instance_buf = match instance_buf_opt {
-                    Some(b) => b,
-                    None => continue,
-                };
-                if instance_count == 0 {
-                    continue;
-                }
-                let mesh = scene.mesh_at(mesh_idx);
-
-                let mat_hash = scene
-                    .unified_material_at(mesh_idx)
-                    .map(|m| m.content_hash());
-                let program: &MeshProgram = match mat_hash {
-                    Some(h) => self
-                        .variant_cache
-                        .get(&h)
-                        .unwrap_or(&self.default_gbuffer_program),
-                    None => &self.default_gbuffer_program,
-                };
-
-                frame.bind_buffer("instances", instance_buf);
-                if let Some(mat_buf) = scene.material_gpu_buffer_at(mesh_idx) {
-                    frame.bind_buffer("material_desc", mat_buf);
-                }
-                let nmap: &crate::Image = scene
-                    .normal_map_at(mesh_idx)
-                    .map(|arc| arc.as_ref())
-                    .unwrap_or(&self.flat_normal_map);
-                frame.bind_image("normal_map", nmap);
-
-                primary.draw_mesh_instanced_mrt_with_push_constants_and_depth(
-                    additional,
-                    mesh,
-                    program,
-                    instance_buf,
-                    instance_count,
+            // GPU-driven path: one indirect draw per persistent bin using
+            // render-world visible-instances + current-matrices buffers.
+            // Legacy path: one instanced draw per CPU batch.
+            if let (Some(rw), Some(rw_prog)) = (render_world, &self.render_world_gbuffer_program) {
+                scene.draw_gbuffer_render_world_bins(
                     &constants,
-                    Some(&depth),
+                    color_targets,
+                    &depth,
+                    frame,
+                    rw,
+                    rw_prog,
+                    &self.flat_normal_map,
                 )?;
+            } else {
+                for (mesh_idx, instance_buf_opt, instance_count) in scene.drawable_batches() {
+                    let instance_buf = match instance_buf_opt {
+                        Some(b) => b,
+                        None => continue,
+                    };
+                    if instance_count == 0 {
+                        continue;
+                    }
+                    let mesh = scene.mesh_at(mesh_idx);
+
+                    let mat_hash = scene
+                        .unified_material_at(mesh_idx)
+                        .map(|m| m.content_hash());
+                    let program: &MeshProgram = match mat_hash {
+                        Some(h) => self
+                            .variant_cache
+                            .get(&h)
+                            .unwrap_or(&self.default_gbuffer_program),
+                        None => &self.default_gbuffer_program,
+                    };
+
+                    frame.bind_buffer("instances", instance_buf);
+                    if let Some(mat_buf) = scene.material_gpu_buffer_at(mesh_idx) {
+                        frame.bind_buffer("material_desc", mat_buf);
+                    }
+                    let nmap: &crate::Image = scene
+                        .normal_map_at(mesh_idx)
+                        .map(|arc| arc.as_ref())
+                        .unwrap_or(&self.flat_normal_map);
+                    frame.bind_image("normal_map", nmap);
+
+                    primary.draw_mesh_instanced_mrt_with_push_constants_and_depth(
+                        additional,
+                        mesh,
+                        program,
+                        instance_buf,
+                        instance_count,
+                        &constants,
+                        Some(&depth),
+                    )?;
+                }
             }
 
             // Register G-Buffer + depth for the lighting shader.

@@ -244,15 +244,16 @@ pub use resource_table::{
 };
 pub use runtime::{
     AppLayer, AppRuntime, AppRuntimeFrame, AssetDiagnostic, AssetState, AutoExposureDiagnostics,
-    DebugImageRegistry, DefaultSceneTargetConfig, FrameTimingReport, RuntimeApp,
-    RuntimeApplyNotification, RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult,
-    RuntimeController, RuntimeDiagnostics, RuntimeFixedUpdateContext, RuntimeGraphDiagnostics,
-    RuntimePassTiming, RuntimeSettingChange, RuntimeSettingDescriptor, RuntimeSettingEntry,
-    RuntimeSettingId, RuntimeSettingKey, RuntimeSettingOption, RuntimeSettingSource,
-    RuntimeSettingSupport, RuntimeSettingValue, RuntimeSettingsSnapshot,
-    RuntimeSettingsTransaction, RuntimeTimingSummary, RuntimeUserDiagnostic,
-    RuntimeWindowDiagnostics, RuntimeWorkloadDiagnostics, SceneRenderContext, ShaderCompileError,
-    UiContext, WindowMode,
+    BackendFeatureChange, BackendRestartOutcome, BenchmarkFrameSample, BenchmarkPassSample,
+    BenchmarkReport, DebugImageRegistry, DefaultSceneTargetConfig, FrameStats, FrameTimingReport,
+    RuntimeApp, RuntimeApplyNotification,
+    RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult, RuntimeController,
+    RuntimeDiagnostics, RuntimeFixedUpdateContext, RuntimeGraphDiagnostics, RuntimePassTiming,
+    RuntimeSettingChange, RuntimeSettingDescriptor, RuntimeSettingEntry, RuntimeSettingId,
+    RuntimeSettingKey, RuntimeSettingOption, RuntimeSettingSource, RuntimeSettingSupport,
+    RuntimeSettingValue, RuntimeSettingsSnapshot, RuntimeSettingsTransaction, RuntimeTimingSummary,
+    RuntimeUserDiagnostic, RuntimeWindowDiagnostics, RuntimeWorkloadDiagnostics, SceneRenderContext,
+    ShaderCompileError, UiContext, WindowMode,
 };
 pub use sampler_catalog::SamplerPreset;
 pub use scene::{
@@ -274,24 +275,34 @@ pub use sprite_batch::{Sprite, SpriteBatch, SpriteRenderer};
 #[allow(deprecated)]
 pub use srd_denoiser::{
     RealtimeRayTracingDenoiser, SRD_CLEAR_HISTORY_WORKGROUP_SIZE,
-    SRD_RADIANCE_SURFACE_MASK_TILE_SIZE, SRD_TEMPORAL_CONSTANTS_SIZE, SrdCapabilities,
-    SrdClearConstants, SrdCommonSettings, SrdConstantArena, SrdConstantRange, SrdDenoiser,
-    SrdDenoiserDesc, SrdDenoiserId, SrdDenoiserMode, SrdDenoiserSettings, SrdDepthConvention,
-    SrdDescriptorType, SrdDispatchDesc, SrdFamilySettings, SrdHistoryMode,
-    SrdHistoryRejectionSettings, SrdHistoryRing, SrdInstance, SrdInstanceDesc,
-    SrdMotionVectorConvention, SrdNormalPacking, SrdOcclusionSettings, SrdOutlierClampSettings,
-    SrdPassBuilder, SrdPipelineDesc, SrdPoolClass, SrdRadianceAccumulateConstants,
-    SrdRadianceAccumulateResources, SrdRadianceOutlierSuppressConstants,
-    SrdRadianceOutlierSuppressResources, SrdRadianceOutputResource,
-    SrdRadianceReconstructConstants, SrdRadianceReconstructResources,
-    SrdRadianceReprojectConstants, SrdRadianceReprojectResources, SrdRadianceSettings,
-    SrdRadianceStabilizerExecutor, SrdRadianceStabilizerInputs, SrdRadianceStabilizerPlan,
-    SrdRadianceStabilizerPrograms, SrdRadianceStabilizerResources, SrdRadianceSurfaceMaskConstants,
-    SrdRadianceSurfaceMaskResources, SrdReferenceSettings, SrdReferenceTemporalExecutor,
-    SrdReferenceTemporalPipelines, SrdReferenceTemporalPrograms, SrdResourceDesc,
-    SrdResourceFormatDesc, SrdResourceSlot, SrdShaderContract, SrdShadowSettings,
-    SrdSignalMomentsConstants, SrdSpectralLayout, SrdTemporalBindings, SrdTemporalConstants,
-    SrdTextureDesc, SrdVarianceSettings,
+    SRD_RADIANCE_SURFACE_MASK_TILE_SIZE, SRD_TEMPORAL_CONSTANTS_SIZE, SrdAtrousSettings,
+    SrdCapabilities, SrdClearConstants, SrdCommonSettings, SrdConstantArena, SrdConstantRange,
+    SrdDenoiser, SrdDenoiserDesc, SrdDenoiserId, SrdDenoiserMode, SrdDenoiserSettings,
+    SrdDepthConvention, SrdDescriptorType, SrdDispatchDesc, SrdFamilySettings,
+    SrdHistoryClampSettings, SrdHistoryMode, SrdHistoryRejectionSettings, SrdHistoryRing,
+    SrdHitDistanceSettings, SrdInstance, SrdInstanceDesc, SrdMotionVectorConvention,
+    SrdNormalPacking, SrdOcclusionPlan, SrdOcclusionSettings, SrdOcclusionStabilizerExecutor,
+    SrdOcclusionStabilizerInputs, SrdOcclusionStabilizerPrograms, SrdOutlierClampSettings,
+    SrdPassBuilder, SrdPipelineDesc, SrdPoolClass, SrdPostBlurSettings,
+    SrdRadianceAccumulateConstants, SrdRadianceAccumulateResources, SrdRadianceAtrousConstants,
+    SrdRadianceClampConstants, SrdRadianceCombinedPlan, SrdRadianceDiffuseSpecularPlan,
+    SrdRadianceOutlierSuppressConstants, SrdRadianceOutlierSuppressResources,
+    SrdRadianceOutputResource, SrdRadiancePostBlurConstants, SrdRadianceReconstructConstants,
+    SrdRadianceReconstructResources, SrdRadianceReprojectConstants, SrdRadianceReprojectResources,
+    SrdRadianceSettings, SrdRadianceSpatialFilterConstants, SrdRadianceStabilizerExecutor,
+    SrdRadianceStabilizerInputs, SrdRadianceStabilizerPlan, SrdRadianceStabilizerPrograms,
+    SrdRadianceStabilizerResources, SrdRadianceSurfaceMaskConstants, SrdRadianceSurfaceMaskResources,
+    SrdReferenceSettings, SrdReferenceTemporalComputeExecutor, SrdReferenceTemporalComputePrograms,
+    SrdReferenceTemporalExecutor, SrdReferenceTemporalPipelines, SrdReferenceTemporalPrograms,
+    SrdResourceDesc, SrdResourceFormatDesc, SrdResourceSlot, SrdShaderContract,
+    SrdShadowPlan, SrdShadowSettings, SrdShadowStabilizerExecutor, SrdShadowStabilizerInputs,
+    SrdShadowStabilizerPrograms, SrdSignalMomentsConstants, SrdSpatialFilterSettings,
+    SrdSpectralLayout, SrdSpectralRadiancePlan, SrdSpectralRadianceSettings,
+    SrdSpectralRadianceStabilizerExecutor, SrdSpectralRadianceStabilizerInputs,
+    SrdSpectralRadianceStabilizerPrograms, SrdTemporalBindings, SrdTemporalConstants,
+    SrdTextureDesc, SrdTranslucentShadowPlan, SrdTranslucentShadowSettings,
+    SrdTranslucentShadowStabilizerExecutor, SrdTranslucentShadowStabilizerInputs,
+    SrdTranslucentShadowStabilizerPrograms, SrdVarianceSettings,
 };
 pub use sturdy_engine_core::{PcFieldKind, PushConstantField};
 pub use text_draw::{
@@ -308,7 +319,7 @@ pub use bind_group::BindGroupBuilder;
 pub use bindless::BindlessHandle;
 pub use frontend_graph::{
     GraphImage, GraphImageCacheKey, GraphImageHistory, GraphImageHistoryFrame, GraphImageView,
-    RenderFrame, ShaderPassIntent,
+    RenderFrame, ShaderPassIntent, UniformBinding,
 };
 pub use glam::{Vec2, Vec3};
 pub use graph_report::{
@@ -335,11 +346,12 @@ pub use sturdy_engine_core::{
     DrawIndirectCountDesc, DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, Error,
     ErrorCategory, Extent3d, ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc,
     ExternalImageHandle, FilterMode, Format, FormatCapabilities, FrontFace, GpuCaptureDesc,
-    GpuCaptureTool, GpuMemoryBudget, GraphicsPipelineDesc, HdrMetadata, ImageBuilder,
+    GpuCaptureTool, GpuMemoryBudget, GpuTimeline, GraphicsPipelineDesc, HdrMetadata, ImageBuilder,
     ImageCompression, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse,
     IndexBufferBinding, IndexFormat, MemoryBudgetReport, MemoryHeapBudget, MetalRawCapabilities,
     MipmapMode, NativeHandleCapabilities, NativeHandleCapability, NativeHandleKind,
-    NativeHandleOwnership, PassDesc, PassWork, PolygonMode, PrimitiveTopology, PushConstants,
+    NativeHandleOwnership, PassDesc, PassTimingReport, PassWork, PerfCounterHandle, PolygonMode,
+    PrimitiveTopology, PushConstants, PushDescriptorBinding, PushDescriptorSetDesc,
     QueueType, RasterState, RayTracingPipelineDesc, RayTracingStageDesc, ResolveImageDesc,
     ResourceBinding, Result, RgState, RtShaderGroupDesc, RtShaderGroupKind, SamplerDesc,
     ShaderBindingTableDesc, ShaderDesc, ShaderParameterKind, ShaderParameterReflection,
@@ -353,8 +365,8 @@ pub use sturdy_engine_core::{
     spirv_words_from_bytes,
 };
 pub use sturdy_engine_core::{
-    AccelerationStructureHandle, DeviceDesc, DeviceFeature, ImageHandle, SamplerHandle,
-    SubmissionHandle, SurfaceHandle, SurfaceSize,
+    AccelerationStructureHandle, BackendFeature, DeviceDesc, DeviceFeature, ImageHandle,
+    SamplerHandle, SubmissionHandle, SurfaceHandle, SurfaceSize,
 };
 pub use sturdy_engine_macros::push_constants;
 pub use sturdy_engine_platform as platform;

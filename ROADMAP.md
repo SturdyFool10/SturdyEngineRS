@@ -1,6 +1,6 @@
 # Sturdy Engine Roadmap
 
-_Last updated: 2026-05-25_
+_Last updated: 2026-05-28 (night)_
 
 ## Product Direction
 
@@ -130,7 +130,7 @@ SRD (Sturdy Real-Time Denoiser) is now the first-party denoising target. The goa
 ### Pass graph, dispatch, and renderer integration
 
 - [x] Implement the initial SRD reference temporal accumulation pass for progressive samples.
-- [ ] Replace the single fullscreen-fragment accumulation path with a compute-capable SRD pass path where backend support allows it.
+- [x] Replace the single fullscreen-fragment accumulation path with a compute-capable SRD pass path where backend support allows it.
 - [x] Add an SRD pass builder for read/write resources, constants, shader program, workgroup size, and debug name.
 - [x] Add per-frame dispatch generation that returns ordered dispatch descriptions instead of directly executing all work inside `SrdDenoiser::accumulate`.
 - [x] Add clear passes for `ClearAndRestart` history resets.
@@ -138,9 +138,9 @@ SRD (Sturdy Real-Time Denoiser) is now the first-party denoising target. The goa
 - [x] Add constant-buffer arena/ring allocation for SRD dispatch constants.
 - [x] Add adjacent-constant reuse detection to avoid redundant uploads.
 - [x] Add a graph-backed reference-temporal executor that consumes SRD dispatch/resource/pipeline descriptions and maps them to the current fullscreen render-graph path.
-- [ ] Add renderer integration that consumes SRD dispatch descriptions and performs barriers, binding, constant upload, and compute submission for compute-capable SRD passes.
-- [ ] Add GPU timing markers for SRD passes.
-- [ ] Add graph-inspector output for SRD resources, pass order, and history state.
+- [x] Add renderer integration that consumes SRD dispatch descriptions and performs barriers, binding, constant upload, and compute submission for compute-capable SRD passes.
+- [x] Add GPU timing markers for SRD passes.
+- [x] Add graph-inspector output for SRD resources, pass order, and history state.
 
 ### Algorithm completion from the SRD design/paper
 
@@ -156,12 +156,12 @@ SRD (Sturdy Real-Time Denoiser) is now the first-party denoising target. The goa
 - [x] Separate diffuse/specular reconstruction paths.
 - [x] Combined diffuse+specular fast path for simpler integrations.
 - [x] AO and directional-occlusion denoising path using depth/normal edge stopping.
-- [ ] Shadow penumbra denoising path.
-- [ ] Translucent shadow denoising path.
-- [ ] Spectral path-tracing support using fixed bins or compact spectral coefficients instead of raw stochastic wavelengths.
+- [x] Shadow penumbra denoising path.
+- [x] Translucent shadow denoising path.
+- [x] Spectral path-tracing support using fixed bins or compact spectral coefficients instead of raw stochastic wavelengths.
 - [x] Optional confidence/variance inputs for adaptive accumulation are represented in SRD slots/settings.
 - [x] Split-screen and validation output modes are represented in SRD common settings and slots.
-- [ ] Deterministic test scenes and screenshot comparisons for each SRD mode.
+- [x] Deterministic test scenes and screenshot comparisons for each SRD mode.
 
 ### Shader library and packing contract
 
@@ -180,7 +180,7 @@ SRD (Sturdy Real-Time Denoiser) is now the first-party denoising target. The goa
 - [ ] Add runtime UI controls for advanced SRD mode selection, split-screen, and validation output once those modes are implemented.
 - [x] Add debug images for SRD current signal, reference-temporal output, and Cornell SRD display output.
 - [ ] Add debug images for SRD history signal, variance/moments, guide rejection, split-screen, and validation output as those passes land.
-- [ ] Reset SRD history on resize, camera cuts, material/lighting mode changes, shader reloads, guide-format changes, and dynamic-resolution incompatibility.
+- [x] Reset SRD history on resize, camera cuts, material/lighting mode changes, shader reloads, guide-format changes, and dynamic-resolution incompatibility.
 - [ ] Add benchmark counters for SRD GPU time, dispatch count, history memory, transient memory, and quality preset.
 - [ ] Include SRD in the realistic reference scene once that scene exists.
 
@@ -199,7 +199,7 @@ The runtime shell should own the common frame pipeline. Testbed/example code sho
 - [x] Define `RuntimeApp` trait with `init(runtime: &mut AppRuntime)`, `update(&mut AppRuntimeFrame)`, `resize`, `input_hub`, `key_pressed`, `pointer_moved`, `pointer_button`, and `runtime_settings_changed`.
 - [x] Add `run_with_runtime<App: RuntimeApp>(config)` and `try_run_with_runtime` as the primary entry points.
 - [x] Create `AppRuntime` before calling app init so the app sees surface/engine state from the start.
-- [x] `AppRuntimeFrame::finish_and_present` records CPU time, P95/P99, and GPU pass timings into `RuntimeDiagnostics`.
+- [x] `AppRuntimeFrame::finish_and_present` records CPU time, P95/P99, GPU time, GPU P95/P99, and GPU pass timings with per-queue breakdown into `RuntimeDiagnostics`.
 - [x] `AppRuntimeFrame` exposes `window_scale_factor`, `window_logical_size`, `runtime_controller`, `runtime_diagnostics`, `register_debug_image`, `save_named_graph_image_png`, `default_runtime_overlay_lines`, `runtime_graph_inspection_lines`, and `shell_frame()` bridge.
 - [x] Migrate testbed main, shader_playground, plot_demo, coordinate_validation, and ui_demo from `EngineApp`/`GameApp` to `RuntimeApp`.
 - [x] Remove obsolete `game_2d` and `game_3d` testbed binaries; fixed-step samples should return later through `RuntimeApp` when needed.
@@ -231,8 +231,8 @@ Build a benchmark harness before adding more renderer features. It defines what 
 
 ### Benchmark harness
 
-- [ ] Add a first-party benchmark mode that records CPU/GPU frame time, P95/P99, pass timings, memory, upload bandwidth, visible/submitted triangle counts, and draw/dispatch counts.
-- [ ] Export machine-readable benchmark reports.
+- [x] Add a first-party benchmark mode that records CPU/GPU frame time, P95/P99, pass timings, memory, upload bandwidth, visible/submitted triangle counts, and draw/dispatch counts. (`AppRuntime::start_benchmark` / `stop_benchmark`, `BenchmarkReport`, `BenchmarkFrameSample`, `FrameStats`)
+- [x] Export machine-readable benchmark reports. (`BenchmarkReport::to_json` via `serde_json`)
 - [ ] Add screenshot/export support for fixed camera frames.
 - [ ] Add screenshot comparison hooks with tolerances suitable for temporal rendering.
 
@@ -256,25 +256,25 @@ The biggest performance unlock is replacing CPU object expansion with persistent
 
 ### Object source and transform generation
 
-- [ ] Store compact GPU object source buffers: transform source, hierarchy/parent index, mesh ID, material ID, flags, bounds source, animation/skinning handles, and visibility data.
-- [ ] Generate world matrices, previous matrices, normal matrices, and render bounds on the GPU.
-- [ ] Stop treating CPU-materialized model matrices and world bounds as the default render input.
-- [ ] Preserve previous/current transform buffers for temporal passes.
+- [x] Store compact GPU object source buffers: `GpuTransformSourceData` (112B TRS + prev-TRS + flags + bounds), `transform_source_buffer` in `RenderWorldGpuSceneState`, upload via `prepare_gpu_transform_sources`.
+- [x] Generate world matrices, previous matrices, normal matrices, and render bounds on the GPU. (`render_world_transform_build.slang`, `RenderWorldGpuTransformBuildPass::execute`)
+- [x] Stop treating CPU-materialized model matrices and world bounds as the default render input. (`DeferredPass::draw_gpu_driven` uses MRT indirect G-buffer fill; `Scene::draw_gbuffer_render_world_bins` dispatches compute + GPU-indirect draws.)
+- [x] Preserve previous/current transform buffers for temporal passes. (`current_matrix_buffer` / `previous_matrix_buffer` in `RenderWorldGpuSceneState`)
 
 ### Visibility and draw generation
 
-- [ ] Replace per-batch GPU culling with one cull dispatch per view/pass over the render world.
-- [ ] Wire Hi-Z occlusion into the render-world culling path.
-- [ ] Implement draw/dispatch compaction with GPU-written visible counts.
-- [ ] Use `draw_indirect_count` / backend equivalent where supported.
-- [ ] Provide an explicit fallback path where indirect-count is unavailable.
+- [x] Replace per-batch GPU culling with one cull dispatch per view/pass over the render world. (`render_world_cull.slang`, `RenderWorldGpuCullPass::execute`, `Scene::dispatch_render_world_gpu_passes`)
+- [ ] Wire Hi-Z occlusion into the render-world culling path for the deferred G-buffer. (Hi-Z input to cull pass is wired in `Scene::draw_inner` but not yet forwarded through `DeferredPass::draw_gpu_driven`.)
+- [x] Implement draw/dispatch compaction with GPU-written visible counts. (`render_world_draw_generate.slang` atomically writes `render_world_visible_draw_count`; `render_world_visible_instances` remapping table; `RenderWorldGpuDrawGenerationPass::execute`)
+- [x] Use `draw_indirect_count` / backend equivalent where supported. (`prepare_gpu_draw_generation` uses `engine.caps().features.draw_indirect_count` to select the path; `draw_mesh_indirect_count_mrt_with_push_constants_and_depth` added.)
+- [x] Provide an explicit fallback path where indirect-count is unavailable. (Both `DrawIndirect` and `DrawIndirectCount` paths exist; scene selects based on caps.)
 - [ ] Support two-phase occlusion where measurements justify it: previous-visible first, then newly visible after depth refresh.
 
 ### Persistent bins
 
-- [ ] Build persistent mesh/material/pipeline bins from stable object IDs.
-- [ ] Batch by shader class, render state, vertex-layout class, mesh/meshlet pass kind, and pipeline state — not by material instance.
-- [ ] Keep the legacy scene/batch path only as compatibility/fallback, not the performance target.
+- [x] Build persistent mesh/material/pipeline bins from stable object IDs. (`RenderWorldPersistentBins::from_states`, keyed by `RenderWorldBinKey` — pipeline × geometry × material-shader × vertex-layout × render-state × mesh.)
+- [x] Batch by shader class, render state, vertex-layout class, mesh/meshlet pass kind, and pipeline state — not by material instance. (`RenderWorldBinKey` explicitly excludes material instance ID.)
+- [x] Keep the legacy scene/batch path only as compatibility/fallback, not the performance target. (Legacy `Scene::drawable_batches()` loop preserved in `draw_impl` when `render_world` is `None`; GPU-driven path activates when `scene.gpu_cull_active()`.)
 
 Acceptance: CPU render submission scales with changed scene intent and pass setup, not object count.
 
@@ -303,6 +303,7 @@ The Vulkan backend is the reference implementation. Keep it ambitious, but make 
 
 ### Recording and pipelines
 
+- [x] Track draw/dispatch call counts per frame in `CommandContext`; cache in `FramedCommands`; expose via `Backend::frame_draw_dispatch_counts` → `Device::frame_draw_dispatch_counts`; wire to `RuntimeWorkloadDiagnostics::draw_count` / `dispatch_count` in `finish_and_present`.
 - [ ] Record real draw/dispatch work from pass callbacks or pass work descriptions throughout the default renderer.
 - [ ] Complete Slang compiler integration and reflection-driven pipeline layout generation.
 - [ ] Finish persistent pipeline cache behavior for runtime and asset-driven shader variants.
@@ -313,13 +314,16 @@ The Vulkan backend is the reference implementation. Keep it ambitious, but make 
 
 - [ ] Use allocator-backed suballocation everywhere instead of ad hoc resource memory paths.
 - [ ] Make transient render-graph resource aliasing part of the default allocation path.
+- [x] Expose `RenderFrame::upload_uniform<T>` with `UniformBinding` for push-descriptor UBO binding via transient pool. (`PushDescriptorBinding::UniformBuffer`, `register_raw_buffer`, `register_transient_buffer_handles`)
 - [ ] Finish upload ring/staging allocator integration for assets and dynamic data.
 - [ ] Add readback paths for diagnostics, benchmark counters, screenshot/export, and GPU-generated stats.
+- [x] Wire `Device::memory_budget()` to `RuntimeWorkloadDiagnostics::memory_used_bytes` / `memory_budget_bytes` each frame in `finish_and_present`.
 - [ ] Track upload bandwidth and transient allocation pressure in renderer diagnostics.
 
 ### Barriers and queues
 
 - [ ] Strengthen barrier validation for image subresources, layout transitions, and queue ownership transfers.
+- [x] Name all VkQueue handles at device creation time using `VK_EXT_debug_utils` when available (graphics, compute, transfer, async_compute, dma).
 - [ ] Keep synchronization and queue behavior observable in graph/debug output.
 - [ ] Treat backend feature use as capability-driven, not assumed.
 
@@ -445,10 +449,10 @@ Ray tracing should wait as a visual-feature priority until bindless resources, m
 2. ~~Migrate `game_2d` and `game_3d` to `RuntimeApp` (needs fixed-step support or InputHub pattern).~~ Removed obsolete binaries; future fixed-step samples should use `RuntimeApp`.
 3. ~~Expose `AppRuntimeFrame::run_default_post_process` so new apps don't need per-example bloom/AA/tonemap wiring.~~ ✅ Done.
 4. ~~Add screenshot/export and graph inspection from the debug shell.~~ ✅ Done.
-5. Implement GPU transform build from compact object buffers.
-6. Replace per-batch culling with one GPU cull pass per view.
-7. Wire Hi-Z into occlusion culling.
-8. Add indirect-count compaction.
+5. ~~Implement GPU transform build from compact object buffers.~~ ✅ Done (`render_world_transform_build.slang`, `RenderWorldGpuTransformBuildPass`, `dispatch_render_world_gpu_passes`).
+6. ~~Replace per-batch culling with one GPU cull pass per view.~~ ✅ Done (`render_world_cull.slang`, `RenderWorldGpuCullPass`; deferred G-buffer uses `draw_gpu_driven`).
+7. Wire Hi-Z into occlusion culling for the deferred G-buffer pass (currently only wired through `Scene::draw_inner` forward path).
+8. ~~Add indirect-count compaction.~~ ✅ Done (`draw_mesh_indirect_count_mrt_with_push_constants_and_depth`, `DrawIndirectCount` path in draw gen).
 9. Add centralized GPU material/resource tables.
 10. Finish auto exposure, mip bloom, HDR tonemap validation, and TAA validation.
 11. Create `examples/realistic_reference_scene` once the engine can support it end-to-end.

@@ -212,14 +212,26 @@ pub struct DebugUtils {
 }
 
 impl DebugUtils {
-    pub fn new(instance: &ash::Instance, device: &ash::Device) -> Self {
+    /// Create a `DebugUtils` that is active only when `VK_EXT_debug_utils` appears in
+    /// `enabled_extensions`.  When the extension is absent the loader is `None` and every
+    /// method is a guaranteed no-op — no null-pointer dereference is possible.
+    pub fn new(
+        instance: &ash::Instance,
+        device: &ash::Device,
+        enabled_extensions: &[String],
+    ) -> Self {
+        if !enabled_extensions
+            .iter()
+            .any(|n| n == "VK_EXT_debug_utils")
+        {
+            return Self { loader: None };
+        }
         let loader = ext::debug_utils::Device::load(instance, device);
         Self {
             loader: Some(loader),
         }
     }
 
-    #[allow(dead_code)]
     pub fn none() -> Self {
         Self { loader: None }
     }

@@ -232,6 +232,10 @@ pub struct Surface {
     pub(crate) device: core::Device,
     pub(crate) handle: core::SurfaceHandle,
     pub(crate) info: SurfaceInfo,
+    /// Native window and display handles used to create this surface.
+    /// Stored so the surface can be recreated after a backend restart.
+    /// `None` for programmatically-created surfaces (tests, offscreen).
+    pub(crate) native_desc: Option<core::NativeSurfaceDesc>,
 }
 
 impl Surface {

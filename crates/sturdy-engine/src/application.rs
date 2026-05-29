@@ -151,12 +151,13 @@ use crate::{
     GamepadId, GraphImage, InputHub, KeyInput, KeyModifiers, MotionVectorDebugPass,
     NativeWindowAppearanceApplyReport, NativeWindowAppearanceStatus, Result as EngineResult,
     RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult, RuntimeController,
-    RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimeSettingChange, RuntimeSettingId,
-    RuntimeSettingKey, RuntimeWindowDiagnostics, ScreenshotCapture, ScreenshotExportReport,
-    ShaderProgram, Surface, SurfaceHdrPreference, SurfaceImage, SurfaceTransparency,
-    WindowAppearance, WindowAppearancePreset, WindowBackdrop, WindowCornerStyle, WindowHandle,
-    WindowMaterialKind, WindowMode, WindowRegistry, WindowTransparencyDesc,
-    appearance_wants_native_blur, apply_native_window_appearance_report_for_window,
+    RuntimeDiagnostics, RuntimeGraphDiagnostics, RuntimePassTiming, RuntimeSettingChange,
+    RuntimeSettingId, RuntimeSettingKey, RuntimeWindowDiagnostics, ScreenshotCapture,
+    ScreenshotExportReport, ShaderProgram, Surface, SurfaceHdrPreference, SurfaceImage,
+    SurfaceTransparency, WindowAppearance, WindowAppearancePreset, WindowBackdrop,
+    WindowCornerStyle, WindowHandle, WindowMaterialKind, WindowMode, WindowRegistry,
+    WindowTransparencyDesc, appearance_wants_native_blur,
+    apply_native_window_appearance_report_for_window,
 };
 
 #[cfg(target_os = "macos")]
@@ -760,7 +761,7 @@ impl<'a> ShellFrame<'a> {
                 },
             ),
             format!(
-                "timing: cpu={} gpu={} gpu-wait={} cpu-p95={} cpu-p99={}",
+                "timing: cpu={} gpu={} gpu-wait={} cpu-p95={} cpu-p99={} gpu-p95={} gpu-p99={}",
                 diagnostics
                     .timings
                     .cpu_frame_time_ms
@@ -786,7 +787,31 @@ impl<'a> ShellFrame<'a> {
                     .cpu_p99_ms
                     .map(|ms| format!("{ms:.2}ms"))
                     .unwrap_or_else(|| "n/a".to_string()),
+                diagnostics
+                    .timings
+                    .gpu_p95_ms
+                    .map(|ms| format!("{ms:.2}ms"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                diagnostics
+                    .timings
+                    .gpu_p99_ms
+                    .map(|ms| format!("{ms:.2}ms"))
+                    .unwrap_or_else(|| "n/a".to_string()),
             ),
+            {
+                let tl = diagnostics.timings.gpu_timeline.as_ref();
+                format!(
+                    "gpu-queues: gfx={} compute={} transfer={} async={}",
+                    tl.map(|t| format!("{:.2}ms", t.graphics_ms))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    tl.map(|t| format!("{:.2}ms", t.compute_ms))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    tl.map(|t| format!("{:.2}ms", t.transfer_ms))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    tl.map(|t| format!("{:.2}ms", t.async_compute_ms))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                )
+            },
             format!(
                 "workload: visible_tris={} submitted_tris={} draws={} dispatches={} memory={} upload={}",
                 diagnostics
@@ -897,6 +922,9 @@ impl<'a> ShellFrame<'a> {
             ),
             format!("debug images: {debug_images}"),
         ]
+        .into_iter()
+        .chain(pass_timing_overlay_lines(&diagnostics.timings.pass_timings))
+        .collect()
     }
 
     /// Return compact render-graph inspection lines for the frame recorded so far.
@@ -3223,7 +3251,25 @@ where
                 };
 
                 match outcome {
-                    FrameOutcome::Ok => {}
+                    FrameOutcome::Ok => {
+                        if self.runtime.backend_restart_pending() {
+                            match self.runtime.apply_pending_backend_restart() {
+                                Ok(restart_outcome) => {
+                                    if let Err(e) = self.app_state.on_backend_restarted(
+                                        &mut self.runtime,
+                                        &restart_outcome,
+                                    ) {
+                                        tracing::error!("on_backend_restarted failed: {e:?}");
+                                        std::process::exit(1);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("backend restart failed: {e:?}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                    }
                     FrameOutcome::RecreateSurface => {
                         if let Err(re) = self
                             .runtime
@@ -3270,6 +3316,66 @@ fn apply_window_runtime_settings_for_primary(
 ) {
     let Some(window) = window else { return };
     apply_window_runtime_settings(window, controller, changes);
+}
+
+/// Build per-pass GPU timing lines for the debug overlay.
+///
+/// Passes whose names contain `: ` are grouped by the prefix before the colon
+/// (e.g. all `"Bloom: *"` passes become one `"  bloom: Xms (N ops)"` line).
+/// Passes without a colon prefix are listed individually.
+/// Passes with no GPU time are omitted.
+fn pass_timing_overlay_lines(timings: &[RuntimePassTiming]) -> Vec<String> {
+    if timings.is_empty() {
+        return Vec::new();
+    }
+
+    use std::collections::BTreeMap;
+
+    // Collect groups and singletons in submission order. BTreeMap keeps keys sorted.
+    let mut groups: BTreeMap<String, (f32, usize)> = BTreeMap::new();
+    let mut singles: Vec<(String, f32)> = Vec::new();
+    let mut group_order: Vec<String> = Vec::new();
+
+    for t in timings {
+        let ms = match t.gpu_time_ms {
+            Some(v) if v > 0.0 => v,
+            _ => continue,
+        };
+        if let Some(colon) = t.name.find(": ") {
+            let prefix = t.name[..colon].to_string();
+            let entry = groups.entry(prefix.clone()).or_insert((0.0, 0));
+            if entry.1 == 0 {
+                group_order.push(prefix);
+            }
+            entry.0 += ms;
+            entry.1 += 1;
+        } else {
+            singles.push((t.name.clone(), ms));
+        }
+    }
+
+    if groups.is_empty() && singles.is_empty() {
+        return Vec::new();
+    }
+
+    let total: f32 = groups.values().map(|(ms, _)| ms).sum::<f32>()
+        + singles.iter().map(|(_, ms)| ms).sum::<f32>();
+
+    let mut lines = Vec::new();
+    lines.push(format!("passes: total={total:.2}ms"));
+
+    // Emit groups in first-seen order.
+    for key in &group_order {
+        if let Some((ms, count)) = groups.get(key) {
+            lines.push(format!("  {key}: {ms:.2}ms ({count} ops)"));
+        }
+    }
+    // Emit ungrouped passes.
+    for (name, ms) in &singles {
+        lines.push(format!("  {name}: {ms:.2}ms"));
+    }
+
+    lines
 }
 
 #[cfg(test)]

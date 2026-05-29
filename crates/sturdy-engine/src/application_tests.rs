@@ -1,7 +1,7 @@
 // Tests extracted from crates/sturdy-engine/src/application.rs
 // Runtime code should stay separate from test code.
 
-use crate::{RuntimeSettingValue, SurfacePresentMode};
+use crate::{RuntimePassTiming, RuntimeSettingValue, SurfacePresentMode};
 
 use super::*;
 
@@ -173,4 +173,61 @@ fn window_reconfigure_report_surfaces_native_appearance_degradation() {
             && reason.contains("status=degraded")
             && reason.contains("blur protocol unavailable")
     ));
+}
+
+fn pt(name: &str, ms: f32) -> RuntimePassTiming {
+    RuntimePassTiming { name: name.to_string(), gpu_time_ms: Some(ms) }
+}
+
+#[test]
+fn pass_timing_overlay_empty_when_no_timings() {
+    let lines = pass_timing_overlay_lines(&[]);
+    assert!(lines.is_empty());
+}
+
+#[test]
+fn pass_timing_overlay_groups_bloom_passes() {
+    let timings = vec![
+        pt("Bloom: bright", 0.05),
+        pt("Bloom: down/0", 0.10),
+        pt("Bloom: down/1", 0.08),
+        pt("Bloom: up/1", 0.09),
+        pt("Bloom: up/0", 0.11),
+        pt("Bloom: composite", 0.07),
+        pt("Deferred", 2.10),
+    ];
+    let lines = pass_timing_overlay_lines(&timings);
+    // Header line present
+    assert!(lines[0].starts_with("passes: total="));
+    // Bloom is grouped into one line
+    let bloom_line = lines.iter().find(|l| l.contains("Bloom:")).unwrap();
+    assert!(bloom_line.contains("6 ops"), "expected 6 ops, got: {bloom_line}");
+    // Deferred is individual
+    assert!(lines.iter().any(|l| l.contains("Deferred:")));
+    // No individual Bloom down/up lines
+    assert!(!lines.iter().any(|l| l.contains("down/")));
+}
+
+#[test]
+fn pass_timing_overlay_singles_listed_individually() {
+    let timings = vec![
+        pt("Shadow CSM 0", 0.15),
+        pt("Shadow CSM 1", 0.12),
+        pt("Deferred", 1.80),
+    ];
+    let lines = pass_timing_overlay_lines(&timings);
+    assert!(lines.iter().any(|l| l.contains("Shadow CSM 0:")));
+    assert!(lines.iter().any(|l| l.contains("Shadow CSM 1:")));
+    assert!(lines.iter().any(|l| l.contains("Deferred:")));
+}
+
+#[test]
+fn pass_timing_overlay_skips_zero_ms_passes() {
+    let timings = vec![
+        pt("Bloom: bright", 0.0),
+        pt("Deferred", 1.80),
+    ];
+    let lines = pass_timing_overlay_lines(&timings);
+    assert!(!lines.iter().any(|l| l.contains("Bloom")));
+    assert!(lines.iter().any(|l| l.contains("Deferred:")));
 }

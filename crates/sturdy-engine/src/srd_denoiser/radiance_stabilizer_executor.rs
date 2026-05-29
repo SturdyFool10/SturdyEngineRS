@@ -418,6 +418,12 @@ pub(super) fn srd_storage_binding_for_resource(
         ("srd_radiance_post_blur", SrdResourceSlot::ScratchPool) => Ok("srd_radiance_post_blur_out"),
         ("srd_occlusion_accumulate", SrdResourceSlot::HistoryPool) => Ok("srd_occlusion_history_write"),
         ("srd_occlusion_filter", SrdResourceSlot::ScratchPool) => Ok("srd_occlusion_out"),
+        ("srd_shadow_accumulate", SrdResourceSlot::HistoryPool) => Ok("srd_shadow_history_write"),
+        ("srd_shadow_filter", SrdResourceSlot::ScratchPool) => Ok("srd_shadow_out"),
+        ("srd_translucency_accumulate", SrdResourceSlot::HistoryPool) => Ok("srd_translucency_history_write"),
+        ("srd_translucency_filter", SrdResourceSlot::ScratchPool) => Ok("srd_translucency_out"),
+        ("srd_spectral_accumulate", SrdResourceSlot::HistoryPool) => Ok("srd_spectral_history_write"),
+        ("srd_spectral_filter", SrdResourceSlot::ScratchPool) => Ok("srd_spectral_out"),
         _ => Err(crate::Error::InvalidInput(format!(
             "SRD shader '{shader_label}' has no storage binding for {:?}",
             resource.slot
@@ -442,6 +448,9 @@ pub(super) fn srd_sampled_binding_for_resource(
         SrdResourceSlot::DiffuseRadianceInput => Ok("srd_radiance_input"),
         SrdResourceSlot::SpecularRadianceInput => Ok("srd_radiance_input"),
         SrdResourceSlot::OcclusionInput => Ok("srd_occlusion_input"),
+        SrdResourceSlot::PenumbraInput => Ok("srd_shadow_input"),
+        SrdResourceSlot::TranslucencyInput => Ok("srd_translucency_input"),
+        SrdResourceSlot::SpectralRadianceInput => Ok("srd_spectral_input"),
         SrdResourceSlot::ClampedRadianceInput => Ok("srd_radiance_accumulated"),
         SrdResourceSlot::HistoryPool => match shader_label {
             "srd_radiance_accumulate" => Ok("srd_radiance_history_read"),
@@ -449,6 +458,12 @@ pub(super) fn srd_sampled_binding_for_resource(
             "srd_radiance_reconstruct" => Ok("srd_radiance_accumulated"),
             "srd_occlusion_accumulate" => Ok("srd_occlusion_history_read"),
             "srd_occlusion_filter" => Ok("srd_occlusion_accumulated"),
+            "srd_shadow_accumulate" => Ok("srd_shadow_history_read"),
+            "srd_shadow_filter" => Ok("srd_shadow_accumulated"),
+            "srd_translucency_accumulate" => Ok("srd_translucency_history_read"),
+            "srd_translucency_filter" => Ok("srd_translucency_accumulated"),
+            "srd_spectral_accumulate" => Ok("srd_spectral_history_read"),
+            "srd_spectral_filter" => Ok("srd_spectral_accumulated"),
             _ => Err(crate::Error::InvalidInput(format!(
                 "SRD shader '{shader_label}' has no sampled history binding"
             ))),
@@ -470,6 +485,15 @@ pub(super) fn srd_sampled_binding_for_resource(
             ("srd_occlusion_accumulate", 1) => Ok("srd_occlusion_reproject"),
             ("srd_occlusion_accumulate", 2) => Ok("srd_radiance_surface_mask"),
             ("srd_occlusion_filter", 1) => Ok("srd_radiance_surface_mask"),
+            ("srd_shadow_accumulate", 1) => Ok("srd_shadow_reproject"),
+            ("srd_shadow_accumulate", 2) => Ok("srd_radiance_surface_mask"),
+            ("srd_shadow_filter", 1) => Ok("srd_radiance_surface_mask"),
+            ("srd_translucency_accumulate", 1) => Ok("srd_translucency_reproject"),
+            ("srd_translucency_accumulate", 2) => Ok("srd_radiance_surface_mask"),
+            ("srd_translucency_filter", 1) => Ok("srd_radiance_surface_mask"),
+            ("srd_spectral_accumulate", 1) => Ok("srd_spectral_reproject"),
+            ("srd_spectral_accumulate", 2) => Ok("srd_radiance_surface_mask"),
+            ("srd_spectral_filter", 1) => Ok("srd_radiance_surface_mask"),
             _ => Err(crate::Error::InvalidInput(format!(
                 "SRD shader '{shader_label}' has no sampled scratch binding for ordinal {scratch_texture_ordinal}"
             ))),

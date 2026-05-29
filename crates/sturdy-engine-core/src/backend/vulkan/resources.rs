@@ -923,6 +923,19 @@ impl ResourceRegistry {
             .ok_or(Error::InvalidHandle)
     }
 
+    /// Register an existing `vk::Buffer` as a `BufferHandle` without allocating memory.
+    ///
+    /// Used to expose the transient buffer pool to the descriptor system. The buffer's
+    /// lifetime must exceed the handle's use; destroy is NOT called on this entry
+    /// because `imported = true` skips cleanup in `destroy_buffer`.
+    pub fn register_raw_buffer(&mut self, handle: BufferHandle, buffer: vk::Buffer) {
+        self.buffers.insert(handle, VulkanBuffer {
+            buffer,
+            allocation: None,
+            imported: true,
+        });
+    }
+
     pub fn sampler(&self, handle: SamplerHandle) -> Result<vk::Sampler> {
         self.samplers
             .get(&handle)

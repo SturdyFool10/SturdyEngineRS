@@ -124,6 +124,33 @@ pub struct SrdRadiancePostBlurResources {
     pub pipeline: usize,
 }
 
+/// Per-instance handles for the shadow temporal accumulate pass.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdShadowAccumulateResources {
+    pub history_ring_index: usize,
+    pub pipeline: usize,
+}
+
+/// Per-instance handles for the shadow spatial filter pass.
+///
+/// `scratch_index` names a full-resolution RGBA16F scratch texture that holds
+/// the spatially-filtered shadow output.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdShadowFilterResources {
+    pub scratch_index: u16,
+    pub pipeline: usize,
+}
+
+/// All shadow stabilizer pipelines and SRD-owned resources for one denoiser.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdShadowResources {
+    pub clear_pipeline: usize,
+    pub surface_mask: SrdRadianceSurfaceMaskResources,
+    pub reproject: SrdRadianceReprojectResources,
+    pub accumulate: SrdShadowAccumulateResources,
+    pub filter: SrdShadowFilterResources,
+}
+
 /// Per-instance handles for the occlusion temporal accumulate pass.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct SrdOcclusionAccumulateResources {
@@ -149,6 +176,60 @@ pub struct SrdOcclusionResources {
     pub reproject: SrdRadianceReprojectResources,
     pub accumulate: SrdOcclusionAccumulateResources,
     pub filter: SrdOcclusionFilterResources,
+}
+
+/// Per-instance handles for the spectral radiance temporal accumulate pass.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdSpectralAccumulateResources {
+    pub history_ring_index: usize,
+    pub pipeline: usize,
+}
+
+/// Per-instance handles for the spectral radiance spatial filter pass.
+///
+/// `scratch_index` names a full-resolution RGBA16F scratch texture that holds
+/// the spatially-filtered spectral radiance output.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdSpectralFilterResources {
+    pub scratch_index: u16,
+    pub pipeline: usize,
+}
+
+/// All spectral radiance stabilizer pipelines and SRD-owned resources for one denoiser.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdSpectralResources {
+    pub clear_pipeline: usize,
+    pub surface_mask: SrdRadianceSurfaceMaskResources,
+    pub reproject: SrdRadianceReprojectResources,
+    pub accumulate: SrdSpectralAccumulateResources,
+    pub filter: SrdSpectralFilterResources,
+}
+
+/// Per-instance handles for the translucent-shadow temporal accumulate pass.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdTranslucentShadowAccumulateResources {
+    pub history_ring_index: usize,
+    pub pipeline: usize,
+}
+
+/// Per-instance handles for the translucent-shadow spatial filter pass.
+///
+/// `scratch_index` names a full-resolution RGBA16F scratch texture that holds
+/// the spatially-filtered translucent-shadow output.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdTranslucentShadowFilterResources {
+    pub scratch_index: u16,
+    pub pipeline: usize,
+}
+
+/// All translucent-shadow stabilizer pipelines and SRD-owned resources for one denoiser.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrdTranslucentShadowResources {
+    pub clear_pipeline: usize,
+    pub surface_mask: SrdRadianceSurfaceMaskResources,
+    pub reproject: SrdRadianceReprojectResources,
+    pub accumulate: SrdTranslucentShadowAccumulateResources,
+    pub filter: SrdTranslucentShadowFilterResources,
 }
 
 /// Per-instance handles returned by `SrdInstance::prepare_radiance_combined`.

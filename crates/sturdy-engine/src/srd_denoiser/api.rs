@@ -35,6 +35,10 @@ pub struct SrdDenoiser {
     history: GraphImageHistory,
     settings: SrdDenoiserSettings,
     bindings: SrdTemporalBindings,
+    /// Extent of the last input image passed to `accumulate*`. When it changes
+    /// the history is automatically invalidated, covering the resize and
+    /// dynamic-resolution-incompatibility cases.
+    last_input_extent: Option<[u32; 2]>,
 }
 
 impl SrdDenoiser {
@@ -47,6 +51,7 @@ impl SrdDenoiser {
             history: GraphImageHistory::new(),
             settings: settings.normalized(),
             bindings: SrdTemporalBindings::default(),
+            last_input_extent: None,
         }
     }
 
@@ -64,6 +69,23 @@ impl SrdDenoiser {
 
     pub fn reset(&mut self) {
         self.history.reset();
+        self.last_input_extent = None;
+    }
+
+    /// Reset history if the input image extent changed since the last frame.
+    ///
+    /// Call this before each `accumulate*` when the input may have been resized
+    /// without an explicit `reset()`. Returns `true` if a reset was performed.
+    pub fn reset_if_extent_changed(&mut self, input: &GraphImage) -> bool {
+        let e = input.desc().extent;
+        let extent = [e.width, e.height];
+        if self.last_input_extent.is_some_and(|prev| prev != extent) {
+            self.history.reset();
+            self.last_input_extent = Some(extent);
+            return true;
+        }
+        self.last_input_extent = Some(extent);
+        false
     }
 
     pub fn next_frame_index(&mut self, frame: &RenderFrame, input_desc: ImageDesc) -> u32 {
@@ -96,11 +118,29 @@ impl SrdDenoiser {
         output_name: &str,
         programs: SrdReferenceTemporalPrograms<'_>,
     ) -> Result<GraphImage> {
+        self.reset_if_extent_changed(input);
         super::reference_temporal_executor::SrdReferenceTemporalExecutor::new(
             programs,
             self.bindings,
         )
         .execute(frame, input, output_name, &mut self.history, self.settings)
+    }
+
+    /// Execute SRD reference temporal accumulation via a compute dispatch.
+    ///
+    /// Requires compute support (`SrdCapabilities::compute`). Replaces the
+    /// fullscreen-fragment path; the compute path dispatches 8×8×1 thread groups
+    /// and uses storage-image writes rather than render-target output.
+    pub fn accumulate_with_compute_programs(
+        &mut self,
+        frame: &RenderFrame,
+        input: &GraphImage,
+        output_name: &str,
+        programs: &super::reference_temporal_executor::SrdReferenceTemporalComputePrograms,
+    ) -> Result<GraphImage> {
+        self.reset_if_extent_changed(input);
+        super::reference_temporal_executor::SrdReferenceTemporalComputeExecutor::new(programs)
+            .execute(frame, input, output_name, &mut self.history, self.settings)
     }
 }
 
@@ -408,10 +448,16 @@ impl SrdInstance {
     ) -> Result<SrdRadianceSurfaceMaskResources> {
         if !matches!(
             self.mode_for_id(denoiser_id),
-            Some(SrdDenoiserMode::RadianceStabilizer | SrdDenoiserMode::OcclusionStabilizer)
+            Some(
+                SrdDenoiserMode::RadianceStabilizer
+                    | SrdDenoiserMode::OcclusionStabilizer
+                    | SrdDenoiserMode::ShadowStabilizer
+                    | SrdDenoiserMode::TranslucentShadowStabilizer
+                    | SrdDenoiserMode::SpectralRadianceStabilizer
+            )
         ) {
             return Err(Error::InvalidInput(format!(
-                "SRD denoiser id {} is not a RadianceStabilizer or OcclusionStabilizer denoiser",
+                "SRD denoiser id {} does not support surface mask or reproject passes",
                 denoiser_id.get()
             )));
         }
@@ -447,10 +493,16 @@ impl SrdInstance {
     ) -> Result<SrdRadianceReprojectResources> {
         if !matches!(
             self.mode_for_id(denoiser_id),
-            Some(SrdDenoiserMode::RadianceStabilizer | SrdDenoiserMode::OcclusionStabilizer)
+            Some(
+                SrdDenoiserMode::RadianceStabilizer
+                    | SrdDenoiserMode::OcclusionStabilizer
+                    | SrdDenoiserMode::ShadowStabilizer
+                    | SrdDenoiserMode::TranslucentShadowStabilizer
+                    | SrdDenoiserMode::SpectralRadianceStabilizer
+            )
         ) {
             return Err(Error::InvalidInput(format!(
-                "SRD denoiser id {} is not a RadianceStabilizer or OcclusionStabilizer denoiser",
+                "SRD denoiser id {} does not support surface mask or reproject passes",
                 denoiser_id.get()
             )));
         }
@@ -478,10 +530,16 @@ impl SrdInstance {
     ) -> Result<&[SrdDispatchDesc]> {
         if !matches!(
             self.mode_for_id(denoiser_id),
-            Some(SrdDenoiserMode::RadianceStabilizer | SrdDenoiserMode::OcclusionStabilizer)
+            Some(
+                SrdDenoiserMode::RadianceStabilizer
+                    | SrdDenoiserMode::OcclusionStabilizer
+                    | SrdDenoiserMode::ShadowStabilizer
+                    | SrdDenoiserMode::TranslucentShadowStabilizer
+                    | SrdDenoiserMode::SpectralRadianceStabilizer
+            )
         ) {
             return Err(Error::InvalidInput(format!(
-                "SRD denoiser id {} is not a RadianceStabilizer or OcclusionStabilizer denoiser",
+                "SRD denoiser id {} does not support surface mask or reproject passes",
                 denoiser_id.get()
             )));
         }
@@ -1042,10 +1100,16 @@ impl SrdInstance {
     ) -> Result<&[SrdDispatchDesc]> {
         if !matches!(
             self.mode_for_id(denoiser_id),
-            Some(SrdDenoiserMode::RadianceStabilizer | SrdDenoiserMode::OcclusionStabilizer)
+            Some(
+                SrdDenoiserMode::RadianceStabilizer
+                    | SrdDenoiserMode::OcclusionStabilizer
+                    | SrdDenoiserMode::ShadowStabilizer
+                    | SrdDenoiserMode::TranslucentShadowStabilizer
+                    | SrdDenoiserMode::SpectralRadianceStabilizer
+            )
         ) {
             return Err(Error::InvalidInput(format!(
-                "SRD denoiser id {} is not a RadianceStabilizer or OcclusionStabilizer denoiser",
+                "SRD denoiser id {} does not support surface mask or reproject passes",
                 denoiser_id.get()
             )));
         }
@@ -1665,5 +1729,87 @@ impl SrdInstance {
             pushed += 1;
         }
         Ok(pushed)
+    }
+
+    // ─── Graph inspector ──────────────────────────────────────────────────────
+
+    /// Return compact inspection lines describing planned passes, resource pools,
+    /// and history ring state. Suitable for in-app debug overlays.
+    ///
+    /// Call after a `plan_*_passes` method to capture the current frame plan.
+    pub fn inspection_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "srd: {} denoiser(s), {} dispatches, {} history textures, {} scratch textures, {} ring(s)",
+            self.desc.denoisers.len(),
+            self.dispatches.len(),
+            self.history_pool.len(),
+            self.scratch_pool.len(),
+            self.history_rings.len(),
+        ));
+        for desc in &self.desc.denoisers {
+            let mode_name = format!("{:?}", desc.mode);
+            let ring = self.history_rings.iter().find(|r| r.denoiser_id == desc.id);
+            if let Some(ring) = ring {
+                lines.push(format!(
+                    "  denoiser[{}] {}  ring=\"{}\" write={} read={}",
+                    desc.id.get(),
+                    mode_name,
+                    ring.label,
+                    ring.write_index,
+                    ring.read_index,
+                ));
+            } else {
+                lines.push(format!(
+                    "  denoiser[{}] {}  (no ring)",
+                    desc.id.get(),
+                    mode_name,
+                ));
+            }
+        }
+        for (i, dispatch) in self.dispatches.iter().enumerate() {
+            let pipeline = self.pipelines.get(dispatch.pipeline_index);
+            let shader_label = pipeline.map(|p| p.shader_label.as_str()).unwrap_or("?");
+            let consts = dispatch.constants_range
+                .map(|r| format!("  {}B consts", r.size))
+                .unwrap_or_default();
+            lines.push(format!(
+                "  pass[{i:02}] \"{}\"  shader={shader_label}  grid=[{},{},{}]{consts}",
+                dispatch.name,
+                dispatch.grid_size[0],
+                dispatch.grid_size[1],
+                dispatch.grid_size[2],
+            ));
+        }
+        for (i, texture) in self.history_pool.iter().enumerate() {
+            let ring_role = self.history_rings.iter().find_map(|r| {
+                if r.write_index as usize == i {
+                    Some("write")
+                } else if r.read_index as usize == i {
+                    Some("read")
+                } else {
+                    None
+                }
+            }).unwrap_or("-");
+            let ext = &self.common_settings;
+            let factor = texture.downsample_factor.max(1);
+            let w = ext.rect_size.x.div_ceil(factor).max(1);
+            let h = ext.rect_size.y.div_ceil(factor).max(1);
+            lines.push(format!(
+                "  history[{i}] \"{}\"  {w}x{h} {:?}  ({})",
+                texture.name, texture.format, ring_role,
+            ));
+        }
+        for (i, texture) in self.scratch_pool.iter().enumerate() {
+            let factor = texture.downsample_factor.max(1);
+            let ext = &self.common_settings;
+            let w = ext.rect_size.x.div_ceil(factor).max(1);
+            let h = ext.rect_size.y.div_ceil(factor).max(1);
+            lines.push(format!(
+                "  scratch[{i}] \"{}\"  {w}x{h} {:?}",
+                texture.name, texture.format,
+            ));
+        }
+        lines
     }
 }

@@ -185,6 +185,13 @@ impl Scene {
             .collect()
     }
 
+    /// Returns `true` when GPU-driven culling and draw-generation are active for
+    /// this scene, meaning [`draw_gbuffer_render_world_bins`] will use the GPU
+    /// indirect path instead of falling back to the legacy batch draw.
+    pub fn gpu_cull_active(&self) -> bool {
+        self.gpu_cull_active
+    }
+
     fn render_world_draw_programs_ready(&self) -> bool {
         !self.gpu_draw_bins.is_empty()
             && self.gpu_draw_bins.bins.iter().all(|bin| {
@@ -831,6 +838,110 @@ impl Scene {
             )?;
         }
         Ok(())
+    }
+
+    /// Dispatch the render-world GPU compute passes without performing any draw calls.
+    ///
+    /// Runs transform-build, frustum cull, and draw-generation compute shaders so
+    /// their outputs (current_matrices, visibility flags, indirect commands) are ready
+    /// for the subsequent [`draw_gbuffer_render_world_bins`] call.
+    ///
+    /// Must be called after [`Scene::prepare_with_render_world`] and before
+    /// [`draw_gbuffer_render_world_bins`] each frame.  No-ops when the required
+    /// passes are not yet initialised or when `gpu_cull_active` is false.
+    pub fn dispatch_render_world_gpu_passes(
+        &self,
+        frame: &RenderFrame,
+        render_world: &RenderWorld,
+        view_proj: glam::Mat4,
+    ) -> Result<()> {
+        if !self.gpu_cull_active {
+            return Ok(());
+        }
+        if let Some(build_pass) = &self.transform_build_pass {
+            build_pass.execute(frame, render_world)?;
+        }
+        if let Some(cull_pass) = &self.cull_pass {
+            cull_pass.execute(frame, render_world, view_proj, None)?;
+        }
+        if let Some(draw_gen) = &self.draw_generation_pass {
+            draw_gen.execute(frame, render_world)?;
+        }
+        Ok(())
+    }
+
+    /// Draw the G-Buffer using GPU-generated indirect draw commands from the render world.
+    ///
+    /// Call after [`dispatch_render_world_gpu_passes`].  For each persistent bin
+    /// issues one indirect draw into the G-Buffer MRT targets using the
+    /// `gbuffer_rw_program` (which must have a vertex shader that reads
+    /// `render_world_visible_instances` and `current_matrices`).
+    ///
+    /// Returns immediately when `gpu_cull_active` is false.
+    pub fn draw_gbuffer_render_world_bins(
+        &self,
+        constants: &CameraConstants,
+        color_targets: &[&GraphImage],
+        depth: &GraphImage,
+        frame: &RenderFrame,
+        render_world: &RenderWorld,
+        gbuffer_rw_program: &MeshProgram,
+        default_normal_map: &crate::Image,
+    ) -> Result<()> {
+        if !self.gpu_cull_active {
+            return Ok(());
+        }
+        assert!(
+            !color_targets.is_empty(),
+            "draw_gbuffer_render_world_bins requires at least one color target"
+        );
+        let primary = color_targets[0];
+        let additional = &color_targets[1..];
+
+        render_world.with_gpu_draw_output(|draw_output| -> Result<()> {
+            let Some(draw_output) = draw_output else {
+                return Ok(());
+            };
+            frame.bind_buffer(
+                "render_world_visible_instances",
+                draw_output.visible_instances,
+            );
+            frame.bind_buffer("current_matrices", draw_output.current_matrices);
+
+            const INDIRECT_STRIDE: u64 =
+                std::mem::size_of::<crate::DrawIndexedIndirectCommand>() as u64;
+
+            for (bin_index, bin) in self.gpu_draw_bins.bins.iter().enumerate() {
+                let mesh_idx = bin.key.mesh.index();
+                let Some((mesh, _)) = self.meshes.get(mesh_idx) else {
+                    continue;
+                };
+                if let Some(mat) = self.materials.get(mesh_idx) {
+                    if let Some(mat_buf) = &mat.gpu_buffer {
+                        frame.bind_buffer("material_desc", mat_buf);
+                    }
+                    let nmap: &crate::Image = mat
+                        .normal_map
+                        .as_ref()
+                        .map(|arc| arc.as_ref())
+                        .unwrap_or(default_normal_map);
+                    frame.bind_image("normal_map", nmap);
+                } else {
+                    frame.bind_image("normal_map", default_normal_map);
+                }
+                primary.draw_mesh_indirect_mrt_with_push_constants_and_depth(
+                    additional,
+                    mesh,
+                    gbuffer_rw_program,
+                    draw_output.indirect_commands,
+                    bin_index as u64 * INDIRECT_STRIDE,
+                    1,
+                    constants,
+                    Some(depth),
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// Draw all offscreen cameras into the render frame using the classic vertex path.

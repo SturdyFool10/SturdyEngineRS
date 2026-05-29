@@ -10,6 +10,7 @@ pub mod adapter_info;
 pub mod adapter_kind;
 pub mod adapter_selection;
 pub mod backend;
+pub mod backend_feature;
 pub mod backend_features;
 pub mod binding;
 pub mod buffer;
@@ -46,6 +47,7 @@ pub use adapter_info::AdapterInfo;
 pub use adapter_kind::AdapterKind;
 pub use adapter_selection::AdapterSelection;
 pub use backend::{Backend, BackendKind, auto_backend_preference_order, available_backend_kinds};
+pub use backend_feature::BackendFeature;
 pub use backend_features::BackendFeatures;
 pub use binding::{
     BINDLESS_COUNT, BindGroupDesc, BindGroupEntry, BindingKind, CanonicalBinding,

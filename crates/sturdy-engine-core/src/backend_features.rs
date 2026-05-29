@@ -72,6 +72,8 @@ pub struct BackendFeatures {
     /// VK_EXT_host_image_copy (or Vulkan 1.4 core) — CPU→GPU image uploads
     /// without a staging buffer or explicit transfer command.
     pub host_image_copy: bool,
+    /// VkPhysicalDeviceFeatures::samplerAnisotropy — anisotropic filtering.
+    pub sampler_anisotropy: bool,
     /// VK_KHR_push_descriptor — inline descriptor updates pushed directly into
     /// a command buffer without a descriptor pool.
     pub push_descriptors: bool,
@@ -302,5 +304,91 @@ impl BackendFeatures {
     /// through a count buffer.
     pub fn supports_gpu_draw_compaction(&self) -> bool {
         self.multi_draw_indirect && self.draw_indirect_count
+    }
+
+    /// All [`BackendFeature`] variants that are currently enabled on this device.
+    ///
+    /// Iterates every known variant and includes it when the corresponding
+    /// flag is `true`.  Use this to display a feature list, drive UI toggles,
+    /// or compare feature sets across devices.
+    pub fn enabled_features(&self) -> Vec<crate::BackendFeature> {
+        crate::BackendFeature::ALL
+            .iter()
+            .copied()
+            .filter(|f| self.has(*f))
+            .collect()
+    }
+
+    /// Returns `true` when the given [`BackendFeature`] variant is active.
+    pub fn has(&self, feature: crate::BackendFeature) -> bool {
+        use crate::BackendFeature as F;
+        match feature {
+            F::RayTracing => self.ray_tracing,
+            F::AccelerationStructure => self.ray_tracing, // AS is required for RT
+            F::RayQuery => self.ray_query,
+            F::RayTracingPositionFetch => self.ray_tracing_position_fetch,
+            F::RayTracingMaintenance1 => self.ray_tracing_maintenance1,
+            F::ClusterAccelerationStructure => self.cluster_acceleration_structure,
+            F::MeshShader => self.mesh_shading,
+            F::TaskShader => self.mesh_shading, // task implies mesh
+            F::PipelineFragmentShadingRate => self.vrs_pipeline,
+            F::PrimitiveFragmentShadingRate => self.vrs_primitive,
+            F::AttachmentFragmentShadingRate => self.vrs_attachment,
+            F::BindlessResources => self.bindless,
+            F::PushDescriptor => self.push_descriptors,
+            F::DescriptorBuffer => self.descriptor_buffer,
+            F::DescriptorHeap => self.descriptor_heap,
+            F::TimelineSemaphore => self.timeline_semaphores,
+            F::Synchronization2 => self.synchronization2,
+            F::DynamicRendering => self.dynamic_rendering,
+            F::BufferDeviceAddress => self.buffer_device_address,
+            F::MemoryBudget => self.memory_budget,
+            F::MemoryPriority => self.memory_priority,
+            F::PageableDeviceLocalMemory => self.pageable_device_local_memory,
+            F::HostImageCopy => self.host_image_copy,
+            F::ConditionalRendering => self.conditional_rendering,
+            F::ShaderObject => self.shader_object,
+            F::DeviceGeneratedCommandsNv => self.device_generated_commands_nv,
+            F::DeviceGeneratedCommands => self.device_generated_commands,
+            F::GraphicsPipelineLibrary => self.graphics_pipeline_library,
+            F::ExtendedDynamicState3 => self.extended_dynamic_state3,
+            F::VertexInputDynamicState => self.vertex_input_dynamic_state,
+            F::SamplerAnisotropy => self.sampler_anisotropy,
+            F::SamplerFilterMinmax => self.sampler_filter_minmax,
+            F::CustomBorderColor => self.custom_border_color,
+            F::FilterCubic => self.filter_cubic,
+            F::ImageViewMinLod => self.image_view_min_lod,
+            F::ImageCompressionControl => self.image_compression_control,
+            F::MsaaRenderToSingleSampled => self.msaa_render_to_single_sampled,
+            F::ConservativeRasterization => self.supports_conservative_rasterization(),
+            F::GlobalQueuePriority => self.global_queue_priority,
+            F::DeviceFault => self.device_fault,
+            F::DeviceDiagnosticCheckpointsNv => self.device_diagnostic_checkpoints_nv,
+            F::BufferMarkerAmd => self.buffer_marker_amd,
+            F::DeviceAddressBindingReport => self.device_address_binding_report,
+            F::DeviceMemoryReport => self.device_memory_report,
+            F::PerformanceQuery => self.performance_query,
+            F::PipelineExecutableProperties => self.pipeline_executable_properties,
+            F::Reflex => self.reflex,
+            F::AntiLag => self.anti_lag,
+            F::FragmentShaderBarycentric => self.fragment_shader_barycentric,
+            F::FragmentShaderInterlock => self.fragment_shader_interlock,
+            F::ShaderAtomicFloat => self.shader_atomic_float,
+            F::ComputeShaderDerivatives => self.compute_shader_derivatives,
+            F::ShaderClock => self.shader_clock,
+            F::WorkGraphs => self.work_graphs,
+            F::CooperativeMatrix => self.cooperative_matrix,
+            F::OpticalFlowNv => self.optical_flow_nv,
+            F::ExternalMemoryFd => self.external_memory_fd,
+            F::ExternalSemaphoreFd => self.external_semaphore_fd,
+            F::ExternalFenceFd => self.external_fence_fd,
+            F::VideoQueue => self.video_queue,
+            F::VideoDecodeH264 => self.video_decode_h264,
+            F::VideoDecodeH265 => self.video_decode_h265,
+            F::VideoDecodeAv1 => self.video_decode_av1,
+            F::VideoEncodeH264 => self.video_encode_h264,
+            F::VideoEncodeH265 => self.video_encode_h265,
+            F::VideoEncodeAv1 => self.video_encode_av1,
+        }
     }
 }

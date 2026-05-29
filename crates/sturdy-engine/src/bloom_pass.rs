@@ -145,7 +145,7 @@ impl BloomPass {
 
         // Pass 2: CoD:AW 13-tap downsampling chain
         for level in 0..bloom_mips.len().saturating_sub(1) {
-            self.execute_downsample(bloom_mips.mip(level), bloom_mips.mip(level + 1))?;
+            self.execute_downsample(bloom_mips.mip(level), bloom_mips.mip(level + 1), level)?;
         }
 
         // Pass 3: pyramid collapse — tent-upsample and accumulate back to full res
@@ -165,14 +165,20 @@ impl BloomPass {
             knee: config.knee,
             _pad: [0.0, 0.0],
         };
-        output.execute_shader_with_push_constants(
+        output.execute_named_shader_with_push_constants(
+            "Bloom: bright",
             &self.bright_extract_program,
             StageMask::FRAGMENT,
             bytemuck::bytes_of(&constants),
         )
     }
 
-    fn execute_downsample(&self, input: &GraphImage, output: &GraphImage) -> Result<()> {
+    fn execute_downsample(
+        &self,
+        input: &GraphImage,
+        output: &GraphImage,
+        from_level: usize,
+    ) -> Result<()> {
         input.register_as("source_tex");
 
         let src_desc = input.desc();
@@ -182,7 +188,9 @@ impl BloomPass {
                 1.0 / src_desc.extent.height as f32,
             ],
         };
-        output.execute_shader_with_push_constants(
+        let pass_name = format!("Bloom: down/{from_level}");
+        output.execute_named_shader_with_push_constants(
+            &pass_name,
             &self.downsample_program,
             StageMask::FRAGMENT,
             bytemuck::bytes_of(&constants),
@@ -219,7 +227,9 @@ impl BloomPass {
                     1.0 / accum_desc.extent.height as f32,
                 ],
             };
-            up_image.execute_shader_with_push_constants(
+            let pass_name = format!("Bloom: up/{level}");
+            up_image.execute_named_shader_with_push_constants(
+                &pass_name,
                 &self.upsample_program,
                 StageMask::FRAGMENT,
                 bytemuck::bytes_of(&constants),
@@ -250,7 +260,8 @@ impl BloomPass {
             bloom_only: bloom_only as u32,
             _pad: [0.0; 2],
         };
-        hdr_out.execute_shader_with_push_constants(
+        hdr_out.execute_named_shader_with_push_constants(
+            "Bloom: composite",
             &self.composite_program,
             StageMask::FRAGMENT,
             bytemuck::bytes_of(&constants),

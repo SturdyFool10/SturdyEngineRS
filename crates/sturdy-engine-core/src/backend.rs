@@ -164,6 +164,23 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// Track 11a: Register `handles.len()` transient pool buffers (one per frame slot)
+    /// in the resource registry so they can be bound via push descriptors.
+    /// No-op on backends without a transient pool.
+    fn register_transient_buffer_handles(&self, _handles: &[crate::BufferHandle]) {}
+
+    /// Track 11a: Number of frame-in-flight slots that need a transient buffer handle.
+    /// Returns 0 on backends without a transient pool.
+    fn transient_pool_slot_count(&self) -> usize {
+        0
+    }
+
+    /// Track 11a: Return the `BufferHandle` for the current frame slot's transient pool.
+    /// Returns `None` when the pool is unavailable for this slot.
+    fn current_transient_buffer_handle(&self) -> Option<crate::BufferHandle> {
+        None
+    }
+
     /// Track 8a: Return registered counts for debug-build bindless index validation.
     /// `(sampled_images, samplers)` — both 0 when bindless is unavailable.
     fn bindless_registered_counts(&self) -> (u32, u32) {
@@ -793,6 +810,11 @@ pub trait Backend: Send + Sync {
     /// report active CPU frame time separately from CPU time blocked on the GPU.
     fn last_submit_gpu_wait_ms(&self) -> f32 {
         0.0
+    }
+
+    /// Draw and dispatch call counts recorded in the most recently submitted frame.
+    fn frame_draw_dispatch_counts(&self) -> (u32, u32) {
+        (0, 0)
     }
 
     fn present(&self) -> Result<()>;

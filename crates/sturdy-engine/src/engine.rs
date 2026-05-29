@@ -98,6 +98,52 @@ impl Engine {
         self.device.caps()
     }
 
+    /// All [`BackendFeature`] variants currently enabled on this engine's backend.
+    ///
+    /// Returns the live set — reflects what the driver actually enabled, not just
+    /// what was requested.  Call after [`AppRuntime::request_backend_restart`]
+    /// completes to see what changed.
+    pub fn enabled_features(&self) -> Vec<core::BackendFeature> {
+        self.device.enabled_features()
+    }
+
+    /// Returns `true` when `feature` is active on the current backend.
+    pub fn has_feature(&self, feature: core::BackendFeature) -> bool {
+        self.device.has_feature(feature)
+    }
+
+    /// The `DeviceDesc` used to create (or most recently rebuild) this engine's backend.
+    pub fn creation_desc(&self) -> core::DeviceDesc {
+        self.device.creation_desc()
+    }
+
+    /// Clear engine-level caches after a backend restart.
+    /// Graph image cache, texture cache, and pending uploads all hold GPU handles
+    /// that are invalid after the backend is rebuilt.
+    pub(crate) fn clear_caches_after_backend_restart(&self) {
+        *self
+            .graph_image_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = HashMap::new();
+        *self
+            .texture_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = HashMap::new();
+        *self
+            .pending_uploads
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Vec::new();
+    }
+
+    /// Rebuild the sampler catalog against the current (new) backend.
+    /// Must be called after `device.rebuild_backend()` and before any pass
+    /// that samples from the default sampler set.
+    pub(crate) fn rebuild_sampler_catalog(&mut self) -> Result<()> {
+        let catalog = sampler_catalog::SamplerCatalog::build(self)?;
+        self.sampler_catalog = Arc::new(catalog);
+        Ok(())
+    }
+
     /// Current GPU memory usage and sub-allocator capacity.
     ///
     /// Returns `None` when the backend doesn't expose allocation statistics.
@@ -873,12 +919,13 @@ impl Engine {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn create_surface(&self, desc: NativeSurfaceDesc) -> Result<Surface> {
-        let handle = self.device.create_surface(desc)?;
+        let handle = self.device.create_surface(desc.clone())?;
         let info = self.device.surface_info(handle)?;
         Ok(Surface {
             device: self.device.clone(),
             handle,
             info,
+            native_desc: Some(desc),
         })
     }
 

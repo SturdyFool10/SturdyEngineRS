@@ -156,6 +156,13 @@ impl BufferPool {
         self.cursor = 0;
     }
 
+    /// The underlying `vk::Buffer` for this pool.
+    ///
+    /// Used to register the pool as a `BufferHandle` in the resource registry.
+    pub fn raw_buffer(&self) -> vk::Buffer {
+        self.buffer
+    }
+
     /// Total pool capacity in bytes.
     pub fn capacity(&self) -> u64 {
         self.capacity

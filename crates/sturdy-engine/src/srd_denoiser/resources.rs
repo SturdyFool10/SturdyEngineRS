@@ -41,6 +41,7 @@ pub enum SrdResourceSlot {
     DiffuseRadianceOutput,
     SpecularRadianceOutput,
     CombinedRadianceOutput,
+    SpectralRadianceOutput,
     OcclusionOutput,
     DirectionalOcclusionOutput,
     ShadowTranslucencyOutput,
@@ -207,6 +208,7 @@ pub(super) fn validate_slot_format(slot: SrdResourceSlot, format: Format) -> Res
         | SrdResourceSlot::DiffuseRadianceOutput
         | SrdResourceSlot::SpecularRadianceOutput
         | SrdResourceSlot::CombinedRadianceOutput
+        | SrdResourceSlot::SpectralRadianceOutput
         | SrdResourceSlot::ShadowTranslucencyOutput
         | SrdResourceSlot::ValidationOutput
         | SrdResourceSlot::HistoryPool

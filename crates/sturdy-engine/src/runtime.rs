@@ -14,8 +14,8 @@ use std::{
 };
 
 use crate::{
-    BackendKind, Engine, Error, Format, FrameClock, FrameTime, GraphImage, GraphReport,
-    MotionVectorDebugPass, PlatformCapabilityState, RenderFrame, Result, Surface,
+    BackendFeature, BackendKind, Engine, Error, Format, FrameClock, FrameTime, GraphImage,
+    GraphReport, MotionVectorDebugPass, PlatformCapabilityState, RenderFrame, Result, Surface,
     SurfaceCapabilities, SurfaceColorSpace, SurfaceHdrPreference, SurfaceImage, SurfacePresentMode,
     SurfaceRecreateDesc, SurfaceSize, WindowCornerStyle, WindowMaterialKind,
     current_window_appearance_caps,
@@ -44,10 +44,16 @@ pub struct AppRuntime {
     frame_start: Option<Instant>,
     /// Rolling 128-frame CPU-time history for P95/P99 computation.
     cpu_time_history: FrameTimeHistory,
+    /// Rolling 128-frame GPU-time history for P95/P99 computation.
+    gpu_time_history: FrameTimeHistory,
     /// Clay UI layout context. Access via [`AppRuntime::clay_ui`].
     clay_ui: clay_ui::UiContext,
     /// Renderer for clay GpuWorkQueue commands — lazy-initialised.
     ui_renderer: Option<crate::ui_renderer::UiRenderer>,
+    /// Active benchmark recording session; `None` when not benchmarking.
+    benchmark_session: Option<BenchmarkSession>,
+    /// Queued backend restart; applied at the next frame boundary.
+    pending_backend_restart: Option<BackendFeatureChange>,
 }
 
 impl AppRuntime {
@@ -61,8 +67,11 @@ impl AppRuntime {
             frame_clock: FrameClock::new(),
             frame_start: None,
             cpu_time_history: FrameTimeHistory::new(128),
+            gpu_time_history: FrameTimeHistory::new(128),
             clay_ui: clay_ui::UiContext::new(),
             ui_renderer: None,
+            benchmark_session: None,
+            pending_backend_restart: None,
             controller: RuntimeController::new(RuntimeSettingsSnapshot {
                 backend: engine.backend_kind(),
                 adapter_name: engine.adapter_name(),
@@ -314,9 +323,135 @@ impl AppRuntime {
         })
     }
 
+    /// Start recording a benchmark session. Replaces any in-progress session.
+    pub fn start_benchmark(&mut self) {
+        self.benchmark_session = Some(BenchmarkSession::new());
+    }
+
+    /// Stop the benchmark session and return an aggregated report.
+    ///
+    /// Returns `None` if no session was started.
+    pub fn stop_benchmark(&mut self) -> Option<BenchmarkReport> {
+        self.benchmark_session.take().map(|s| s.finish())
+    }
+
+    /// `true` if a benchmark session is currently recording.
+    pub fn is_benchmarking(&self) -> bool {
+        self.benchmark_session.is_some()
+    }
+
     /// Decompose the runtime into its current owned parts.
     pub fn into_parts(self) -> (Engine, Surface, RuntimeController) {
         (self.engine, self.surface, self.controller)
+    }
+
+    // ── Backend restart ───────────────────────────────────────────────────────
+
+    /// Queue a backend restart at the next frame boundary.
+    ///
+    /// The current backend is torn down (`vkDeviceWaitIdle`, device destroyed),
+    /// a new one is created with `changes` applied to the current feature set,
+    /// and the presentation surface is recreated automatically.  All existing
+    /// GPU resource handles (images, buffers, pipelines, shaders, samplers)
+    /// become invalid.  The [`RuntimeApp::on_backend_restarted`] callback fires
+    /// on the same frame so the app can recreate its resources before the next
+    /// `update` call.
+    ///
+    /// If a restart is already pending the new request replaces the previous one.
+    pub fn request_backend_restart(&mut self, changes: BackendFeatureChange) {
+        self.pending_backend_restart = Some(changes);
+    }
+
+    /// `true` if a backend restart has been requested and not yet applied.
+    pub fn backend_restart_pending(&self) -> bool {
+        self.pending_backend_restart.is_some()
+    }
+
+    /// All [`BackendFeature`] variants currently enabled on this runtime's backend.
+    pub fn enabled_features(&self) -> Vec<BackendFeature> {
+        self.engine.enabled_features()
+    }
+
+    /// Returns `true` when `feature` is active on the current backend.
+    pub fn has_feature(&self, feature: BackendFeature) -> bool {
+        self.engine.has_feature(feature)
+    }
+
+    /// Apply the queued backend restart synchronously.
+    ///
+    /// Called by the shell at the end of each `Ok` frame.  Returns the outcome
+    /// (new caps, what features are now active) so the shell can notify the app.
+    /// Clears `pending_backend_restart` regardless of success.
+    pub(crate) fn apply_pending_backend_restart(&mut self) -> Result<BackendRestartOutcome> {
+        let changes = self
+            .pending_backend_restart
+            .take()
+            .expect("apply_pending_backend_restart called with no pending restart");
+
+        // Build the new DeviceDesc from the current creation desc + requested changes.
+        let mut new_desc = self.engine.creation_desc();
+        for feature in &changes.enable {
+            new_desc.disabled_features.retain(|f| f != feature);
+            if !new_desc.optional_features.contains(feature)
+                && !new_desc.required_features.contains(feature)
+            {
+                new_desc.optional_features.push(feature.clone());
+            }
+        }
+        for feature in &changes.disable {
+            new_desc.optional_features.retain(|f| f != feature);
+            new_desc.required_features.retain(|f| f != feature);
+            if !new_desc.disabled_features.contains(feature) {
+                new_desc.disabled_features.push(feature.clone());
+            }
+        }
+
+        // Capture the current surface size + native desc *before* tearing down the backend.
+        // The new backend needs to recreate the surface from the same window handles.
+        let current_size = self.surface.size();
+        let native_desc_for_recreate = self.surface.native_desc.as_ref().map(|d| {
+            let mut nd = d.clone();
+            nd.size = current_size; // Use current (possibly-resized) size
+            nd
+        });
+
+        // Swap the backend — waits for idle, creates new backend, drops old, clears all state.
+        self.engine.device.rebuild_backend(&new_desc)?;
+
+        // Clear engine-level caches (graph images, texture cache, pending uploads).
+        self.engine.clear_caches_after_backend_restart();
+
+        // Rebuild the sampler catalog so default samplers are valid in the new backend.
+        self.engine.rebuild_sampler_catalog()?;
+
+        // Recreate the presentation surface in the new backend.
+        if let Some(nd) = native_desc_for_recreate {
+            let new_handle = self.engine.device.create_surface(nd.clone())?;
+            let new_info = self.engine.device.surface_info(new_handle)?;
+            // Replace the surface — old Surface's Drop ignores the now-invalid handle.
+            self.surface = Surface {
+                device: self.engine.device.clone(),
+                handle: new_handle,
+                info: new_info,
+                native_desc: Some(nd),
+            };
+        }
+
+        // Reset timing histories — old frame times are meaningless after a backend swap.
+        self.cpu_time_history = FrameTimeHistory::new(128);
+        self.gpu_time_history = FrameTimeHistory::new(128);
+
+        // Reset lazy-initialized renderer state.
+        self.ui_renderer = None;
+        self.motion_debug_pass = MotionVectorDebugPass::new(&self.engine)?;
+
+        // Refresh the runtime controller with new backend/surface info.
+        self.refresh_controller_state();
+
+        Ok(BackendRestartOutcome {
+            new_desc,
+            new_caps: self.engine.caps(),
+        })
     }
 }
 
@@ -655,13 +790,13 @@ impl<'a> AppRuntimeFrame<'a> {
         if self.runtime.frame_start.take().is_some() {
             let cpu_ms = active_cpu_ms.unwrap_or(0.0);
             self.runtime.cpu_time_history.push(cpu_ms);
-            let percentiles = self.runtime.cpu_time_history.percentiles();
+            let cpu_percentiles = self.runtime.cpu_time_history.percentiles();
             let pass_timings_raw = self.runtime.engine.device.pass_timings();
             let gpu_total: f32 = pass_timings_raw.iter().map(|t| t.gpu_ms).sum();
             let pass_timings: Vec<RuntimePassTiming> = pass_timings_raw
-                .into_iter()
+                .iter()
                 .map(|t| RuntimePassTiming {
-                    name: t.name,
+                    name: t.name.clone(),
                     gpu_time_ms: Some(t.gpu_ms),
                 })
                 .collect();
@@ -670,10 +805,44 @@ impl<'a> AppRuntimeFrame<'a> {
             } else {
                 Some(gpu_total)
             };
+            if let Some(total) = gpu_ms {
+                self.runtime.gpu_time_history.push(total);
+            }
+            let gpu_percentiles = self.runtime.gpu_time_history.percentiles();
+            let gpu_timeline = if pass_timings.is_empty() {
+                None
+            } else {
+                Some(self.runtime.engine.device.gpu_timeline())
+            };
+            if let Some(session) = self.runtime.benchmark_session.as_mut() {
+                let frame_index = session.next_frame_index;
+                session.record(BenchmarkFrameSample {
+                    frame_index,
+                    cpu_ms,
+                    gpu_ms,
+                    gpu_wait_ms,
+                    pass_timings: pass_timings
+                        .iter()
+                        .filter_map(|p| {
+                            p.gpu_time_ms.map(|ms| BenchmarkPassSample {
+                                name: p.name.clone(),
+                                gpu_ms: ms,
+                            })
+                        })
+                        .collect(),
+                });
+            }
             let present_to_display_ms: Option<f32> = None;
             let total_latency_ms = gpu_ms
                 .zip(present_to_display_ms)
                 .map(|(gpu_ms, present_ms)| cpu_ms + gpu_ms + present_ms);
+            let mem_budget = self.runtime.engine.device.memory_budget();
+            let memory_used_bytes = mem_budget.as_ref().map(|b| b.device_local_used_bytes);
+            let memory_budget_bytes = mem_budget.as_ref().map(|b| b.device_local_capacity_bytes);
+            let (raw_draws, raw_dispatches) =
+                self.runtime.engine.device.frame_draw_dispatch_counts();
+            let draw_count = (raw_draws > 0).then_some(raw_draws as u64);
+            let dispatch_count = (raw_dispatches > 0).then_some(raw_dispatches as u64);
             self.runtime.controller.update_diagnostics(|d| {
                 d.timings.available = true;
                 d.timings.cpu_frame_time_ms = Some(cpu_ms);
@@ -682,10 +851,20 @@ impl<'a> AppRuntimeFrame<'a> {
                 d.timings.present_to_display_ms = present_to_display_ms;
                 d.timings.total_latency_ms = total_latency_ms;
                 d.timings.pass_timings = pass_timings;
-                if let Some((mean, p95, p99)) = percentiles {
+                d.timings.gpu_timeline = gpu_timeline;
+                d.workload.memory_used_bytes = memory_used_bytes;
+                d.workload.memory_budget_bytes = memory_budget_bytes;
+                d.workload.draw_count = draw_count;
+                d.workload.dispatch_count = dispatch_count;
+                if let Some((mean, p95, p99)) = cpu_percentiles {
                     d.timings.cpu_mean_ms = Some(mean);
                     d.timings.cpu_p95_ms = Some(p95);
                     d.timings.cpu_p99_ms = Some(p99);
+                }
+                if let Some((mean, p95, p99)) = gpu_percentiles {
+                    d.timings.gpu_mean_ms = Some(mean);
+                    d.timings.gpu_p95_ms = Some(p95);
+                    d.timings.gpu_p99_ms = Some(p99);
                 }
                 if let Some(report) = FrameTimingReport::from_summary(&d.timings) {
                     if report.is_jittery() {
@@ -847,6 +1026,21 @@ pub trait RuntimeApp: Sized {
         &mut self,
         _controller: &RuntimeController,
         _changes: &[RuntimeSettingChange],
+    ) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Called after the backend has been restarted via
+    /// [`AppRuntime::request_backend_restart`].
+    ///
+    /// All previously created GPU resources (images, buffers, pipelines,
+    /// shaders, samplers) are invalid.  The new backend is fully initialised
+    /// and the presentation surface has been recreated before this fires.
+    /// Use this callback to recreate renderer state and re-upload assets.
+    fn on_backend_restarted(
+        &mut self,
+        _runtime: &mut AppRuntime,
+        _outcome: &BackendRestartOutcome,
     ) -> std::result::Result<(), Self::Error> {
         Ok(())
     }
@@ -1673,6 +1867,10 @@ pub struct RuntimeTimingSummary {
     pub cpu_mean_ms: Option<f32>,
     pub cpu_p95_ms: Option<f32>,
     pub cpu_p99_ms: Option<f32>,
+    pub gpu_mean_ms: Option<f32>,
+    pub gpu_p95_ms: Option<f32>,
+    pub gpu_p99_ms: Option<f32>,
+    pub gpu_timeline: Option<crate::GpuTimeline>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3276,6 +3474,167 @@ fn surface_is_hdr(color_space: SurfaceColorSpace) -> bool {
             | SurfaceColorSpace::Hdr10St2084
             | SurfaceColorSpace::Hdr10Hlg
     )
+}
+
+// ── Backend restart types ─────────────────────────────────────────────────────
+
+/// Requested changes to the backend's active feature/extension set.
+///
+/// Pass to [`AppRuntime::request_backend_restart`].  Prefer [`BackendFeature`]
+/// variants for compile-time safety; raw strings are also accepted as an escape
+/// hatch for unlisted or experimental features.
+///
+/// ```ignore
+/// runtime.request_backend_restart(
+///     BackendFeatureChange::default()
+///         .enable(BackendFeature::RayTracing)
+///         .disable(BackendFeature::MeshShader),
+/// );
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct BackendFeatureChange {
+    /// Feature names to additionally enable (added to `optional_features`).
+    pub enable: Vec<String>,
+    /// Feature names to disable (removed from `optional_features`/`required_features`).
+    pub disable: Vec<String>,
+}
+
+impl BackendFeatureChange {
+    /// Enable a feature.  Accepts [`BackendFeature`] variants or raw `&str`/`String`.
+    pub fn enable(mut self, feature: impl Into<String>) -> Self {
+        self.enable.push(feature.into());
+        self
+    }
+    /// Disable a feature.  Accepts [`BackendFeature`] variants or raw `&str`/`String`.
+    pub fn disable(mut self, feature: impl Into<String>) -> Self {
+        self.disable.push(feature.into());
+        self
+    }
+}
+
+/// Outcome of a completed backend restart.
+///
+/// Passed to [`RuntimeApp::on_backend_restarted`] so the app can inspect
+/// what the new backend actually supports.
+#[derive(Clone, Debug)]
+pub struct BackendRestartOutcome {
+    /// The `DeviceDesc` that was used to create the new backend.
+    pub new_desc: crate::DeviceDesc,
+    /// Capability snapshot for the new backend.
+    pub new_caps: crate::Caps,
+}
+
+// ── Benchmark harness ────────────────────────────────────────────────────────
+
+/// Per-frame snapshot recorded during an active [`BenchmarkSession`].
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct BenchmarkFrameSample {
+    pub frame_index: u64,
+    pub cpu_ms: f32,
+    pub gpu_ms: Option<f32>,
+    pub gpu_wait_ms: Option<f32>,
+    pub pass_timings: Vec<BenchmarkPassSample>,
+}
+
+/// Per-pass GPU timing sample for one frame.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct BenchmarkPassSample {
+    pub name: String,
+    pub gpu_ms: f32,
+}
+
+/// Aggregated statistics over a set of f32 samples.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct FrameStats {
+    pub min: f32,
+    pub max: f32,
+    pub mean: f32,
+    pub p50: f32,
+    pub p95: f32,
+    pub p99: f32,
+}
+
+impl FrameStats {
+    fn zero() -> Self {
+        Self { min: 0.0, max: 0.0, mean: 0.0, p50: 0.0, p95: 0.0, p99: 0.0 }
+    }
+
+    fn from_samples(samples: &[f32]) -> Self {
+        if samples.is_empty() {
+            return Self::zero();
+        }
+        let mut sorted = samples.to_vec();
+        sorted.sort_by(f32::total_cmp);
+        let n = sorted.len();
+        let min = sorted[0];
+        let max = sorted[n - 1];
+        let mean = sorted.iter().sum::<f32>() / n as f32;
+        let p50 = sorted[(n as f32 * 0.5) as usize];
+        let p95 = sorted[((n - 1) as f32 * 0.95) as usize];
+        let p99 = sorted[((n - 1) as f32 * 0.99) as usize];
+        Self { min, max, mean, p50, p95, p99 }
+    }
+}
+
+/// Aggregated benchmark results produced by [`AppRuntime::stop_benchmark`].
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct BenchmarkReport {
+    pub frame_count: usize,
+    pub cpu_ms: FrameStats,
+    pub gpu_ms: Option<FrameStats>,
+    pub per_pass: std::collections::HashMap<String, FrameStats>,
+}
+
+impl BenchmarkReport {
+    /// Serialize the report to a pretty-printed JSON string.
+    pub fn to_json(&self) -> std::result::Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+}
+
+struct BenchmarkSession {
+    frames: Vec<BenchmarkFrameSample>,
+    pub(crate) next_frame_index: u64,
+}
+
+impl BenchmarkSession {
+    fn new() -> Self {
+        Self { frames: Vec::new(), next_frame_index: 0 }
+    }
+
+    fn record(&mut self, sample: BenchmarkFrameSample) {
+        self.frames.push(sample);
+        self.next_frame_index += 1;
+    }
+
+    fn finish(self) -> BenchmarkReport {
+        let frame_count = self.frames.len();
+        if frame_count == 0 {
+            return BenchmarkReport {
+                frame_count: 0,
+                cpu_ms: FrameStats::zero(),
+                gpu_ms: None,
+                per_pass: Default::default(),
+            };
+        }
+        let cpu_samples: Vec<f32> = self.frames.iter().map(|f| f.cpu_ms).collect();
+        let gpu_samples: Vec<f32> = self.frames.iter().filter_map(|f| f.gpu_ms).collect();
+        let mut pass_map: std::collections::HashMap<String, Vec<f32>> = Default::default();
+        for frame in &self.frames {
+            for pass in &frame.pass_timings {
+                pass_map.entry(pass.name.clone()).or_default().push(pass.gpu_ms);
+            }
+        }
+        BenchmarkReport {
+            frame_count,
+            cpu_ms: FrameStats::from_samples(&cpu_samples),
+            gpu_ms: (!gpu_samples.is_empty()).then(|| FrameStats::from_samples(&gpu_samples)),
+            per_pass: pass_map
+                .into_iter()
+                .map(|(name, s)| (name, FrameStats::from_samples(&s)))
+                .collect(),
+        }
+    }
 }
 
 #[cfg(test)]

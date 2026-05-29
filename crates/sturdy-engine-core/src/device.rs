@@ -52,6 +52,9 @@ enum DeferredDestroy {
 
 struct DeviceInner {
     backend: Box<dyn Backend>,
+    /// The descriptor used to create (or most recently rebuild) the backend.
+    /// Preserved through restarts so `rebuild_backend` can apply incremental changes.
+    creation_desc: DeviceDesc,
     images: HashMap<ImageHandle, ImageDesc>,
     buffers: HashMap<BufferHandle, BufferDesc>,
     acceleration_structures: HashMap<AccelerationStructureHandle, AccelerationStructureDesc>,
@@ -116,9 +119,12 @@ impl Device {
     pub fn create(desc: DeviceDesc) -> Result<Self> {
         let backend = create_backend(&desc)?;
 
-        Ok(Self {
+        let slot_count = backend.transient_pool_slot_count();
+
+        let device = Self {
             inner: Arc::new(Mutex::new(DeviceInner {
                 backend,
+                creation_desc: desc,
                 images: HashMap::new(),
                 buffers: HashMap::new(),
                 acceleration_structures: HashMap::new(),
@@ -159,7 +165,117 @@ impl Device {
                 optical_flow_session_handles: HandleAllocator::default(),
                 fence_handles: HandleAllocator::default(),
             })),
-        })
+        };
+
+        // Track 11a: allocate one BufferHandle per frame slot and register the transient pool
+        // buffers in the backend resource registry so they can be bound via push descriptors.
+        if slot_count > 0 {
+            let mut inner = device.inner.lock().unwrap_or_else(|p| p.into_inner());
+            let handles: Vec<crate::BufferHandle> = (0..slot_count)
+                .map(|_| crate::BufferHandle(inner.buffer_handles.alloc()))
+                .collect();
+            inner.backend.register_transient_buffer_handles(&handles);
+        }
+
+        Ok(device)
+    }
+
+    /// The `DeviceDesc` used to create (or most recently rebuild) this device.
+    pub fn creation_desc(&self) -> DeviceDesc {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .creation_desc
+            .clone()
+    }
+
+    /// Replace the graphics backend with a new one built from `new_desc`.
+    ///
+    /// All existing GPU resource handles (images, buffers, pipelines, shaders,
+    /// surfaces, samplers) become invalid after this call — the caller is
+    /// responsible for recreating them.  The caller should also recreate any
+    /// presentation surface before issuing new frames.
+    ///
+    /// Steps performed:
+    /// 1. Wait for the GPU to be completely idle (`vkDeviceWaitIdle`).
+    /// 2. Create the new backend (fails fast if the new config is invalid).
+    /// 3. Swap and drop the old backend (triggers full Vulkan resource cleanup).
+    /// 4. Clear all resource-tracking state in `DeviceInner`.
+    /// 5. Re-register transient buffer handles for the new backend.
+    pub fn rebuild_backend(&self, new_desc: &DeviceDesc) -> Result<()> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // 1. Wait for idle so the GPU is not using any resources we're about to destroy.
+        inner.backend.wait_idle()?;
+
+        // 2. Create the new backend. Fail before touching anything if config is bad.
+        let new_backend = create_backend(new_desc)
+            .map_err(|e| Error::Backend(format!("backend rebuild failed: {e}")))?;
+
+        // 3. Swap — dropping the old backend triggers full Vulkan cleanup (vkDestroyDevice etc.).
+        let _old = std::mem::replace(&mut inner.backend, new_backend);
+        drop(_old);
+
+        // 4. Clear all resource-tracking maps. Every handle the caller holds is now invalid.
+        inner.images.clear();
+        inner.buffers.clear();
+        inner.acceleration_structures.clear();
+        inner.image_states.clear();
+        inner.buffer_states.clear();
+        inner.samplers.clear();
+        inner.bindless_sampled_images.clear();
+        inner.bindless_storage_images.clear();
+        inner.bindless_samplers.clear();
+        inner.bindless_storage_buffers.clear();
+        inner.shaders.clear();
+        inner.shader_reflections.clear();
+        inner.shader_compile_cache.clear();
+        inner.pipeline_layouts.clear();
+        inner.pipelines.clear();
+        inner.bind_groups.clear();
+        inner.shader_objects.clear();
+        inner.surfaces.clear();
+        inner.frames.clear();
+        inner.video_sessions.clear();
+        inner.indirect_command_layouts.clear();
+        inner.optical_flow_sessions.clear();
+        inner.deferred_destroys.clear();
+        inner.pending_transient_destroys.clear();
+        // Reset handle allocators so new handles start from a clean state.
+        inner.image_handles = HandleAllocator::default();
+        inner.buffer_handles = HandleAllocator::default();
+        inner.acceleration_structure_handles = HandleAllocator::default();
+        inner.sampler_handles = HandleAllocator::default();
+        inner.shader_handles = HandleAllocator::default();
+        inner.pipeline_layout_handles = HandleAllocator::default();
+        inner.pipeline_handles = HandleAllocator::default();
+        inner.bind_group_handles = HandleAllocator::default();
+        inner.shader_object_handles = HandleAllocator::default();
+        inner.surface_handles = HandleAllocator::default();
+        inner.frame_handles = HandleAllocator::default();
+        inner.video_session_handles = HandleAllocator::default();
+        inner.indirect_command_layout_handles = HandleAllocator::default();
+        inner.optical_flow_session_handles = HandleAllocator::default();
+        inner.fence_handles = HandleAllocator::default();
+
+        // 5. Re-register transient buffer handles for the new backend.
+        let slot_count = inner.backend.transient_pool_slot_count();
+        if slot_count > 0 {
+            let handles: Vec<crate::BufferHandle> = (0..slot_count)
+                .map(|_| crate::BufferHandle(inner.buffer_handles.alloc()))
+                .collect();
+            inner.backend.register_transient_buffer_handles(&handles);
+        }
+
+        // Update the stored desc so future callers can inspect what's active.
+        inner.creation_desc = new_desc.clone();
+
+        Ok(())
     }
 
     pub fn backend_kind(&self) -> BackendKind {
@@ -365,27 +481,37 @@ impl Device {
             .alloc_transient(size, alignment)
     }
 
+    /// Track 11a: Return the `BufferHandle` for the current frame's transient pool buffer.
+    ///
+    /// Use together with `alloc_transient` to bind the allocation as a uniform or storage
+    /// descriptor: allocate via `alloc_transient`, write data to `mapped_ptr`, then build
+    /// a `PushDescriptorBinding::UniformBuffer { buffer: handle, offset: alloc.offset, .. }`.
+    ///
+    /// Returns `None` when the transient pool is not available for this frame slot.
+    pub fn transient_buffer_handle(&self) -> Option<crate::BufferHandle> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .backend
+            .current_transient_buffer_handle()
+    }
+
     /// Track 11b: Return per-queue GPU utilisation for the previous frame.
     ///
-    /// Aggregates per-pass timestamp data into per-queue totals.
-    /// Pass names ending with `[async]` or `[transfer]` are bucketed accordingly;
-    /// all others are bucketed as graphics or compute based on their pass work type.
+    /// Aggregates per-pass timestamp data into per-queue totals using the queue
+    /// type recorded at submission time, not name heuristics.
     pub fn gpu_timeline(&self) -> crate::GpuTimeline {
         let timings = self.pass_timings();
         let mut timeline = crate::GpuTimeline::default();
         for report in &timings {
-            let name_lower = report.name.to_ascii_lowercase();
-            if name_lower.contains("[async") {
-                timeline.async_compute_ms += report.gpu_ms;
-            } else if name_lower.contains("[transfer") || name_lower.contains("[dma") {
-                timeline.transfer_ms += report.gpu_ms;
-            } else if name_lower.contains("dispatch")
-                || name_lower.contains("compute")
-                || name_lower.contains("cull")
-            {
-                timeline.compute_ms += report.gpu_ms;
-            } else {
-                timeline.graphics_ms += report.gpu_ms;
+            match report.queue_type {
+                crate::QueueType::AsyncCompute => timeline.async_compute_ms += report.gpu_ms,
+                crate::QueueType::Transfer | crate::QueueType::Dma => {
+                    timeline.transfer_ms += report.gpu_ms
+                }
+                crate::QueueType::Compute => timeline.compute_ms += report.gpu_ms,
+                crate::QueueType::Graphics => timeline.graphics_ms += report.gpu_ms,
             }
             timeline.total_frame_ms += report.gpu_ms;
             timeline.passes.push((report.name.clone(), report.gpu_ms));
@@ -409,6 +535,44 @@ impl Device {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .last_submit_gpu_wait_ms()
+    }
+
+    /// Draw and dispatch call counts from the most recently submitted frame.
+    pub fn frame_draw_dispatch_counts(&self) -> (u32, u32) {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .backend
+            .frame_draw_dispatch_counts()
+    }
+
+    /// All [`BackendFeature`] variants that are enabled on the current backend.
+    ///
+    /// Reflects what the device actually supports and has enabled, not what was
+    /// requested.  Use this to inspect capability, build feature menus, or compare
+    /// before/after a [`Device::rebuild_backend`] call.
+    pub fn enabled_features(&self) -> Vec<crate::BackendFeature> {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .backend
+            .caps()
+            .features
+            .enabled_features()
+    }
+
+    /// Returns `true` when a specific [`BackendFeature`] is active on this device.
+    pub fn has_feature(&self, feature: crate::BackendFeature) -> bool {
+        //panic allowed, reason = "poisoned mutex is unrecoverable"
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .backend
+            .caps()
+            .features
+            .has(feature)
     }
 
     // ── GFX-4a: Video decode/encode session creation ───────────────────────

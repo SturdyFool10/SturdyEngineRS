@@ -303,6 +303,34 @@ pub struct SrdRadiancePostBlurConstants {
     pub tile_size: u32,
 }
 
+/// Push constants for the shadow Accumulate pass.
+///
+/// Matches `SrdShadowAccumulateConstants` in `shaders/srd_shadow_accumulate.slang`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SrdShadowAccumulateConstants {
+    pub rect_extent: [u32; 2],
+    pub mask_extent: [u32; 2],
+    pub history_frame_budget: f32,
+    pub plane_offset_tolerance: f32,
+    pub use_surface_mask: u32,
+    pub tile_size: u32,
+}
+
+/// Push constants for the shadow spatial Filter pass.
+///
+/// Matches `SrdShadowFilterConstants` in `shaders/srd_shadow_filter.slang`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SrdShadowFilterConstants {
+    pub rect_extent: [u32; 2],
+    pub mask_extent: [u32; 2],
+    pub normal_weight_power: f32,
+    pub spatial_radius: f32,
+    pub use_surface_mask: u32,
+    pub tile_size: u32,
+}
+
 /// Push constants for the occlusion Accumulate pass.
 ///
 /// Matches `SrdOcclusionAccumulateConstants` in `shaders/srd_occlusion_accumulate.slang`.
@@ -323,6 +351,66 @@ pub struct SrdOcclusionAccumulateConstants {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SrdOcclusionFilterConstants {
+    pub rect_extent: [u32; 2],
+    pub mask_extent: [u32; 2],
+    pub normal_weight_power: f32,
+    pub spatial_radius: f32,
+    pub use_surface_mask: u32,
+    pub tile_size: u32,
+}
+
+/// Push constants for the spectral radiance Accumulate pass.
+///
+/// `channel_count` carries the number of active spectral channels (1–3) so the
+/// shader can zero unused RGB components in the history blend.
+///
+/// Matches `SrdSpectralAccumulateConstants` in `shaders/srd_spectral_accumulate.slang`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SrdSpectralAccumulateConstants {
+    pub rect_extent: [u32; 2],
+    pub mask_extent: [u32; 2],
+    pub history_frame_budget: f32,
+    pub channel_count: u32,
+    pub use_surface_mask: u32,
+    pub tile_size: u32,
+}
+
+/// Push constants for the spectral radiance Filter pass.
+///
+/// Matches `SrdSpectralFilterConstants` in `shaders/srd_spectral_filter.slang`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SrdSpectralFilterConstants {
+    pub rect_extent: [u32; 2],
+    pub mask_extent: [u32; 2],
+    pub normal_weight_power: f32,
+    pub spatial_radius: f32,
+    pub use_surface_mask: u32,
+    pub tile_size: u32,
+}
+
+/// Push constants for the translucent-shadow Accumulate pass.
+///
+/// Matches `SrdTranslucentShadowAccumulateConstants` in
+/// `shaders/srd_translucency_accumulate.slang`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SrdTranslucentShadowAccumulateConstants {
+    pub rect_extent: [u32; 2],
+    pub mask_extent: [u32; 2],
+    pub history_frame_budget: f32,
+    pub use_surface_mask: u32,
+    pub tile_size: u32,
+    pub _pad: u32,
+}
+
+/// Push constants for the translucent-shadow spatial Filter pass.
+///
+/// Matches `SrdTranslucentShadowFilterConstants` in `shaders/srd_translucency_filter.slang`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SrdTranslucentShadowFilterConstants {
     pub rect_extent: [u32; 2],
     pub mask_extent: [u32; 2],
     pub normal_weight_power: f32,
