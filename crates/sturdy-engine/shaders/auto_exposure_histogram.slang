@@ -22,14 +22,18 @@ struct HistogramConstants {
     float  min_log_luma;
     float  inv_log_luma_range;
     uint2  resolution;
-    uint2  _pad;
+    float  min_luma;  // metering floor: pixels below this go to bin 0 (excluded from mean)
+    uint   _pad;
 };
-uniform HistogramConstants push;
+[[vk::push_constant]] HistogramConstants push;
 
 groupshared uint local_histogram[256];
 
 uint bin_for_luminance(float luma) {
-    if (luma < 1e-5) {
+    // Pixels below the metering floor go to bin 0 and are excluded from the
+    // luminance mean by the adapt pass.  This discards miss/background rays
+    // in path-traced scenes without polluting the mean for lit geometry.
+    if (luma < push.min_luma) {
         return 0;
     }
     float log_luma   = log2(luma);

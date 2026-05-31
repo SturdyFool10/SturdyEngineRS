@@ -232,6 +232,39 @@ pub struct DrawIndirectCountDesc {
     pub index_buffer: Option<IndexBufferBinding>,
 }
 
+/// One item in a [`MultiMeshIndirectDrawDesc`] batch.
+///
+/// Each item describes the per-mesh buffers and one indirect draw entry.  All
+/// items share the same pipeline, push constants, and descriptor sets —
+/// only the vertex/index buffers and the position within the indirect buffer
+/// change per item.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiMeshIndirectDrawItem {
+    pub vertex_buffer: VertexBufferBinding,
+    pub index_buffer: Option<IndexBufferBinding>,
+    pub indirect_buffer: BufferHandle,
+    pub indirect_offset: u64,
+    pub max_draw_count: u32,
+    pub stride: u32,
+    /// `None` → use a fixed count of `max_draw_count`.
+    /// `Some(buf, offset)` → GPU-written count via `vkCmdDrawIndexedIndirectCount`.
+    pub count_buffer: Option<BufferHandle>,
+    pub count_offset: u64,
+}
+
+/// Batch of per-mesh indirect draws recorded inside a **single** render pass.
+///
+/// Used by the GPU-driven G-Buffer bin draw path to collapse N bin passes into
+/// one `vkCmdBeginRenderingKHR` / … / `vkCmdEndRenderingKHR` pair, avoiding
+/// N−1 unnecessary render-pass boundaries and their associated barrier cost.
+///
+/// All items share the same pipeline, push constants, and bind group.  The
+/// backend binds each item's vertex+index buffer before its draw call.
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub struct MultiMeshIndirectDrawDesc {
+    pub items: Vec<MultiMeshIndirectDrawItem>,
+}
+
 /// Indirect compute dispatch: GPU-populated buffer drives group counts.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DispatchIndirectDesc {
@@ -519,6 +552,12 @@ pub enum PassWork {
     DrawIndirect(DrawIndirectDesc),
     /// Indirect vertex/index draw limited by a GPU-written command count.
     DrawIndirectCount(DrawIndirectCountDesc),
+    /// Multiple mesh indirect draws in a single render pass.
+    ///
+    /// Prefer this over N consecutive `DrawIndirectCount` passes when all items
+    /// share the same pipeline and descriptor sets — it eliminates N−1 render
+    /// pass boundaries and their associated barrier and memory overhead.
+    MultiMeshIndirectDraw(MultiMeshIndirectDrawDesc),
     /// Direct mesh-shader dispatch (no task shader).
     DrawMeshShader(DrawMeshShaderDesc),
     /// Indirect mesh-shader dispatch — workgroup counts come from a GPU buffer.
@@ -554,6 +593,22 @@ pub enum PassWork {
     BuildTlas(TlasBuildDesc),
     /// Dispatch rays using a ray-tracing pipeline and a shader binding table.
     TraceRays(TraceRaysDesc),
+    /// Zero-fill a buffer range with a constant 32-bit pattern via `vkCmdFillBuffer`.
+    ///
+    /// Equivalent to `memset(data, value, size)` on the GPU.  Useful for resetting
+    /// per-frame GPU counters (e.g. draw count atomics) without a CPU write, allowing
+    /// the buffer to reside in `DEVICE_LOCAL` memory for better GPU bandwidth.
+    ///
+    /// The buffer must include `COPY_DST` in its usage flags.
+    FillBuffer {
+        buffer: BufferHandle,
+        /// Byte offset into the buffer (must be a multiple of 4).
+        offset: u64,
+        /// Number of bytes to fill (must be a multiple of 4, or `u64::MAX` for the whole buffer).
+        size: u64,
+        /// 32-bit pattern written into every 4-byte word.
+        value: u32,
+    },
     /// Decode a compressed video frame into an output image.
     ///
     /// Video graph passes are design-only scaffolding until backend video
@@ -840,6 +895,14 @@ pub struct CompiledGraph {
     pub alias_plan: AliasPlan,
     pub final_image_states: Vec<(ImageStateKey, RgState)>,
     pub final_buffer_states: Vec<(BufferStateKey, RgState)>,
+    /// Per-batch **release** barriers recorded at the END of each batch's command buffer,
+    /// releasing resources to the next batch's queue for correct queue ownership transfer.
+    ///
+    /// For EXCLUSIVE-mode Vulkan resources crossing queue families, both a release
+    /// (on the source queue) and an acquire (in `barriers_per_pass`) are required.
+    /// Indexed by batch index; empty vec when a batch has no outgoing transfers.
+    pub release_buffer_barriers_per_batch: Vec<Vec<BufferBarrier>>,
+    pub release_image_barriers_per_batch: Vec<Vec<ImageBarrier>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1482,6 +1545,77 @@ impl RenderGraph {
             .map(|(key, state)| (key, state.state))
             .collect();
 
+        // Build per-batch release barriers for cross-queue ownership transfers.
+        //
+        // For EXCLUSIVE-mode resources that cross queue families, Vulkan requires both
+        // a "release" operation (recorded on the source queue's command buffer) and an
+        // "acquire" operation (in barriers_per_pass on the destination queue).  The
+        // release operation uses the same VkBufferMemoryBarrier/VkImageMemoryBarrier
+        // struct but records it at the END of the source batch, preserving the same
+        // layout (for images) while transferring queue family ownership.
+        let num_batches = batches.len().max(1);
+        let mut release_buffer_barriers_per_batch = vec![Vec::new(); num_batches];
+        let mut release_image_barriers_per_batch = vec![Vec::new(); num_batches];
+
+        // For each per-pass acquire barrier that is cross-queue, emit a corresponding
+        // release barrier into the previous batch on the source queue.
+        for (pass_idx, barriers) in barriers_per_pass.iter().enumerate() {
+            for barrier in barriers {
+                if barrier.before_queue == barrier.after_queue {
+                    continue;
+                }
+                // Find the last batch that belongs to before_queue, before this pass.
+                let source_batch = batches
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, batch)| {
+                        batch.queue == barrier.before_queue
+                            && batch.pass_indices.iter().any(|&pi| pi < pass_idx as u32)
+                    })
+                    .map(|(i, _)| i);
+                if let Some(src_batch) = source_batch {
+                    release_image_barriers_per_batch[src_batch].push(ImageBarrier {
+                        before: barrier.before,
+                        after: barrier.before, // release preserves layout
+                        before_queue: barrier.before_queue,
+                        after_queue: barrier.after_queue,
+                        queue: barrier.before_queue, // recorded on source queue
+                        image: barrier.image,
+                        subresource: barrier.subresource,
+                    });
+                }
+            }
+        }
+        for (pass_idx, barriers) in buffer_barriers_per_pass.iter().enumerate() {
+            for barrier in barriers {
+                if barrier.before_queue == barrier.after_queue {
+                    continue;
+                }
+                let source_batch = batches
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, batch)| {
+                        batch.queue == barrier.before_queue
+                            && batch.pass_indices.iter().any(|&pi| pi < pass_idx as u32)
+                    })
+                    .map(|(i, _)| i);
+                if let Some(src_batch) = source_batch {
+                    release_buffer_barriers_per_batch[src_batch].push(BufferBarrier {
+                        before: barrier.before,
+                        after: barrier.before, // release preserves state
+                        before_queue: barrier.before_queue,
+                        after_queue: barrier.after_queue,
+                        queue: barrier.before_queue, // recorded on source queue
+                        buffer: barrier.buffer,
+                        offset: barrier.offset,
+                        size: barrier.size,
+                    });
+                }
+            }
+        }
+
         Ok(CompiledGraph {
             passes,
             images,
@@ -1492,6 +1626,8 @@ impl RenderGraph {
             alias_plan,
             final_image_states,
             final_buffer_states,
+            release_buffer_barriers_per_batch,
+            release_image_barriers_per_batch,
         })
     }
 
@@ -1606,6 +1742,7 @@ fn is_graphics_work(work: &PassWork) -> bool {
         PassWork::Draw(_)
             | PassWork::DrawIndirect(_)
             | PassWork::DrawIndirectCount(_)
+            | PassWork::MultiMeshIndirectDraw(_)
             | PassWork::DrawMeshShader(_)
             | PassWork::DrawMeshShaderIndirect(_)
     )

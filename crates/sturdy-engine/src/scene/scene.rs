@@ -16,7 +16,7 @@ use super::{
 use crate::{
     Buffer, BufferDesc, BufferUsage, ComputeProgram, DrawIndexedIndirectCommand, Engine, Error,
     Format, Frustum, GeometryBackend, GraphImage, HizHistory, HizPass, ImageDesc, ImageDimension,
-    ImageUsage, Mesh, MeshProgram, RenderFrame, Result,
+    ImageUsage, Mesh, MeshProgram, MultiMeshDrawBinItem, RenderFrame, Result,
     render_world::{
         GpuObjectId, HizOcclusionInput, MaterialShaderClass, PipelineClass, RenderStateClass,
         RenderWorld, RenderWorldGpuCullPass, RenderWorldGpuCullSettings,
@@ -190,6 +190,25 @@ impl Scene {
     /// indirect path instead of falling back to the legacy batch draw.
     pub fn gpu_cull_active(&self) -> bool {
         self.gpu_cull_active
+    }
+
+    /// Total triangles that would be submitted if every persistent bin's objects
+    /// were visible.  Computed from `index_count / 3` per mesh × the bin's
+    /// object count.  Returns `None` when no GPU-cull bins have been built.
+    pub fn submitted_triangle_count(&self) -> Option<u64> {
+        if self.gpu_draw_bins.is_empty() {
+            return None;
+        }
+        let count: u64 = self.gpu_draw_bins.bins.iter().fold(0u64, |acc, bin| {
+            let mesh_idx = bin.key.mesh.index();
+            let tri_per_mesh = self
+                .meshes
+                .get(mesh_idx)
+                .map(|(mesh, _)| mesh.index_count as u64 / 3)
+                .unwrap_or(0);
+            acc.saturating_add(bin.object_count as u64 * tri_per_mesh)
+        });
+        Some(count)
     }
 
     fn render_world_draw_programs_ready(&self) -> bool {
@@ -846,14 +865,21 @@ impl Scene {
     /// their outputs (current_matrices, visibility flags, indirect commands) are ready
     /// for the subsequent [`draw_gbuffer_render_world_bins`] call.
     ///
+    /// `depth` — optionally the current frame's depth render target.  When provided,
+    /// the Hi-Z pyramid builder records a pass to update the Hi-Z history and the
+    /// cull pass uses the **previous** frame's pyramid for occlusion testing.  On the
+    /// first frame the history is empty so culling falls back to frustum-only.
+    ///
     /// Must be called after [`Scene::prepare_with_render_world`] and before
     /// [`draw_gbuffer_render_world_bins`] each frame.  No-ops when the required
     /// passes are not yet initialised or when `gpu_cull_active` is false.
     pub fn dispatch_render_world_gpu_passes(
-        &self,
+        &mut self,
         frame: &RenderFrame,
         render_world: &RenderWorld,
         view_proj: glam::Mat4,
+        depth: Option<&GraphImage>,
+        proj: glam::Mat4,
     ) -> Result<()> {
         if !self.gpu_cull_active {
             return Ok(());
@@ -861,9 +887,36 @@ impl Scene {
         if let Some(build_pass) = &self.transform_build_pass {
             build_pass.execute(frame, render_world)?;
         }
+
+        // Build Hi-Z pyramid from the current depth image so the cull pass can
+        // use the *previous* frame's result for occlusion testing.
+        let hiz_frame = if let (Some(depth), Some(hiz_pass)) = (depth, &self.hiz_pass) {
+            Some(hiz_pass.execute_history(frame, depth, &mut self.hiz_history)?)
+        } else {
+            None
+        };
+
         if let Some(cull_pass) = &self.cull_pass {
-            cull_pass.execute(frame, render_world, view_proj, None)?;
+            let out_ext = depth
+                .map(|d| d.desc().extent)
+                .unwrap_or(sturdy_engine_core::Extent3d {
+                    width: 0,
+                    height: 0,
+                    depth: 1,
+                });
+            let hiz_ref = hiz_frame
+                .as_ref()
+                .and_then(|hf| hf.previous.as_ref())
+                .map(|prev| HizOcclusionInput {
+                    pyramid: prev,
+                    proj_y_scale: proj.col(1).y.abs(),
+                    proj_z_scale: proj.col(2).z,
+                    screen_size: [out_ext.width, out_ext.height],
+                });
+            cull_pass.execute(frame, render_world, view_proj, hiz_ref)?;
         }
+        let _ = hiz_frame; // keep alive until after cull dispatch is recorded
+
         if let Some(draw_gen) = &self.draw_generation_pass {
             draw_gen.execute(frame, render_world)?;
         }
@@ -907,15 +960,33 @@ impl Scene {
                 draw_output.visible_instances,
             );
             frame.bind_buffer("current_matrices", draw_output.current_matrices);
+            // Bind previous-frame model matrices for per-object motion vectors.
+            // Falls back to current matrices on the first frame (motion = 0).
+            render_world.with_gpu_previous_matrix_buffer(|prev| {
+                let prev_buf = prev.unwrap_or(draw_output.current_matrices);
+                frame.bind_buffer("previous_matrices", prev_buf);
+            });
 
             const INDIRECT_STRIDE: u64 =
                 std::mem::size_of::<crate::DrawIndexedIndirectCommand>() as u64;
 
+            // Build the bin item list for a single-pass multi-mesh indirect draw.
+            // All bins share the same program and push constants; only vertex/index
+            // buffers and indirect-command offset differ per bin.
+            // Per-bin material bindings (legacy material_desc / normal_map) are set
+            // on the frame before calling so the bind-group builder picks them up.
+            // Note: with the material table (bindless path), per-bin bindings go
+            // away and this becomes a pure single-descriptor-set pass.
+            let mut bin_items: Vec<MultiMeshDrawBinItem<'_>> = Vec::with_capacity(
+                self.gpu_draw_bins.bins.len()
+            );
             for (bin_index, bin) in self.gpu_draw_bins.bins.iter().enumerate() {
                 let mesh_idx = bin.key.mesh.index();
                 let Some((mesh, _)) = self.meshes.get(mesh_idx) else {
                     continue;
                 };
+                // Bind per-bin material resources so the deferred resolver captures
+                // the last registered binding when building the shared bind group.
                 if let Some(mat) = self.materials.get(mesh_idx) {
                     if let Some(mat_buf) = &mat.gpu_buffer {
                         frame.bind_buffer("material_desc", mat_buf);
@@ -929,17 +1000,21 @@ impl Scene {
                 } else {
                     frame.bind_image("normal_map", default_normal_map);
                 }
-                primary.draw_mesh_indirect_mrt_with_push_constants_and_depth(
-                    additional,
+                bin_items.push(MultiMeshDrawBinItem {
                     mesh,
-                    gbuffer_rw_program,
-                    draw_output.indirect_commands,
-                    bin_index as u64 * INDIRECT_STRIDE,
-                    1,
-                    constants,
-                    Some(depth),
-                )?;
+                    indirect_buffer: draw_output.indirect_commands,
+                    indirect_offset: bin_index as u64 * INDIRECT_STRIDE,
+                    draw_count: 1,
+                });
             }
+
+            primary.draw_multi_mesh_indirect_mrt(
+                additional,
+                &bin_items,
+                gbuffer_rw_program,
+                constants,
+                Some(depth),
+            )?;
             Ok(())
         })
     }
@@ -1294,6 +1369,10 @@ impl Scene {
                 draw_output.visible_instances,
             );
             frame.bind_buffer("current_matrices", draw_output.current_matrices);
+            render_world.with_gpu_previous_matrix_buffer(|prev| {
+                let prev_buf = prev.unwrap_or(draw_output.current_matrices);
+                frame.bind_buffer("previous_matrices", prev_buf);
+            });
 
             const INDIRECT_STRIDE: u64 = std::mem::size_of::<DrawIndexedIndirectCommand>() as u64;
             for (bin_index, bin) in self.gpu_draw_bins.bins.iter().enumerate() {

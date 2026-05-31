@@ -122,7 +122,7 @@ impl RenderWorldGpuTransformBuildPass {
             _pad1: 0,
             _pad2: 0,
         };
-        frame.dispatch_compute_auto(
+        frame.dispatch_async_compute_auto(
             "render_world_transform_build",
             &self.program,
             &constants,

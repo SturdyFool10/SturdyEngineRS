@@ -29,7 +29,7 @@ struct AdaptConstants {
     float dt_seconds;
     float _pad;
 };
-uniform AdaptConstants push;
+[[vk::push_constant]] AdaptConstants push;
 
 groupshared uint   bin_counts[256];
 groupshared float  weighted[256];
@@ -62,16 +62,23 @@ void main(uint3 dt_id : SV_DispatchThreadID, uint thread_id : SV_GroupIndex) {
         }
         total_count = total;
 
+        // Exclude bin 0 (essentially-black / no-hit-ray pixels) from the mean.
+        // Bin 0 captures luminance below ~min_log_luma and would otherwise
+        // drag the mean down to -10, causing massive over-exposure in path-traced
+        // scenes where most rays miss geometry (black background).
+        uint total_valid = total - bin_counts[0];
+        float valid_weighted_sum = weighted_log_sum - weighted[0];
+
         float target_log_luma;
-        if (total == 0u) {
+        if (total_valid == 0u) {
             target_log_luma = push.min_log_luma;
         } else {
-            // Use the weighted mean of log luminance; this matches Frostbite /
-            // Filament eye-adaptation behaviour and is more stable than a hard
-            // percentile when scenes contain large flat regions.  The
-            // `target_percentile` knob is folded into a small bias so users can
-            // still bias toward highlights (>0.5) or shadows (<0.5).
-            float mean_log_luma = weighted_log_sum / float(total);
+            // Use the weighted mean of log luminance across valid (non-black) pixels.
+            // This matches Frostbite / Filament eye-adaptation behaviour and is more
+            // stable than a hard percentile when scenes contain large flat regions.
+            // The `target_percentile` knob applies a small log-space bias so users
+            // can still bias toward highlights (>0.5) or shadows (<0.5).
+            float mean_log_luma = valid_weighted_sum / float(total_valid);
             float bias = (push.target_percentile - 0.5) * push.log_luma_range;
             target_log_luma = mean_log_luma - bias;
         }

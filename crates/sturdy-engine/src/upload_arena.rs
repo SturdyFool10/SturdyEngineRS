@@ -23,6 +23,7 @@ struct UploadBlock {
 #[derive(Default)]
 pub(crate) struct UploadArena {
     blocks: Vec<UploadBlock>,
+    bytes_uploaded: u64,
 }
 
 impl UploadArena {
@@ -40,6 +41,7 @@ impl UploadArena {
         block.used = offset
             .checked_add(size)
             .ok_or_else(|| Error::InvalidInput("upload arena offset overflowed".into()))?;
+        self.bytes_uploaded = self.bytes_uploaded.saturating_add(size);
         Ok(UploadAllocation {
             block_index,
             offset,
@@ -48,6 +50,11 @@ impl UploadArena {
 
     pub(crate) fn buffer(&self, allocation: UploadAllocation) -> &Buffer {
         &self.blocks[allocation.block_index].buffer
+    }
+
+    /// Total bytes written to the arena since it was created (i.e. this frame).
+    pub(crate) fn bytes_uploaded(&self) -> u64 {
+        self.bytes_uploaded
     }
 
     #[cfg(test)]

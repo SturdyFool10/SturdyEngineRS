@@ -22,6 +22,10 @@ struct VSOut {
     float3 world_pos  : TEXCOORD1;
     // tangent.xyz in world space; .w = bitangent handedness sign (+1 or -1)
     float4 tangent    : TANGENT;
+    // Current and previous clip-space positions (pre perspective-divide) for
+    // per-object motion vector computation in the G-Buffer fragment shader.
+    float4 curr_clip  : TEXCOORD5;
+    float4 prev_clip  : TEXCOORD6;
 };
 
 VSOut main(VSInput input, uint instance_id : SV_InstanceID, uniform CameraConstants cam) {
@@ -29,10 +33,14 @@ VSOut main(VSInput input, uint instance_id : SV_InstanceID, uniform CameraConsta
     float4   world  = mul(model, float4(input.position, 1.0));
     float3x3 model3 = (float3x3)model;
     VSOut o;
-    o.position  = mul(cam.view_proj, world);
+    o.curr_clip = mul(cam.view_proj, world);
+    o.position  = o.curr_clip;
     o.world_pos = world.xyz;
     o.normal    = mul(model3, input.normal);
     o.uv        = input.uv;
     o.tangent   = float4(mul(model3, input.tangent.xyz), input.tangent.w);
+    // For the legacy path, previous model matrix is not tracked per-instance,
+    // so reuse the same world position — motion reflects camera movement only.
+    o.prev_clip = mul(cam.previous_view_proj, world);
     return o;
 }

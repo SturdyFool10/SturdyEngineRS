@@ -72,6 +72,12 @@ pub struct LogicalDevice {
     pub vertex_input_dynamic_state_enabled: bool,
     pub shader_object_enabled: bool,
     pub graphics_pipeline_library_enabled: bool,
+    pub maintenance5_enabled: bool,
+    pub maintenance6_enabled: bool,
+    pub dynamic_rendering_local_read_enabled: bool,
+    pub null_descriptor_enabled: bool,
+    pub depth_clip_enable_enabled: bool,
+    pub shader_module_identifier_enabled: bool,
 }
 
 impl DeviceSelection {
@@ -197,6 +203,17 @@ pub fn create_logical_device(
         .graphics_pipeline_library
         .graphics_pipeline_library
         == vk::TRUE;
+    let maintenance5_enabled = feature_request.maintenance5.maintenance5 == vk::TRUE;
+    let maintenance6_enabled = feature_request.maintenance6.maintenance6 == vk::TRUE;
+    let dynamic_rendering_local_read_enabled = feature_request
+        .dynamic_rendering_local_read
+        .dynamic_rendering_local_read
+        == vk::TRUE;
+    let null_descriptor_enabled = feature_request.robustness2.null_descriptor == vk::TRUE;
+    let depth_clip_enable_enabled =
+        feature_request.depth_clip_enable.depth_clip_enable == vk::TRUE;
+    let shader_module_identifier_enabled =
+        feature_request.shader_module_identifier.shader_module_identifier == vk::TRUE;
     // push_descriptors, conservative_rasterization, and global_queue_priority are extension-only
     // (no feature struct).
     // They are enabled if the extension was added to required_extensions by resolve().
@@ -346,6 +363,12 @@ pub fn create_logical_device(
         vertex_input_dynamic_state_enabled,
         shader_object_enabled,
         graphics_pipeline_library_enabled,
+        maintenance5_enabled,
+        maintenance6_enabled,
+        dynamic_rendering_local_read_enabled,
+        null_descriptor_enabled,
+        depth_clip_enable_enabled,
+        shader_module_identifier_enabled,
     })
 }
 
@@ -461,6 +484,12 @@ struct FeatureRequest<'a> {
     shader_object: vk::PhysicalDeviceShaderObjectFeaturesEXT<'a>,
     optical_flow: vk::PhysicalDeviceOpticalFlowFeaturesNV<'a>,
     graphics_pipeline_library: vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT<'a>,
+    maintenance5: vk::PhysicalDeviceMaintenance5FeaturesKHR<'a>,
+    maintenance6: vk::PhysicalDeviceMaintenance6FeaturesKHR<'a>,
+    dynamic_rendering_local_read: vk::PhysicalDeviceDynamicRenderingLocalReadFeaturesKHR<'a>,
+    robustness2: vk::PhysicalDeviceRobustness2FeaturesEXT<'a>,
+    depth_clip_enable: vk::PhysicalDeviceDepthClipEnableFeaturesEXT<'a>,
+    shader_module_identifier: vk::PhysicalDeviceShaderModuleIdentifierFeaturesEXT<'a>,
     use_feature_chain: bool,
     required_extensions: Vec<&'static CStr>,
 }
@@ -510,6 +539,13 @@ impl FeatureRequest<'static> {
             optical_flow: vk::PhysicalDeviceOpticalFlowFeaturesNV::default(),
             graphics_pipeline_library:
                 vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT::default(),
+            maintenance5: vk::PhysicalDeviceMaintenance5FeaturesKHR::default(),
+            maintenance6: vk::PhysicalDeviceMaintenance6FeaturesKHR::default(),
+            dynamic_rendering_local_read:
+                vk::PhysicalDeviceDynamicRenderingLocalReadFeaturesKHR::default(),
+            robustness2: vk::PhysicalDeviceRobustness2FeaturesEXT::default(),
+            depth_clip_enable: vk::PhysicalDeviceDepthClipEnableFeaturesEXT::default(),
+            shader_module_identifier: vk::PhysicalDeviceShaderModuleIdentifierFeaturesEXT::default(),
             use_feature_chain: false,
             required_extensions: Vec::new(),
         };
@@ -898,6 +934,57 @@ impl FeatureRequest<'static> {
                 self.graphics_pipeline_library.graphics_pipeline_library = vk::TRUE;
                 true
             }
+            "maintenance5" => {
+                if available.maintenance5.maintenance5 != vk::TRUE {
+                    return false;
+                }
+                self.maintenance5.maintenance5 = vk::TRUE;
+                true
+            }
+            "maintenance6" => {
+                if available.maintenance6.maintenance6 != vk::TRUE {
+                    return false;
+                }
+                self.maintenance6.maintenance6 = vk::TRUE;
+                true
+            }
+            "dynamic_rendering_local_read" => {
+                if available
+                    .dynamic_rendering_local_read
+                    .dynamic_rendering_local_read
+                    != vk::TRUE
+                {
+                    return false;
+                }
+                self.dynamic_rendering_local_read.dynamic_rendering_local_read = vk::TRUE;
+                true
+            }
+            "null_descriptor" => {
+                if available.robustness2.null_descriptor != vk::TRUE {
+                    return false;
+                }
+                self.robustness2.null_descriptor = vk::TRUE;
+                true
+            }
+            "depth_clip_enable" => {
+                if available.depth_clip_enable.depth_clip_enable != vk::TRUE {
+                    return false;
+                }
+                self.depth_clip_enable.depth_clip_enable = vk::TRUE;
+                true
+            }
+            // VK_EXT_shader_module_identifier: extension-only on older APIs,
+            // feature struct required for enablement.
+            "shader_module_identifier" => {
+                if available.shader_module_identifier.shader_module_identifier != vk::TRUE {
+                    return false;
+                }
+                self.shader_module_identifier.shader_module_identifier = vk::TRUE;
+                true
+            }
+            // VK_KHR_calibrated_timestamps / VK_EXT_calibrated_timestamps:
+            // extension-only, no feature struct.
+            "calibrated_timestamps" => true,
             _ => self.enable_descriptor_indexing_field(name, &available.descriptor_indexing),
         }
     }
@@ -1055,6 +1142,48 @@ impl FeatureRequest<'static> {
             "buffer_device_address" if api_version < vk::API_VERSION_1_2 => {
                 self.require_extension(ash::khr::buffer_device_address::NAME, available_extensions)?
             }
+            "maintenance5" if api_version < vk::API_VERSION_1_4 => {
+                self.require_extension(ash::khr::maintenance5::NAME, available_extensions)?
+            }
+            "maintenance6" if api_version < vk::API_VERSION_1_4 => {
+                self.require_extension(ash::khr::maintenance6::NAME, available_extensions)?
+            }
+            "dynamic_rendering_local_read" if api_version < vk::API_VERSION_1_4 => {
+                self.require_extension(
+                    ash::khr::dynamic_rendering_local_read::NAME,
+                    available_extensions,
+                )?
+            }
+            "null_descriptor" => {
+                self.require_extension(ash::ext::robustness2::NAME, available_extensions)?
+            }
+            "depth_clip_enable" => {
+                self.require_extension(ash::ext::depth_clip_enable::NAME, available_extensions)?
+            }
+            "shader_module_identifier" => self.require_extension(
+                ash::ext::shader_module_identifier::NAME,
+                available_extensions,
+            )?,
+            "calibrated_timestamps" if api_version < vk::API_VERSION_1_4 => {
+                // Prefer the KHR promoted variant; fall back to EXT if only that is available.
+                let khr_name = c"VK_KHR_calibrated_timestamps";
+                let ext_name = c"VK_EXT_calibrated_timestamps";
+                let khr_str = khr_name.to_string_lossy().into_owned();
+                let ext_str = ext_name.to_string_lossy().into_owned();
+                if available_extensions.contains(&khr_str) {
+                    if !self.required_extensions.iter().any(|e| *e == khr_name) {
+                        self.required_extensions.push(khr_name);
+                    }
+                } else if available_extensions.contains(&ext_str) {
+                    if !self.required_extensions.iter().any(|e| *e == ext_name) {
+                        self.required_extensions.push(ext_name);
+                    }
+                } else {
+                    return Err(crate::Error::InvalidInput(
+                        "calibrated_timestamps: neither VK_KHR_calibrated_timestamps nor VK_EXT_calibrated_timestamps is available".into(),
+                    ));
+                }
+            }
             _ if is_descriptor_indexing_field(name) && api_version < vk::API_VERSION_1_2 => {
                 self.require_extension(ash::ext::descriptor_indexing::NAME, available_extensions)?
             }
@@ -1183,6 +1312,30 @@ impl FeatureRequest<'static> {
             push_feature_chain(&mut self.features2, &mut self.graphics_pipeline_library);
             self.use_feature_chain = true;
         }
+        if self.maintenance5.maintenance5 == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.maintenance5);
+            self.use_feature_chain = true;
+        }
+        if self.maintenance6.maintenance6 == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.maintenance6);
+            self.use_feature_chain = true;
+        }
+        if self.dynamic_rendering_local_read.dynamic_rendering_local_read == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.dynamic_rendering_local_read);
+            self.use_feature_chain = true;
+        }
+        if self.robustness2.null_descriptor == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.robustness2);
+            self.use_feature_chain = true;
+        }
+        if self.depth_clip_enable.depth_clip_enable == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.depth_clip_enable);
+            self.use_feature_chain = true;
+        }
+        if self.shader_module_identifier.shader_module_identifier == vk::TRUE {
+            push_feature_chain(&mut self.features2, &mut self.shader_module_identifier);
+            self.use_feature_chain = true;
+        }
     }
 
     fn has_descriptor_indexing_features(&self) -> bool {
@@ -1257,6 +1410,13 @@ fn is_known_feature_name(name: &str) -> bool {
                 | "optical_flow"
                 | "optical_flow_nv"
                 | "graphics_pipeline_library"
+                | "maintenance5"
+                | "maintenance6"
+                | "dynamic_rendering_local_read"
+                | "null_descriptor"
+                | "depth_clip_enable"
+                | "calibrated_timestamps"
+                | "shader_module_identifier"
         )
 }
 

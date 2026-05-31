@@ -22,6 +22,9 @@ use super::shaders::{ShaderRegistry, shader_stage_flags};
 /// the last save.  Keeps startup fast (no stale cache flush) while ensuring the
 /// cache is written out during a long session even if the process is killed.
 const PIPELINE_CACHE_CHECKPOINT_THRESHOLD: u32 = 8;
+/// Force a pipeline cache save if this many seconds have elapsed since the last save.
+/// Prevents cache loss on short sessions that create <CHECKPOINT_THRESHOLD pipelines.
+const PIPELINE_CACHE_MAX_AGE_SECS: u64 = 300;
 
 pub struct PipelineRegistry {
     pipeline_cache: vk::PipelineCache,
@@ -29,6 +32,8 @@ pub struct PipelineRegistry {
     graphics_states: HashMap<PipelineHandle, VulkanGraphicsPipelineState>,
     /// Pipelines created since the last incremental cache save.
     pipelines_since_checkpoint: u32,
+    /// Wall-clock time of the last successful cache checkpoint.
+    last_checkpoint_time: std::time::Instant,
     /// When true, graphics pipelines are created without a VkRenderPass,
     /// using VkPipelineRenderingCreateInfoKHR instead.
     pub dynamic_rendering_enabled: bool,
@@ -72,6 +77,7 @@ impl PipelineRegistry {
             pipelines: HashMap::new(),
             graphics_states: HashMap::new(),
             pipelines_since_checkpoint: 0,
+            last_checkpoint_time: std::time::Instant::now(),
             dynamic_rendering_enabled: false,
             vrs_pipeline_enabled: false,
             conservative_rasterization_overestimate_enabled: false,
@@ -94,17 +100,26 @@ impl PipelineRegistry {
         }
     }
 
-    /// If enough new pipelines have been created since the last save, serialize
-    /// the cache and return the bytes.  The caller should write them to disk.
-    /// Returns `None` if the threshold has not yet been reached.
+    /// Serialize the cache if enough new pipelines were created OR enough time
+    /// has elapsed since the last checkpoint.  The bytes should be written to disk.
+    ///
+    /// Two triggers:
+    /// - **Count**: ≥ `PIPELINE_CACHE_CHECKPOINT_THRESHOLD` new pipelines since last save.
+    /// - **Time**: ≥ `PIPELINE_CACHE_MAX_AGE_SECS` elapsed since last save.  Catches short
+    ///   sessions that compile <8 new pipelines so the cache is never lost on clean exit.
     pub fn maybe_checkpoint(&mut self, device: &Device) -> Option<Vec<u8>> {
-        if self.pipelines_since_checkpoint >= PIPELINE_CACHE_CHECKPOINT_THRESHOLD {
+        let count_trigger = self.pipelines_since_checkpoint >= PIPELINE_CACHE_CHECKPOINT_THRESHOLD;
+        let time_trigger = self.pipelines_since_checkpoint > 0
+            && self.last_checkpoint_time.elapsed().as_secs() >= PIPELINE_CACHE_MAX_AGE_SECS;
+        if count_trigger || time_trigger {
             tracing::debug!(
                 new_pipelines = self.pipelines_since_checkpoint,
                 total_pipelines = self.pipelines.len(),
+                time_trigger,
                 "pipeline cache checkpoint: serializing to disk"
             );
             self.pipelines_since_checkpoint = 0;
+            self.last_checkpoint_time = std::time::Instant::now();
             match self.serialize_cache(device) {
                 Ok(data) => {
                     tracing::debug!(bytes = data.len(), "pipeline cache serialized");

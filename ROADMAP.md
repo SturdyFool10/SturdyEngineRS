@@ -1,6 +1,6 @@
 # Sturdy Engine Roadmap
 
-_Last updated: 2026-05-28 (night)_
+_Last updated: 2026-05-29 (evening)_
 
 ## Product Direction
 
@@ -264,7 +264,7 @@ The biggest performance unlock is replacing CPU object expansion with persistent
 ### Visibility and draw generation
 
 - [x] Replace per-batch GPU culling with one cull dispatch per view/pass over the render world. (`render_world_cull.slang`, `RenderWorldGpuCullPass::execute`, `Scene::dispatch_render_world_gpu_passes`)
-- [ ] Wire Hi-Z occlusion into the render-world culling path for the deferred G-buffer. (Hi-Z input to cull pass is wired in `Scene::draw_inner` but not yet forwarded through `DeferredPass::draw_gpu_driven`.)
+- [x] Wire Hi-Z occlusion into the render-world culling path for the deferred G-buffer. `dispatch_render_world_gpu_passes` accepts `depth: Option<&GraphImage>` + `proj`; calls `hiz_pass.execute_history` to build the Hi-Z pyramid and returns previous-frame pyramid to cull pass. `DeferredPass::draw_gpu_driven` pre-allocates `gbuffer_depth` to share it with Hi-Z + G-buffer fill.
 - [x] Implement draw/dispatch compaction with GPU-written visible counts. (`render_world_draw_generate.slang` atomically writes `render_world_visible_draw_count`; `render_world_visible_instances` remapping table; `RenderWorldGpuDrawGenerationPass::execute`)
 - [x] Use `draw_indirect_count` / backend equivalent where supported. (`prepare_gpu_draw_generation` uses `engine.caps().features.draw_indirect_count` to select the path; `draw_mesh_indirect_count_mrt_with_push_constants_and_depth` added.)
 - [x] Provide an explicit fallback path where indirect-count is unavailable. (Both `DrawIndirect` and `DrawIndirectCount` paths exist; scene selects based on caps.)
@@ -284,14 +284,26 @@ Acceptance: CPU render submission scales with changed scene intent and pass setu
 
 Photoreal scenes need many materials, textures, samplers, decals, reflection probes, lights, and per-material parameters. Per-object/per-material binding is not acceptable on the fast path.
 
-- [ ] Define stable material IDs owned by the render/material registry.
-- [ ] Store material parameters in one GPU-resident material table.
-- [ ] Store texture and sampler references as bindless indices.
-- [ ] Upload dirty material ranges instead of rewriting whole tables.
+- [x] Define stable material IDs owned by the render/material registry. (`render_world::MaterialId` — already existed as the stable slot handle; `MaterialRegistry` now manages the GPU table at those slots.)
+- [x] Store material parameters in one GPU-resident material table. (`MaterialRegistry` — 4096-entry `StructuredBuffer<GpuMaterialEntry>`, 64 bytes/entry, persistent GPU buffer.)
+- [x] Store texture and sampler references as bindless indices. (`GpuMaterialEntry` stores `albedo_idx`, `normal_idx`, `roughness_metallic_idx`, `emissive_idx`, `sampler_idx` as `u32` bindless heap indices. `Image::bindless_handle()` is now auto-populated at creation time for all sampled, non-depth, non-transient engine images.)
+- [x] Upload dirty material ranges instead of rewriting whole tables. (`MaterialRegistry::flush` tracks `dirty_start`/`dirty_end` and uploads only the changed sub-range.)
 - [ ] Batch by material shader class and render state, not material instance.
 - [ ] Add scene-wide tables for lights, decals, probes, and other frequently indexed render resources.
 - [ ] Expose a bindless fast path and an explicit degraded fallback path for weaker hardware.
 - [ ] Report when a material/resource feature is unavailable, degraded, or using fallback bindings.
+
+### Bindless foundation (in-progress as part of Priority 4)
+
+These items establish the layers needed before the full bindless-primary path is complete:
+
+- [x] **Image auto-registration**: Every sampled, non-depth, non-transient engine image is auto-registered in the bindless heap at `Engine::create_image` time. `Image::bindless_handle()` returns the stable `u32` index. No manual `register_bindless_image` calls needed for asset textures.
+- [x] **`frame.bind_material_table`**: One-liner to wire `MaterialRegistry` into the reflection-driven bind group builder for any shader that declares `StructuredBuffer<GpuMaterialEntry> material_table`.
+- [x] **`material_table.slang`**: Engine-standard shader header declaring `GpuMaterialEntry`, `material_table`, and helpers (`material_sample_albedo`, `material_sample_normal_ts`, etc.).
+- [ ] **Bindless set 0 auto-injection**: Auto-prepend the bindless set to all reflected pipeline layouts so any shader can access `g_bindless_textures[]` without explicitly declaring unbounded arrays. Requires set-numbering convention (`set 0 = bindless`, `set 1+ = per-pass`) to be enforced across all engine shaders.
+- [x] **Engine-global name registry**: `Engine::register_global_buffer` / `register_global_image` — when `build_reflected_bind_group` cannot resolve a resource by name from per-frame registered bindings, falls back to the engine-wide registry. `MaterialRegistry::flush` auto-registers `"material_table"` on first flush, eliminating per-frame `frame.bind_material_table()` calls for shaders that declare the binding.
+- [ ] **`frame.bind_image` transparent bindless routing**: When an image has a `bindless_handle` and the reflected binding is a `SampledImage`, route through the bindless heap (push constant index) instead of allocating a descriptor set slot. Requires shaders to use `g_bindless_textures[NonUniformResourceIndex(idx)]` — coordinate with the set-convention migration.
+- [x] **Buffer auto-registration**: Non-transient `STORAGE` buffers are auto-registered in the bindless heap at `Device::create_buffer` time. `Buffer::bindless_handle()` returns the stable `u32` index (previously tracked only internally; now exposed at the engine-level `Buffer` API).
 
 Acceptance: adding many material instances should mostly increase data size, not pipeline count, descriptor churn, or draw-call count.
 
@@ -305,27 +317,39 @@ The Vulkan backend is the reference implementation. Keep it ambitious, but make 
 
 - [x] Track draw/dispatch call counts per frame in `CommandContext`; cache in `FramedCommands`; expose via `Backend::frame_draw_dispatch_counts` → `Device::frame_draw_dispatch_counts`; wire to `RuntimeWorkloadDiagnostics::draw_count` / `dispatch_count` in `finish_and_present`.
 - [ ] Record real draw/dispatch work from pass callbacks or pass work descriptions throughout the default renderer.
+- [x] Engine requests all modern Vulkan features automatically at startup: `dynamic_rendering`, `synchronization2`, `timeline_semaphores`, `push_descriptor`, `graphics_pipeline_library`, `extended_dynamic_state3`, `vertex_input_dynamic_state`, `shader_object`, `memory_priority`, `custom_border_color`, `conditional_rendering`, `maintenance5`, `maintenance6`, `dynamic_rendering_local_read`, `null_descriptor`, `depth_clip_enable`, `calibrated_timestamps`, `shader_module_identifier`. All as optional — falls back gracefully when unavailable.
+- [x] `BackendFeature` enum and `BackendFeatures` struct extended with 7 new variants: `Maintenance5`, `Maintenance6`, `DynamicRenderingLocalRead`, `NullDescriptor`, `DepthClipEnable`, `CalibratedTimestamps`, `ShaderModuleIdentifier`. All detected via `AvailableFeatureChain` and enabled in `FeatureRequest`.
 - [ ] Complete Slang compiler integration and reflection-driven pipeline layout generation.
-- [ ] Finish persistent pipeline cache behavior for runtime and asset-driven shader variants.
+- [x] Finish persistent pipeline cache behavior for runtime and asset-driven shader variants. (`pipeline_cache_path()` / `load_pipeline_cache_file()` / `save_pipeline_cache_file()` fully implemented; loaded at startup from `~/.cache/sturdy-engine/pipeline_cache_v2.bin`, checkpointed after every 8 new pipelines, saved on shutdown.)
 - [ ] Add pipeline cache and shader compilation diagnostics to runtime reports.
 - [ ] Validate dynamic rendering, graphics pipeline library, shader objects, and fallback pipeline paths against the reference scene.
+- [x] Wire push descriptor layout flag — `DescriptorRegistry` detects groups where all bindings have `UpdateRate::Draw`, creates those layouts with `PUSH_DESCRIPTOR_BIT_KHR`, skips pool allocation, and the reflection builder (`build_reflected_bind_group`) automatically routes draw-rate bindings into `PushDescriptorSetDesc` which is wired to `PassDesc::push_descriptor_set`. Activated when a shader declares bindings at set=3 (`[[vk::binding(x, 3)]]`).
+- [x] Shader objects end-to-end — `ShaderProgram` compiles `VkShaderEXT` vertex+fragment objects alongside the pipeline when `shader_object` feature is enabled. `record_fullscreen_shader_pass` uses `ShaderBinding::ShaderObjects` when both objects are available; the compiled pipeline serves as the render-state anchor. `Engine::create_shader_object` + `ShaderObject` RAII wrapper added.
 
 ### Memory and transfers
 
+- [x] **`BufferUsage::GPU_ONLY`** — Hint that a buffer is exclusively GPU-resident (never CPU-written). Vulkan backend prefers `DEVICE_LOCAL` memory; falls back to `HOST_VISIBLE` on integrated/budget GPU. Wired to all GPU-driven compute output buffers: `current_matrix_buffer`, `previous_matrix_buffer`, `normal_matrix_buffer`, `world_bounds_buffer`, `visibility_flags_buffer`, `draw_indirect_buffer`, `draw_count_buffer`, `visible_instance_buffer`. These buffers now live in GDDR on discrete GPU — major bandwidth improvement for large GPU-driven scenes.
+- [x] **`PassWork::FillBuffer`** — GPU-side buffer zeroing via `vkCmdFillBuffer`. Allows `GPU_ONLY`/`DEVICE_LOCAL` buffers to be reset without a CPU write. `RenderFrame::fill_buffer(&buf, value)` records a transfer pass on the async compute queue. Used to zero `draw_count_buffer` before each draw generation dispatch.
 - [ ] Use allocator-backed suballocation everywhere instead of ad hoc resource memory paths.
 - [ ] Make transient render-graph resource aliasing part of the default allocation path.
 - [x] Expose `RenderFrame::upload_uniform<T>` with `UniformBinding` for push-descriptor UBO binding via transient pool. (`PushDescriptorBinding::UniformBuffer`, `register_raw_buffer`, `register_transient_buffer_handles`)
 - [ ] Finish upload ring/staging allocator integration for assets and dynamic data.
 - [ ] Add readback paths for diagnostics, benchmark counters, screenshot/export, and GPU-generated stats.
 - [x] Wire `Device::memory_budget()` to `RuntimeWorkloadDiagnostics::memory_used_bytes` / `memory_budget_bytes` each frame in `finish_and_present`.
-- [ ] Track upload bandwidth and transient allocation pressure in renderer diagnostics.
+- [x] Track upload bandwidth in renderer diagnostics: `UploadArena::bytes_uploaded()` accumulates per-frame staging bytes; `RenderFrame::frame_upload_bytes()` exposes it; wired to `RuntimeWorkloadDiagnostics::upload_bytes` in `finish_and_present`.
+- [x] Track transient allocation pressure in renderer diagnostics. (`AliasHeapRegistry::total_bytes()` → `Device::transient_aliased_bytes()` → `RuntimeWorkloadDiagnostics::transient_aliased_bytes` wired in `finish_and_present`.)
+- [x] `Scene::submitted_triangle_count()` from GPU-driven bins; `AppRuntimeFrame::report_scene_workload(scene)` feeds `submitted_triangles` into diagnostics.
+- [x] Transient buffer pool exhaustion diagnostic — `BufferPool::alloc` now logs a `tracing::warn!` with requested size, cursor, and capacity when the pool runs out. `usage_fraction() -> f32` accessor added for telemetry.
 
 ### Barriers and queues
 
 - [ ] Strengthen barrier validation for image subresources, layout transitions, and queue ownership transfers.
 - [x] Name all VkQueue handles at device creation time using `VK_EXT_debug_utils` when available (graphics, compute, transfer, async_compute, dma).
+- [x] **`ShaderPassIntent::async_compute()`** — submits to `AsyncCompute` queue (mirrors `compute()` but routes to dedicated compute queue where available). HiZ pyramid build (`hiz_pass.rs`) migrated to async_compute; now groups in the same batch as transform-build/cull/draw-gen, eliminating 2 unnecessary batch boundaries and semaphore synchronizations per frame.
+- [x] **Pipeline cache time-based flush** — `PipelineRegistry::maybe_checkpoint` now also triggers after 5 minutes regardless of pipeline count. Prevents cache loss in short sessions that compile fewer than 8 new pipelines.
 - [ ] Keep synchronization and queue behavior observable in graph/debug output.
 - [ ] Treat backend feature use as capability-driven, not assumed.
+- [x] NVIDIA Reflex latency sleep (`Surface::latency_sleep()`) and AMD Anti-Lag frame-start (`Device::anti_lag_frame_start()`) called in `AppRuntime::acquire_frame` before input sampling; `LatencyMode` setting changes wire to `Device::set_reflex_mode` / `set_anti_lag_mode` in `apply_pending_runtime_settings`.
 
 Acceptance: higher-level renderer work should not fight memory churn, pipeline stutter, missing readbacks, or opaque synchronization failures.
 
@@ -335,11 +359,11 @@ Acceptance: higher-level renderer work should not fight memory churn, pipeline s
 
 Temporal correctness is required before investing heavily in advanced RT, denoising, frame generation, motion blur, or sophisticated reflections.
 
-- [ ] Use camera-local motion vectors by default.
-- [ ] Maintain previous/current transform buffers for all renderable objects.
+- [x] Use camera-local motion vectors by default. (`CameraMotionVectorPass` reconstructs world pos from G-Buffer depth + camera matrices; attached to `DeferredPass` via `set_camera_motion_vectors`; output exposed through `DeferredOutput::motion_vectors`.)
+- [x] Maintain previous/current transform buffers for all renderable objects. (GPU-driven path: `previous_matrix_buffer` in `RenderWorldGpuSceneState`; bound as `"previous_matrices"` in `draw_gbuffer_render_world_bins` and `draw_inner`. G-buffer vertex shaders now output `curr_clip`/`prev_clip` for per-object motion vectors. Legacy path uses camera-only reprojection as fallback.)
 - [ ] Correctly handle skinned and animated object motion vectors.
 - [ ] Separate screen-locked and camera-locked passes from world-space temporal passes.
-- [ ] Support jittered projection and expose jitter state to all passes that need it.
+- [x] Support jittered projection and expose jitter state to all passes that need it. (`DeferredPass::draw_with_camera` takes `&SceneCamera` and automatically uses `camera.jittered_projection()` + `camera.previous_view_proj`; jitter UV returned to TAA via `camera.jitter_uv`; `draw_with_camera_gpu_driven` does the same for the GPU-driven path.)
 - [ ] Track history resources explicitly in the render graph.
 - [ ] Add motion-vector validation scenes and debug views.
 - [ ] Validate TAA against camera cuts, disocclusion, transparency, emissives, and animated geometry.
@@ -355,8 +379,8 @@ Do not add disconnected effects. Wire the existing modules into the default rend
 
 ### HDR, exposure, tone mapping, and bloom
 
-- [ ] Implement real auto-exposure luminance reduction and exposure history.
-- [ ] Make auto-exposure a supported runtime feature instead of a rejected config.
+- [x] Implement real auto-exposure luminance reduction and exposure history. `AutoExposurePass` runs GPU histogram + adapt compute each frame; `adapted_ev` returned via `RuntimePostProcessOutput::adapted_ev`; testbed converts to linear exposure scale with `exp2(REF_EV - adapted_ev)` and feeds into `TonemapParams::exposure` on the next frame (1-frame lag, imperceptible at 60+ fps).
+- [ ] Make auto-exposure a supported runtime feature with runtime settings toggle (currently always-on in testbed; `AutoExposureConfig::enabled` controls it).
 - [ ] Use mip-based bloom in the default post stack.
 - [ ] Stabilize HDR tonemapping and color-management behavior across SDR/HDR surfaces.
 - [ ] Add debug views for luminance, exposure, bloom mips, and tonemap output.
@@ -403,7 +427,10 @@ Only deepen graph scheduling after the renderer has real passes, real resources,
 - [ ] Model graphics, compute, and transfer queue work in renderer-facing graph diagnostics.
 - [ ] Schedule async compute only where measurements show overlap benefits.
 - [ ] Validate cross-queue synchronization and ownership transfers.
-- [ ] Add parallel command recording where it reduces CPU frame time.
+- [x] Add parallel command recording infrastructure: `SecondaryPool` (one pool+buffer per slot), `CommandContext::record_parallel_compute` (records items into secondaries on `std::thread::scope` threads, executes via `vkCmdExecuteCommands`), `FramedCommands::prepare_parallel_secondary_capacity`, exposed through `Backend` trait, `Device`, and `Engine`. Call `engine.prepare_parallel_secondary_capacity(N)` before first use.
+- [x] `PassWork::MultiMeshIndirectDraw` — collapses N bin draw passes into ONE render pass (one `vkCmdBeginRenderingKHR` / N mesh-switch draws / `vkCmdEndRenderingKHR`). N−1 render-pass boundaries eliminated; especially impactful on tile GPUs. Wired into `draw_gbuffer_render_world_bins` via `draw_multi_mesh_indirect_mrt`.
+- [x] `RenderFrame::dispatch_async_compute_auto` — targets `QueueType::AsyncCompute` instead of `Compute`. GPU-driven compute passes (transform build, cull, draw gen) now route to async compute; on hardware with a dedicated compute queue they overlap GPU execution with shadow-map rendering. Falls back to graphics queue on hardware without a dedicated compute family.
+- [ ] Wire parallel secondary recording into the shadow cascade pass (4 cascades in parallel).
 - [ ] Feed pass timing data back into scheduling decisions.
 - [ ] Optimize transient resource lifetimes and aliasing.
 - [ ] Minimize barriers after correctness is validated.

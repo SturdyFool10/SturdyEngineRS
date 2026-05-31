@@ -187,6 +187,26 @@ pub trait Backend: Send + Sync {
         (0, 0)
     }
 
+    /// Returns `true` when the backend supports parallel secondary command buffer
+    /// recording via [`prepare_parallel_secondary_capacity`].
+    fn parallel_secondary_recording_supported(&self) -> bool {
+        false
+    }
+
+    /// Pre-allocate N secondary command buffer slots for parallel recording.
+    ///
+    /// Must be called before the first parallel recording request.  Idempotent —
+    /// subsequent calls with a larger count grow the slot pool; smaller counts
+    /// are ignored.  No-op on backends that return `false` from
+    /// [`parallel_secondary_recording_supported`].
+    fn prepare_parallel_secondary_capacity(
+        &self,
+        _count: usize,
+        _queue_family_index: u32,
+    ) -> crate::Result<()> {
+        Ok(())
+    }
+
     /// Track 8e: Pre-compile pipeline library objects for common vertex/attachment formats.
     /// Returns a report of what was compiled. No-op when pipeline libraries are unavailable.
     fn pso_pre_warm(&self) -> crate::PsoWarmupReport {
@@ -815,6 +835,11 @@ pub trait Backend: Send + Sync {
     /// Draw and dispatch call counts recorded in the most recently submitted frame.
     fn frame_draw_dispatch_counts(&self) -> (u32, u32) {
         (0, 0)
+    }
+
+    /// Bytes currently held in transient alias-heap memory (render-graph intermediate images).
+    fn transient_aliased_bytes(&self) -> u64 {
+        0
     }
 
     fn present(&self) -> Result<()>;

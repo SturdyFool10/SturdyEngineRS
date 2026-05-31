@@ -14,11 +14,13 @@ struct CameraConstants {
 };
 
 struct VSOut {
-    float4 position : SV_POSITION;
-    float3 normal : NORMAL;
-    float2 uv : TEXCOORD0;
+    float4 position  : SV_POSITION;
+    float3 normal    : NORMAL;
+    float2 uv        : TEXCOORD0;
     float3 world_pos : TEXCOORD1;
-    float4 tangent : TANGENT;
+    float4 tangent   : TANGENT;
+    float4 curr_clip : TEXCOORD5;
+    float4 prev_clip : TEXCOORD6;
 };
 
 // Texture and sampler bindings
@@ -36,12 +38,12 @@ float2 oct_encode(float3 n) {
     return n.xy;
 }
 
-// G-Buffer output
-// G3 removed; world position is reconstructed from depth in deferred_lighting.slang.
+// G-Buffer output — must match GBufferOut in material_surface.slang.
 struct GBufferOut {
     float4 g0 : SV_TARGET0; // base_color.rgb | metallic
     float4 g1 : SV_TARGET1; // oct-normal.xy | roughness | 0
     float4 g2 : SV_TARGET2; // emissive.rgb | 0
+    float4 g3 : SV_TARGET3; // xy = motion velocity (prev_uv - curr_uv), zw = 0
 };
 
 // Material evaluation
@@ -60,9 +62,14 @@ GBufferOut main(VSOut v, uniform CameraConstants cam) {
     N = normalize(mul(normal_ts, tbn));
     float2 oct_n = oct_encode(N);
 
+    float2 curr_ndc = v.curr_clip.xy / v.curr_clip.w;
+    float2 prev_ndc = v.prev_clip.xy / v.prev_clip.w;
+    float2 motion_velocity = (prev_ndc - curr_ndc) * 0.5;
+
     GBufferOut o;
     o.g0 = float4(base_color.rgb, metallic);
     o.g1 = float4(oct_n, roughness, 0.0);
     o.g2 = float4(emissive, 0.0);
+    o.g3 = float4(motion_velocity, 0.0, 0.0);
     return o;
 }

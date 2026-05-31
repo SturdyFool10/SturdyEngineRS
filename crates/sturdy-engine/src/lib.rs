@@ -8,6 +8,7 @@
 pub mod animation;
 mod anti_aliasing_pass;
 mod antialiasing;
+mod camera_motion_vector_pass;
 mod ao_pass;
 mod application;
 mod asset_loader;
@@ -44,6 +45,7 @@ mod input;
 mod light_bvh;
 mod material_table;
 mod mesh;
+mod material_registry;
 mod mesh_loader;
 mod mesh_program;
 mod mip_pyramid;
@@ -123,7 +125,8 @@ pub use debug_overlay::{
     DebugOverlayRenderer, DebugOverlayTransform,
 };
 pub use debug_view_picker::DebugViewPicker;
-pub use deferred_pass::{DeferredPass, RenderPath, SkyConfig};
+pub use camera_motion_vector_pass::CameraMotionVectorPass;
+pub use deferred_pass::{DeferredOutput, DeferredPass, RenderPath, SkyConfig};
 pub use device_manager::{AdapterEntry, DeviceManager};
 pub use ecs::{
     Acceleration,
@@ -187,6 +190,10 @@ pub use input::{
     LateSample,
 };
 pub use light_bvh::{BVH_EMPTY, GpuBvhNode, LEAF_FLAG, LightBvhBuilder};
+pub use material_registry::{
+    GpuMaterialEntry, MATERIAL_NO_TEXTURE, MATERIAL_REGISTRY_CAPACITY, MaterialEntry,
+    MaterialRegistry,
+};
 pub use material_table::{
     MaterialTableCaps, MaterialTableDirtyRange, MaterialTablePlan, MaterialTableSettings,
     material_table_dirty_ranges,
@@ -236,7 +243,7 @@ pub use renderer_metrics::{
 };
 pub use resource::{
     AccelerationStructure, BindGroup, Buffer, Image, Pipeline, PipelineLayout,
-    RayTracingShaderBindingTable, Sampler, Shader, Surface, SurfaceImage,
+    RayTracingShaderBindingTable, Sampler, Shader, ShaderObject, Surface, SurfaceImage,
 };
 pub use resource_table::{
     SceneResourceDirtyRange, SceneResourceId, SceneResourceTableCaps, SceneResourceTableKind,
@@ -319,7 +326,7 @@ pub use bind_group::BindGroupBuilder;
 pub use bindless::BindlessHandle;
 pub use frontend_graph::{
     GraphImage, GraphImageCacheKey, GraphImageHistory, GraphImageHistoryFrame, GraphImageView,
-    RenderFrame, ShaderPassIntent, UniformBinding,
+    MultiMeshDrawBinItem, RenderFrame, ShaderPassIntent, UniformBinding,
 };
 pub use glam::{Vec2, Vec3};
 pub use graph_report::{
@@ -344,6 +351,7 @@ pub use sturdy_engine_core::{
     CompiledShaderArtifact, ComputePipelineDesc, CopyBufferToImageDesc, CopyImageToBufferDesc,
     CullMode, D3d12RawCapabilities, DispatchDesc, DispatchIndirectDesc, DrawDesc,
     DrawIndirectCountDesc, DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, Error,
+    MultiMeshIndirectDrawDesc, MultiMeshIndirectDrawItem,
     ErrorCategory, Extent3d, ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc,
     ExternalImageHandle, FilterMode, Format, FormatCapabilities, FrontFace, GpuCaptureDesc,
     GpuCaptureTool, GpuMemoryBudget, GpuTimeline, GraphicsPipelineDesc, HdrMetadata, ImageBuilder,

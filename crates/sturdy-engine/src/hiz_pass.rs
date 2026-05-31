@@ -348,7 +348,7 @@ impl HizPass {
                 .target_as("hiz_out", target)
                 .image("hiz_source", source)
                 .constants_auto(&push)
-                .compute(
+                .async_compute(
                     &self.program,
                     [
                         target_desc.extent.width.div_ceil(8),

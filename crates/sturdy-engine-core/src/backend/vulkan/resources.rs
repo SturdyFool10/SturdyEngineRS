@@ -554,16 +554,40 @@ impl ResourceRegistry {
         } else {
             vk::MemoryAllocateFlags::empty()
         };
-        let allocation = match self.allocator.alloc_with_flags(
-            device,
-            requirements,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            allocate_flags,
-        ) {
-            Ok(a) => a,
-            Err(error) => {
-                unsafe { device.destroy_buffer(buffer, None) };
-                return Err(error);
+        // GPU_ONLY buffers are never written from the CPU — use DEVICE_LOCAL for
+        // optimal GPU bandwidth.  Fall back to HOST_VISIBLE if DEVICE_LOCAL is
+        // unavailable (integrated GPU, memory pressure, etc.).
+        let allocation = if desc.usage.contains(BufferUsage::GPU_ONLY) {
+            self.allocator
+                .alloc_with_flags(device, requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL, allocate_flags)
+                .or_else(|_| {
+                    tracing::debug!(
+                        size = desc.size,
+                        "DEVICE_LOCAL buffer allocation failed, falling back to HOST_VISIBLE"
+                    );
+                    self.allocator.alloc_with_flags(
+                        device,
+                        requirements,
+                        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                        allocate_flags,
+                    )
+                })
+                .map_err(|error| {
+                    unsafe { device.destroy_buffer(buffer, None) };
+                    error
+                })?
+        } else {
+            match self.allocator.alloc_with_flags(
+                device,
+                requirements,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                allocate_flags,
+            ) {
+                Ok(a) => a,
+                Err(error) => {
+                    unsafe { device.destroy_buffer(buffer, None) };
+                    return Err(error);
+                }
             }
         };
         unsafe {

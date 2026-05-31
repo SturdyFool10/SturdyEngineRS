@@ -17,15 +17,15 @@ use srd_runtime::{
 };
 use sturdy_engine::{
     AntiAliasingConfig, AntiAliasingDial, AntiAliasingPass, AppRuntime, AppRuntimeFrame,
-    BloomConfig, BloomPass, CpuProceduralTexture2d, DebugOverlay, DebugOverlayRenderer,
-    DebugViewPicker, Engine, Error, Extent3d, Format, GpuProceduralTexture, HdrPipelineDesc,
-    HdrPreference, ImageDesc, ImageDimension, ImageUsage, KeyInput, KeyInputState, KeyModifier,
-    KeyToken, MotionVectorLayer, MotionVectorSpace, ProceduralTextureRecipe,
-    ProceduralTextureUpdatePolicy, Result as EngineResult, RuntimeApp, RuntimeController,
-    RuntimeMotionVectorDesc, RuntimePostProcessDesc, RuntimeSettingDescriptor, RuntimeSettingId,
-    RuntimeSettingKey, RuntimeSettingOption, ShaderProgram, ShaderWatcher, ShellFrame, SrdDenoiser,
-    SrdReferenceTemporalPrograms, SurfaceColorSpace, ToneMappingOp, WindowConfig,
-    init_tracing_with_default_filter, push_constants, run_with_runtime, set_log_level,
+    AutoExposureConfig, AutoExposurePass, BloomConfig, BloomPass, CpuProceduralTexture2d,
+    DebugOverlay, DebugOverlayRenderer, DebugViewPicker, Engine, Error, Extent3d, Format,
+    GpuProceduralTexture, HdrPipelineDesc, HdrPreference, ImageDesc, ImageDimension, ImageUsage,
+    KeyInput, KeyInputState, KeyModifier, KeyToken, MotionVectorLayer, MotionVectorSpace,
+    ProceduralTextureRecipe, ProceduralTextureUpdatePolicy, Result as EngineResult, RuntimeApp,
+    RuntimeController, RuntimeMotionVectorDesc, RuntimePostProcessDesc, RuntimeSettingDescriptor,
+    RuntimeSettingId, RuntimeSettingKey, RuntimeSettingOption, ShaderProgram, ShaderWatcher,
+    ShellFrame, SrdDenoiser, SrdReferenceTemporalPrograms, SurfaceColorSpace, ToneMappingOp,
+    WindowConfig, init_tracing_with_default_filter, push_constants, run_with_runtime, set_log_level,
 };
 use tonemap::{TonemapParams, tone_mapping_id};
 
@@ -406,6 +406,14 @@ struct Testbed {
     cornell_denoise_program: ShaderProgram,
     bloom_pass: BloomPass,
     aa_pass: AntiAliasingPass,
+    auto_exposure_pass: AutoExposurePass,
+    /// General auto-exposure config for rasterized and outdoor scenes.
+    auto_exposure_config: AutoExposureConfig,
+    /// Cornell/path-traced config: high metering_floor discards miss-ray background.
+    auto_exposure_config_pt: AutoExposureConfig,
+    /// EV100 from the previous frame's auto-exposure compute — fed into
+    /// `tonemap_constants.exposure` on the next frame as a linear scale.
+    auto_exposure_adapted_ev: Option<f32>,
     bloom_config: BloomConfig,
     bloom_enabled: bool,
     bloom_only: bool,
@@ -677,6 +685,34 @@ impl RuntimeApp for Testbed {
             cornell_denoise_program,
             bloom_pass: BloomPass::new(engine)?,
             aa_pass: AntiAliasingPass::new(engine)?,
+            auto_exposure_pass: AutoExposurePass::new(engine)?,
+            auto_exposure_config: AutoExposureConfig {
+                enabled: true,
+                min_ev: -1.0,
+                max_ev: 6.0,
+                // Bias toward highlights so direct-sun scenes (bright ground plane)
+                // don't blow out: lower percentile pushes target_log_luma up →
+                // higher adapted EV → lower exposure multiplier → darker output.
+                target_percentile: 0.40,
+                // Exclude near-black sky/miss-ray pixels from the mean so they
+                // don't drag target_log_luma down and over-brighten the scene.
+                metering_floor: 0.01,
+                ..AutoExposureConfig::default()
+            },
+            // Path-traced / Cornell config: high metering_floor so background miss-ray
+            // pixels (luma < 0.02) never enter the histogram mean.  Only lit geometry
+            // contributes.
+            // min_ev=1.5 matches REF_EV so the scene is never brightened — the path
+            // tracer converges to the correct exposure on its own and only needs
+            // auto-exposure to prevent it from being too bright, not to lift it.
+            auto_exposure_config_pt: AutoExposureConfig {
+                enabled: true,
+                metering_floor: 0.02,
+                min_ev: 1.5,
+                max_ev: 4.0,
+                ..AutoExposureConfig::default()
+            },
+            auto_exposure_adapted_ev: None,
             bloom_config: BloomConfig::default(),
             bloom_enabled: true,
             bloom_only: false,
@@ -985,11 +1021,23 @@ impl RuntimeApp for Testbed {
             (scene_color, Some(motion_vectors))
         };
 
-        let tonemap_constants = self.tonemap_settings.params(
+        // When auto-exposure is active, replace the manual exposure dial with the
+        // GPU-derived value from the previous frame (1-frame lag, imperceptible at 60+ fps).
+        // REF_EV=1.5 calibrates so a scene at avg_luma≈0.35 linear (EV100≈1.5) needs
+        // no exposure adjustment.  Brighter scenes are dimmed; darker scenes are lifted.
+        // The adapt shader excludes bin-0 (near-black / no-hit rays) from the mean, so
+        // path-traced scenes with black backgrounds auto-expose correctly on the lit region.
+        const AUTO_EXPOSURE_REF_EV: f32 = 1.5;
+        let is_cornell = self.selected_scene == ShowcaseScene::CornellPathTracing;
+        let mut tonemap_constants = self.tonemap_settings.params(
             self.tone_mapping,
             self.hdr_output,
             self.selected_tonemap_dial,
         );
+        if let Some(adapted_ev) = self.auto_exposure_adapted_ev {
+            tonemap_constants.exposure = f32::exp2(AUTO_EXPOSURE_REF_EV - adapted_ev);
+        }
+
         let shadow_showcase = self.selected_scene == ShowcaseScene::RealtimeShadows;
         if shadow_showcase {
             // Keep the deferred shadow showcase on a minimal present path: HDR scene
@@ -1011,7 +1059,7 @@ impl RuntimeApp for Testbed {
             } else {
                 &self.bloom_config
             };
-            let _post = shell_frame.run_default_post_process(RuntimePostProcessDesc {
+            let post = shell_frame.run_default_post_process(RuntimePostProcessDesc {
                 scene_color: &scene_color,
                 motion_vectors: motion_vectors_opt
                     .as_ref()
@@ -1033,9 +1081,18 @@ impl RuntimeApp for Testbed {
                 swapchain: &swapchain,
                 tonemap_program: &self.tonemap_program,
                 tonemap_constants: &tonemap_constants,
-                auto_exposure_pass: None,
-                auto_exposure_config: None,
+                // Cornell uses a dedicated config with a high metering floor so miss-ray
+                // background pixels (luma < 0.02) are excluded from the histogram mean.
+                // Other scenes use the general config with metering_floor=1e-5.
+                auto_exposure_pass: Some(&self.auto_exposure_pass),
+                auto_exposure_config: Some(if is_cornell {
+                    &self.auto_exposure_config_pt
+                } else {
+                    &self.auto_exposure_config
+                }),
             })?;
+            // Store the GPU-computed EV for next frame's tonemap exposure calculation.
+            self.auto_exposure_adapted_ev = post.adapted_ev;
         }
         shell_frame.publish_runtime_diagnostics(
             self.aa.mode.label(),

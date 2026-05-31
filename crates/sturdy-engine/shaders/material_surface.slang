@@ -36,11 +36,13 @@ struct MaterialSurface {
 //   g0  RGBA8Unorm   albedo.rgb | metallic
 //   g1  RGBA16Float  oct-encoded normal.xy | roughness | 0
 //   g2  RGBA16Float  emissive.rgb | 0
+//   g3  RGBA16Float  motion velocity (screen UV delta, RG = prev_uv - curr_uv)
 
 struct GBufferOut {
     float4 g0 : SV_TARGET0; // albedo.rgb | metallic
     float4 g1 : SV_TARGET1; // oct-normal.xy | roughness | 0
     float4 g2 : SV_TARGET2; // emissive.rgb | 0
+    float4 g3 : SV_TARGET3; // xy = motion velocity (prev_uv - curr_uv), zw = 0
 };
 
 // ── Octahedral normal encoding / decoding ─────────────────────────────────────
@@ -72,11 +74,16 @@ float3 oct_decode(float2 f) {
 // ── G-Buffer packing ──────────────────────────────────────────────────────────
 
 /// Pack a `MaterialSurface` into the standard G-Buffer layout.
-GBufferOut pack_gbuffer(MaterialSurface s) {
+///
+/// `motion_velocity` is `prev_uv - curr_uv` in screen UV space.
+/// Pass `float2(0.0, 0.0)` when no per-object motion is available (e.g. from
+/// a camera-only motion vector pass, or for static geometry in the legacy path).
+GBufferOut pack_gbuffer(MaterialSurface s, float2 motion_velocity = float2(0.0f, 0.0f)) {
     GBufferOut o;
     o.g0 = float4(s.albedo, s.metallic);
     o.g1 = float4(oct_encode(s.normal), clamp(s.roughness, 0.04f, 1.0f), 0.0f);
     o.g2 = float4(s.emissive, 0.0f);
+    o.g3 = float4(motion_velocity, 0.0f, 0.0f);
     return o;
 }
 

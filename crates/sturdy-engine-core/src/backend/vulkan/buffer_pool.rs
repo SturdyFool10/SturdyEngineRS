@@ -138,6 +138,16 @@ impl BufferPool {
         let align = alignment.max(1);
         let offset = (self.cursor + align - 1) & !(align - 1);
         if offset + size > self.capacity {
+            // Pool exhausted this frame — the caller will fall back to a dedicated
+            // allocation, which is correct but slower.  Log once per exhaustion event
+            // so the operator can tune the pool capacity.
+            tracing::warn!(
+                requested = size,
+                cursor = self.cursor,
+                capacity = self.capacity,
+                "transient buffer pool exhausted — allocation falls back to dedicated VkBuffer; \
+                 consider increasing the pool capacity if this fires frequently"
+            );
             return None;
         }
         self.cursor = offset + size;
@@ -148,6 +158,14 @@ impl BufferPool {
             size,
             mapped_ptr: ptr,
         })
+    }
+
+    /// Current usage fraction in the range [0.0, 1.0].
+    pub fn usage_fraction(&self) -> f32 {
+        if self.capacity == 0 {
+            return 0.0;
+        }
+        self.cursor as f32 / self.capacity as f32
     }
 
     /// Reset the allocation cursor. Call at the start of each frame, after the

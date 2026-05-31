@@ -10,6 +10,14 @@ pub struct Image {
     pub(crate) device: core::Device,
     pub(crate) handle: core::ImageHandle,
     pub(crate) desc: ImageDesc,
+    /// Stable index into the engine's global bindless sampled-image array.
+    ///
+    /// `Some(idx)` when the image was registered at creation time (sampled,
+    /// non-depth, non-transient).  Pass this into shaders as
+    /// `g_bindless_textures[NonUniformResourceIndex(idx)]`.  `None` on hardware
+    /// without bindless support or for images that are not suitable for bindless
+    /// access (depth/stencil, transient, storage-only).
+    bindless_handle: Option<u32>,
 }
 
 impl Image {
@@ -21,8 +29,47 @@ impl Image {
         self.desc
     }
 
+    /// The stable bindless index for this image, if registered.
+    ///
+    /// Non-`None` for every sampled (non-depth, non-transient) engine-created
+    /// image when the device supports `VK_EXT_descriptor_indexing`.  Use this
+    /// index in shaders that include `bindless.slang`:
+    ///
+    /// ```slang
+    /// float4 color = g_bindless_textures[NonUniformResourceIndex(push.albedo_idx)]
+    ///                    .Sample(g_bindless_samplers[push.sampler_idx], uv);
+    /// ```
+    pub fn bindless_handle(&self) -> Option<u32> {
+        self.bindless_handle
+    }
+
     pub fn set_debug_name(&self, name: &str) -> Result<()> {
         self.device.set_image_debug_name(self.handle, name)
+    }
+
+    /// Build an Image that is NOT auto-registered in the bindless heap.
+    ///
+    /// Used internally for render targets, depth buffers, and images whose
+    /// heap slot would never be reclaimed (e.g. transient frame resources).
+    pub(crate) fn without_bindless(device: core::Device, handle: core::ImageHandle, desc: ImageDesc) -> Self {
+        Self { device, handle, desc, bindless_handle: None }
+    }
+
+    /// Build an Image and attempt bindless registration.
+    ///
+    /// Auto-registers if `desc.usage` contains `SAMPLED` and does NOT contain
+    /// `DEPTH_STENCIL`, and `desc.transient` is false.
+    pub(crate) fn with_auto_bindless(device: core::Device, handle: core::ImageHandle, desc: ImageDesc) -> Self {
+        use crate::ImageUsage;
+        let should_register = desc.usage.contains(ImageUsage::SAMPLED)
+            && !desc.usage.contains(ImageUsage::DEPTH_STENCIL)
+            && !desc.transient;
+        let bindless_handle = if should_register {
+            device.register_bindless_sampled_image(handle)
+        } else {
+            None
+        };
+        Self { device, handle, desc, bindless_handle }
     }
 }
 
@@ -89,6 +136,18 @@ impl Buffer {
 
     pub fn device_address(&self) -> Result<Option<u64>> {
         self.device.buffer_device_address(self.handle)
+    }
+
+    /// Stable bindless index for this buffer in the engine's global heap.
+    ///
+    /// `Some(idx)` for every non-transient storage buffer when the device
+    /// supports bindless.  Use this in shaders that include `bindless.slang`:
+    ///
+    /// ```slang
+    /// uint data = bindless_load_uint(push.buf_idx, byte_offset);
+    /// ```
+    pub fn bindless_handle(&self) -> Option<u32> {
+        self.device.buffer_bindless_index(self.handle)
     }
 
     pub fn set_debug_name(&self, name: &str) -> Result<()> {
@@ -340,5 +399,27 @@ impl SurfaceImage {
 impl Drop for SurfaceImage {
     fn drop(&mut self) {
         let _ = self.device.destroy_image(self.handle);
+    }
+}
+
+/// RAII wrapper for a compiled `VkShaderEXT` object.
+///
+/// Shader objects replace pipeline state objects on hardware and drivers that
+/// support `VK_EXT_shader_object`.  Obtain via [`Engine::create_shader_object`].
+pub struct ShaderObject {
+    pub(crate) device: core::Device,
+    pub(crate) handle: core::shader_object::ShaderObjectHandle,
+}
+
+impl ShaderObject {
+    /// The raw handle, used when building `ShaderBinding::ShaderObjects`.
+    pub fn handle(&self) -> core::shader_object::ShaderObjectHandle {
+        self.handle
+    }
+}
+
+impl Drop for ShaderObject {
+    fn drop(&mut self) {
+        self.device.destroy_shader_object(self.handle);
     }
 }

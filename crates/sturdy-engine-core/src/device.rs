@@ -393,6 +393,49 @@ impl Device {
         register_bindless_storage_buffer(&mut inner, handle)
     }
 
+    /// Return the stable bindless index assigned to this buffer, if any.
+    ///
+    /// Non-`None` for every storage buffer registered in the bindless heap
+    /// (all non-transient `STORAGE` buffers when bindless is supported).
+    /// Use the returned index in shaders via `g_bindless_buffers[idx]`.
+    pub fn buffer_bindless_index(&self, handle: BufferHandle) -> Option<u32> {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.bindless_storage_buffers.get(&handle).copied()
+    }
+
+    // ── Parallel secondary command buffer recording ───────────────────────────
+
+    /// Returns `true` when the backend supports parallel secondary command buffer
+    /// recording.  Always `true` on Vulkan; `false` on stub/null backends.
+    pub fn parallel_secondary_recording_supported(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .backend
+            .parallel_secondary_recording_supported()
+    }
+
+    /// Pre-allocate `count` secondary command buffer recording slots on all
+    /// per-frame contexts.  Call once at init time or when a higher bin/cascade
+    /// count is needed.
+    ///
+    /// `queue_family_index` is the queue family index for the secondary slots
+    /// (typically the graphics family from `caps().queue_families.graphics`).
+    pub fn prepare_parallel_secondary_capacity(
+        &self,
+        count: usize,
+        queue_family_index: u32,
+    ) -> Result<()> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .backend
+            .prepare_parallel_secondary_capacity(count, queue_family_index)
+    }
+
     // ── Descriptor buffer (GFX-7a) ────────────────────────────────────────────
 
     /// Returns the required alignment for descriptor buffer offsets when
@@ -545,6 +588,15 @@ impl Device {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .frame_draw_dispatch_counts()
+    }
+
+    /// Bytes currently held in transient alias-heap memory (render-graph intermediates).
+    pub fn transient_aliased_bytes(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .backend
+            .transient_aliased_bytes()
     }
 
     /// All [`BackendFeature`] variants that are enabled on the current backend.

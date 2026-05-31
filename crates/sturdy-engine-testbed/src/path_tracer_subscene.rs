@@ -500,7 +500,7 @@ fn outdoor_geometry() -> PathTracerSceneGeometry {
         v(-28.0, 0.0, 30.0),
         Vec3::Y,
         MATERIAL_DIFFUSE,
-        Vec3::new(0.48, 0.56, 0.38),
+        Vec3::splat(0.45),
         Vec3::ZERO,
     );
 

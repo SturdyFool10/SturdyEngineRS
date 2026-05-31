@@ -6,7 +6,7 @@ use ash::{Device, vk};
 use crate::{
     BINDLESS_COUNT, BindGroupDesc, BindGroupHandle, BindingKind, CanonicalBinding,
     CanonicalGroupLayout, CanonicalPipelineLayout, Error, Limits, PipelineLayoutHandle,
-    ResourceBinding, Result, StageMask,
+    ResourceBinding, Result, StageMask, UpdateRate,
 };
 
 use super::bindless::{
@@ -29,6 +29,10 @@ pub struct DescriptorRegistry {
     descriptor_buffer_ext: Option<ash::ext::descriptor_buffer::Device>,
     /// GFX-7a: buffer device address feature must be on for buffer-backed descriptors.
     pub buffer_device_address_enabled: bool,
+    /// GFX-1f: VK_KHR_push_descriptor — when true, descriptor groups with all
+    /// `UpdateRate::Draw` bindings are created with `PUSH_DESCRIPTOR_BIT_KHR`
+    /// and are not pool-allocated. They are pushed inline at command-recording time.
+    pub push_descriptors_enabled: bool,
 }
 
 struct VulkanPipelineLayout {
@@ -43,6 +47,10 @@ struct VulkanPipelineLayout {
     pool_sizes_per_bg: Vec<vk::DescriptorPoolSize>,
     push_constants_bytes: u32,
     push_constant_stages: vk::ShaderStageFlags,
+    /// Vulkan set index of the push-descriptor set in this layout, if any.
+    /// Bindings at this set are pushed via `vkCmdPushDescriptorSetKHR` rather
+    /// than allocated from a descriptor pool.
+    push_descriptor_set_index: Option<u32>,
 }
 
 #[derive(Copy, Clone)]
@@ -229,6 +237,7 @@ impl Default for DescriptorRegistry {
             pool_slabs: HashMap::new(),
             descriptor_buffer_ext: None,
             buffer_device_address_enabled: false,
+            push_descriptors_enabled: false,
         }
     }
 }
@@ -263,6 +272,7 @@ impl DescriptorRegistry {
         let mut uses_bindless = false;
         let mut binding_map = HashMap::new();
         let mut pool_counts: HashMap<vk::DescriptorType, u32> = HashMap::new();
+        let mut push_descriptor_set_index: Option<u32> = None;
 
         for (set_index, group) in layout.groups.iter().enumerate() {
             let is_bindless = group_is_bindless(group);
@@ -283,7 +293,17 @@ impl DescriptorRegistry {
                 continue;
             }
 
-            if bind_group_first_set.is_none() {
+            // Detect push-descriptor groups: all bindings at UpdateRate::Draw AND
+            // the push_descriptors extension is available.  These sets are created
+            // with PUSH_DESCRIPTOR_BIT_KHR and are NOT pool-allocated.
+            let is_push_descriptor = self.push_descriptors_enabled
+                && !group.bindings.is_empty()
+                && group
+                    .bindings
+                    .iter()
+                    .all(|b| b.update_rate == UpdateRate::Draw);
+
+            if bind_group_first_set.is_none() && !is_push_descriptor {
                 bind_group_first_set = Some(set_index as u32);
             }
             let allocated_set_index = bind_group_set_layouts.len();
@@ -301,11 +321,21 @@ impl DescriptorRegistry {
                             descriptor_type,
                         },
                     );
-                    *pool_counts.entry(descriptor_type).or_default() += binding.count.max(1);
+                    if !is_push_descriptor {
+                        *pool_counts.entry(descriptor_type).or_default() += binding.count.max(1);
+                    }
                     descriptor_set_layout_binding(binding_index, binding)
                 })
                 .collect::<Vec<_>>();
-            let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+
+            let create_flags = if is_push_descriptor {
+                vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR
+            } else {
+                vk::DescriptorSetLayoutCreateFlags::empty()
+            };
+            let info = vk::DescriptorSetLayoutCreateInfo::default()
+                .bindings(&bindings)
+                .flags(create_flags);
             let set_layout = unsafe {
                 match device.create_descriptor_set_layout(&info, None) {
                     Ok(layout) => layout,
@@ -314,6 +344,7 @@ impl DescriptorRegistry {
                             ?handle,
                             set_index,
                             bindings = bindings.len(),
+                            is_push_descriptor,
                             "vkCreateDescriptorSetLayout failed — check binding count limits \
                              or unsupported descriptor types in this set: {error:?}"
                         );
@@ -326,7 +357,19 @@ impl DescriptorRegistry {
             };
             set_layouts.push(set_layout);
             owned_set_layouts.push(set_layout);
-            bind_group_set_layouts.push(set_layout);
+            if is_push_descriptor {
+                // Push-descriptor sets are NOT pool-allocated; skip the bind-group
+                // set layouts and pool slab.  Record the Vulkan set index so the
+                // command recorder can push descriptors to the correct slot.
+                push_descriptor_set_index = Some(set_index as u32);
+                tracing::debug!(
+                    ?handle,
+                    set_index,
+                    "push-descriptor set detected — bindings will be pushed inline"
+                );
+            } else {
+                bind_group_set_layouts.push(set_layout);
+            }
         }
 
         let push_constant_stages = if layout.push_constants_bytes == 0 {
@@ -386,6 +429,7 @@ impl DescriptorRegistry {
                 pool_sizes_per_bg,
                 push_constants_bytes: layout.push_constants_bytes,
                 push_constant_stages,
+                push_descriptor_set_index,
             },
         );
         tracing::debug!(?handle, uses_bindless, "pipeline layout created");
@@ -723,6 +767,15 @@ impl DescriptorRegistry {
             .get(&handle)
             .map(|layout| layout.uses_bindless)
             .ok_or(Error::InvalidHandle)
+    }
+
+    /// Return the Vulkan set index of the push-descriptor set for this layout,
+    /// or `None` when the layout has no push-descriptor set.
+    pub fn pipeline_push_descriptor_set_index(
+        &self,
+        handle: PipelineLayoutHandle,
+    ) -> Option<u32> {
+        self.layouts.get(&handle)?.push_descriptor_set_index
     }
 }
 
@@ -1269,7 +1322,13 @@ fn write_descriptor_to_buffer(
         crate::ResourceBinding::Buffer(buf_handle) => {
             let buf = match resources.buffer(buf_handle) {
                 Ok(b) => b,
-                Err(_) => return,
+                Err(e) => {
+                    tracing::error!(
+                        ?buf_handle,
+                        "descriptor_buffer: buffer lookup failed — descriptor left zeroed (null): {e:?}"
+                    );
+                    return;
+                }
             };
             let addr_info = vk::DescriptorAddressInfoEXT::default()
                 .address(unsafe {
@@ -1289,7 +1348,13 @@ fn write_descriptor_to_buffer(
         crate::ResourceBinding::Image(img_handle) => {
             let view = match resources.image_view(img_handle) {
                 Ok(v) => v,
-                Err(_) => return,
+                Err(e) => {
+                    tracing::error!(
+                        ?img_handle,
+                        "descriptor_buffer: image view lookup failed — descriptor left zeroed (null): {e:?}"
+                    );
+                    return;
+                }
             };
             let image_info = vk::DescriptorImageInfo::default()
                 .image_view(view)
@@ -1311,7 +1376,13 @@ fn write_descriptor_to_buffer(
         crate::ResourceBinding::Sampler(sampler_handle) => {
             let sampler = match resources.sampler(sampler_handle) {
                 Ok(s) => s,
-                Err(_) => return,
+                Err(e) => {
+                    tracing::error!(
+                        ?sampler_handle,
+                        "descriptor_buffer: sampler lookup failed — descriptor left zeroed (null): {e:?}"
+                    );
+                    return;
+                }
             };
             let data = vk::DescriptorDataEXT {
                 p_sampler: &sampler,

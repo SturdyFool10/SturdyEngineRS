@@ -35,7 +35,9 @@ struct HistogramConstants {
     min_log_luma: f32,
     inv_log_luma_range: f32,
     resolution: [u32; 2],
-    _pad: [u32; 2],
+    /// Linear luminance floor: pixels below this go to bin 0 (excluded from mean).
+    min_luma: f32,
+    _pad: u32,
 }
 
 #[repr(C)]
@@ -157,7 +159,8 @@ impl AutoExposurePass {
             min_log_luma,
             inv_log_luma_range,
             resolution: [width, height],
-            _pad: [0, 0],
+            min_luma: config.metering_floor.max(0.0),
+            _pad: 0,
         };
         let groups_x = (width + 15) / 16;
         let groups_y = (height + 15) / 16;

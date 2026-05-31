@@ -7,7 +7,7 @@ use std::{
 use crate::{
     Buffer, ColorTargetDesc, CullMode, Engine, Error, Format, FrontFace, GraphicsPipelineDesc,
     Pipeline, PipelineLayout, PrimitiveTopology, RasterState, Result, Shader, ShaderDesc,
-    ShaderReflection, ShaderSource, ShaderStage, StageMask, VertexAttributeDesc,
+    ShaderObject, ShaderReflection, ShaderSource, ShaderStage, StageMask, VertexAttributeDesc,
     VertexBufferLayout, VertexFormat, VertexInputRate,
 };
 
@@ -27,6 +27,10 @@ pub struct ShaderProgram {
     pub(crate) reflection: ShaderReflection,
     pub(crate) stage: ShaderStage,
     source_path: Option<PathBuf>,
+    /// VkShaderEXT objects compiled alongside the pipeline when
+    /// `VK_EXT_shader_object` is available. `None` on older hardware/drivers.
+    vertex_shader_obj: Option<ShaderObject>,
+    fragment_shader_obj: Option<ShaderObject>,
 }
 
 impl ShaderProgram {
@@ -193,6 +197,32 @@ impl ShaderProgram {
         };
         tracing::debug!(stage = ?fragment_stage, source = %source_label, "ShaderProgram compiled");
         let fullscreen_triangle = create_fullscreen_triangle(engine)?;
+
+        // Compile VkShaderEXT objects alongside the pipeline when shader objects
+        // are available.  Failures are non-fatal — the pipeline path remains.
+        let (vertex_shader_obj, fragment_shader_obj) = if engine.caps().features.shader_object {
+            use sturdy_engine_core::shader_object::ShaderObjectDesc;
+            let layout_handle = pipeline_layout.handle();
+            let vert_obj = engine.create_shader_object(ShaderObjectDesc {
+                shader: vertex.handle(),
+                layout: Some(layout_handle),
+            });
+            let frag_obj = engine.create_shader_object(ShaderObjectDesc {
+                shader: fragment.handle(),
+                layout: Some(layout_handle),
+            });
+            if vert_obj.is_none() || frag_obj.is_none() {
+                tracing::debug!(
+                    stage = ?fragment_stage,
+                    source = %source_label,
+                    "shader object compilation failed or skipped — using pipeline fallback"
+                );
+            }
+            (vert_obj, frag_obj)
+        } else {
+            (None, None)
+        };
+
         Ok(Self {
             engine: engine.clone(),
             pipelines: Mutex::new(HashMap::new()),
@@ -203,6 +233,8 @@ impl ShaderProgram {
             reflection,
             stage: fragment_stage,
             source_path: None,
+            vertex_shader_obj,
+            fragment_shader_obj,
         })
     }
 
@@ -213,6 +245,21 @@ impl ShaderProgram {
     /// Return the source file path if this program was loaded from a file.
     pub fn source_path(&self) -> Option<&Path> {
         self.source_path.as_deref()
+    }
+
+    /// Return compiled shader object handles for this program, or `None` when
+    /// `VK_EXT_shader_object` is not available or compilation failed.
+    ///
+    /// When `Some`, passes can use `ShaderBinding::ShaderObjects` with these
+    /// handles instead of a compiled pipeline, setting the pipeline as the anchor
+    /// for render state.  The order is `[vertex, fragment]`.
+    pub fn shader_object_handles(
+        &self,
+    ) -> Option<[sturdy_engine_core::shader_object::ShaderObjectHandle; 2]> {
+        Some([
+            self.vertex_shader_obj.as_ref()?.handle(),
+            self.fragment_shader_obj.as_ref()?.handle(),
+        ])
     }
 
     /// Recompile from the original source file and rebuild all cached pipelines.

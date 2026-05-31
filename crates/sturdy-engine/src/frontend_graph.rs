@@ -6,7 +6,8 @@ use crate::{
     Access, BindGroup, BindGroupDesc, BindGroupEntry, BindingKind, BlasBuildDesc, Buffer,
     BufferDesc, BufferUsage, BufferUse, CopyImageToBufferDesc, DispatchDesc, DrawDesc,
     DrawIndirectCountDesc, DrawIndirectDesc, Engine, Error, Format, ImageDesc, ImageHandle,
-    ImageRef, ImageUse, IndexBufferBinding, PassDesc, PassWork, Pipeline, PushConstants, QueueType,
+    ImageRef, ImageUse, IndexBufferBinding, MultiMeshIndirectDrawDesc, MultiMeshIndirectDrawItem,
+    PassDesc, PassWork, Pipeline, PushConstants, QueueType,
     RayTracingShaderBindingTable, ResolveImageDesc, ResourceBinding, Result, RgState,
     ShaderReflection, StageMask, SubresourceRange, SurfaceImage, TlasBuildDesc, TraceRaysDesc,
     VertexBufferBinding, compute_program::ComputeProgram, mesh::Mesh, mesh_program::MeshProgram,
@@ -279,7 +280,7 @@ struct ImageBinding {
     subresource: SubresourceRange,
 }
 
-fn single_subresource() -> SubresourceRange {
+pub(super) fn single_subresource() -> SubresourceRange {
     SubresourceRange {
         base_mip: 0,
         mip_count: 1,
@@ -316,6 +317,14 @@ impl RenderFrame {
 
     pub fn engine(&self) -> Engine {
         self.inner.borrow().engine.clone()
+    }
+
+    /// Total bytes written to the staging upload arena during this frame.
+    ///
+    /// Counts all `upload_texture_2d`, `upload_uniform`, and direct arena uploads.
+    /// Reset to zero at the start of each frame (the arena is freshly created).
+    pub fn frame_upload_bytes(&self) -> u64 {
+        self.inner.borrow().frame.upload_arena.bytes_uploaded()
     }
 
     /// Write `value` into the per-frame transient buffer pool and return a binding descriptor
@@ -566,6 +575,61 @@ impl RenderFrame {
     /// `StructuredBuffer` or `RWStructuredBuffer` binding whose variable name
     /// matches `name` will receive this buffer. Call this before the first
     /// `draw_mesh_instanced` (or other draw) that needs it.
+    /// Reset a GPU buffer to a constant 32-bit pattern via `vkCmdFillBuffer`.
+    ///
+    /// Records a transfer pass that zeroes (or fills) the entire buffer.  Use
+    /// this to reset per-frame GPU counters stored in `GPU_ONLY` / `DEVICE_LOCAL`
+    /// buffers that cannot be written from the CPU.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Reset draw-count atomic before the draw-generation dispatch.
+    /// frame.fill_buffer(&draw_count_buf, 0)?;
+    /// frame.dispatch_async_compute_auto("draw_gen", &prog, &constants, [groups, 1, 1])?;
+    /// ```
+    pub fn fill_buffer(&self, buffer: &crate::Buffer, value: u32) -> Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        let declaration_index = inner.declaration_index;
+        inner.declaration_index = inner.declaration_index.saturating_add(1);
+        let handle = buffer.handle();
+        let desc = buffer.desc();
+        inner.frame.inner.graph_mut(|g| g.import_buffer(handle, desc))?;
+        let pass_name = format!("{declaration_index:04}-fill-buffer");
+        inner.pass_records.push(PassRecord {
+            name: pass_name.clone(),
+            kind: PassKind::Compute,
+            queue: core::QueueType::AsyncCompute,
+            reads: Vec::new(),
+            writes: Vec::new(),
+            buffer_read_names: Vec::new(),
+            buffer_write_names: Vec::new(),
+            deferred_read_names: Vec::new(),
+            skip_read_name: String::new(),
+        });
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                name: pass_name,
+                queue: QueueType::AsyncCompute,
+                work: PassWork::FillBuffer {
+                    buffer: handle,
+                    offset: 0,
+                    size: u64::MAX,
+                    value,
+                },
+                buffer_writes: vec![crate::BufferUse {
+                    buffer: handle,
+                    access: Access::Write,
+                    state: RgState::CopyDst,
+                    offset: 0,
+                    size: desc.size,
+                }],
+                ..PassDesc::new(String::new(), QueueType::AsyncCompute)
+            },
+            deferred: None,
+        });
+        Ok(())
+    }
+
     pub fn bind_buffer(&self, name: impl Into<String>, buffer: &crate::Buffer) -> &Self {
         let mut inner = self.inner.borrow_mut();
         inner
@@ -580,6 +644,28 @@ impl RenderFrame {
     /// for data created with [`ShaderData`](crate::ShaderData).
     pub fn bind_shader_data(&self, name: impl Into<String>, data: &crate::ShaderData) -> &Self {
         self.bind_buffer(name, data.buffer())
+    }
+
+    /// Bind the [`MaterialRegistry`](crate::MaterialRegistry) buffer as
+    /// `"material_table"` so any shader that declares
+    /// `StructuredBuffer<GpuMaterialEntry> material_table` receives it
+    /// automatically through reflection-driven bind group creation.
+    ///
+    /// Call this **after** [`MaterialRegistry::flush`] and before the first
+    /// draw or dispatch that reads `material_table`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// material_registry.flush(&engine)?;
+    /// frame.bind_material_table(&material_registry);
+    /// // any subsequent pass whose shader declares `material_table` is wired up
+    /// deferred.draw(&mut scene, view, proj, &hdr, &frame, &engine, time)?;
+    /// ```
+    pub fn bind_material_table(
+        &self,
+        registry: &crate::MaterialRegistry,
+    ) -> &Self {
+        self.bind_buffer("material_table", registry.gpu_buffer())
     }
 
     /// Register a GPU image under a name for the current frame.
@@ -766,6 +852,27 @@ impl RenderFrame {
     /// frame.bind_buffer("indirect_commands", &indirect_buf);
     /// frame.dispatch_compute_auto("cull", &cull_program, &constants, [groups, 1, 1])?;
     /// ```
+    /// Like [`dispatch_compute_auto`] but targets the async compute queue.
+    ///
+    /// Passes submitted on `AsyncCompute` can overlap GPU execution with graphics
+    /// passes on the graphics queue.  Use this for GPU-driven culling, transform
+    /// build, draw generation, and other compute work that runs before or in
+    /// parallel with rasterisation.  The render graph batcher automatically groups
+    /// consecutive async-compute passes into a separate command-buffer submission
+    /// and inserts timeline-semaphore synchronisation with the graphics batches.
+    ///
+    /// Falls back to the graphics queue on hardware without a dedicated compute
+    /// queue family — behaviour is identical on those devices.
+    pub fn dispatch_async_compute_auto<T: bytemuck::Pod>(
+        &self,
+        name: impl Into<String>,
+        program: &ComputeProgram,
+        constants: &T,
+        groups: [u32; 3],
+    ) -> Result<()> {
+        self.dispatch_on_queue(QueueType::AsyncCompute, name, program, constants, groups)
+    }
+
     pub fn dispatch_compute_auto<T: bytemuck::Pod>(
         &self,
         name: impl Into<String>,
@@ -773,13 +880,31 @@ impl RenderFrame {
         constants: &T,
         groups: [u32; 3],
     ) -> Result<()> {
+        self.dispatch_on_queue(QueueType::Compute, name, program, constants, groups)
+    }
+
+    fn dispatch_on_queue<T: bytemuck::Pod>(
+        &self,
+        queue: QueueType,
+        name: impl Into<String>,
+        program: &ComputeProgram,
+        constants: &T,
+        groups: [u32; 3],
+    ) -> Result<()> {
         let stages = reflected_push_constant_stages(program.reflection(), StageMask::COMPUTE);
         let bytes = validate_compute_typed_constants(program, constants)?;
-        let push = Some(PushConstants {
-            offset: 0,
-            stages,
-            bytes: bytes.to_vec(),
-        });
+        // Only push constants when the pipeline layout actually declares them.
+        // When push_constants_bytes == 0 the pipeline has no push constant range and
+        // any cmd_push_constants call would fail with a Vulkan validation error.
+        let push = if program.reflection().layout.push_constants_bytes > 0 {
+            Some(PushConstants {
+                offset: 0,
+                stages,
+                bytes: bytes.to_vec(),
+            })
+        } else {
+            None
+        };
 
         let mut inner = self.inner.borrow_mut();
         let declaration_index = inner.declaration_index;
@@ -817,7 +942,7 @@ impl RenderFrame {
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
             kind: PassKind::Compute,
-            queue: core::QueueType::Compute,
+            queue,
             reads: eager_uses.clone(),
             writes: Vec::new(),
             buffer_read_names: buf_read_names.clone(),
@@ -864,7 +989,7 @@ impl RenderFrame {
                             })
                     })
                     .collect(),
-                ..PassDesc::default_compute(pass_name.clone())
+                ..PassDesc::new(pass_name.clone(), queue)
             },
             deferred: Some(DeferredPassResolve {
                 layout_handle: program.pipeline_layout.handle(),
@@ -1762,6 +1887,20 @@ impl<'a> ShaderPassIntent<'a> {
     }
 
     pub fn compute(self, program: &ComputeProgram, groups: [u32; 3]) -> Result<()> {
+        self.compute_on_queue(program, groups, QueueType::Compute)
+    }
+
+    /// Like [`compute`] but submits to the async compute queue.
+    ///
+    /// Passes on the async queue can overlap GPU execution with graphics passes,
+    /// which is especially valuable for read-only compute on previous-frame data
+    /// (e.g. Hi-Z pyramid build from last frame's depth).  Falls back to the
+    /// graphics queue on hardware without a dedicated compute queue family.
+    pub fn async_compute(self, program: &ComputeProgram, groups: [u32; 3]) -> Result<()> {
+        self.compute_on_queue(program, groups, QueueType::AsyncCompute)
+    }
+
+    fn compute_on_queue(self, program: &ComputeProgram, groups: [u32; 3], queue: QueueType) -> Result<()> {
         let target = self.target.ok_or_else(|| {
             Error::InvalidInput(format!(
                 "shader pass '{}' needs a target image before compute()",
@@ -1775,16 +1914,29 @@ impl<'a> ShaderPassIntent<'a> {
             }
             pc
         });
-        record_compute_shader_pass(
-            &self.frame.inner,
-            Some(self.name),
-            &target,
-            program,
-            push_constants,
-            groups,
-            self.target_binding_name.as_deref(),
-            self.resources,
-        )
+        if queue == QueueType::AsyncCompute {
+            record_compute_shader_pass_async(
+                &self.frame.inner,
+                Some(self.name),
+                &target,
+                program,
+                push_constants,
+                groups,
+                self.target_binding_name.as_deref(),
+                self.resources,
+            )
+        } else {
+            record_compute_shader_pass(
+                &self.frame.inner,
+                Some(self.name),
+                &target,
+                program,
+                push_constants,
+                groups,
+                self.target_binding_name.as_deref(),
+                self.resources,
+            )
+        }
     }
 
     pub fn constants_auto<T: bytemuck::Pod>(mut self, constants: &T) -> Self {
@@ -1837,6 +1989,17 @@ pub struct GraphImage {
     name: String,
     handle: ImageHandle,
     desc: ImageDesc,
+}
+
+/// One item in a [`GraphImage::draw_multi_mesh_indirect_mrt`] batch.
+///
+/// Carries the per-mesh buffers and indirect-draw parameters for a single bin.
+/// All items in the batch share the program, push constants, and bind group.
+pub struct MultiMeshDrawBinItem<'a> {
+    pub mesh: &'a crate::Mesh,
+    pub indirect_buffer: &'a crate::Buffer,
+    pub indirect_offset: u64,
+    pub draw_count: u32,
 }
 
 #[derive(Clone)]
@@ -2816,6 +2979,215 @@ impl GraphImage {
         Ok(())
     }
 
+    /// Draw multiple meshes with different vertex/index buffers in a **single
+    /// render pass**, sharing the same program, push constants, and bind group.
+    ///
+    /// This collapses N individual `draw_mesh_indirect_mrt_*` calls (which each
+    /// create their own render pass begin/end boundary) into ONE
+    /// `vkCmdBeginRenderingKHR` block containing N draws.  The reduction in
+    /// render-pass boundaries lowers CPU recording overhead and is especially
+    /// beneficial on tile-based GPUs.
+    ///
+    /// # Per-item data
+    ///
+    /// Each `MultiMeshDrawBinItem` carries:
+    /// - `mesh` — provides vertex + index buffers
+    /// - `indirect_buffer` — the shared GPU indirect command buffer
+    /// - `indirect_offset` — byte offset of this item's draw command
+    /// - `draw_count` — number of draw commands for this item (usually 1)
+    ///
+    /// All items share `program`, `constants`, and any frame-registered
+    /// buffer/image bindings (e.g. `"render_world_visible_instances"`).
+    pub fn draw_multi_mesh_indirect_mrt<T: bytemuck::Pod>(
+        &self,
+        additional_targets: &[&GraphImage],
+        items: &[MultiMeshDrawBinItem<'_>],
+        program: &MeshProgram,
+        constants: &T,
+        depth: Option<&GraphImage>,
+    ) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let stage = reflected_push_constant_stages(
+            program.reflection(),
+            StageMask::VERTEX | StageMask::FRAGMENT,
+        );
+        let push_constants = Some(PushConstants {
+            offset: 0,
+            stages: stage,
+            bytes: bytemuck::bytes_of(constants).to_vec(),
+        });
+
+        let mut inner = self.frame.borrow_mut();
+        let declaration_index = inner.declaration_index;
+        inner.declaration_index = inner.declaration_index.saturating_add(1);
+
+        // Import the primary and additional render targets.
+        inner.frame.inner.graph_mut(|g| g.import_image(self.handle, self.desc))?;
+        for t in additional_targets {
+            inner.frame.inner.graph_mut(|g| g.import_image(t.handle, t.desc))?;
+        }
+        if let Some(d) = depth {
+            inner.frame.inner.graph_mut(|g| g.import_image(d.handle, d.desc))?;
+        }
+
+        // Import all mesh geometry + indirect buffers across all items.
+        let mut buffer_reads: Vec<crate::BufferUse> = Vec::new();
+        let mut work_items: Vec<MultiMeshIndirectDrawItem> = Vec::with_capacity(items.len());
+        for item in items {
+            inner.frame.inner.graph_mut(|g| {
+                g.import_buffer(item.mesh.vertex_buffer.handle(), item.mesh.vertex_buffer.desc())
+            })?;
+            if let Some(ib) = &item.mesh.index_buffer {
+                inner.frame.inner.graph_mut(|g| g.import_buffer(ib.handle(), ib.desc()))?;
+            }
+            inner.frame.inner.graph_mut(|g| {
+                g.import_buffer(item.indirect_buffer.handle(), item.indirect_buffer.desc())
+            })?;
+            buffer_reads.push(crate::BufferUse {
+                buffer: item.mesh.vertex_buffer.handle(),
+                access: Access::Read,
+                state: RgState::VertexRead,
+                offset: 0,
+                size: item.mesh.vertex_buffer.desc().size,
+            });
+            if let Some(ib) = &item.mesh.index_buffer {
+                buffer_reads.push(crate::BufferUse {
+                    buffer: ib.handle(),
+                    access: Access::Read,
+                    state: RgState::IndexRead,
+                    offset: 0,
+                    size: ib.desc().size,
+                });
+            }
+            buffer_reads.push(crate::BufferUse {
+                buffer: item.indirect_buffer.handle(),
+                access: Access::Read,
+                state: RgState::IndirectRead,
+                offset: 0,
+                size: item.indirect_buffer.desc().size,
+            });
+            const INDIRECT_STRIDE: u32 = std::mem::size_of::<crate::DrawIndexedIndirectCommand>() as u32;
+            work_items.push(MultiMeshIndirectDrawItem {
+                vertex_buffer: VertexBufferBinding {
+                    buffer: item.mesh.vertex_buffer.handle(),
+                    binding: 0,
+                    offset: 0,
+                },
+                index_buffer: item.mesh.index_buffer.as_ref().map(|ib| IndexBufferBinding {
+                    buffer: ib.handle(),
+                    offset: 0,
+                    format: item.mesh.index_format,
+                }),
+                indirect_buffer: item.indirect_buffer.handle(),
+                indirect_offset: item.indirect_offset,
+                max_draw_count: item.draw_count,
+                stride: INDIRECT_STRIDE,
+                count_buffer: None,
+                count_offset: 0,
+            });
+        }
+
+        // MRT pipeline keyed on all color formats.
+        let mut color_formats = vec![self.desc.format];
+        for t in additional_targets {
+            color_formats.push(t.desc.format);
+        }
+        let pipeline = program.pipeline_handle_mrt(&color_formats, self.desc.samples)?;
+
+        // Color writes + optional depth write.
+        let mut writes: Vec<crate::ImageUse> = std::iter::once(self)
+            .chain(additional_targets.iter().copied())
+            .map(|t| crate::ImageUse {
+                image: t.handle,
+                access: Access::Write,
+                state: RgState::RenderTarget,
+                subresource: single_subresource(),
+            })
+            .collect();
+        let mut clear_depth = None;
+        if let Some(d) = depth {
+            writes.push(crate::ImageUse {
+                image: d.handle,
+                access: Access::Write,
+                state: RgState::DepthWrite,
+                subresource: single_subresource(),
+            });
+            clear_depth = Some((d.handle, f32::to_bits(1.0), 0u8));
+        }
+
+        let mesh_read_names = reflected_image_reads(program.reflection());
+        for name in &mesh_read_names {
+            if name != &self.name {
+                if let Some(record) = inner.images_by_name.get(name.as_str()).copied() {
+                    inner.frame.inner.graph_mut(|g| g.import_image(record.handle, record.desc))?;
+                }
+            }
+        }
+        let (eager_bindings, unresolved_read_names, eager_uses) =
+            split_read_names(&mesh_read_names, &self.name, &inner.images_by_name);
+
+        let pass_name = format!("{declaration_index:04}-multi-mesh-indirect-mrt-{}", self.name);
+        inner.pass_records.push(PassRecord {
+            name: pass_name.clone(),
+            kind: PassKind::Mesh,
+            queue: core::QueueType::Graphics,
+            reads: eager_uses.clone(),
+            writes: writes.iter().map(|w| crate::ImageUse { image: w.image, access: w.access, state: w.state, subresource: w.subresource }).collect(),
+            buffer_read_names: reflected_buffer_read_names(program.reflection()),
+            buffer_write_names: reflected_buffer_write_names(program.reflection()),
+            deferred_read_names: unresolved_read_names.clone(),
+            skip_read_name: self.name.clone(),
+        });
+
+        // Snapshot eager buffer bindings for the deferred resolve.
+        let buf_read_names = reflected_buffer_read_names(program.reflection());
+        let buf_write_names = reflected_buffer_write_names(program.reflection());
+        let mut eager_buffers: HashMap<String, (core::BufferHandle, crate::BufferDesc)> = HashMap::new();
+        for n in buf_read_names.iter().chain(buf_write_names.iter()) {
+            if let Some(&(handle, desc)) = inner.buffers_by_name.get(n.as_str()) {
+                eager_buffers.insert(n.clone(), (handle, desc));
+                inner.frame.inner.graph_mut(|g| g.import_buffer(handle, desc))?;
+            }
+        }
+
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                name: pass_name,
+                queue: crate::QueueType::Graphics,
+                shader: Some(program.fragment.handle()),
+                pipeline: Some(pipeline),
+                bind_groups: Vec::new(),
+                push_constants,
+                pipeline_shading_rate: None,
+                work: PassWork::MultiMeshIndirectDraw(MultiMeshIndirectDrawDesc { items: work_items }),
+                reads: eager_uses,
+                writes,
+                buffer_reads,
+                buffer_writes: Vec::new(),
+                clear_colors: Vec::new(),
+                clear_depth,
+                push_descriptor_set: None,
+                predicate: None,
+                shader_binding: None,
+                shading_rate_image: None,
+                perf_counters: None,
+            },
+            deferred: Some(DeferredPassResolve {
+                layout_handle: program.pipeline_layout.handle(),
+                reflection: program.reflection().clone(),
+                eager_bindings,
+                eager_samplers: HashMap::new(),
+                eager_buffers,
+                unresolved_read_names,
+                skip_name: self.name.clone(),
+                storage_output: None,
+            }),
+        });
+        Ok(())
+    }
+
     /// Like `draw_mesh_instanced_with_push_constants_and_depth` but driven by a
     /// GPU indirect command buffer.
     ///
@@ -3660,6 +4032,12 @@ fn record_fullscreen_shader_pass(
         skip_read_name: target.name.clone(),
     });
 
+    // Use shader objects when available so the driver can skip PSO lookups.
+    // The compiled pipeline is always provided as the render-state anchor.
+    let shader_binding = shader
+        .shader_object_handles()
+        .map(|handles| core::ShaderBinding::ShaderObjects(handles.to_vec()));
+
     inner.pending_passes.push(PendingPass {
         desc: PassDesc {
             name: pass_name,
@@ -3696,7 +4074,7 @@ fn record_fullscreen_shader_pass(
             clear_depth: None,
             push_descriptor_set: None,
             predicate: None,
-            shader_binding: None,
+            shader_binding,
             shading_rate_image: None,
             perf_counters: None,
         },
@@ -3723,6 +4101,39 @@ fn record_compute_shader_pass(
     groups: [u32; 3],
     target_binding_name: Option<&str>,
     explicit: ExplicitPassResources,
+) -> Result<()> {
+    record_compute_shader_pass_on_queue(
+        frame, pass_name_override, target, program, push_constants,
+        groups, target_binding_name, explicit, QueueType::Compute,
+    )
+}
+
+fn record_compute_shader_pass_async(
+    frame: &Rc<RefCell<RenderFrameInner>>,
+    pass_name_override: Option<String>,
+    target: &GraphImage,
+    program: &ComputeProgram,
+    push_constants: Option<PushConstants>,
+    groups: [u32; 3],
+    target_binding_name: Option<&str>,
+    explicit: ExplicitPassResources,
+) -> Result<()> {
+    record_compute_shader_pass_on_queue(
+        frame, pass_name_override, target, program, push_constants,
+        groups, target_binding_name, explicit, QueueType::AsyncCompute,
+    )
+}
+
+fn record_compute_shader_pass_on_queue(
+    frame: &Rc<RefCell<RenderFrameInner>>,
+    pass_name_override: Option<String>,
+    target: &GraphImage,
+    program: &ComputeProgram,
+    push_constants: Option<PushConstants>,
+    groups: [u32; 3],
+    target_binding_name: Option<&str>,
+    explicit: ExplicitPassResources,
+    queue: QueueType,
 ) -> Result<()> {
     validate_pass_target_usage(&target.name, target.desc, crate::ImageUsage::STORAGE)?;
     let mut inner = frame.borrow_mut();
@@ -3756,7 +4167,7 @@ fn record_compute_shader_pass(
     inner.pass_records.push(PassRecord {
         name: pass_name.clone(),
         kind: PassKind::Compute,
-        queue: core::QueueType::Compute,
+        queue,
         reads: eager_uses.clone(),
         writes: vec![target_use],
         buffer_read_names: reflected_buffer_read_names(program.reflection()),
@@ -3768,7 +4179,7 @@ fn record_compute_shader_pass(
     inner.pending_passes.push(PendingPass {
         desc: PassDesc {
             name: pass_name,
-            queue: QueueType::Compute,
+            queue,
             shader: Some(program.shader.handle()),
             pipeline: Some(program.pipeline.handle()),
             bind_groups: Vec::new(),
@@ -4145,7 +4556,7 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
 
             // Build the bind group now that all images are known.
             let pass_name = desc.name.clone();
-            let bind_groups = build_reflected_bind_group(
+            let (bind_groups, push_descriptor_set) = build_reflected_bind_group(
                 &inner.engine,
                 deferred.layout_handle,
                 &deferred.reflection,
@@ -4170,6 +4581,11 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
             })?;
             desc.bind_groups = bind_groups.iter().map(|bg| bg.handle()).collect();
             inner.held_bind_groups.extend(bind_groups);
+            // Wire push-descriptor bindings (UpdateRate::Draw groups) directly into
+            // the pass so they are pushed inline via vkCmdPushDescriptorSetKHR.
+            if push_descriptor_set.is_some() {
+                desc.push_descriptor_set = push_descriptor_set;
+            }
         }
         resolved.push(desc);
     }

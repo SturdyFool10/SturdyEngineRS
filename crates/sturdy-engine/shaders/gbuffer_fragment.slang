@@ -33,6 +33,8 @@ struct VSOut {
     float2 uv        : TEXCOORD0;
     float3 world_pos : TEXCOORD1;
     float4 tangent   : TANGENT;
+    float4 curr_clip : TEXCOORD5;
+    float4 prev_clip : TEXCOORD6;
 };
 
 GBufferOut main(VSOut v) {
@@ -58,5 +60,10 @@ GBufferOut main(VSOut v) {
     surface.emissive  = emissive;
     surface.opacity   = M.albedo.w;
 
-    return pack_gbuffer(surface);
+    // Per-object motion velocity: clip-space positions interpolated from vertex shader.
+    float2 curr_ndc = v.curr_clip.xy / v.curr_clip.w;
+    float2 prev_ndc = v.prev_clip.xy / v.prev_clip.w;
+    float2 motion_velocity = (prev_ndc - curr_ndc) * 0.5; // NDC→UV scale: *0.5
+
+    return pack_gbuffer(surface, motion_velocity);
 }

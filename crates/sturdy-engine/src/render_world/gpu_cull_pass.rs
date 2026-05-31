@@ -193,7 +193,7 @@ impl RenderWorldGpuCullPass {
             proj_z_scale,
             _pad: 0,
         };
-        frame.dispatch_compute_auto(
+        frame.dispatch_async_compute_auto(
             "render_world_cull",
             &self.program,
             &constants,

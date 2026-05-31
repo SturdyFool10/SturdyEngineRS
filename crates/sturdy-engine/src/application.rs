@@ -582,6 +582,22 @@ pub struct RuntimePostProcessDesc<'a, T: bytemuck::Pod> {
 pub struct RuntimePostProcessOutput {
     pub hdr_composite: GraphImage,
     pub final_color: GraphImage,
+    /// Adapted EV100 read back from the GPU exposure state buffer.
+    ///
+    /// Available after `auto_exposure_pass` ran with `enabled = true`.
+    /// Uses the **previous** frame's GPU result (the current frame's histogram
+    /// dispatch has been recorded but not yet executed).  Feed this into the
+    /// tonemap's `exposure` push constant on the next frame to implement a
+    /// 1-frame-lag auto-exposure loop with no CPU↔GPU synchronisation stall.
+    ///
+    /// Convert to a linear exposure multiplier with:
+    /// ```text
+    /// exposure = exp2(AUTO_EXPOSURE_REF_EV - adapted_ev)
+    /// ```
+    /// where `AUTO_EXPOSURE_REF_EV` is the scene EV at which manual
+    /// `exposure = 1.0` produces a well-exposed result (typically 0.0–3.0
+    /// depending on your HDR scene scale).
+    pub adapted_ev: Option<f32>,
 }
 
 impl<'a> ShellFrame<'a> {
@@ -1095,9 +1111,11 @@ impl<'a> ShellFrame<'a> {
         desc.swapchain
             .execute_shader_with_constants_auto(desc.tonemap_program, desc.tonemap_constants)?;
 
+        let adapted_ev = auto_exposure_readback.as_ref().map(|s| s.adapted_ev);
         Ok(RuntimePostProcessOutput {
             hdr_composite: final_input,
             final_color: desc.swapchain.clone(),
+            adapted_ev,
         })
     }
 
@@ -2989,6 +3007,26 @@ where
             self.runtime.apply_surface_runtime_settings(&changes);
             if let Some(window) = self.window_context_for_handle_mut(self.primary_window) {
                 window.state_mut().waiting_for_surface_recreation = false;
+            }
+        }
+        // Apply Immediate-path latency/pacing settings.
+        for change in &changes {
+            if let crate::RuntimeSettingId::Engine(crate::RuntimeSettingKey::LatencyMode) =
+                &change.setting
+            {
+                if let crate::RuntimeSettingValue::Text(ref mode_str) = change.value {
+                    let reflex_mode = match mode_str.as_str() {
+                        "LowLatency" => sturdy_engine_core::ReflexMode::On,
+                        "UltraLowLatency" => sturdy_engine_core::ReflexMode::OnPlusBoost,
+                        _ => sturdy_engine_core::ReflexMode::Off,
+                    };
+                    let _ = self.runtime.engine().device.set_reflex_mode(reflex_mode);
+                    let anti_lag_mode = match mode_str.as_str() {
+                        "LowLatency" | "UltraLowLatency" => sturdy_engine_core::AntiLagMode::On,
+                        _ => sturdy_engine_core::AntiLagMode::Off,
+                    };
+                    let _ = self.runtime.engine().device.set_anti_lag_mode(anti_lag_mode);
+                }
             }
         }
         self.app_state

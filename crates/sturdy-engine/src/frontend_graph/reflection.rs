@@ -63,6 +63,13 @@ fn reflected_bindings_of_kind(
         .collect()
 }
 
+/// Returns `(pool_bind_groups, push_descriptor_set)`.
+///
+/// `push_descriptor_set` is populated when the reflected layout contains a
+/// descriptor group where every binding has `UpdateRate::Draw`.  These bindings
+/// are excluded from the pool-allocated bind group and instead returned as a
+/// `PushDescriptorSetDesc` that the caller attaches to `PassDesc::push_descriptor_set`.
+/// The Vulkan backend will then push them inline via `vkCmdPushDescriptorSetKHR`.
 pub(super) fn build_reflected_bind_group(
     engine: &Engine,
     layout_handle: core::PipelineLayoutHandle,
@@ -74,14 +81,14 @@ pub(super) fn build_reflected_bind_group(
     eager_samplers: &HashMap<String, core::SamplerHandle>,
     eager_buffers: &HashMap<String, (core::BufferHandle, crate::BufferDesc)>,
     output_image: Option<(&str, ImageHandle)>,
-) -> Result<Vec<BindGroup>> {
+) -> Result<(Vec<BindGroup>, Option<core::PushDescriptorSetDesc>)> {
     let has_bindings = reflection
         .layout
         .groups
         .iter()
         .any(|g| !g.bindings.is_empty());
     if !has_bindings {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
 
     let resolve_image = |path: &str| -> Option<ImageBinding> {
@@ -101,11 +108,106 @@ pub(super) fn build_reflected_bind_group(
 
     let mut missing = Vec::new();
     let mut entries = Vec::new();
-    for group in &reflection.layout.groups {
+    let mut push_bindings: Vec<core::PushDescriptorBinding> = Vec::new();
+    let mut push_set_index: Option<u32> = None;
+
+    for (group_index, group) in reflection.layout.groups.iter().enumerate() {
+        // All-Draw-rate groups route through push descriptors rather than pool allocation.
+        let is_push_group = engine.caps().features.push_descriptors
+            && !group.bindings.is_empty()
+            && group
+                .bindings
+                .iter()
+                .all(|b| b.update_rate == core::UpdateRate::Draw);
+
         for binding in &group.bindings {
+            if is_push_group {
+                // Build PushDescriptorBinding for this draw-rate binding.
+                match binding.kind {
+                    BindingKind::SampledImage => {
+                        if let Some(image) = resolve_image(&binding.path) {
+                            push_bindings.push(core::PushDescriptorBinding::SampledImage {
+                                binding: binding.binding,
+                                image_view: image.handle,
+                                layout: crate::RgState::ShaderRead,
+                            });
+                            push_set_index = Some(group_index as u32);
+                        } else {
+                            missing.push(format!(
+                                "{} ({:?} push set binding {})",
+                                binding.path, binding.kind, binding.binding
+                            ));
+                        }
+                    }
+                    BindingKind::Sampler => {
+                        let handle = eager_samplers
+                            .get(&binding.path)
+                            .or_else(|| samplers_by_name.get(&binding.path))
+                            .copied()
+                            .unwrap_or_else(|| engine.default_sampler());
+                        push_bindings.push(core::PushDescriptorBinding::Sampler {
+                            binding: binding.binding,
+                            sampler: handle,
+                        });
+                        push_set_index = Some(group_index as u32);
+                    }
+                    BindingKind::StorageBuffer => {
+                        if let Some((handle, desc)) = eager_buffers
+                            .get(&binding.path)
+                            .or_else(|| buffers_by_name.get(&binding.path))
+                            .copied()
+                            .or_else(|| engine.global_buffer(&binding.path))
+                        {
+                            push_bindings.push(core::PushDescriptorBinding::StorageBuffer {
+                                binding: binding.binding,
+                                buffer: handle,
+                                offset: 0,
+                                range: desc.size,
+                            });
+                            push_set_index = Some(group_index as u32);
+                        } else {
+                            missing.push(format!(
+                                "{} ({:?} push set binding {})",
+                                binding.path, binding.kind, binding.binding
+                            ));
+                        }
+                    }
+                    BindingKind::UniformBuffer => {
+                        if let Some((handle, desc)) = eager_buffers
+                            .get(&binding.path)
+                            .or_else(|| buffers_by_name.get(&binding.path))
+                            .copied()
+                            .or_else(|| engine.global_buffer(&binding.path))
+                        {
+                            push_bindings.push(core::PushDescriptorBinding::UniformBuffer {
+                                binding: binding.binding,
+                                buffer: handle,
+                                offset: 0,
+                                range: desc.size,
+                            });
+                            push_set_index = Some(group_index as u32);
+                        } else {
+                            missing.push(format!(
+                                "{} ({:?} push set binding {})",
+                                binding.path, binding.kind, binding.binding
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            // Regular pool-allocated path.
             match binding.kind {
                 BindingKind::SampledImage => {
-                    if let Some(image) = resolve_image(&binding.path) {
+                    let image = resolve_image(&binding.path).or_else(|| {
+                        engine.global_image(&binding.path).map(|(handle, _desc)| ImageBinding {
+                            handle,
+                            subresource: single_subresource(),
+                        })
+                    });
+                    if let Some(image) = image {
                         if let Some(desc) = image_desc(image.handle) {
                             validate_reflected_image_usage(&binding.path, binding.kind, desc)?;
                         }
@@ -169,11 +271,13 @@ pub(super) fn build_reflected_bind_group(
                     if let Some((handle, desc)) = eager_buffers
                         .get(&binding.path)
                         .or_else(|| buffers_by_name.get(&binding.path))
+                        .copied()
+                        .or_else(|| engine.global_buffer(&binding.path))
                     {
-                        validate_reflected_buffer_usage(&binding.path, binding.kind, *desc)?;
+                        validate_reflected_buffer_usage(&binding.path, binding.kind, desc)?;
                         entries.push(BindGroupEntry {
                             path: binding.path.clone(),
-                            resource: ResourceBinding::Buffer(*handle),
+                            resource: ResourceBinding::Buffer(handle),
                         });
                     } else {
                         missing.push(format!(
@@ -194,15 +298,20 @@ pub(super) fn build_reflected_bind_group(
         )));
     }
 
+    let push_descriptor_set = push_set_index.map(|set| core::PushDescriptorSetDesc {
+        set,
+        bindings: push_bindings,
+    });
+
     if entries.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), push_descriptor_set));
     }
 
     let bind_group = engine.create_bind_group(BindGroupDesc {
         layout: layout_handle,
         entries,
     })?;
-    Ok(vec![bind_group])
+    Ok((vec![bind_group], push_descriptor_set))
 }
 
 pub(super) fn validate_pass_target_usage(

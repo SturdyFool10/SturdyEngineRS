@@ -15,7 +15,7 @@ use crate::{
     GraphicsPipelineDesc, Image, ImageDesc, ImageUsage, MeshPrimitive, NativeHandleCapabilities,
     Pipeline, PipelineLayout, RayTracingPipelineDesc, RayTracingShaderBindingTable, RenderFrame,
     Result, Sampler, SamplerDesc, SamplerPreset, Shader, ShaderBindingTableDesc, ShaderDesc,
-    ShaderName, ShaderProgram, ShaderProgramDesc, ShaderReflection, ShaderSource, ShaderStage,
+    ShaderName, ShaderObject, ShaderProgram, ShaderProgramDesc, ShaderReflection, ShaderSource, ShaderStage,
     SlangEntryPoints, Surface, SurfaceHdrPreference, SurfaceImage, SurfaceSize, TextureUploadDesc,
     TlasBuildDesc, asset_loader, engine_global, mesh_loader, sampler_catalog,
 };
@@ -46,6 +46,16 @@ pub struct Engine {
     /// Unix-second timestamp of the last VRAM over-budget log line.
     /// Used to throttle the warning to at most once per 5 seconds.
     last_budget_warn_secs: Arc<std::sync::atomic::AtomicU64>,
+    /// Engine-global named buffer registry.
+    ///
+    /// Populated via [`Engine::register_global_buffer`].  The reflection-driven
+    /// bind-group builder checks this as a fallback when the per-frame registered
+    /// bindings don't contain a shader-required name.  Eliminates the need for
+    /// explicit `frame.bind_buffer("material_table", ...)` calls for standard
+    /// engine resources.
+    global_buffers: Arc<Mutex<HashMap<String, (core::BufferHandle, BufferDesc)>>>,
+    /// Engine-global named image registry (same fallback role as `global_buffers`).
+    global_images: Arc<Mutex<HashMap<String, (core::ImageHandle, ImageDesc)>>>,
 }
 
 impl Engine {
@@ -61,12 +71,34 @@ impl Engine {
             ..core::DeviceDesc::default()
         };
         desc = desc
+            // Core capabilities
             .prefer_feature(core::DeviceFeature::SamplerAnisotropy)
             .prefer_feature(core::DeviceFeature::BindlessResources)
             .prefer_feature(core::DeviceFeature::BufferDeviceAddress)
             .prefer_feature(core::DeviceFeature::MeshShading)
             .prefer_feature(core::DeviceFeature::RayTracing)
-            .prefer_feature(core::DeviceFeature::RayQuery);
+            .prefer_feature(core::DeviceFeature::RayQuery)
+            // Modern Vulkan render pipeline
+            .prefer_backend_feature("dynamic_rendering")
+            .prefer_backend_feature("synchronization2")
+            .prefer_backend_feature("timeline_semaphores")
+            .prefer_backend_feature("push_descriptor")
+            .prefer_backend_feature("graphics_pipeline_library")
+            .prefer_backend_feature("extended_dynamic_state3")
+            .prefer_backend_feature("vertex_input_dynamic_state")
+            .prefer_backend_feature("shader_object")
+            // Descriptor and resource access
+            .prefer_backend_feature("memory_priority")
+            .prefer_backend_feature("custom_border_color")
+            .prefer_backend_feature("conditional_rendering")
+            // Vulkan 1.4 / modern maintenance
+            .prefer_backend_feature("maintenance5")
+            .prefer_backend_feature("maintenance6")
+            .prefer_backend_feature("dynamic_rendering_local_read")
+            .prefer_backend_feature("null_descriptor")
+            .prefer_backend_feature("depth_clip_enable")
+            .prefer_backend_feature("calibrated_timestamps")
+            .prefer_backend_feature("shader_module_identifier");
         Self::with_desc(desc)
     }
 
@@ -79,6 +111,8 @@ impl Engine {
             pending_uploads: Arc::new(Mutex::new(Vec::new())),
             texture_cache: Arc::new(Mutex::new(HashMap::new())),
             last_budget_warn_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            global_buffers: Arc::new(Mutex::new(HashMap::new())),
+            global_images: Arc::new(Mutex::new(HashMap::new())),
         };
         let catalog = sampler_catalog::SamplerCatalog::build(&engine)?;
         engine.sampler_catalog = Arc::new(catalog);
@@ -96,6 +130,26 @@ impl Engine {
 
     pub fn caps(&self) -> Caps {
         self.device.caps()
+    }
+
+    /// Returns `true` when the backend supports parallel secondary command buffer
+    /// recording.  Use [`prepare_parallel_secondary_capacity`] to allocate slots.
+    pub fn parallel_secondary_recording_supported(&self) -> bool {
+        self.device.parallel_secondary_recording_supported()
+    }
+
+    /// Pre-allocate secondary command buffer slots for parallel recording.
+    ///
+    /// Call once at startup (or when the peak parallel count increases) so the
+    /// per-frame recording path never allocates on the hot path.  Idempotent
+    /// for repeated calls with the same or smaller counts.
+    ///
+    /// `count` is the maximum number of items you want to record in parallel
+    /// (e.g. 4 for CSM cascades, or `render_world.persistent_bins.len()` for
+    /// the GPU-driven G-buffer bins).
+    pub fn prepare_parallel_secondary_capacity(&self, count: usize) -> Result<()> {
+        // Queue family is resolved internally by the backend (graphics family).
+        self.device.prepare_parallel_secondary_capacity(count, 0)
     }
 
     /// All [`BackendFeature`] variants currently enabled on this engine's backend.
@@ -118,8 +172,8 @@ impl Engine {
     }
 
     /// Clear engine-level caches after a backend restart.
-    /// Graph image cache, texture cache, and pending uploads all hold GPU handles
-    /// that are invalid after the backend is rebuilt.
+    /// Graph image cache, texture cache, pending uploads, and global resource
+    /// registries all hold GPU handles that are invalid after the backend is rebuilt.
     pub(crate) fn clear_caches_after_backend_restart(&self) {
         *self
             .graph_image_cache
@@ -133,6 +187,14 @@ impl Engine {
             .pending_uploads
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = Vec::new();
+        self.global_buffers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        self.global_images
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
     }
 
     /// Rebuild the sampler catalog against the current (new) backend.
@@ -158,6 +220,68 @@ impl Engine {
     /// ```
     pub fn memory_budget(&self) -> Option<GpuMemoryBudget> {
         self.device.memory_budget()
+    }
+
+    // ── Global resource registry ──────────────────────────────────────────────
+
+    /// Register a named buffer so the reflection-driven bind-group builder can
+    /// resolve it by name without an explicit per-frame `frame.bind_buffer` call.
+    ///
+    /// Call once after creating a long-lived GPU buffer (e.g. `MaterialRegistry`,
+    /// scene light tables).  Any shader that declares a binding with the same name
+    /// as the registered resource will be wired up automatically.
+    ///
+    /// Re-registering an existing name replaces the old entry (useful after a
+    /// buffer resize).  Cleared automatically on backend restart.
+    pub fn register_global_buffer(&self, name: impl Into<String>, handle: core::BufferHandle, desc: BufferDesc) {
+        self.global_buffers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(name.into(), (handle, desc));
+    }
+
+    /// Register a named image for automatic reflection-driven binding.
+    ///
+    /// Works like [`register_global_buffer`] but for images.
+    pub fn register_global_image(&self, name: impl Into<String>, handle: core::ImageHandle, desc: ImageDesc) {
+        self.global_images
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(name.into(), (handle, desc));
+    }
+
+    /// Un-register a previously registered named buffer.
+    pub fn unregister_global_buffer(&self, name: &str) {
+        self.global_buffers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(name);
+    }
+
+    /// Un-register a previously registered named image.
+    pub fn unregister_global_image(&self, name: &str) {
+        self.global_images
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(name);
+    }
+
+    /// Look up a globally registered buffer by name.
+    pub fn global_buffer(&self, name: &str) -> Option<(core::BufferHandle, BufferDesc)> {
+        self.global_buffers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(name)
+            .copied()
+    }
+
+    /// Look up a globally registered image by name.
+    pub fn global_image(&self, name: &str) -> Option<(core::ImageHandle, ImageDesc)> {
+        self.global_images
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(name)
+            .copied()
     }
 
     // ── Global accessor ───────────────────────────────────────────────────────
@@ -230,11 +354,7 @@ impl Engine {
 
     pub fn create_image(&self, desc: ImageDesc) -> Result<Image> {
         let handle = self.device.create_image(desc)?;
-        Ok(Image {
-            device: self.device.clone(),
-            handle,
-            desc,
-        })
+        Ok(Image::with_auto_bindless(self.device.clone(), handle, desc))
     }
 
     /// Import a borrowed native image into the engine.
@@ -245,11 +365,7 @@ impl Engine {
     /// requirements documented by `Device::import_external_image`.
     pub unsafe fn import_external_image(&self, desc: ExternalImageDesc) -> Result<Image> {
         let handle = unsafe { self.device.import_external_image(desc)? };
-        Ok(Image {
-            device: self.device.clone(),
-            handle,
-            desc: desc.desc,
-        })
+        Ok(Image::without_bindless(self.device.clone(), handle, desc.desc))
     }
 
     pub fn create_buffer(&self, desc: BufferDesc) -> Result<Buffer> {
@@ -859,6 +975,28 @@ impl Engine {
     /// All discrete GPUs since ~2016 and most mobile GPUs since 2020 support this.
     pub fn bindless_supported(&self) -> bool {
         self.device.bindless_supported()
+    }
+
+    /// Compile a standalone shader object (`VkShaderEXT`) for direct binding.
+    ///
+    /// Returns `None` when `BackendFeatures::shader_object` is not enabled.
+    /// On success returns a RAII [`ShaderObject`] handle valid until dropped.
+    ///
+    /// Shader objects replace pipeline state objects on modern drivers and are
+    /// bound via `ShaderBinding::ShaderObjects` in `PassDesc`.  The `layout`
+    /// field in the descriptor must match the pipeline layout that will be bound
+    /// alongside the shader objects.
+    pub fn create_shader_object(
+        &self,
+        desc: core::shader_object::ShaderObjectDesc,
+    ) -> Option<ShaderObject> {
+        if !self.caps().features.shader_object {
+            return None;
+        }
+        self.device.create_shader_object(desc).ok().map(|handle| ShaderObject {
+            device: self.device.clone(),
+            handle,
+        })
     }
 
     /// Register a 2-D texture (sampled image) in the global bindless heap.

@@ -177,6 +177,22 @@ pub enum BackendFeature {
     VideoEncodeH265,
     /// VK_KHR_video_encode_av1.
     VideoEncodeAv1,
+
+    // ── Vulkan 1.4 / modern maintenance ──────────────────────────────────────
+    /// VK_KHR_maintenance5 (core in Vulkan 1.4).
+    Maintenance5,
+    /// VK_KHR_maintenance6 (core in Vulkan 1.4) — `VkBindDescriptorSetsInfoKHR`.
+    Maintenance6,
+    /// VK_KHR_dynamic_rendering_local_read (core in Vulkan 1.4) — in-pass attachment reads.
+    DynamicRenderingLocalRead,
+    /// VK_EXT_robustness2 `nullDescriptor` — safe sentinel descriptor bindings.
+    NullDescriptor,
+    /// VK_EXT_depth_clip_enable — dynamic depth-clipping control.
+    DepthClipEnable,
+    /// VK_KHR_calibrated_timestamps (core in Vulkan 1.4) — accurate GPU/CPU clock correlation.
+    CalibratedTimestamps,
+    /// VK_EXT_shader_module_identifier — stable shader binary hash for pipeline caching.
+    ShaderModuleIdentifier,
 }
 
 impl BackendFeature {
@@ -250,6 +266,13 @@ impl BackendFeature {
             Self::VideoEncodeH264 => "video_encode_h264",
             Self::VideoEncodeH265 => "video_encode_h265",
             Self::VideoEncodeAv1 => "video_encode_av1",
+            Self::Maintenance5 => "maintenance5",
+            Self::Maintenance6 => "maintenance6",
+            Self::DynamicRenderingLocalRead => "dynamic_rendering_local_read",
+            Self::NullDescriptor => "null_descriptor",
+            Self::DepthClipEnable => "depth_clip_enable",
+            Self::CalibratedTimestamps => "calibrated_timestamps",
+            Self::ShaderModuleIdentifier => "shader_module_identifier",
         }
     }
 
@@ -328,6 +351,13 @@ impl BackendFeature {
             "video_encode_h264" => Self::VideoEncodeH264,
             "video_encode_h265" => Self::VideoEncodeH265,
             "video_encode_av1" => Self::VideoEncodeAv1,
+            "maintenance5" => Self::Maintenance5,
+            "maintenance6" => Self::Maintenance6,
+            "dynamic_rendering_local_read" => Self::DynamicRenderingLocalRead,
+            "null_descriptor" => Self::NullDescriptor,
+            "depth_clip_enable" => Self::DepthClipEnable,
+            "calibrated_timestamps" => Self::CalibratedTimestamps,
+            "shader_module_identifier" => Self::ShaderModuleIdentifier,
             _ => return None,
         })
     }
@@ -400,6 +430,13 @@ impl BackendFeature {
         Self::VideoEncodeH264,
         Self::VideoEncodeH265,
         Self::VideoEncodeAv1,
+        Self::Maintenance5,
+        Self::Maintenance6,
+        Self::DynamicRenderingLocalRead,
+        Self::NullDescriptor,
+        Self::DepthClipEnable,
+        Self::CalibratedTimestamps,
+        Self::ShaderModuleIdentifier,
     ];
 }
 

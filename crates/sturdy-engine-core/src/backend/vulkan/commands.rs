@@ -6,6 +6,8 @@ use ash::{Device, vk};
 
 #[path = "commands/batch_pool.rs"]
 mod batch_pool;
+#[path = "commands/secondary_pool.rs"]
+pub(crate) mod secondary_pool;
 
 use crate::{
     AccelerationStructureBuildMode, BufferBarrier, CompiledGraph, Error, Extent3d, Format,
@@ -101,6 +103,12 @@ pub struct CommandContext {
     pub frame_draw_calls: u32,
     /// Compute dispatches recorded in the most recently submitted frame.
     pub frame_dispatch_calls: u32,
+    /// Per-slot secondary command pools for parallel recording.
+    /// Grown on demand; reset each frame after the previous fence signals.
+    secondary_slots: Vec<secondary_pool::SecondaryPool>,
+    /// Queue family used when secondary slots were created.
+    /// When the requested queue family changes, all slots are destroyed and recreated.
+    secondary_queue_family: Option<u32>,
 }
 
 impl CommandContext {
@@ -221,6 +229,8 @@ impl CommandContext {
             transient_buffer_handle: None,
             frame_draw_calls: 0,
             frame_dispatch_calls: 0,
+            secondary_slots: Vec::new(),
+            secondary_queue_family: None,
         })
     }
 
@@ -234,6 +244,146 @@ impl CommandContext {
     /// Returns the `BufferHandle` for this frame slot's transient pool buffer, if available.
     pub fn transient_buffer_handle(&self) -> Option<crate::BufferHandle> {
         self.transient_buffer_handle
+    }
+
+    // ── Parallel secondary command buffer recording ───────────────────────────
+
+    /// Ensure at least `count` secondary recording slots exist for `queue_family`.
+    ///
+    /// If the queue family has changed, all existing slots are destroyed first.
+    /// New slots are grown as needed.  This is idempotent — cheap to call every
+    /// frame even when no parallel recording is needed.
+    pub fn prepare_secondary_slots(
+        &mut self,
+        device: &Device,
+        count: usize,
+        queue_family: u32,
+    ) -> Result<()> {
+        // If queue family changed, destroy all existing slots first.
+        if self.secondary_queue_family != Some(queue_family) && !self.secondary_slots.is_empty() {
+            for slot in self.secondary_slots.drain(..) {
+                slot.destroy(device);
+            }
+        }
+        self.secondary_queue_family = Some(queue_family);
+
+        while self.secondary_slots.len() < count {
+            let slot = secondary_pool::SecondaryPool::create(device, queue_family)?;
+            self.secondary_slots.push(slot);
+        }
+        Ok(())
+    }
+
+    /// Reset secondary recording slots for this frame (called after the fence signals).
+    pub fn reset_secondary_slots(&self, device: &Device) -> Result<()> {
+        for slot in &self.secondary_slots {
+            unsafe {
+                device
+                    .reset_command_pool(slot.pool, vk::CommandPoolResetFlags::empty())
+                    .map_err(|e| Error::Backend(format!("reset secondary pool: {e:?}")))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Record into `count` secondary compute command buffers in parallel using rayon,
+    /// then execute all of them in `primary_cmd`.
+    ///
+    /// `record_fn` receives a `SecondaryRecordToken` for its assigned slot; callers
+    /// may record any Vulkan commands (compute, copy, etc.) that are valid outside
+    /// a render pass.  The token wraps a `vk::CommandBuffer` that is safe to use
+    /// from any thread as long as each token is used from at most one thread.
+    ///
+    /// After all workers return, the secondaries are executed in the primary via
+    /// `vkCmdExecuteCommands`.  The secondary buffers remain valid until the next
+    /// call to [`reset_secondary_slots`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `count > self.secondary_slots.len()` — call `prepare_secondary_slots`
+    /// first.
+    pub fn record_parallel_compute<T, F>(
+        &self,
+        device: &Device,
+        primary_cmd: vk::CommandBuffer,
+        items: &[T],
+        record_fn: F,
+    ) -> Result<()>
+    where
+        T: Send + Sync,
+        F: Fn(&T, secondary_pool::SecondaryRecordToken) -> Result<()> + Send + Sync,
+    {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let count = items.len();
+        assert!(
+            count <= self.secondary_slots.len(),
+            "record_parallel_compute: count={count} exceeds slot count={}", self.secondary_slots.len()
+        );
+
+        // Begin all secondaries before spawning rayon tasks.
+        let cmds: Vec<vk::CommandBuffer> = self.secondary_slots[..count]
+            .iter()
+            .map(|s| s.cmd)
+            .collect();
+        for &cmd in &cmds {
+            let begin_info = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            unsafe {
+                device
+                    .begin_command_buffer(cmd, &begin_info)
+                    .map_err(|e| Error::Backend(format!("begin secondary: {e:?}")))?;
+            }
+        }
+
+        // Build tokens — one per slot.  Each is Send because SecondaryRecordToken
+        // is marked Send (see secondary_pool.rs safety comment).
+        let tokens: Vec<secondary_pool::SecondaryRecordToken> =
+            cmds.iter().copied().map(secondary_pool::SecondaryRecordToken).collect();
+
+        // Record in parallel using scoped threads — each gets exclusive access to
+        // its own token.  std::thread::scope ensures all threads join before we
+        // continue, so no 'static requirement on the closure.
+        let results: Vec<Result<()>> = std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(count);
+            for (item, token) in items.iter().zip(tokens) {
+                let rf = &record_fn;
+                let handle = s.spawn(move || rf(item, token));
+                handles.push(handle);
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| Err(Error::Backend("secondary recording thread panicked".into()))))
+                .collect()
+        });
+
+        // End all secondaries and propagate the first error, if any.
+        for &cmd in &cmds {
+            unsafe {
+                device
+                    .end_command_buffer(cmd)
+                    .map_err(|e| Error::Backend(format!("end secondary: {e:?}")))?;
+            }
+        }
+
+        // Propagate first recording error after ending all buffers.
+        for r in results {
+            r?;
+        }
+
+        // Execute all secondaries in the primary.
+        unsafe {
+            device.cmd_execute_commands(primary_cmd, &cmds);
+        }
+        Ok(())
+    }
+
+    /// Destroy all secondary recording slots.  Called in `Drop`.
+    pub fn destroy_secondary_slots(&mut self, device: &Device) {
+        for slot in self.secondary_slots.drain(..) {
+            slot.destroy(device);
+        }
     }
 
     /// Record and submit one command buffer per graph batch, then return
@@ -337,6 +487,8 @@ impl CommandContext {
             if let Some(pool) = &mut self.transient_buffer_pool {
                 pool.reset();
             }
+            // Reset secondary recording pools so they are ready for reuse this frame.
+            self.reset_secondary_slots(device)?;
             for semaphore in self.pending_semaphores.drain(..) {
                 unsafe {
                     device.destroy_semaphore(semaphore, None);
@@ -559,6 +711,34 @@ impl CommandContext {
                         }
                     }
                 }
+
+                // Emit cross-queue release barriers at the END of each batch.
+                // These transfer queue family ownership of resources that are
+                // acquired by the next batch on a different queue.  Combined with
+                // the semaphore signal between batches, this satisfies the Vulkan
+                // spec requirement for EXCLUSIVE queue family ownership transfer.
+                let release_buf_barriers = graph
+                    .release_buffer_barriers_per_batch
+                    .get(batch_idx)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let release_img_barriers = graph
+                    .release_image_barriers_per_batch
+                    .get(batch_idx)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                if !release_buf_barriers.is_empty() || !release_img_barriers.is_empty() {
+                    self.record_pass_barriers(
+                        device,
+                        cmd,
+                        release_img_barriers,
+                        release_buf_barriers,
+                        resources,
+                        queue_families,
+                        sync2,
+                    )?;
+                }
+
                 self.end_cmd(device, cmd)?;
             }
         }
@@ -754,6 +934,9 @@ impl CommandContext {
             }
             for bp in &self.batch_pools {
                 bp.destroy(device);
+            }
+            for slot in &self.secondary_slots {
+                slot.destroy(device);
             }
         }
     }
@@ -1039,6 +1222,11 @@ impl CommandContext {
                         })],
                 );
             },
+            PassWork::FillBuffer { buffer, offset, size, value } => unsafe {
+                let buf = resources.buffer(buffer)?;
+                let fill_size = if size == u64::MAX { vk::WHOLE_SIZE } else { size };
+                device.cmd_fill_buffer(command_buffer, buf, offset, fill_size, value);
+            }
             PassWork::CopyBufferToImage(copy) => unsafe {
                 let image_desc = resources.image_desc(copy.image)?;
                 device.cmd_copy_buffer_to_image(
@@ -1231,6 +1419,125 @@ impl CommandContext {
                     },
                 )?;
                 self.frame_draw_calls += 1;
+            }
+            PassWork::MultiMeshIndirectDraw(ref desc) => {
+                let binding = bound_binding.as_ref().ok_or_else(|| {
+                    Error::InvalidInput(
+                        "multi-mesh indirect draw pass requires a graphics shader binding".into(),
+                    )
+                })?;
+                if binding.bind_point != vk::PipelineBindPoint::GRAPHICS {
+                    return Err(Error::InvalidInput(
+                        "multi-mesh indirect draw pass shader binding must use graphics".into(),
+                    ));
+                }
+                let shader_object_draw_ext =
+                    prepare_shader_object_draw(command_buffer, binding, shader_object_ext)?;
+
+                // Resolve all per-item Vulkan objects before entering the render pass.
+                struct ResolvedItem {
+                    vertex_buf: vk::Buffer,
+                    vertex_offset: u64,
+                    index_buf: Option<(vk::Buffer, u64, vk::IndexType)>,
+                    indirect_buf: vk::Buffer,
+                    indirect_offset: u64,
+                    max_draw_count: u32,
+                    stride: u32,
+                    count_buf: Option<vk::Buffer>,
+                    count_offset: u64,
+                }
+                let mut resolved = Vec::with_capacity(desc.items.len());
+                for item in &desc.items {
+                    let vertex_buf = resources.buffer(item.vertex_buffer.buffer)?;
+                    let index_info = if let Some(ib) = &item.index_buffer {
+                        let buf = resources.buffer(ib.buffer)?;
+                        Some((buf, ib.offset, vk_index_type(ib.format)))
+                    } else {
+                        None
+                    };
+                    let indirect_buf = resources.buffer(item.indirect_buffer)?;
+                    let count_buf = if let Some(cb) = item.count_buffer {
+                        Some(resources.buffer(cb)?)
+                    } else {
+                        None
+                    };
+                    resolved.push(ResolvedItem {
+                        vertex_buf,
+                        vertex_offset: item.vertex_buffer.offset,
+                        index_buf: index_info,
+                        indirect_buf,
+                        indirect_offset: item.indirect_offset,
+                        max_draw_count: item.max_draw_count,
+                        stride: item.stride,
+                        count_buf,
+                        count_offset: item.count_offset,
+                    });
+                }
+
+                let draw_count = resolved.len() as u32;
+                self.record_draw_pass(
+                    device,
+                    command_buffer,
+                    pass,
+                    binding.render_pass,
+                    resources,
+                    pipelines,
+                    None,
+                    dynamic_rendering,
+                    shader_object_draw_ext,
+                    fragment_shading_rate,
+                    || unsafe {
+                        for item in &resolved {
+                            device.cmd_bind_vertex_buffers(
+                                command_buffer,
+                                0,
+                                &[item.vertex_buf],
+                                &[item.vertex_offset],
+                            );
+                            if let Some((ib, offset, fmt)) = item.index_buf {
+                                device.cmd_bind_index_buffer(command_buffer, ib, offset, fmt);
+                                if let Some(cb) = item.count_buf {
+                                    device.cmd_draw_indexed_indirect_count(
+                                        command_buffer,
+                                        item.indirect_buf,
+                                        item.indirect_offset,
+                                        cb,
+                                        item.count_offset,
+                                        item.max_draw_count,
+                                        item.stride,
+                                    );
+                                } else {
+                                    device.cmd_draw_indexed_indirect(
+                                        command_buffer,
+                                        item.indirect_buf,
+                                        item.indirect_offset,
+                                        item.max_draw_count,
+                                        item.stride,
+                                    );
+                                }
+                            } else if let Some(cb) = item.count_buf {
+                                device.cmd_draw_indirect_count(
+                                    command_buffer,
+                                    item.indirect_buf,
+                                    item.indirect_offset,
+                                    cb,
+                                    item.count_offset,
+                                    item.max_draw_count,
+                                    item.stride,
+                                );
+                            } else {
+                                device.cmd_draw_indirect(
+                                    command_buffer,
+                                    item.indirect_buf,
+                                    item.indirect_offset,
+                                    item.max_draw_count,
+                                    item.stride,
+                                );
+                            }
+                        }
+                    },
+                )?;
+                self.frame_draw_calls += draw_count;
             }
             PassWork::DrawMeshShader(desc) => {
                 let binding = bound_binding.as_ref().ok_or_else(|| {
@@ -2645,9 +2952,18 @@ fn stage_mask(state: RgState) -> vk::PipelineStageFlags {
                 | vk::PipelineStageFlags::FRAGMENT_SHADER
                 | vk::PipelineStageFlags::COMPUTE_SHADER
                 | vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR
+                | vk::PipelineStageFlags::MESH_SHADER_EXT
+                | vk::PipelineStageFlags::TASK_SHADER_EXT
         }
         RgState::ShaderWrite => {
-            vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR
+            // Fragment shaders write to storage buffers/images (OIT, etc.).
+            // Compute and RT are the primary write stages; vertex/mesh/task
+            // writes are uncommon but legal and covered here for correctness.
+            vk::PipelineStageFlags::COMPUTE_SHADER
+                | vk::PipelineStageFlags::FRAGMENT_SHADER
+                | vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR
+                | vk::PipelineStageFlags::MESH_SHADER_EXT
+                | vk::PipelineStageFlags::TASK_SHADER_EXT
         }
         RgState::RenderTarget => vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
         RgState::DepthRead | RgState::DepthWrite => {
@@ -2658,11 +2974,14 @@ fn stage_mask(state: RgState) -> vk::PipelineStageFlags {
         // Presentation: semaphore handles the actual memory visibility.
         // BOTTOM_OF_PIPE ensures the transition is recorded before present.
         RgState::Present => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-        // Uniform buffers bound in any shader stage.
+        // Uniform buffers are accessible in every shader stage.
         RgState::UniformRead => {
             vk::PipelineStageFlags::VERTEX_SHADER
                 | vk::PipelineStageFlags::FRAGMENT_SHADER
                 | vk::PipelineStageFlags::COMPUTE_SHADER
+                | vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR
+                | vk::PipelineStageFlags::MESH_SHADER_EXT
+                | vk::PipelineStageFlags::TASK_SHADER_EXT
         }
         RgState::VertexRead | RgState::IndexRead => vk::PipelineStageFlags::VERTEX_INPUT,
         RgState::IndirectRead => vk::PipelineStageFlags::DRAW_INDIRECT,
@@ -2688,10 +3007,15 @@ fn stage_mask2(state: RgState) -> vk::PipelineStageFlags2 {
                 | vk::PipelineStageFlags2::FRAGMENT_SHADER
                 | vk::PipelineStageFlags2::COMPUTE_SHADER
                 | vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR
+                | vk::PipelineStageFlags2::MESH_SHADER_EXT
+                | vk::PipelineStageFlags2::TASK_SHADER_EXT
         }
         RgState::ShaderWrite => {
             vk::PipelineStageFlags2::COMPUTE_SHADER
+                | vk::PipelineStageFlags2::FRAGMENT_SHADER
                 | vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR
+                | vk::PipelineStageFlags2::MESH_SHADER_EXT
+                | vk::PipelineStageFlags2::TASK_SHADER_EXT
         }
         RgState::RenderTarget => vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
         RgState::DepthRead | RgState::DepthWrite => {
@@ -3861,5 +4185,23 @@ impl FramedCommands {
         for ctx in &self.contexts {
             ctx.destroy(device);
         }
+    }
+
+    // ── Parallel secondary command buffer recording ───────────────────────────
+
+    /// Ensure every per-frame slot has at least `count` secondary recording
+    /// slots available, creating new slots as needed.  Call once at frame start
+    /// (or when the expected bin/cascade count changes) before issuing any
+    /// parallel recording requests.
+    pub fn prepare_parallel_secondary_capacity(
+        &mut self,
+        device: &Device,
+        count: usize,
+        queue_family: u32,
+    ) -> Result<()> {
+        for ctx in &mut self.contexts {
+            ctx.prepare_secondary_slots(device, count, queue_family)?;
+        }
+        Ok(())
     }
 }

@@ -19,6 +19,7 @@ use crate::{
     SurfaceCapabilities, SurfaceColorSpace, SurfaceHdrPreference, SurfaceImage, SurfacePresentMode,
     SurfaceRecreateDesc, SurfaceSize, WindowCornerStyle, WindowMaterialKind,
     current_window_appearance_caps,
+    scene::Scene,
 };
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -302,6 +303,10 @@ impl AppRuntime {
         self.refresh_controller_state();
         self.debug_images.clear();
         self.controller.clear_overlay_lines();
+        // Notify NVIDIA Reflex/AMD Anti-Lag that a new frame is starting.
+        // Both calls are no-ops when the respective feature is unavailable.
+        let _ = self.surface.latency_sleep();
+        let _ = self.engine.device.anti_lag_frame_start();
         self.frame_start = Some(Instant::now());
         // Upload any textures that background workers finished decoding.
         let _ = self.engine.drain_pending_uploads();
@@ -753,6 +758,17 @@ impl<'a> AppRuntimeFrame<'a> {
         Ok(())
     }
 
+    /// Report scene-derived workload metrics — submitted triangle count from the
+    /// GPU-driven bin list.  Call once per frame, typically right before
+    /// `finish_and_present`.  No-op when GPU culling is not active on the scene.
+    pub fn report_scene_workload(&self, scene: &Scene) {
+        if let Some(submitted) = scene.submitted_triangle_count() {
+            self.runtime.controller.update_diagnostics(|d| {
+                d.workload.submitted_triangles = Some(submitted);
+            });
+        }
+    }
+
     pub fn finish_and_present(&mut self) -> Result<()> {
         self.finished = true;
         let flush_report = match self
@@ -843,6 +859,10 @@ impl<'a> AppRuntimeFrame<'a> {
                 self.runtime.engine.device.frame_draw_dispatch_counts();
             let draw_count = (raw_draws > 0).then_some(raw_draws as u64);
             let dispatch_count = (raw_dispatches > 0).then_some(raw_dispatches as u64);
+            let raw_upload_bytes = self.render_frame.frame_upload_bytes();
+            let upload_bytes = (raw_upload_bytes > 0).then_some(raw_upload_bytes);
+            let raw_transient = self.runtime.engine.device.transient_aliased_bytes();
+            let transient_aliased_bytes = (raw_transient > 0).then_some(raw_transient);
             self.runtime.controller.update_diagnostics(|d| {
                 d.timings.available = true;
                 d.timings.cpu_frame_time_ms = Some(cpu_ms);
@@ -856,6 +876,8 @@ impl<'a> AppRuntimeFrame<'a> {
                 d.workload.memory_budget_bytes = memory_budget_bytes;
                 d.workload.draw_count = draw_count;
                 d.workload.dispatch_count = dispatch_count;
+                d.workload.upload_bytes = upload_bytes;
+                d.workload.transient_aliased_bytes = transient_aliased_bytes;
                 if let Some((mean, p95, p99)) = cpu_percentiles {
                     d.timings.cpu_mean_ms = Some(mean);
                     d.timings.cpu_p95_ms = Some(p95);
@@ -1850,6 +1872,10 @@ pub struct RuntimeWorkloadDiagnostics {
     pub memory_used_bytes: Option<u64>,
     pub memory_budget_bytes: Option<u64>,
     pub upload_bytes: Option<u64>,
+    /// Bytes held in transient alias-heap memory shared by render-graph
+    /// intermediate images (G-buffer, shadow maps, etc.).  Non-None when the
+    /// render graph executes at least one aliased image this frame.
+    pub transient_aliased_bytes: Option<u64>,
 }
 
 /// Frame timing summary surfaced through runtime diagnostics.

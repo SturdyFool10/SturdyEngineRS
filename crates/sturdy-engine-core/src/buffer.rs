@@ -16,6 +16,16 @@ impl BufferUsage {
     pub const SHADER_BINDING_TABLE: Self = Self(1 << 9);
     /// GFX-4b: output buffer for `vkCmdEncodeVideoKHR` compressed bitstream.
     pub const VIDEO_ENCODE_DST: Self = Self(1 << 10);
+    /// Hint: this buffer is exclusively GPU-resident — never written by the CPU.
+    ///
+    /// When set, the Vulkan backend will allocate the buffer in `DEVICE_LOCAL`
+    /// memory for optimal GPU read/write bandwidth.  `Buffer::write` is invalid
+    /// on such buffers; attempting to call it returns an error.
+    ///
+    /// Suitable for: GPU-compute outputs (`current_matrices`, `visible_instances`,
+    /// `draw_indirect_commands`, etc.) that are never touched by the CPU after
+    /// the initial buffer allocation.
+    pub const GPU_ONLY: Self = Self(1 << 11);
 
     pub const fn empty() -> Self {
         Self(0)

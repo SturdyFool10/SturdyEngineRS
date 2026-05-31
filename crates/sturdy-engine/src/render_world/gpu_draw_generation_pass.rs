@@ -74,8 +74,11 @@ impl RenderWorldGpuDrawGenerationPass {
         });
         render_world.with_gpu_draw_count_buffer(|buffer| match buffer {
             Some(buffer) => {
-                let zero = 0_u32;
-                buffer.write_pod(0, &zero)?;
+                // Zero the draw count via GPU fill so the buffer can live in
+                // DEVICE_LOCAL memory (GPU_ONLY).  The fill pass is recorded on
+                // the async compute queue and the subsequent dispatch waits for it
+                // via the render-graph barrier system.
+                frame.fill_buffer(buffer, 0)?;
                 frame.bind_buffer("render_world_visible_draw_count", buffer);
                 Ok(())
             }
@@ -104,7 +107,7 @@ impl RenderWorldGpuDrawGenerationPass {
             _pad1: 0,
             _pad2: 0,
         };
-        frame.dispatch_compute_auto(
+        frame.dispatch_async_compute_auto(
             "render_world_draw_generate",
             &self.program,
             &constants,

@@ -245,10 +245,17 @@ float glassIorForFrequency(float frequencyThz) {
   return glassIorForWavelength(frequencyToWavelengthNm(frequencyThz));
 }
 
-float glassAbsorptionForWavelength(float wavelengthNm) {
-  // Clear glass should not add a color cast; let wavelength-dependent IOR,
-  // not absorption, produce the caustic rainbow.
-  return 0.0025 + wavelengthNm * 0.0;
+// Beer-Lambert absorption coefficient for a given glass albedo and wavelength.
+//
+// The albedo encodes per-unit transmittance: a glass with albedo c transmits
+// fraction c of light per unit length.  Absorption coefficient = -log(c).
+// Near-neutral glass (albedo ≈ 0.998) gives ~0.002/unit; saturated colored
+// glass (albedo ≈ (0.9, 0.1, 0.1)) produces strong blue/green absorption that
+// intensifies with thickness, correctly tinting caustics and transmitted light.
+float beerLambertAbsorption(float3 albedo, float wavelengthNm) {
+  float3 safe = clamp(albedo, 0.001, 0.9999);
+  float3 absorption = -log(safe);
+  return max(0.0, sampleRgbSpectrum(absorption, wavelengthNm));
 }
 
 bool refractDielectricBoundary(float3 incidentDir, float3 orientedNormal,
@@ -429,7 +436,7 @@ void traceTriangles(float3 ro, float3 rd, inout RayPayload payload) {
   RayDesc ray;
   ray.Origin = ro;
   ray.Direction = rd;
-  ray.TMin = 0.003;
+  ray.TMin = 0.0005;
   ray.TMax = 100.0;
   payload.hit = 0u;
   payload.hitT = ray.TMax;
@@ -509,7 +516,11 @@ bool traceSpectralPhotonThroughGlass(float3 lightPos, float3 sphereSampleNormal,
     photon.normal = -photon.normal;
   photon.incidentDirection = -exitDir;
 
-  float absorption = exp(-glassAbsorptionForWavelength(wavelengthNm) * exitT);
+  // Cornell glass sphere is nearly clear (albedo ≈ 0.998), so Beer-Lambert
+  // absorption is effectively the same as the old constant but now consistent
+  // with the albedo-driven system used for all other glass.
+  static const float3 CORNELL_GLASS_ALBEDO = float3(0.998, 0.998, 0.998);
+  float absorption = exp(-beerLambertAbsorption(CORNELL_GLASS_ALBEDO, wavelengthNm) * exitT);
   photon.throughput = (1.0 - fresnelEnter) * (1.0 - fresnelExit) * absorption;
   photon.geometry = cosLight * cosEntry / max(dist2, 1e-4);
   return photon.throughput > 0.0;
@@ -563,7 +574,9 @@ float sampleSpectralPhotonMapCaustics(float3 p, float3 n,
   return sum / float(PHOTON_MAP_LIGHT_SUBPATH_SAMPLES);
 }
 
-float sampleCornellAreaLight(float3 p, float3 n, float wavelengthNm,
+// gn = geometric (flat) normal, used to offset the shadow ray origin so that
+// near sharp mesh corners the origin is never placed inside an adjacent face.
+float sampleCornellAreaLight(float3 p, float3 n, float3 gn, float wavelengthNm,
                              inout uint seed) {
   float sum = 0.0;
   for (int sample = 0; sample < 4; ++sample) {
@@ -582,7 +595,7 @@ float sampleCornellAreaLight(float3 p, float3 n, float wavelengthNm,
 
     RayPayload shadow;
     shadow.seed = seed;
-    traceScene(p + n * 0.004, wi, shadow);
+    traceScene(p + gn * 0.010, wi, shadow);
 
     float lightArea = 0.64 * 0.58;
     if (shadow.hit == 0u || shadow.hitT >= dist - 0.01 ||
@@ -593,6 +606,59 @@ float sampleCornellAreaLight(float3 p, float3 n, float wavelengthNm,
     }
   }
   return sum * 0.25;
+}
+
+// Direct sun sample for outdoor diffuse surfaces.
+//
+// Traces a shadow ray toward the sun (with a small angular jitter for soft
+// penumbra) and accumulates the sun radiance contribution.  Glass objects along
+// the shadow ray are treated as transparent: the ray continues through each
+// glass hit, accumulating Beer-Lambert attenuation, so caustic energy from
+// glass objects focusing sunlight onto diffuse surfaces is captured directly
+// rather than relying on slow Monte Carlo convergence.
+float sampleOutdoorSun(float3 p, float3 n, float3 gn, float wavelengthNm,
+                       inout uint seed) {
+  float3 sunDir = outdoorSunDirection();
+  float cosSurface = dot(n, sunDir);
+  if (cosSurface <= 0.0)
+    return 0.0;
+
+  // Soft solar disc: angular radius ~0.26 degrees (real sun ≈ 0.265).
+  float2 xi = float2(rand(seed), rand(seed));
+  float3 t; float3 b;
+  tangentFrame(sunDir, t, b);
+  float r = sqrt(xi.x) * 0.00455;   // sin(0.26 deg) ≈ 0.00455
+  float phi = 2.0 * PI * xi.y;
+  float3 jitteredDir = normalize(sunDir + t * (r * cos(phi)) + b * (r * sin(phi)));
+
+  // Walk through glass layers accumulating Beer-Lambert transmittance.
+  float3 shadowO = p + gn * 0.010;
+  float throughput = 1.0;
+  [loop]
+  for (int layer = 0; layer < 6; ++layer) {
+    RayPayload shadow;
+    shadow.seed = seed;
+    traceScene(shadowO, jitteredDir, shadow);
+    if (shadow.hit == 0u)
+      break;  // clear path to sun
+    if (shadow.material == MATERIAL_DIFFUSE || shadow.material == MATERIAL_LIGHT) {
+      throughput = 0.0;  // opaque blocker
+      break;
+    }
+    // Glass: attenuate by Beer-Lambert and advance through.
+    throughput *= exp(-beerLambertAbsorption(shadow.albedo, wavelengthNm) * shadow.hitT);
+    shadowO = shadowO + jitteredDir * (shadow.hitT + 0.010);
+    if (throughput < 0.001) { throughput = 0.0; break; }
+  }
+
+  if (throughput <= 0.0)
+    return 0.0;
+
+  // Sun spectral radiance: approximate white-body at ~5800 K with the sky's
+  // Mie peak driving the warm colour.
+  float sunMie = pow(saturate(dot(jitteredDir, sunDir)), 650.0) * 55.0;
+  float sunRadiance = sampleRgbSpectrum(float3(1.0, 0.86, 0.62) * sunMie, wavelengthNm);
+  return throughput * sunRadiance * cosSurface;
 }
 
 void makeLookAtCameraRay(float2 uv, float3 origin, float3 target,
@@ -747,9 +813,13 @@ SpectralPathResult solveBidirectionalSpectralPath(uint2 pixel, uint2 extent,
                                                etaT, refractedDir, fresnel);
       }
 
+      // Beer-Lambert colored absorption: the glass albedo encodes per-unit
+      // transmittance, so thicker glass produces stronger tinting of caustics
+      // and transmitted light.  Apply on the exiting boundary using the
+      // distance actually traveled inside the glass (payload.hitT).
       if (!entering)
         result.throughput *=
-            exp(-glassAbsorptionForWavelength(wavelengthNm) * payload.hitT);
+            exp(-beerLambertAbsorption(payload.albedo, wavelengthNm) * payload.hitT);
 
       bool reflectEvent = !canRefract || rand(seed) < fresnel;
       if (reflectEvent) {
@@ -762,13 +832,17 @@ SpectralPathResult solveBidirectionalSpectralPath(uint2 pixel, uint2 extent,
         rd = refractedDir;
         ro = p - orientedGeometricN * 0.006;
       }
-      result.throughput *= sampleRgbSpectrum(payload.albedo, wavelengthNm);
+      // No additional flat tint here: color is already handled by Beer-Lambert above.
     } else {
       float surfaceReflectance =
           sampleRgbSpectrum(payload.albedo, wavelengthNm);
+      // Geometric normal used for all ray offsets — avoids placing origins
+      // inside adjacent faces at sharp mesh corners.
+      float3 geoN = normalize(payload.geometricNormal);
+      if (dot(geoN, n) < 0.0) geoN = -geoN;
       if (rt_constants.sceneId == SCENE_CORNELL) {
         result.radiance += result.throughput * surfaceReflectance *
-                           sampleCornellAreaLight(p, n, wavelengthNm, seed) /
+                           sampleCornellAreaLight(p, n, geoN, wavelengthNm, seed) /
                            PI;
         if (bounce <= 1u) {
           result.radiance += result.throughput *
@@ -776,6 +850,14 @@ SpectralPathResult solveBidirectionalSpectralPath(uint2 pixel, uint2 extent,
                                  p, n, surfaceReflectance, frequencyThz, seed) /
                              PI;
         }
+      } else if (rt_constants.sceneId == SCENE_OUTDOOR) {
+        // Direct sun NEE: glass objects along the shadow ray are traversed
+        // transparently with Beer-Lambert attenuation so focused sunlight
+        // through glass (caustics) converges quickly instead of relying on
+        // unguided secondary bounces.
+        result.radiance += result.throughput * surfaceReflectance *
+                           sampleOutdoorSun(p, n, geoN, wavelengthNm, seed) /
+                           PI;
       }
 
       float diffusePdf;
@@ -784,7 +866,7 @@ SpectralPathResult solveBidirectionalSpectralPath(uint2 pixel, uint2 extent,
       if (diffusePdf <= 1e-5 || cosTheta <= 0.0)
         break;
       rd = nextDir;
-      ro = p + n * 0.004;
+      ro = p + geoN * 0.010;
       result.throughput *= surfaceReflectance * cosTheta / (PI * diffusePdf);
     }
 

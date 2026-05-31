@@ -264,6 +264,25 @@ impl VulkanBackend {
         caps.features.vertex_input_dynamic_state = logical.vertex_input_dynamic_state_enabled;
         caps.features.shader_object = logical.shader_object_enabled && caps.features.shader_object;
         caps.features.graphics_pipeline_library = logical.graphics_pipeline_library_enabled;
+        caps.features.maintenance5 =
+            logical.maintenance5_enabled && caps.features.maintenance5;
+        caps.features.maintenance6 =
+            logical.maintenance6_enabled && caps.features.maintenance6;
+        caps.features.dynamic_rendering_local_read = logical.dynamic_rendering_local_read_enabled
+            && caps.features.dynamic_rendering_local_read;
+        caps.features.null_descriptor =
+            logical.null_descriptor_enabled && caps.features.null_descriptor;
+        caps.features.depth_clip_enable =
+            logical.depth_clip_enable_enabled && caps.features.depth_clip_enable;
+        caps.features.shader_module_identifier = logical.shader_module_identifier_enabled
+            && caps.features.shader_module_identifier;
+        // calibrated_timestamps: extension-only, reflected from enabled extension list.
+        caps.features.calibrated_timestamps = caps.features.calibrated_timestamps
+            && (enabled_extension(&logical.enabled_extension_names, "VK_KHR_calibrated_timestamps")
+                || enabled_extension(
+                    &logical.enabled_extension_names,
+                    "VK_EXT_calibrated_timestamps",
+                ));
         caps.features.device_fault =
             enabled_extension(&logical.enabled_extension_names, "VK_EXT_device_fault");
         caps.features.device_diagnostic_checkpoints_nv = enabled_extension(
@@ -388,6 +407,7 @@ impl VulkanBackend {
             descriptors_reg.set_descriptor_buffer(db_device);
             descriptors_reg.buffer_device_address_enabled = true;
         }
+        descriptors_reg.push_descriptors_enabled = logical.push_descriptors_enabled;
 
         let debug_utils =
             debug::DebugUtils::new(&instance, &logical.device, &logical.enabled_extension_names);
@@ -970,6 +990,22 @@ impl VulkanBackend {
             .contexts_mut()
             .len()
     }
+
+    /// Pre-allocate secondary command buffer slots for parallel recording.
+    ///
+    /// Call once at init time (or when the expected parallel count increases) so
+    /// that per-frame parallel recording does not allocate on the hot path.
+    /// Slots are created on the graphics queue family.
+    pub fn prepare_parallel_secondary_capacity(
+        &self,
+        count: usize,
+    ) -> crate::Result<()> {
+        let queue_family = self.queue_families.graphics;
+        self.commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .prepare_parallel_secondary_capacity(&self.device, count, queue_family)
+    }
 }
 
 impl Backend for VulkanBackend {
@@ -1495,6 +1531,18 @@ impl Backend for VulkanBackend {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .current_context()
             .and_then(|ctx| ctx.transient_buffer_handle())
+    }
+
+    fn parallel_secondary_recording_supported(&self) -> bool {
+        true
+    }
+
+    fn prepare_parallel_secondary_capacity(
+        &self,
+        count: usize,
+        _queue_family_index: u32,
+    ) -> crate::Result<()> {
+        VulkanBackend::prepare_parallel_secondary_capacity(self, count)
     }
 
     fn register_bindless_sampled_image(&self, handle: ImageHandle) -> Option<u32> {
@@ -2324,6 +2372,13 @@ impl Backend for VulkanBackend {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         (cmds.last_frame_draw_calls(), cmds.last_frame_dispatch_calls())
+    }
+
+    fn transient_aliased_bytes(&self) -> u64 {
+        self.alias_heaps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .total_bytes()
     }
 
     fn wait_submission(&self, token: SubmissionHandle) -> Result<()> {

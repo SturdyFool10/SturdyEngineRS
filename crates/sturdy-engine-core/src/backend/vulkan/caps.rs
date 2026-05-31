@@ -283,6 +283,31 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     // GFX-5: external memory export capability
     let external_memory_fd_export = has(b"VK_KHR_external_memory_fd\0");
 
+    // Modern Vulkan maintenance and robustness features.
+    let maintenance5 = has(b"VK_KHR_maintenance5\0")
+        && feature_chain.maintenance5.maintenance5 == vk::TRUE;
+    let maintenance6 = has(b"VK_KHR_maintenance6\0")
+        && feature_chain.maintenance6.maintenance6 == vk::TRUE;
+    let dynamic_rendering_local_read = has(b"VK_KHR_dynamic_rendering_local_read\0")
+        && feature_chain
+            .dynamic_rendering_local_read
+            .dynamic_rendering_local_read
+            == vk::TRUE;
+    // VK_EXT_robustness2 null_descriptor: safe sentinel values in unbound slots.
+    let null_descriptor = has(b"VK_EXT_robustness2\0")
+        && feature_chain.robustness2.null_descriptor == vk::TRUE;
+    let depth_clip_enable = has(b"VK_EXT_depth_clip_enable\0")
+        && feature_chain.depth_clip_enable.depth_clip_enable == vk::TRUE;
+    // VK_KHR_calibrated_timestamps is core in Vulkan 1.4; fall back to EXT variant.
+    let calibrated_timestamps = properties.api_version >= vk_1_4
+        || has(b"VK_KHR_calibrated_timestamps\0")
+        || has(b"VK_EXT_calibrated_timestamps\0");
+    let shader_module_identifier = has(b"VK_EXT_shader_module_identifier\0")
+        && feature_chain
+            .shader_module_identifier
+            .shader_module_identifier
+            == vk::TRUE;
+
     let features = BackendFeatures {
         ray_tracing,
         ray_query,
@@ -402,6 +427,13 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
         shader_info_amd,
         image_compression_control_swapchain,
         external_memory_fd_export,
+        maintenance5,
+        maintenance6,
+        dynamic_rendering_local_read,
+        null_descriptor,
+        depth_clip_enable,
+        calibrated_timestamps,
+        shader_module_identifier,
     };
 
     let limits = Limits {
@@ -771,6 +803,12 @@ pub struct AvailableFeatureChain<'a> {
     pub graphics_pipeline_library: vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT<'a>,
     /// GFX-7b: VK_EXT_descriptor_heap feature detection.
     pub descriptor_heap: vk::PhysicalDeviceDescriptorHeapFeaturesEXT<'a>,
+    pub maintenance5: vk::PhysicalDeviceMaintenance5FeaturesKHR<'a>,
+    pub maintenance6: vk::PhysicalDeviceMaintenance6FeaturesKHR<'a>,
+    pub dynamic_rendering_local_read: vk::PhysicalDeviceDynamicRenderingLocalReadFeaturesKHR<'a>,
+    pub robustness2: vk::PhysicalDeviceRobustness2FeaturesEXT<'a>,
+    pub depth_clip_enable: vk::PhysicalDeviceDepthClipEnableFeaturesEXT<'a>,
+    pub shader_module_identifier: vk::PhysicalDeviceShaderModuleIdentifierFeaturesEXT<'a>,
 }
 
 pub fn available_feature_chain(
@@ -804,6 +842,13 @@ pub fn available_feature_chain(
         optical_flow: vk::PhysicalDeviceOpticalFlowFeaturesNV::default(),
         graphics_pipeline_library: vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT::default(),
         descriptor_heap: vk::PhysicalDeviceDescriptorHeapFeaturesEXT::default(),
+        maintenance5: vk::PhysicalDeviceMaintenance5FeaturesKHR::default(),
+        maintenance6: vk::PhysicalDeviceMaintenance6FeaturesKHR::default(),
+        dynamic_rendering_local_read:
+            vk::PhysicalDeviceDynamicRenderingLocalReadFeaturesKHR::default(),
+        robustness2: vk::PhysicalDeviceRobustness2FeaturesEXT::default(),
+        depth_clip_enable: vk::PhysicalDeviceDepthClipEnableFeaturesEXT::default(),
+        shader_module_identifier: vk::PhysicalDeviceShaderModuleIdentifierFeaturesEXT::default(),
     };
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
         .push(&mut chain.vulkan11)
@@ -830,7 +875,13 @@ pub fn available_feature_chain(
         .push(&mut chain.shader_object)
         .push(&mut chain.optical_flow)
         .push(&mut chain.graphics_pipeline_library)
-        .push(&mut chain.descriptor_heap);
+        .push(&mut chain.descriptor_heap)
+        .push(&mut chain.maintenance5)
+        .push(&mut chain.maintenance6)
+        .push(&mut chain.dynamic_rendering_local_read)
+        .push(&mut chain.robustness2)
+        .push(&mut chain.depth_clip_enable)
+        .push(&mut chain.shader_module_identifier);
     unsafe { instance.get_physical_device_features2(physical_device, &mut features2) };
     chain
 }

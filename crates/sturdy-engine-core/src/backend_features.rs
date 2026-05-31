@@ -238,6 +238,36 @@ pub struct BackendFeatures {
     // ── GFX-5: External memory exports ───────────────────────────────────────
     /// VK_KHR_external_memory_fd is available and buffer/image export is supported.
     pub external_memory_fd_export: bool,
+
+    // ── Vulkan 1.4 / modern maintenance ──────────────────────────────────────
+    /// VK_KHR_maintenance5 (core in Vulkan 1.4) — `maintenance5` feature bit.
+    /// Enables `VkBufferUsageFlags2CreateInfoKHR`, `renderingAreaInfo` dynamic
+    /// rendering area, and pipeline identifier queries.
+    pub maintenance5: bool,
+    /// VK_KHR_maintenance6 (core in Vulkan 1.4) — `maintenance6` feature bit.
+    /// Enables `VkBindDescriptorSetsInfoKHR` for atomic multi-set push-descriptor
+    /// binding and per-draw-call partial binding.
+    pub maintenance6: bool,
+    /// VK_KHR_dynamic_rendering_local_read (core in Vulkan 1.4) — enables
+    /// in-flight reads from color/depth attachments within the same dynamic
+    /// render pass without explicit barriers or layout transitions.
+    /// Essential for efficient deferred lighting with dynamic rendering.
+    pub dynamic_rendering_local_read: bool,
+    /// VK_EXT_robustness2 `nullDescriptor` feature — allows binding
+    /// null/invalid descriptor handles (e.g. `MATERIAL_NO_TEXTURE` sentinel)
+    /// without triggering undefined behaviour in the driver.
+    pub null_descriptor: bool,
+    /// VK_EXT_depth_clip_enable — allows enabling/disabling depth clipping
+    /// dynamically (per-draw) without a full pipeline state object switch.
+    pub depth_clip_enable: bool,
+    /// VK_KHR_calibrated_timestamps (core in Vulkan 1.4) or VK_EXT variant —
+    /// allows correlating GPU timestamps with a CPU clock domain for accurate
+    /// CPU+GPU frame-time correlation.
+    pub calibrated_timestamps: bool,
+    /// VK_EXT_shader_module_identifier — allows querying a stable identifier
+    /// (hash) for compiled shader modules. Used by the pipeline cache to
+    /// skip re-compilation of already-compiled shaders across sessions.
+    pub shader_module_identifier: bool,
 }
 
 impl BackendFeatures {
@@ -389,6 +419,13 @@ impl BackendFeatures {
             F::VideoEncodeH264 => self.video_encode_h264,
             F::VideoEncodeH265 => self.video_encode_h265,
             F::VideoEncodeAv1 => self.video_encode_av1,
+            F::Maintenance5 => self.maintenance5,
+            F::Maintenance6 => self.maintenance6,
+            F::DynamicRenderingLocalRead => self.dynamic_rendering_local_read,
+            F::NullDescriptor => self.null_descriptor,
+            F::DepthClipEnable => self.depth_clip_enable,
+            F::CalibratedTimestamps => self.calibrated_timestamps,
+            F::ShaderModuleIdentifier => self.shader_module_identifier,
         }
     }
 }

@@ -51,6 +51,12 @@ impl AliasHeapRegistry {
         Ok(memory)
     }
 
+    /// Total bytes across all alias-heap slots.  Non-zero when the render graph
+    /// has assigned transient images to shared memory.
+    pub fn total_bytes(&self) -> u64 {
+        self.heaps.values().map(|h| h.size).sum()
+    }
+
     pub fn destroy_all(&mut self, device: &Device) {
         for (_, heap) in self.heaps.drain() {
             unsafe { device.free_memory(heap.memory, None) };

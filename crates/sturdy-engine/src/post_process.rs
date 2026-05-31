@@ -60,6 +60,16 @@ pub struct AutoExposureConfig {
     pub target_percentile: f32,
     /// How quickly exposure adapts toward the target, in EV100/second. Default: 1.5.
     pub adaptation_speed: f32,
+    /// Linear luminance floor for histogram metering.  Pixels with luminance below
+    /// this value are placed in bin 0 and excluded from the mean luminance used to
+    /// derive the target EV.
+    ///
+    /// Default: `1e-5` (essentially-zero pixels only).
+    ///
+    /// Set higher for path-traced scenes where miss/background rays return a
+    /// near-zero luminance: e.g. `0.01` discards any pixel below 1% luminance,
+    /// so the Cornell box meters only the lit geometry and not the black background.
+    pub metering_floor: f32,
 }
 
 impl Default for AutoExposureConfig {
@@ -70,6 +80,7 @@ impl Default for AutoExposureConfig {
             max_ev: 8.0,
             target_percentile: 0.5,
             adaptation_speed: 1.5,
+            metering_floor: 1e-5,
         }
     }
 }

@@ -521,29 +521,32 @@ impl RenderWorld {
         }
 
         let mut derived_reallocated = false;
+        // These buffers are exclusively GPU-compute outputs — the CPU never writes
+        // to them after creation.  GPU_ONLY causes DEVICE_LOCAL allocation on
+        // discrete GPUs for maximum GPU memory bandwidth.
         derived_reallocated |= ensure_buffer_capacity(
             engine,
             &mut gpu_scene.current_matrix_buffer,
             plan.current_matrix_bytes,
-            BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            BufferUsage::STORAGE | BufferUsage::COPY_DST | BufferUsage::GPU_ONLY,
         )?;
         derived_reallocated |= ensure_buffer_capacity(
             engine,
             &mut gpu_scene.previous_matrix_buffer,
             plan.previous_matrix_bytes,
-            BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            BufferUsage::STORAGE | BufferUsage::COPY_DST | BufferUsage::GPU_ONLY,
         )?;
         derived_reallocated |= ensure_buffer_capacity(
             engine,
             &mut gpu_scene.normal_matrix_buffer,
             plan.normal_matrix_bytes,
-            BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            BufferUsage::STORAGE | BufferUsage::COPY_DST | BufferUsage::GPU_ONLY,
         )?;
         derived_reallocated |= ensure_buffer_capacity(
             engine,
             &mut gpu_scene.world_bounds_buffer,
             plan.bounds_bytes,
-            BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            BufferUsage::STORAGE | BufferUsage::COPY_DST | BufferUsage::GPU_ONLY,
         )?;
 
         gpu_scene.transform_source_slots = source_slots;
@@ -600,7 +603,7 @@ impl RenderWorld {
             let new_capacity = object_count.next_power_of_two().max(4);
             gpu_scene.visibility_flags_buffer = Some(engine.create_buffer(BufferDesc {
                 size: (new_capacity * stride) as u64,
-                usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+                usage: BufferUsage::STORAGE | BufferUsage::COPY_DST | BufferUsage::GPU_ONLY,
             })?);
             gpu_scene.visibility_flags_capacity = new_capacity;
             visibility_reallocated = true;
@@ -673,7 +676,8 @@ impl RenderWorld {
             let new_capacity = bin_count.next_power_of_two().max(4);
             gpu_scene.draw_indirect_buffer = Some(engine.create_buffer(BufferDesc {
                 size: (new_capacity * indirect_stride) as u64,
-                usage: BufferUsage::INDIRECT | BufferUsage::STORAGE | BufferUsage::COPY_DST,
+                // GPU_ONLY: written exclusively by render_world_draw_generate.slang compute.
+                usage: BufferUsage::INDIRECT | BufferUsage::STORAGE | BufferUsage::COPY_DST | BufferUsage::GPU_ONLY,
             })?);
             gpu_scene.draw_indirect_capacity = new_capacity;
             indirect_buffer_reallocated = true;
@@ -683,7 +687,8 @@ impl RenderWorld {
         if gpu_scene.draw_count_buffer.is_none() {
             gpu_scene.draw_count_buffer = Some(engine.create_buffer(BufferDesc {
                 size: std::mem::size_of::<u32>() as u64,
-                usage: BufferUsage::INDIRECT | BufferUsage::STORAGE | BufferUsage::COPY_DST,
+                // GPU_ONLY: written by GPU atomic in draw generation, zeroed by vkCmdFillBuffer.
+                usage: BufferUsage::INDIRECT | BufferUsage::STORAGE | BufferUsage::COPY_DST | BufferUsage::GPU_ONLY,
             })?);
             count_buffer_reallocated = true;
         }
@@ -696,7 +701,8 @@ impl RenderWorld {
             let new_capacity = object_count.next_power_of_two().max(4);
             gpu_scene.visible_instance_buffer = Some(engine.create_buffer(BufferDesc {
                 size: (new_capacity * visible_instance_stride) as u64,
-                usage: BufferUsage::STORAGE | BufferUsage::COPY_DST,
+                // GPU_ONLY: compacted by cull compute, never written by CPU.
+                usage: BufferUsage::STORAGE | BufferUsage::COPY_DST | BufferUsage::GPU_ONLY,
             })?);
             gpu_scene.visible_instance_capacity = new_capacity;
             visible_instance_buffer_reallocated = true;
