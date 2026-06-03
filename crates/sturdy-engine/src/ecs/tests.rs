@@ -137,20 +137,20 @@ fn schedule_runs_systems_in_order() {
     let mut world = World::new();
     world.spawn().with(Pos(0.0, 0.0)).id();
 
-    let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+    let order = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<u32>::new()));
     let o1 = order.clone();
     let o2 = order.clone();
 
     let mut sched = Schedule::new();
     sched.add_system("first", move |_w| {
-        o1.lock().unwrap().push(1);
+        o1.lock().push(1);
     });
     sched.add_system("second", move |_w| {
-        o2.lock().unwrap().push(2);
+        o2.lock().push(2);
     });
     sched.run(&mut world);
 
-    assert_eq!(*order.lock().unwrap(), vec![1, 2]);
+    assert_eq!(*order.lock(), vec![1, 2]);
 }
 
 #[test]

@@ -26,6 +26,7 @@ repository = "https://example.invalid/sturdy-engine"
 rust-version = "1.85"
 
 [workspace.dependencies]
+parking_lot = "0.12"
 cosmic-text = "0.19"
 glam = { version = "0.33", features = ["bytemuck"] }
 winit = "0.30"

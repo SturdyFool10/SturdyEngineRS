@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::NativeSurfaceDesc;
@@ -170,7 +171,7 @@ impl Device {
         // Track 11a: allocate one BufferHandle per frame slot and register the transient pool
         // buffers in the backend resource registry so they can be bound via push descriptors.
         if slot_count > 0 {
-            let mut inner = device.inner.lock().unwrap_or_else(|p| p.into_inner());
+            let mut inner = device.inner.lock();
             let handles: Vec<crate::BufferHandle> = (0..slot_count)
                 .map(|_| crate::BufferHandle(inner.buffer_handles.alloc()))
                 .collect();
@@ -185,7 +186,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .creation_desc
             .clone()
     }
@@ -207,8 +207,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
 
         // 1. Wait for idle so the GPU is not using any resources we're about to destroy.
         inner.backend.wait_idle()?;
@@ -282,7 +281,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .kind()
     }
@@ -291,7 +289,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .adapter_name()
     }
@@ -300,7 +297,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .caps()
     }
@@ -313,7 +309,6 @@ impl Device {
         //panic allowed, reason = "poisoned device mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .memory_budget()
     }
@@ -326,7 +321,6 @@ impl Device {
         //panic allowed, reason = "poisoned device mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .memory_budget_ext()
     }
@@ -342,7 +336,6 @@ impl Device {
         //panic allowed, reason = "poisoned device mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .bindless_supported()
     }
@@ -358,8 +351,7 @@ impl Device {
         //panic allowed, reason = "poisoned device mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         register_bindless_sampled_image(&mut inner, handle)
     }
 
@@ -368,8 +360,7 @@ impl Device {
         //panic allowed, reason = "poisoned device mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         register_bindless_sampler(&mut inner, handle)
     }
 
@@ -378,8 +369,7 @@ impl Device {
         //panic allowed, reason = "poisoned device mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         register_bindless_storage_image(&mut inner, handle)
     }
 
@@ -388,8 +378,7 @@ impl Device {
         //panic allowed, reason = "poisoned device mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         register_bindless_storage_buffer(&mut inner, handle)
     }
 
@@ -401,8 +390,7 @@ impl Device {
     pub fn buffer_bindless_index(&self, handle: BufferHandle) -> Option<u32> {
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         inner.bindless_storage_buffers.get(&handle).copied()
     }
 
@@ -413,7 +401,6 @@ impl Device {
     pub fn parallel_secondary_recording_supported(&self) -> bool {
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .parallel_secondary_recording_supported()
     }
@@ -431,7 +418,6 @@ impl Device {
     ) -> Result<()> {
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .prepare_parallel_secondary_capacity(count, queue_family_index)
     }
@@ -444,8 +430,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.backend.caps().features.descriptor_buffer {
             return None;
         }
@@ -460,8 +445,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.backend.caps().features.descriptor_heap {
             return None;
         }
@@ -477,8 +461,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.backend.caps().features.shader_object {
             return Err(Error::Unsupported(
                 "shader objects require BackendFeatures::shader_object".into(),
@@ -495,8 +478,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if inner.shader_objects.remove(&handle).is_some() {
             inner
                 .deferred_destroys
@@ -519,7 +501,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .alloc_transient(size, alignment)
     }
@@ -535,7 +516,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .current_transient_buffer_handle()
     }
@@ -566,7 +546,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .pass_timings()
     }
@@ -575,7 +554,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .last_submit_gpu_wait_ms()
     }
@@ -585,7 +563,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .frame_draw_dispatch_counts()
     }
@@ -594,7 +571,6 @@ impl Device {
     pub fn transient_aliased_bytes(&self) -> u64 {
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .transient_aliased_bytes()
     }
@@ -608,7 +584,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .caps()
             .features
@@ -620,7 +595,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .caps()
             .features
@@ -632,7 +606,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .format_capabilities(format)
     }
@@ -641,7 +614,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .native_handle_capabilities()
     }
@@ -650,7 +622,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .raw_capabilities()
     }
@@ -659,7 +630,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .bindless_sampled_images
             .get(&handle)
             .copied()
@@ -669,7 +639,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .bindless_storage_images
             .get(&handle)
             .copied()
@@ -679,7 +648,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .bindless_samplers
             .get(&handle)
             .copied()
@@ -689,7 +657,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .bindless_storage_buffers
             .get(&handle)
             .copied()
@@ -705,8 +672,7 @@ impl Device {
         {
             let inner = self
                 .inner
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .lock();
             let (count, _) = inner.backend.bindless_registered_counts();
             assert!(
                 index < count,
@@ -723,8 +689,7 @@ impl Device {
         {
             let inner = self
                 .inner
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .lock();
             let (_, count) = inner.backend.bindless_registered_counts();
             assert!(
                 index < count,
@@ -739,8 +704,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         validate_sample_count(
             desc.samples,
             inner.backend.caps().max_color_sample_count,
@@ -769,8 +733,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let handle = ImageHandle(inner.image_handles.alloc());
         unsafe {
             inner.backend.import_external_image(handle, desc)?;
@@ -796,8 +759,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         validate_sample_count(
             desc.samples,
             inner.backend.caps().max_color_sample_count,
@@ -816,8 +778,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let _desc = inner.images.remove(&handle).ok_or(Error::InvalidHandle)?;
         inner.bindless_sampled_images.remove(&handle);
         inner.bindless_storage_images.remove(&handle);
@@ -830,8 +791,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         inner
             .images
             .get(&handle)
@@ -844,8 +804,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if desc.usage.contains(BufferUsage::SHADER_DEVICE_ADDRESS)
             && !inner.backend.caps().features.buffer_device_address
         {
@@ -875,8 +834,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let handle = BufferHandle(inner.buffer_handles.alloc());
         unsafe {
             inner.backend.import_external_buffer(handle, desc)?;
@@ -892,8 +850,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let _desc = inner.buffers.remove(&handle).ok_or(Error::InvalidHandle)?;
         inner.bindless_storage_buffers.remove(&handle);
         inner.buffer_states.retain(|key, _| key.buffer != handle);
@@ -907,8 +864,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let desc = inner.buffers.get(&handle).ok_or(Error::InvalidHandle)?;
         let end = offset
             .checked_add(data.len() as u64)
@@ -926,8 +882,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let desc = inner.buffers.get(&handle).ok_or(Error::InvalidHandle)?;
         let end = offset
             .checked_add(out.len() as u64)
@@ -945,8 +900,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         inner
             .buffers
             .get(&handle)
@@ -962,8 +916,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let desc = inner.buffers.get(&handle).ok_or(Error::InvalidHandle)?;
         if !desc.usage.contains(BufferUsage::SHADER_DEVICE_ADDRESS)
             || !inner.backend.caps().features.buffer_device_address
@@ -981,8 +934,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.backend.caps().features.ray_tracing && !inner.backend.caps().features.ray_query {
             return Err(Error::Unsupported(
                 "acceleration structures require ray_tracing or ray_query backend support".into(),
@@ -1001,8 +953,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let _desc = inner
             .acceleration_structures
             .remove(&handle)
@@ -1020,8 +971,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         inner
             .acceleration_structures
             .get(&handle)
@@ -1036,8 +986,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         validate_as_handle(&inner, handle)?;
         inner.backend.acceleration_structure_device_address(handle)
     }
@@ -1050,8 +999,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if desc.mode == AccelerationStructureBuildMode::Compact {
             let src = desc.src.ok_or_else(|| {
                 Error::InvalidInput("BLAS compaction size query requires a source".into())
@@ -1090,8 +1038,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if desc.mode == AccelerationStructureBuildMode::Compact {
             let src = desc.src.ok_or_else(|| {
                 Error::InvalidInput("TLAS compaction size query requires a source".into())
@@ -1119,8 +1066,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let handle = SamplerHandle(inner.sampler_handles.alloc());
         inner.backend.create_sampler(handle, desc)?;
         inner.samplers.insert(handle, desc);
@@ -1132,8 +1078,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let _desc = inner.samplers.remove(&handle).ok_or(Error::InvalidHandle)?;
         inner.bindless_samplers.remove(&handle);
         inner
@@ -1146,8 +1091,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         inner
             .samplers
             .get(&handle)
@@ -1162,8 +1106,7 @@ impl Device {
             //panic allowed, reason = "poisoned mutex is unrecoverable"
             let inner = self
                 .inner
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .lock();
             let target = inner.backend.preferred_shader_ir();
             let key = shader_compile_cache_key(&desc, target);
             let cached = key.and_then(|k| inner.shader_compile_cache.get(&k).cloned());
@@ -1180,8 +1123,7 @@ impl Device {
                 //panic allowed, reason = "poisoned mutex is unrecoverable"
                 let mut inner = self
                     .inner
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    .lock();
                 // Use or_insert_with to avoid overwriting a concurrent insertion.
                 inner
                     .shader_compile_cache
@@ -1195,8 +1137,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let handle = ShaderHandle(inner.shader_handles.alloc());
         inner.backend.create_shader(handle, &compiled_desc)?;
         inner.shader_reflections.insert(handle, reflection);
@@ -1208,8 +1149,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         inner
             .shader_reflections
             .get(&handle)
@@ -1221,8 +1161,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let _desc = inner.shaders.remove(&handle).ok_or(Error::InvalidHandle)?;
         inner.shader_reflections.remove(&handle);
         inner
@@ -1238,8 +1177,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let handle = PipelineLayoutHandle(inner.pipeline_layout_handles.alloc());
         inner.backend.create_pipeline_layout(handle, &layout)?;
         inner.pipeline_layouts.insert(handle, layout);
@@ -1253,8 +1191,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.shaders.contains_key(&shader) {
             return Err(Error::InvalidHandle);
         }
@@ -1273,8 +1210,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.shaders.contains_key(&vertex_shader)
             || fragment_shader.is_some_and(|shader| !inner.shaders.contains_key(&shader))
         {
@@ -1294,8 +1230,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.shaders.contains_key(&vertex_shader)
             || fragment_shader.is_some_and(|shader| !inner.shaders.contains_key(&shader))
         {
@@ -1311,8 +1246,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let _layout = inner
             .pipeline_layouts
             .remove(&handle)
@@ -1327,8 +1261,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         inner.validate_bind_group_desc(&desc)?;
         let handle = BindGroupHandle(inner.bind_group_handles.alloc());
         inner.backend.create_bind_group(handle, &desc)?;
@@ -1340,8 +1273,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let _desc = inner
             .bind_groups
             .remove(&handle)
@@ -1356,8 +1288,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.shaders.contains_key(&desc.shader) {
             return Err(Error::InvalidHandle);
         }
@@ -1406,8 +1337,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         validate_sample_count(
             desc.samples,
             inner.backend.caps().max_color_sample_count,
@@ -1461,8 +1391,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.backend.caps().features.ray_tracing {
             return Err(Error::Unsupported(
                 "ray tracing pipelines require BackendFeatures::ray_tracing".into(),
@@ -1510,8 +1439,7 @@ impl Device {
             //panic allowed, reason = "poisoned mutex is unrecoverable"
             let inner = self
                 .inner
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .lock();
             if !inner.backend.caps().features.ray_tracing {
                 return Err(Error::Unsupported(
                     "shader binding tables require BackendFeatures::ray_tracing".into(),
@@ -1608,8 +1536,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.images.contains_key(&handle) {
             return Err(Error::InvalidHandle);
         }
@@ -1621,8 +1548,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.buffers.contains_key(&handle) {
             return Err(Error::InvalidHandle);
         }
@@ -1634,8 +1560,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.pipelines.contains_key(&handle) {
             return Err(Error::InvalidHandle);
         }
@@ -1647,7 +1572,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .supported_gpu_capture_tools()
     }
@@ -1656,7 +1580,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .begin_gpu_capture(desc)
     }
@@ -1665,7 +1588,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .end_gpu_capture(tool)
     }
@@ -1674,8 +1596,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let desc = inner
             .pipelines
             .remove(&handle)
@@ -1699,8 +1620,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let handle = SurfaceHandle(inner.surface_handles.alloc());
         let info = inner.backend.create_surface(handle, desc)?;
         inner.surfaces.insert(
@@ -1718,8 +1638,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let old = inner
             .surfaces
             .get(&handle)
@@ -1740,8 +1659,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let old = inner
             .surfaces
             .get(&handle)
@@ -1761,8 +1679,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         inner
             .surfaces
             .get(&handle)
@@ -1774,8 +1691,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let surface = inner
             .surfaces
             .get_mut(&handle)
@@ -1791,8 +1707,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.surfaces.contains_key(&surface) {
             return Err(Error::InvalidHandle);
         }
@@ -1807,8 +1722,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.surfaces.contains_key(&surface) {
             return Err(Error::InvalidHandle);
         }
@@ -1819,8 +1733,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let _surface = inner.surfaces.remove(&handle).ok_or(Error::InvalidHandle)?;
         inner.backend.destroy_surface(handle)
     }
@@ -1829,8 +1742,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.surfaces.contains_key(&handle) {
             return Err(Error::InvalidHandle);
         }
@@ -1846,8 +1758,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let handle = FrameHandle(inner.frame_handles.alloc());
         let mut graph = RenderGraph::new();
         for (key, state) in &inner.image_states {
@@ -1870,7 +1781,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .wait_submission(token)
     }
@@ -1879,7 +1789,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .wait_idle()
     }
@@ -1890,8 +1799,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.backend.caps().features.video_queue {
             return Err(Error::Unsupported(
                 "video sessions require BackendFeatures::video_queue".into(),
@@ -1907,8 +1815,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if inner.video_sessions.remove(&handle).is_some() {
             inner
                 .deferred_destroys
@@ -1933,8 +1840,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         // Create the underlying VkVideoSessionKHR.
         let session_handle = VideoSessionHandle(inner.video_session_handles.alloc());
         let session_desc = VideoSessionDesc {
@@ -2014,8 +1920,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         // Heuristic: allocate 2 MiB per megapixel per second at the target bitrate.
         let w = config.width as u64;
         let h = config.height as u64;
@@ -2070,7 +1975,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .pso_pre_warm()
     }
@@ -2079,8 +1983,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         inner
             .backend
             .read_encode_bitstream(session.output_buffer, session.max_bitstream_bytes)
@@ -2095,8 +1998,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.backend.caps().features.device_generated_commands_nv
             && !inner.backend.caps().features.device_generated_commands
         {
@@ -2115,8 +2017,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if inner.indirect_command_layouts.remove(&handle).is_some() {
             inner
                 .deferred_destroys
@@ -2133,8 +2034,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.backend.caps().features.optical_flow_nv {
             return Err(Error::Unsupported(
                 "optical flow sessions require BackendFeatures::optical_flow_nv".into(),
@@ -2150,8 +2050,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if inner.optical_flow_sessions.remove(&handle).is_some() {
             inner
                 .deferred_destroys
@@ -2175,7 +2074,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .copy_memory_to_image(handle, mip, layer, data)
     }
@@ -2192,7 +2090,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .transition_image_layout_cpu(handle, new_layout)
     }
@@ -2209,8 +2106,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.backend.caps().features.external_memory_fd {
             return Err(Error::Unsupported(
                 "exportable buffers require BackendFeatures::external_memory_fd".into(),
@@ -2229,8 +2125,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.backend.caps().features.external_memory_fd {
             return Err(Error::Unsupported(
                 "exportable images require BackendFeatures::external_memory_fd".into(),
@@ -2249,7 +2144,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .export_buffer_fd(handle)
     }
@@ -2259,7 +2153,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .export_image_fd(handle)
     }
@@ -2278,8 +2171,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.backend.caps().features.external_memory_host {
             return Err(Error::Unsupported(
                 "host memory import requires BackendFeatures::external_memory_host".into(),
@@ -2304,8 +2196,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if !inner.backend.caps().features.external_semaphore_fd {
             return Err(Error::Unsupported(
                 "exportable semaphores require BackendFeatures::external_semaphore_fd".into(),
@@ -2321,7 +2212,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .export_semaphore_fd(handle)
     }
@@ -2331,7 +2221,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .import_semaphore_fd(handle, fd)
     }
@@ -2343,8 +2232,7 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut inner = self
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let handle = crate::FenceHandle(inner.fence_handles.alloc());
         inner.backend.create_exportable_fence(handle)?;
         Ok(handle)
@@ -2357,7 +2245,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .export_fence_fd(handle)
     }
@@ -2369,7 +2256,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .import_fence_fd(handle, fd)
     }
@@ -2378,7 +2264,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .set_reflex_mode(mode)
     }
@@ -2387,7 +2272,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .set_anti_lag_mode(mode)
     }
@@ -2396,7 +2280,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .latency_mode()
     }
@@ -2414,7 +2297,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .caps()
             .shader_core_count
@@ -2427,7 +2309,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .enumerate_cooperative_matrix_properties()
     }
@@ -2439,7 +2320,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .enumerate_performance_counters()
     }
@@ -2454,7 +2334,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .pipeline_executable_stats(pipeline)
     }
@@ -2470,7 +2349,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .pipeline_shader_stats_amd(pipeline)
     }
@@ -2486,7 +2364,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .create_timeline_semaphore(initial_value)
     }
@@ -2501,7 +2378,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .wait_for_timeline(semaphore, value, timeout_ns)
     }
@@ -2511,7 +2387,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .signal_timeline(semaphore, value)
     }
@@ -2521,7 +2396,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .destroy_timeline_semaphore(semaphore)
     }
@@ -2534,7 +2408,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .latency_sleep(surface)
     }
@@ -2546,7 +2419,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .anti_lag_frame_start()
     }
@@ -2562,7 +2434,6 @@ impl Device {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .set_surface_hdr_metadata(surface, metadata)
     }
@@ -2753,6 +2624,8 @@ fn merge_shader_reflection<const N: usize>(
         entry_points,
         parameters,
         vertex_inputs,
+        workgroup_size: None,
+        wave_ops_used: false,
     }
 }
 
@@ -3194,8 +3067,7 @@ impl Frame {
         let mut inner = self
             .device
             .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let graph = inner
             .frames
             .get_mut(&self.handle)
@@ -3209,8 +3081,7 @@ impl Frame {
             let inner = self
                 .device
                 .inner
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .lock();
             let graph = inner.frames.get(&self.handle).ok_or_else(|| {
                 Error::ResourceStateCorruption(format!(
                     "frame flush could not find render graph for frame handle {:?}",
@@ -3229,8 +3100,7 @@ impl Frame {
             let mut inner = self
                 .device
                 .inner
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .lock();
             // `backend.flush` → `submit_graph` waits the previous frame's fence
             // before submitting.  Everything after this point is safe to destroy.
             let token = inner.backend.flush(&compiled).map_err(|error| {
@@ -3305,7 +3175,6 @@ impl Frame {
         self.device
             .inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .backend
             .present()
     }
@@ -3326,7 +3195,7 @@ impl Frame {
 
 impl Drop for Frame {
     fn drop(&mut self) {
-        if let Ok(mut inner) = self.device.inner.lock() {
+        let mut inner = self.device.inner.lock(); if true {
             inner.frames.remove(&self.handle);
             // Transient images that were never flushed are safe to destroy
             // immediately (they were never submitted to the GPU).

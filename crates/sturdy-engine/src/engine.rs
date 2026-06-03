@@ -1,7 +1,8 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
+use parking_lot::Mutex;
 
 use sturdy_engine_core as core;
 
@@ -9,7 +10,7 @@ use crate::upload_arena::UploadArena;
 use crate::{
     AccelerationStructure, AccelerationStructureBuildSizes, AccelerationStructureDesc, AssetHandle,
     BackendKind, BackendRawCapabilities, BindGroup, BindGroupDesc, BindlessHandle, BlasBuildDesc,
-    Buffer, BufferDesc, CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error,
+    Buffer, BufferDesc, BufferUsage, CanonicalPipelineLayout, Caps, ComputePipelineDesc, Error,
     ExternalBufferDesc, ExternalImageDesc, Format, FormatCapabilities, Frame, FrameSyncReason,
     GpuCaptureDesc, GpuCaptureTool, GpuMemoryBudget, GraphFrame, GraphImage, GraphImageCacheKey,
     GraphicsPipelineDesc, Image, ImageDesc, ImageUsage, MeshPrimitive, NativeHandleCapabilities,
@@ -29,6 +30,33 @@ const _: fn() = || {
     fn assert_send_sync<T: Send + Sync + 'static>() {}
     assert_send_sync::<Engine>();
 };
+
+// ── Cross-frame bind group cache ─────────────────────────────────────────────
+
+/// How many frames a bind group is kept alive in the cache after its last use.
+/// Must be > FRAMES_IN_FLIGHT (typically 2) to ensure GPU is done before eviction.
+const BIND_GROUP_CACHE_TTL: u64 = 4;
+
+pub(crate) struct CachedBindGroupEntry {
+    pub(crate) bind_group: std::sync::Arc<BindGroup>,
+    pub(crate) last_used_frame: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct BindGroupFrameCache {
+    pub(crate) entries: HashMap<u64, CachedBindGroupEntry>,
+}
+
+impl BindGroupFrameCache {
+    /// Evict entries that are older than `BIND_GROUP_CACHE_TTL` frames.
+    /// Call this at frame start — the GPU fence guarantees all older GPU work
+    /// using these descriptor sets has completed by then.
+    pub(crate) fn evict_stale(&mut self, current_frame: u64) {
+        self.entries.retain(|_, entry| {
+            current_frame.saturating_sub(entry.last_used_frame) < BIND_GROUP_CACHE_TTL
+        });
+    }
+}
 
 // ── Engine ────────────────────────────────────────────────────────────────────
 
@@ -56,6 +84,22 @@ pub struct Engine {
     global_buffers: Arc<Mutex<HashMap<String, (core::BufferHandle, BufferDesc)>>>,
     /// Engine-global named image registry (same fallback role as `global_buffers`).
     global_images: Arc<Mutex<HashMap<String, (core::ImageHandle, ImageDesc)>>>,
+    /// Reusable staging arena pool.  Instead of allocating new HOST_VISIBLE
+    /// staging blocks every frame, arenas are returned here after GPU work
+    /// completes and reused on the next `begin_frame` call.  Reduces per-frame
+    /// HOST_VISIBLE `vkAllocateMemory` calls to zero for steady-state workloads.
+    staging_pool: Arc<Mutex<Vec<crate::upload_arena::UploadArena>>>,
+    /// Cross-frame bind group cache.  Avoids `vkAllocateDescriptorSets` +
+    /// `vkUpdateDescriptorSets` when the same set of resources is bound every
+    /// frame (e.g. deferred lighting G-buffer inputs, shadow atlas, etc.).
+    ///
+    /// Keys are a hash of `(layout_handle, sorted entries)`.  Values hold a
+    /// strong `Arc<BindGroup>` reference so the descriptor set stays alive for
+    /// `BIND_GROUP_CACHE_TTL` frames after its last use.  Eviction runs at
+    /// each `begin_frame` call after the TTL expires.
+    bind_group_cache: Arc<Mutex<BindGroupFrameCache>>,
+    /// Monotonically-increasing frame counter used for bind group cache TTL.
+    frame_index: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Engine {
@@ -113,6 +157,9 @@ impl Engine {
             last_budget_warn_secs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             global_buffers: Arc::new(Mutex::new(HashMap::new())),
             global_images: Arc::new(Mutex::new(HashMap::new())),
+            staging_pool: Arc::new(Mutex::new(Vec::new())),
+            bind_group_cache: Arc::new(Mutex::new(BindGroupFrameCache::default())),
+            frame_index: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         let catalog = sampler_catalog::SamplerCatalog::build(&engine)?;
         engine.sampler_catalog = Arc::new(catalog);
@@ -177,23 +224,22 @@ impl Engine {
     pub(crate) fn clear_caches_after_backend_restart(&self) {
         *self
             .graph_image_cache
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = HashMap::new();
+            .lock() = HashMap::new();
         *self
             .texture_cache
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = HashMap::new();
+            .lock() = HashMap::new();
         *self
             .pending_uploads
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = Vec::new();
+            .lock() = Vec::new();
         self.global_buffers
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
             .clear();
         self.global_images
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+        self.bind_group_cache
+            .lock()
+            .entries
             .clear();
     }
 
@@ -222,6 +268,29 @@ impl Engine {
         self.device.memory_budget()
     }
 
+    // ── Cross-frame bind group cache ──────────────────────────────────────────
+
+    /// Advance the frame counter and evict stale bind groups from the cross-frame cache.
+    ///
+    /// Called once per frame (in `RenderFrame::flush()`).  Safe to call more than
+    /// once per frame — extra calls only advance the counter.
+    pub(crate) fn advance_bind_group_frame(&self) {
+        use std::sync::atomic::Ordering;
+        let frame = self.frame_index.fetch_add(1, Ordering::Relaxed) + 1;
+        self.bind_group_cache
+            .lock()
+            .evict_stale(frame);
+    }
+
+    /// Current frame index used for bind group cache TTL tracking.
+    pub(crate) fn bind_group_frame_index(&self) -> u64 {
+        self.frame_index.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn bind_group_cache(&self) -> &Arc<Mutex<BindGroupFrameCache>> {
+        &self.bind_group_cache
+    }
+
     // ── Global resource registry ──────────────────────────────────────────────
 
     /// Register a named buffer so the reflection-driven bind-group builder can
@@ -236,7 +305,6 @@ impl Engine {
     pub fn register_global_buffer(&self, name: impl Into<String>, handle: core::BufferHandle, desc: BufferDesc) {
         self.global_buffers
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
             .insert(name.into(), (handle, desc));
     }
 
@@ -246,7 +314,6 @@ impl Engine {
     pub fn register_global_image(&self, name: impl Into<String>, handle: core::ImageHandle, desc: ImageDesc) {
         self.global_images
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
             .insert(name.into(), (handle, desc));
     }
 
@@ -254,7 +321,6 @@ impl Engine {
     pub fn unregister_global_buffer(&self, name: &str) {
         self.global_buffers
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
             .remove(name);
     }
 
@@ -262,7 +328,6 @@ impl Engine {
     pub fn unregister_global_image(&self, name: &str) {
         self.global_images
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
             .remove(name);
     }
 
@@ -270,7 +335,6 @@ impl Engine {
     pub fn global_buffer(&self, name: &str) -> Option<(core::BufferHandle, BufferDesc)> {
         self.global_buffers
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
             .get(name)
             .copied()
     }
@@ -279,7 +343,6 @@ impl Engine {
     pub fn global_image(&self, name: &str) -> Option<(core::ImageHandle, ImageDesc)> {
         self.global_images
             .lock()
-            .unwrap_or_else(|p| p.into_inner())
             .get(name)
             .copied()
     }
@@ -375,6 +438,38 @@ impl Engine {
             handle,
             desc,
         })
+    }
+
+    /// Create a `DEVICE_LOCAL` (GPU-resident) buffer and upload `data` into it
+    /// via an internal staging copy.
+    ///
+    /// The resulting buffer resides in VRAM on discrete GPUs for optimal GPU
+    /// read bandwidth.  `data` is copied synchronously — this method creates a
+    /// one-shot frame, submits the staging copy, and waits for completion.
+    ///
+    /// # Intended use
+    ///
+    /// Use this for static or rarely-updated GPU data: mesh vertex/index
+    /// buffers, static lookup tables, etc.  For per-frame dynamic data use
+    /// `create_buffer` with `COPY_DST` and `write()`, or the transient pool.
+    ///
+    /// `usage` should NOT include `GPU_ONLY` — this method adds it internally.
+    /// It MUST include the intended GPU usage (`VERTEX`, `INDEX`, `STORAGE`,
+    /// etc.); `COPY_DST` is added automatically for the staging transfer.
+    pub fn create_gpu_buffer(&self, data: &[u8], usage: BufferUsage) -> Result<Buffer> {
+        if data.is_empty() {
+            return Err(Error::InvalidInput("create_gpu_buffer: data must not be empty".into()));
+        }
+        let dst = self.create_buffer(BufferDesc {
+            size: data.len() as u64,
+            usage: usage | BufferUsage::COPY_DST | BufferUsage::GPU_ONLY,
+        })?;
+        let mut frame = self.begin_frame()?;
+        frame.upload_buffer_data("gpu-buffer-upload", &dst, data)?;
+        frame.flush_with_reason(FrameSyncReason::CompatibilityShim)?;
+        frame.wait_with_reason(FrameSyncReason::CompatibilityShim)?;
+        frame.recycle_staging_arena();
+        Ok(dst)
     }
 
     pub fn create_acceleration_structure(
@@ -580,8 +675,7 @@ impl Engine {
     pub fn evict_cached_graph_images_with_prefix(&self, name_prefix: &str) {
         let mut cache = self
             .graph_image_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         cache.retain(|key, _| !key.name().starts_with(name_prefix));
     }
 
@@ -593,8 +687,7 @@ impl Engine {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut cache = self
             .graph_image_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if let Some(image) = cache.get(&key) {
             return Ok((image.handle(), image.desc()));
         }
@@ -707,11 +800,29 @@ impl Engine {
     }
 
     pub fn begin_frame(&self) -> Result<Frame> {
+        // Try to reuse a reset staging arena from the pool to avoid per-frame
+        // HOST_VISIBLE vkAllocateMemory calls.
+        let upload_arena = self
+            .staging_pool
+            .lock()
+            .pop()
+            .unwrap_or_default();
         Ok(Frame {
             engine: self.clone(),
             inner: self.device.begin_frame()?,
-            upload_arena: UploadArena::default(),
+            upload_arena,
         })
+    }
+
+    /// Return a used staging arena to the pool for reuse next frame.
+    ///
+    /// Called automatically from `Frame::wait()` / `Frame::wait_with_reason()`
+    /// after the GPU has finished reading from all staging buffers.
+    pub(crate) fn return_staging_arena(&self, mut arena: UploadArena) {
+        if arena.has_blocks() {
+            arena.reset_for_reuse();
+            self.staging_pool.lock().push(arena);
+        }
     }
 
     /// Begin a new image-centric graph frame.
@@ -784,8 +895,7 @@ impl Engine {
             //panic allowed, reason = "poisoned internal texture cache is unrecoverable"
             let cache = self
                 .texture_cache
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .lock();
             if let Some(handle) = cache.get(&key) {
                 return handle.clone();
             }
@@ -794,7 +904,6 @@ impl Engine {
         //panic allowed, reason = "poisoned internal texture cache is unrecoverable"
         self.texture_cache
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(key, handle.clone());
         handle
     }
@@ -852,8 +961,7 @@ impl Engine {
             //panic allowed, reason = "poisoned internal pending upload queue is unrecoverable"
             let mut lock = self
                 .pending_uploads
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .lock();
             std::mem::take(&mut *lock)
         };
         if uploads.is_empty() {
@@ -869,11 +977,14 @@ impl Engine {
                 format: u.format,
                 usage: ImageUsage::SAMPLED,
                 prefer_compressed: true,
+            generate_mips: true,
             };
             results.push(frame.upload_texture_2d(&u.name, desc, &u.data));
         }
         frame.flush_with_reason(FrameSyncReason::CompatibilityShim)?;
         frame.wait_with_reason(FrameSyncReason::CompatibilityShim)?;
+        // Return staging arena to pool so its HOST_VISIBLE memory is reused next frame.
+        frame.recycle_staging_arena();
 
         for (upload, result) in uploads.into_iter().zip(results) {
             match result {

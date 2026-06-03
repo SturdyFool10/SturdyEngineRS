@@ -24,8 +24,7 @@ use sturdy_engine_core::Extent3d;
 ///
 /// The output is an `Rgba16Float` image whose `.xy` channels contain
 /// `prev_uv_unjittered - curr_uv_unjittered` in screen UV space `[0, 1]`.
-/// This matches the reprojection convention used by `AntiAliasingPass` (TAA)
-/// and `SrdDenoiser`.
+/// This matches the reprojection convention used by `AntiAliasingPass` (TAA).
 pub struct CameraMotionVectorPass {
     program: ShaderProgram,
 }

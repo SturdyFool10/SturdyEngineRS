@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 
 use crate::ecs::Transform;
 
@@ -25,10 +26,13 @@ impl RenderWorldCommands {
     }
 
     pub fn push(&self, command: RenderWorldCommand) {
-        self.queue
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(command);
+        self.queue.lock().push(command);
+    }
+
+    /// Push multiple commands in a single lock acquisition — much cheaper than
+    /// calling `push` N times when many commands are generated concurrently.
+    pub fn push_batch(&self, commands: impl IntoIterator<Item = RenderWorldCommand>) {
+        self.queue.lock().extend(commands);
     }
 
     pub fn create_object(&self, object: GpuObjectId) {
@@ -64,14 +68,13 @@ impl RenderWorldCommands {
     }
 
     pub fn pending_count(&self) -> usize {
-        self.queue.lock().map(|queue| queue.len()).unwrap_or(0)
+        self.queue.lock().len()
     }
 
     pub(super) fn take_all(&self) -> Vec<RenderWorldCommand> {
         let mut queue = self
             .queue
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         std::mem::take(&mut *queue)
     }
 }

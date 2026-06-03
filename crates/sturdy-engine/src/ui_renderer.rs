@@ -28,7 +28,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 use clay_ui::{GpuWorkQueue, RenderCommandKind, RenderData};
 
@@ -117,7 +118,6 @@ impl UiRenderer {
     pub fn set_image(&self, image_key: impl Into<String>, image: Arc<Image>) {
         self.images
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(image_key.into(), image);
     }
 
@@ -125,7 +125,6 @@ impl UiRenderer {
     pub fn remove_image(&self, image_key: &str) -> Option<Arc<Image>> {
         self.images
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(image_key)
     }
 
@@ -209,8 +208,7 @@ impl UiRenderer {
                         let image = {
                             let images = self
                                 .images
-                                .read()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                .read();
                             images.get(&data.image_key).cloned()
                         };
                         let Some(image) = image else {
@@ -391,12 +389,11 @@ pub fn draw_ui_text(
     // Thread-local cache of compiled text programs. Lazily created.
     // For simplicity, use a static Mutex so we don't need to thread the program
     // through the call chain.
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
     static TEXT_PROGRAM: Mutex<Option<MeshProgram>> = Mutex::new(None);
 
     let program_guard = TEXT_PROGRAM
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .lock();
     if program_guard.is_none() {
         drop(program_guard);
         let prog = MeshProgram::new(
@@ -417,12 +414,10 @@ pub fn draw_ui_text(
             },
         )?;
         *TEXT_PROGRAM
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(prog);
+            .lock() = Some(prog);
     }
     let program_guard = TEXT_PROGRAM
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .lock();
     let program = match program_guard.as_ref() {
         Some(p) => p,
         None => return Ok(()),

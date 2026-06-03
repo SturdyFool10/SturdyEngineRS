@@ -91,6 +91,12 @@ fn reflect_compute_shader_binding() {
     // Binding index should be populated from Slang reflection (not always 0 from array position)
     // For a single binding in set 0, Slang assigns binding=0
     assert_eq!(binding.binding, 0, "first binding should have slot 0");
+    // testbed_compute.slang declares [numthreads(8, 8, 1)] — verify SPIR-V extraction.
+    assert_eq!(
+        reflection.workgroup_size,
+        Some([8, 8, 1]),
+        "workgroup_size should be extracted from OpExecutionMode LocalSize"
+    );
 }
 
 #[test]

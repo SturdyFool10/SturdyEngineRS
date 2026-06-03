@@ -18,6 +18,7 @@ stable = []
 [dependencies]
 sturdy-engine-macros = { path = "../sturdy-engine-macros" }
 tracing.workspace = true
+parking_lot.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }

@@ -10,6 +10,7 @@ pub(crate) struct UploadAllocation {
 }
 
 impl UploadAllocation {
+    #[inline]
     pub(crate) fn offset(self) -> u64 {
         self.offset
     }
@@ -48,13 +49,32 @@ impl UploadArena {
         })
     }
 
+    #[inline]
     pub(crate) fn buffer(&self, allocation: UploadAllocation) -> &Buffer {
         &self.blocks[allocation.block_index].buffer
     }
 
     /// Total bytes written to the arena since it was created (i.e. this frame).
+    #[inline]
     pub(crate) fn bytes_uploaded(&self) -> u64 {
         self.bytes_uploaded
+    }
+
+    /// Reset the arena for reuse after the GPU has finished reading all staged data.
+    ///
+    /// Clears the write cursor on all existing blocks without freeing the
+    /// HOST_VISIBLE memory.  Call this after the previous frame's GPU fence fires
+    /// to avoid per-frame HOST_VISIBLE allocation overhead.
+    pub(crate) fn reset_for_reuse(&mut self) {
+        for block in &mut self.blocks {
+            block.used = 0;
+        }
+        self.bytes_uploaded = 0;
+    }
+
+    /// Whether this arena has any allocated blocks (can be reused next frame).
+    pub(crate) fn has_blocks(&self) -> bool {
+        !self.blocks.is_empty()
     }
 
     #[cfg(test)]

@@ -13,7 +13,7 @@
 //   [2] sample count          — diagnostics
 //   [3] avg linear luminance  — diagnostics
 
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use crate::{
     AutoExposureConfig, Buffer, BufferDesc, BufferUsage, ComputeProgram, Engine, GraphImage,
@@ -177,7 +177,7 @@ impl AutoExposurePass {
 
         // On the very first frame we have no previous EV, so jump directly to
         // the target rather than blending from zero.  Subsequent frames blend.
-        let mut initialized = self.initialized.lock().unwrap_or_else(|p| p.into_inner());
+        let mut initialized = self.initialized.lock();
         let adaptation_rate = if !*initialized {
             *initialized = true;
             1.0
@@ -217,7 +217,7 @@ impl AutoExposurePass {
     pub fn read_back_state(&self) -> Result<Option<AutoExposureReadback>> {
         let mut bytes = [0u8; EXPOSURE_STATE_BYTES as usize];
         self.exposure_buffer.read(0, &mut bytes)?;
-        let initialized = *self.initialized.lock().unwrap_or_else(|p| p.into_inner());
+        let initialized = *self.initialized.lock();
         if !initialized {
             return Ok(None);
         }

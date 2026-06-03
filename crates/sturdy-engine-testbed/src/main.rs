@@ -5,28 +5,71 @@ mod overlay;
 mod path_tracer_camera;
 mod path_tracer_subscene;
 mod shadow_showcase;
-mod srd_runtime;
 mod tonemap;
 
 use cornell_rt::CornellRtScene;
 use path_tracer_camera::{PathTracerCameraGpu, PathTracerCameraInput, PathTracerCameraRig};
 use path_tracer_subscene::PathTracerSubscene;
 use shadow_showcase::ShadowShowcase;
-use srd_runtime::{
-    CORNELL_RT_MAX_ACCUMULATION_FRAMES, SRD_QUALITY_SETTING, SRD_RESET_SETTING, SrdQualityPreset,
-};
 use sturdy_engine::{
     AntiAliasingConfig, AntiAliasingDial, AntiAliasingPass, AppRuntime, AppRuntimeFrame,
     AutoExposureConfig, AutoExposurePass, BloomConfig, BloomPass, CpuProceduralTexture2d,
     DebugOverlay, DebugOverlayRenderer, DebugViewPicker, Engine, Error, Extent3d, Format,
-    GpuProceduralTexture, HdrPipelineDesc, HdrPreference, ImageDesc, ImageDimension, ImageUsage,
-    KeyInput, KeyInputState, KeyModifier, KeyToken, MotionVectorLayer, MotionVectorSpace,
-    ProceduralTextureRecipe, ProceduralTextureUpdatePolicy, Result as EngineResult, RuntimeApp,
-    RuntimeController, RuntimeMotionVectorDesc, RuntimePostProcessDesc, RuntimeSettingDescriptor,
-    RuntimeSettingId, RuntimeSettingKey, RuntimeSettingOption, ShaderProgram, ShaderWatcher,
-    ShellFrame, SrdDenoiser, SrdReferenceTemporalPrograms, SurfaceColorSpace, ToneMappingOp,
-    WindowConfig, init_tracing_with_default_filter, push_constants, run_with_runtime, set_log_level,
+    GraphImageHistory, GpuProceduralTexture, HdrPipelineDesc, HdrPreference, ImageDesc,
+    ImageDimension, ImageUsage, KeyInput, KeyInputState, KeyModifier, KeyToken, MotionVectorLayer,
+    MotionVectorSpace, ProceduralTextureRecipe, ProceduralTextureUpdatePolicy,
+    Result as EngineResult, RuntimeApp, RuntimeController, RuntimeMotionVectorDesc,
+    RuntimePostProcessDesc, RuntimeSettingDescriptor, RuntimeSettingId, RuntimeSettingKey,
+    RuntimeSettingOption, SamplerPreset, ShaderProgram, ShaderWatcher, ShellFrame, StageMask,
+    SurfaceColorSpace, ToneMappingOp, WindowConfig, init_tracing_with_default_filter,
+    push_constants, run_with_runtime, set_log_level,
 };
+
+const PT_QUALITY_SETTING: &str = "testbed.pt_quality";
+const PT_RESET_SETTING: &str = "testbed.pt_reset_history";
+const PT_MAX_ACCUMULATION_FRAMES: u32 = 65536;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PtQuality {
+    Preview,
+    Balanced,
+    Stable,
+}
+
+impl PtQuality {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Preview => "preview",
+            Self::Balanced => "balanced",
+            Self::Stable => "stable",
+        }
+    }
+
+    fn display_label(self) -> &'static str {
+        match self {
+            Self::Preview => "Preview",
+            Self::Balanced => "Balanced",
+            Self::Stable => "Stable",
+        }
+    }
+
+    fn max_frames(self) -> u32 {
+        match self {
+            Self::Preview => 32,
+            Self::Balanced => 512,
+            Self::Stable => PT_MAX_ACCUMULATION_FRAMES,
+        }
+    }
+
+    fn from_setting(value: &str) -> Option<Self> {
+        match value {
+            "preview" | "Preview" => Some(Self::Preview),
+            "balanced" | "Balanced" => Some(Self::Balanced),
+            "stable" | "Stable" => Some(Self::Stable),
+            _ => None,
+        }
+    }
+}
 use tonemap::{TonemapParams, tone_mapping_id};
 
 #[push_constants]
@@ -49,6 +92,14 @@ struct CornellDenoiseParams {
     max_frames: u32,
     output_mode: u32,
     _pad: u32,
+}
+
+#[push_constants]
+struct PtTemporalConstants {
+    frame_index: u32,
+    has_history: u32,
+    max_frames: u32,
+    mode: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -401,8 +452,8 @@ struct Testbed {
     scene_program: ShaderProgram,
     motion_program: ShaderProgram,
     tonemap_program: ShaderProgram,
-    srd_temporal_accumulation_program: ShaderProgram,
-    srd_clear_history_program: ShaderProgram,
+    pt_temporal_program: ShaderProgram,
+    pt_clear_program: ShaderProgram,
     cornell_denoise_program: ShaderProgram,
     bloom_pass: BloomPass,
     aa_pass: AntiAliasingPass,
@@ -429,7 +480,7 @@ struct Testbed {
     debug_view_picker: DebugViewPicker,
     runtime_controller: Option<RuntimeController>,
     texture_resolution: TextureResolutionTier,
-    srd_quality: SrdQualityPreset,
+    pt_quality: PtQuality,
     selected_scene: ShowcaseScene,
     shadow_scene: ShadowShowcase,
     cornell_rt_scene: Option<CornellRtScene>,
@@ -437,7 +488,8 @@ struct Testbed {
     path_tracer_camera: PathTracerCameraRig,
     previous_path_tracer_camera: PathTracerCameraGpu,
     path_tracer_camera_input: PathTracerCameraInput,
-    srd_denoiser: SrdDenoiser,
+    pt_history: GraphImageHistory,
+    pt_max_frames: u32,
     clear_path_tracer_after_first_trace: bool,
     show_graph_inspector: bool,
     pending_debug_image_export: bool,
@@ -647,10 +699,10 @@ impl RuntimeApp for Testbed {
         let scene_program = engine.load_shader(shader_path("shader_graph_fragment.slang"))?;
         let motion_program = engine.load_shader(shader_path("motion_vectors.slang"))?;
         let tonemap_program = engine.load_shader(shader_path("tonemap.slang"))?;
-        let srd_temporal_accumulation_program =
-            engine.load_shader(shader_path("srd_temporal_accumulate.slang"))?;
-        let srd_clear_history_program =
-            engine.load_shader(shader_path("srd_clear_history.slang"))?;
+        let pt_temporal_program =
+            engine.load_shader(shader_path("temporal_accumulate.slang"))?;
+        let pt_clear_program =
+            engine.load_shader(shader_path("temporal_clear_history.slang"))?;
         let cornell_denoise_program = engine.load_shader(shader_path("cornell_denoise.slang"))?;
 
         let mut shader_watcher = ShaderWatcher::new();
@@ -658,8 +710,8 @@ impl RuntimeApp for Testbed {
             &scene_program,
             &motion_program,
             &tonemap_program,
-            &srd_temporal_accumulation_program,
-            &srd_clear_history_program,
+            &pt_temporal_program,
+            &pt_clear_program,
             &cornell_denoise_program,
         ] {
             if let Some(path) = program.source_path() {
@@ -680,8 +732,8 @@ impl RuntimeApp for Testbed {
             scene_program,
             motion_program,
             tonemap_program,
-            srd_temporal_accumulation_program,
-            srd_clear_history_program,
+            pt_temporal_program,
+            pt_clear_program,
             cornell_denoise_program,
             bloom_pass: BloomPass::new(engine)?,
             aa_pass: AntiAliasingPass::new(engine)?,
@@ -728,7 +780,7 @@ impl RuntimeApp for Testbed {
             debug_view_picker: DebugViewPicker::new(engine)?,
             runtime_controller: None,
             texture_resolution: TextureResolutionTier::Medium,
-            srd_quality: SrdQualityPreset::Stable,
+            pt_quality: PtQuality::Stable,
             selected_scene: ShowcaseScene::CornellPathTracing,
             shadow_scene,
             cornell_rt_scene,
@@ -736,7 +788,8 @@ impl RuntimeApp for Testbed {
             path_tracer_camera: PathTracerCameraRig::outdoor_default(),
             previous_path_tracer_camera: PathTracerCameraRig::outdoor_default().gpu_data(),
             path_tracer_camera_input: PathTracerCameraInput::default(),
-            srd_denoiser: SrdDenoiser::new(CORNELL_RT_MAX_ACCUMULATION_FRAMES),
+            pt_history: GraphImageHistory::new(),
+            pt_max_frames: PT_MAX_ACCUMULATION_FRAMES,
             clear_path_tracer_after_first_trace: true,
             show_graph_inspector: false,
             pending_debug_image_export: false,
@@ -772,18 +825,18 @@ impl RuntimeApp for Testbed {
                 self.tonemap_program.reload()
             } else if path
                 == self
-                    .srd_temporal_accumulation_program
+                    .pt_temporal_program
                     .source_path()
                     .unwrap_or(path.as_path())
             {
-                self.srd_temporal_accumulation_program.reload()
+                self.pt_temporal_program.reload()
             } else if path
                 == self
-                    .srd_clear_history_program
+                    .pt_clear_program
                     .source_path()
                     .unwrap_or(path.as_path())
             {
-                self.srd_clear_history_program.reload()
+                self.pt_clear_program.reload()
             } else if path
                 == self
                     .cornell_denoise_program
@@ -854,16 +907,20 @@ impl RuntimeApp for Testbed {
             shell_frame.register_debug_image("hdr_shadow_scene_color", &scene_color);
             (scene_color, None)
         } else {
-            let mut cornell_guide = None;
-            let mut cornell_material_guide = None;
             let mut path_tracer_motion_vectors = None;
-            let mut cornell_accumulation_frame = 0;
-            let mut scene_color = if self.selected_scene == ShowcaseScene::CornellPathTracing {
+            let scene_color = if self.selected_scene == ShowcaseScene::CornellPathTracing {
                 if let Some(cornell_rt_scene) = &self.cornell_rt_scene {
-                    let cornell_sample_frame = self.srd_denoiser.next_frame_index(
-                        frame,
-                        CornellRtScene::output_desc(ext.width, ext.height),
-                    );
+                    // Acquire ping-pong history first to get the current frame index,
+                    // which the Cornell RT path tracer uses as its per-frame sample seed.
+                    let mut pt_history_desc = CornellRtScene::output_desc(ext.width, ext.height);
+                    pt_history_desc.usage |= ImageUsage::RENDER_TARGET | ImageUsage::SAMPLED;
+                    let pt_history = frame.history_images(
+                        &mut self.pt_history,
+                        "cornell_accumulation",
+                        pt_history_desc,
+                    )?;
+                    let cornell_sample_frame =
+                        pt_history.frame_index.min(u32::MAX as u64) as u32;
                     let current_camera = self.path_tracer_camera.gpu_data();
                     let cornell_frame = cornell_rt_scene.draw(
                         frame,
@@ -889,11 +946,79 @@ impl RuntimeApp for Testbed {
                     );
                     shell_frame.register_debug_image("cornell_normals", &cornell_frame.normals);
                     shell_frame.register_debug_image("cornell_depth", &cornell_frame.depth);
-                    cornell_accumulation_frame = cornell_sample_frame;
-                    cornell_guide = Some(cornell_frame.guide);
-                    cornell_material_guide = Some(cornell_frame.material_guide);
+                    let cornell_guide = cornell_frame.guide;
+                    let cornell_material_guide = cornell_frame.material_guide;
                     path_tracer_motion_vectors = Some(cornell_frame.motion_vectors);
-                    cornell_frame.color
+
+                    // Temporal accumulation using the same pt_history acquired above.
+                    if !pt_history.has_history {
+                        pt_history.write.execute_shader_auto(&self.pt_clear_program)?;
+                    }
+                    cornell_frame.color.register_as("current_signal");
+                    pt_history.read.register_as("history_signal");
+                    frame.set_sampler("current_sampler", SamplerPreset::Linear);
+                    frame.set_sampler("history_sampler", SamplerPreset::Linear);
+                    pt_history.write.execute_shader_with_push_constants(
+                        &self.pt_temporal_program,
+                        StageMask::FRAGMENT,
+                        bytemuck::bytes_of(&PtTemporalConstants {
+                            frame_index: cornell_sample_frame,
+                            has_history: pt_history.has_history as u32,
+                            max_frames: self.pt_max_frames,
+                            mode: 0,
+                        }),
+                    )?;
+                    let accumulated = pt_history.write;
+                    shell_frame.register_debug_image("hdr_cornell_accumulated", &accumulated);
+
+                    let mut denoise_desc = accumulated.desc();
+                    denoise_desc.usage |=
+                        ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET | ImageUsage::COPY_SRC;
+                    denoise_desc.debug_name = Some("cornell_rt_denoised");
+                    let denoised = frame.image("cornell_denoised", denoise_desc)?;
+                    accumulated.register_as("accumulated_radiance");
+                    cornell_guide.register_as("current_guides");
+                    cornell_material_guide.register_as("current_material_guides");
+                    denoised.execute_shader_with_constants_auto(
+                        &self.cornell_denoise_program,
+                        &CornellDenoiseParams {
+                            frame_index: cornell_sample_frame,
+                            max_frames: self.pt_max_frames,
+                            output_mode: 0,
+                            _pad: 0,
+                        },
+                    )?;
+                    shell_frame.register_debug_image("hdr_cornell_denoised", &denoised);
+
+                    let mut delta_desc = accumulated.desc();
+                    delta_desc.usage |=
+                        ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET | ImageUsage::COPY_SRC;
+                    delta_desc.debug_name = Some("cornell_rt_denoise_delta");
+                    let denoise_delta = frame.image("cornell_denoise_delta", delta_desc)?;
+                    denoise_delta.execute_shader_with_constants_auto(
+                        &self.cornell_denoise_program,
+                        &CornellDenoiseParams {
+                            frame_index: cornell_sample_frame,
+                            max_frames: self.pt_max_frames,
+                            output_mode: 1,
+                            _pad: 0,
+                        },
+                    )?;
+                    shell_frame.register_debug_image("hdr_cornell_denoise_delta", &denoise_delta);
+
+                    denoised.register_as("scene_color");
+                    let final_color = denoised;
+
+                    if self.clear_path_tracer_after_first_trace {
+                        self.pt_history.reset();
+                        self.clear_path_tracer_after_first_trace = false;
+                        tracing::debug!(
+                            subscene = self.path_tracer_subscene.label(),
+                            "path tracer accumulation cleared after first trace"
+                        );
+                    }
+
+                    final_color
                 } else {
                     let scene_target = shell_frame
                         .default_hdr_scene_target("scene_color", self.actual_msaa_samples())?;
@@ -928,78 +1053,6 @@ impl RuntimeApp for Testbed {
                 )?;
                 scene_color
             };
-            if self.selected_scene == ShowcaseScene::CornellPathTracing {
-                let accumulated = self.srd_denoiser.accumulate_with_programs(
-                    frame,
-                    &scene_color,
-                    "srd_cornell_accumulation",
-                    SrdReferenceTemporalPrograms::new(
-                        &self.srd_temporal_accumulation_program,
-                        Some(&self.srd_clear_history_program),
-                    ),
-                )?;
-                shell_frame.register_debug_image("hdr_cornell_accumulated", &accumulated);
-                shell_frame.register_debug_image("srd_current_signal", &scene_color);
-                shell_frame.register_debug_image("srd_reference_temporal_output", &accumulated);
-                let srd_max_frames = self.srd_denoiser.settings().max_frames;
-
-                if let (Some(guide), Some(material_guide)) =
-                    (&cornell_guide, &cornell_material_guide)
-                {
-                    let mut denoise_desc = accumulated.desc();
-                    denoise_desc.usage |=
-                        ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET | ImageUsage::COPY_SRC;
-                    denoise_desc.debug_name = Some("cornell_rt_denoised");
-                    let denoised = frame.image("cornell_denoised", denoise_desc)?;
-                    accumulated.register_as("accumulated_radiance");
-                    guide.register_as("current_guides");
-                    material_guide.register_as("current_material_guides");
-                    denoised.execute_shader_with_constants_auto(
-                        &self.cornell_denoise_program,
-                        &CornellDenoiseParams {
-                            frame_index: cornell_accumulation_frame,
-                            max_frames: srd_max_frames,
-                            output_mode: 0,
-                            _pad: 0,
-                        },
-                    )?;
-                    shell_frame.register_debug_image("hdr_cornell_denoised", &denoised);
-                    shell_frame.register_debug_image("srd_display_output", &denoised);
-
-                    let mut delta_desc = accumulated.desc();
-                    delta_desc.usage |=
-                        ImageUsage::SAMPLED | ImageUsage::RENDER_TARGET | ImageUsage::COPY_SRC;
-                    delta_desc.debug_name = Some("cornell_rt_denoise_delta");
-                    let denoise_delta = frame.image("cornell_denoise_delta", delta_desc)?;
-                    denoise_delta.execute_shader_with_constants_auto(
-                        &self.cornell_denoise_program,
-                        &CornellDenoiseParams {
-                            frame_index: cornell_accumulation_frame,
-                            max_frames: srd_max_frames,
-                            output_mode: 1,
-                            _pad: 0,
-                        },
-                    )?;
-                    shell_frame.register_debug_image("hdr_cornell_denoise_delta", &denoise_delta);
-
-                    // Accumulation registers the raw history as `scene_color` for its pass.
-                    // Override that alias only after denoising so bloom/tonemap consume the
-                    // display denoise without ever feeding it back into raw accumulation.
-                    denoised.register_as("scene_color");
-                    scene_color = denoised;
-                } else {
-                    scene_color = accumulated;
-                }
-
-                if self.clear_path_tracer_after_first_trace {
-                    self.srd_denoiser.reset();
-                    self.clear_path_tracer_after_first_trace = false;
-                    tracing::debug!(
-                        subscene = self.path_tracer_subscene.label(),
-                        "path tracer accumulation cleared after first trace"
-                    );
-                }
-            }
             shell_frame.register_debug_image("hdr_scene_color", &scene_color);
             let motion_vectors = if let Some(motion_vectors) = path_tracer_motion_vectors {
                 motion_vectors
@@ -1459,9 +1512,9 @@ impl RuntimeApp for Testbed {
         self.engine
             .evict_cached_graph_images_with_prefix("cornell_rt_sample");
         self.engine
-            .evict_cached_graph_images_with_prefix("srd_cornell_accumulation");
+            .evict_cached_graph_images_with_prefix("cornell_accumulation");
         tracing::info!(
-            "SRD Cornell accumulation and cached images reset for resize to {}x{}",
+            "Cornell accumulation and cached images reset for resize to {}x{}",
             width,
             height
         );
@@ -1504,7 +1557,7 @@ impl Testbed {
     }
 
     fn reset_path_tracer_accumulation(&mut self) {
-        self.srd_denoiser.reset();
+        self.pt_history.reset();
         self.previous_path_tracer_camera = self.path_tracer_camera.gpu_data();
         self.clear_path_tracer_after_first_trace = true;
     }
@@ -1588,38 +1641,38 @@ impl Testbed {
         )?;
         controller.register_app_setting(
             RuntimeSettingDescriptor::new(
-                RuntimeSettingId::app(SRD_QUALITY_SETTING),
-                "SRD Quality",
+                RuntimeSettingId::app(PT_QUALITY_SETTING),
+                "PT Accumulation Quality",
                 sturdy_engine::RuntimeApplyPath::Immediate,
-                self.srd_quality.label(),
+                self.pt_quality.label(),
             )
             .with_description(
-                "Hardware path tracing: choose the SRD temporal history budget used by accumulation and the Cornell display denoise.",
+                "Hardware path tracing: temporal history budget for accumulation and display denoise.",
             )
             .with_options(vec![
                 RuntimeSettingOption {
-                    value: SrdQualityPreset::Preview.label().into(),
-                    label: SrdQualityPreset::Preview.display_label().to_string(),
+                    value: PtQuality::Preview.label().into(),
+                    label: PtQuality::Preview.display_label().to_string(),
                 },
                 RuntimeSettingOption {
-                    value: SrdQualityPreset::Balanced.label().into(),
-                    label: SrdQualityPreset::Balanced.display_label().to_string(),
+                    value: PtQuality::Balanced.label().into(),
+                    label: PtQuality::Balanced.display_label().to_string(),
                 },
                 RuntimeSettingOption {
-                    value: SrdQualityPreset::Stable.label().into(),
-                    label: SrdQualityPreset::Stable.display_label().to_string(),
+                    value: PtQuality::Stable.label().into(),
+                    label: PtQuality::Stable.display_label().to_string(),
                 },
             ]),
         )?;
         controller.register_app_setting(
             RuntimeSettingDescriptor::new(
-                RuntimeSettingId::app(SRD_RESET_SETTING),
-                "SRD Reset History",
+                RuntimeSettingId::app(PT_RESET_SETTING),
+                "PT Reset History",
                 sturdy_engine::RuntimeApplyPath::Immediate,
                 false,
             )
             .with_description(
-                "Hardware path tracing: clear SRD temporal history on the next runtime setting apply.",
+                "Hardware path tracing: clear temporal history on the next runtime setting apply.",
             )
             .with_options(vec![
                 RuntimeSettingOption {
@@ -1665,8 +1718,8 @@ impl Testbed {
                 "testbed.texture_resolution",
                 self.texture_resolution.label(),
             )
-            .set_app_value(SRD_QUALITY_SETTING, self.srd_quality.label())
-            .set_app_value(SRD_RESET_SETTING, false)
+            .set_app_value(PT_QUALITY_SETTING, self.pt_quality.label())
+            .set_app_value(PT_RESET_SETTING, false)
             .apply()?;
         Ok(())
     }
@@ -1716,39 +1769,37 @@ impl Testbed {
             {
                 self.recreate_procedural_mask(tier)?;
             }
-            if change.setting == RuntimeSettingId::app(SRD_QUALITY_SETTING)
+            if change.setting == RuntimeSettingId::app(PT_QUALITY_SETTING)
                 && let sturdy_engine::RuntimeSettingValue::Text(value) = &change.value
-                && let Some(preset) = SrdQualityPreset::from_setting(value)
+                && let Some(preset) = PtQuality::from_setting(value)
             {
-                self.apply_srd_quality(preset);
+                self.apply_pt_quality(preset);
             }
-            if change.setting == RuntimeSettingId::app(SRD_RESET_SETTING)
+            if change.setting == RuntimeSettingId::app(PT_RESET_SETTING)
                 && let sturdy_engine::RuntimeSettingValue::Bool(true) = &change.value
             {
                 self.reset_path_tracer_accumulation();
                 controller
                     .clone()
                     .transact()
-                    .set_app_value(SRD_RESET_SETTING, false)
+                    .set_app_value(PT_RESET_SETTING, false)
                     .apply()?;
             }
         }
         Ok(())
     }
 
-    fn apply_srd_quality(&mut self, preset: SrdQualityPreset) {
-        if self.srd_quality == preset {
+    fn apply_pt_quality(&mut self, preset: PtQuality) {
+        if self.pt_quality == preset {
             return;
         }
-        let mut settings = self.srd_denoiser.settings();
-        settings.max_frames = preset.max_frames();
-        self.srd_denoiser.set_settings(settings);
-        self.srd_quality = preset;
+        self.pt_max_frames = preset.max_frames();
+        self.pt_quality = preset;
         self.reset_path_tracer_accumulation();
         tracing::info!(
             quality = preset.label(),
             max_frames = preset.max_frames(),
-            "SRD quality preset changed"
+            "PT accumulation quality preset changed"
         );
     }
 

@@ -1,3 +1,4 @@
+use parking_lot::Mutex;
 // Asset hot-reload watcher for textures and meshes.
 //
 // Polls modification times of on-disk asset files. When a change is detected,
@@ -23,7 +24,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::SystemTime,
 };
 
@@ -81,7 +82,7 @@ struct WatchEntry {
 /// ```ignore
 /// watcher.watch_with_callback("assets/rock.png", move |engine, path| {
 ///     let new_tex = engine.load_texture_2d(path)?;
-///     *my_texture.lock()? = Some(new_tex);
+///     *my_texture.lock() = Some(new_tex);
 ///     Ok(())
 /// });
 /// ```
@@ -90,7 +91,7 @@ struct WatchEntry {
 /// ```ignore
 /// let slot = Arc::new(Mutex::new(Some(engine.load_texture_2d("assets/rock.png")?)));
 /// watcher.watch_texture("assets/rock.png", slot.clone(), &engine);
-/// // Each frame: render with `if let Some(texture) = slot.lock()?.as_ref() { ... }`
+/// // Each frame: render with `if let Some(texture) = slot.lock().as_ref() { ... }`
 /// ```
 pub struct AssetWatcher {
     entries: Vec<WatchEntry>,
@@ -138,7 +139,7 @@ impl AssetWatcher {
     /// watcher.watch_texture("rock_albedo.png", Arc::clone(&slot), &engine);
     ///
     /// // Each frame:
-    /// if let Some(tex) = slot.lock()?.as_ref() {
+    /// if let Some(tex) = slot.lock().as_ref() {
     ///     frame.bind_image("albedo", tex);
     /// }
     /// ```
@@ -151,10 +152,10 @@ impl AssetWatcher {
         let path = path.into();
         let last_mtime = mtime(&path);
         // Populate the slot immediately so it's ready before the first tick.
-        let slot_is_empty = slot.lock().map(|slot| slot.is_none()).unwrap_or(false);
+        let slot_is_empty = slot.lock().is_none();
         if slot_is_empty {
             if let Ok(img) = engine.load_texture_2d_blocking(&path) {
-                if let Ok(mut slot) = slot.lock() {
+                let mut slot = slot.lock(); if true {
                     *slot = Some(Arc::new(img));
                 }
             }
@@ -192,16 +193,10 @@ impl AssetWatcher {
 
             let result = match &mut entry.kind {
                 AssetKind::Texture(slot) => match engine.load_texture_2d_blocking(&entry.path) {
-                    Ok(img) => slot
-                        .lock()
-                        .map(|mut slot| {
-                            *slot = Some(Arc::new(img));
-                        })
-                        .map_err(|_| {
-                            crate::Error::Unknown(
-                                "asset watcher texture slot mutex poisoned".into(),
-                            )
-                        }),
+                    Ok(img) => {
+                        *slot.lock() = Some(Arc::new(img));
+                        Ok(())
+                    }
                     Err(e) => Err(e),
                 },
                 AssetKind::Callback(cb) => cb(engine, &entry.path),

@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    ComputePipelineDesc, Engine, Pipeline, PipelineLayout, Result, Shader, ShaderDesc,
-    ShaderReflection, ShaderSource, ShaderStage,
+    ComputePipelineDesc, Engine, Pipeline, PipelineLayout, Result, Shader, ShaderCapabilityProfile,
+    ShaderDesc, ShaderReflection, ShaderSource, ShaderStage,
 };
 
 pub struct ComputeProgram {
@@ -11,6 +11,7 @@ pub struct ComputeProgram {
     pub(crate) pipeline_layout: PipelineLayout,
     pub(crate) shader: Shader,
     pub(crate) reflection: ShaderReflection,
+    pub(crate) capability: ShaderCapabilityProfile,
     source_path: Option<PathBuf>,
     requires_ray_query: bool,
 }
@@ -39,6 +40,7 @@ impl ComputeProgram {
             uses_ser: false,
         })?;
         let reflection = engine.shader_reflection(&shader)?;
+        let capability = ShaderCapabilityProfile::from_reflection(&reflection, ShaderStage::Compute);
         let pipeline_layout = engine.create_reflected_compute_pipeline_layout(&shader)?;
         let pipeline = engine.create_compute_pipeline(ComputePipelineDesc {
             shader: shader.handle(),
@@ -50,6 +52,7 @@ impl ComputeProgram {
             pipeline_layout,
             shader,
             reflection,
+            capability,
             source_path: Some(path),
             requires_ray_query,
         })
@@ -57,6 +60,10 @@ impl ComputeProgram {
 
     pub fn reflection(&self) -> &ShaderReflection {
         &self.reflection
+    }
+
+    pub fn capability_profile(&self) -> &ShaderCapabilityProfile {
+        &self.capability
     }
 
     /// Return the source file path if this program was loaded from a file.
@@ -83,6 +90,7 @@ impl ComputeProgram {
             uses_ser: false,
         })?;
         let reflection = self.engine.shader_reflection(&shader)?;
+        let capability = ShaderCapabilityProfile::from_reflection(&reflection, ShaderStage::Compute);
         let pipeline_layout = self
             .engine
             .create_reflected_compute_pipeline_layout(&shader)?;
@@ -92,6 +100,7 @@ impl ComputeProgram {
         })?;
         self.shader = shader;
         self.reflection = reflection;
+        self.capability = capability;
         self.pipeline_layout = pipeline_layout;
         self.pipeline = pipeline;
         Ok(true)

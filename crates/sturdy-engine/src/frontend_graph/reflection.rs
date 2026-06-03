@@ -9,11 +9,65 @@ pub(super) fn reflected_storage_image_reads(reflection: &ShaderReflection) -> Ve
 }
 
 pub(super) fn reflected_buffer_read_names(reflection: &ShaderReflection) -> Vec<String> {
+    // Include uniform buffers (always read-only) AND read-only storage buffers
+    // (StructuredBuffer<T> reflected as StorageBuffer with Read access).
+    if !reflection.parameters.is_empty() {
+        return reflection
+            .parameters
+            .iter()
+            .filter(|p| {
+                matches!(p.kind, crate::ShaderParameterKind::Resource(core::BindingKind::UniformBuffer))
+                    || (matches!(p.kind, crate::ShaderParameterKind::Resource(core::BindingKind::StorageBuffer))
+                        && p.access == crate::ShaderResourceAccess::Read)
+            })
+            .map(|p| p.name.clone())
+            .collect();
+    }
+    // Fallback: layout-only reflection has no access info — use UniformBuffer only.
     reflected_bindings_of_kind(reflection, core::BindingKind::UniformBuffer)
 }
 
 pub(super) fn reflected_buffer_write_names(reflection: &ShaderReflection) -> Vec<String> {
+    // Only include storage buffers that are actually writable (RWStructuredBuffer<T>).
+    // Read-only storage buffers (StructuredBuffer<T>) are excluded — they appear in
+    // reflected_buffer_read_names instead to generate correct ShaderRead barriers.
+    if !reflection.parameters.is_empty() {
+        return reflection
+            .parameters
+            .iter()
+            .filter(|p| {
+                matches!(p.kind, crate::ShaderParameterKind::Resource(core::BindingKind::StorageBuffer))
+                    && p.access != crate::ShaderResourceAccess::Read
+            })
+            .map(|p| p.name.clone())
+            .collect();
+    }
+    // Fallback: layout-only reflection has no access info — treat all as writes (conservative).
     reflected_bindings_of_kind(reflection, core::BindingKind::StorageBuffer)
+}
+
+/// Return the appropriate `RgState` for a named buffer read in a shader.
+///
+/// Uniform buffers get `UniformRead` (which maps to `UNIFORM_READ` access in Vulkan
+/// barriers). Read-only storage buffers get `ShaderRead` (`SHADER_READ` access).
+/// Falls back to `default_state` when the name isn't in the parameter list.
+pub(super) fn reflected_read_state_for(
+    reflection: &ShaderReflection,
+    name: &str,
+    default_state: RgState,
+) -> RgState {
+    for parameter in &reflection.parameters {
+        if parameter.name != name {
+            continue;
+        }
+        return match parameter.kind {
+            crate::ShaderParameterKind::Resource(core::BindingKind::UniformBuffer) => {
+                RgState::UniformRead
+            }
+            _ => RgState::ShaderRead,
+        };
+    }
+    default_state
 }
 
 pub(super) fn reflected_push_constant_stages(
@@ -81,7 +135,8 @@ pub(super) fn build_reflected_bind_group(
     eager_samplers: &HashMap<String, core::SamplerHandle>,
     eager_buffers: &HashMap<String, (core::BufferHandle, crate::BufferDesc)>,
     output_image: Option<(&str, ImageHandle)>,
-) -> Result<(Vec<BindGroup>, Option<core::PushDescriptorSetDesc>)> {
+    intra_frame_cache: Option<&mut HashMap<u64, core::BindGroupHandle>>,
+) -> Result<(Vec<std::sync::Arc<BindGroup>>, Option<core::PushDescriptorSetDesc>)> {
     let has_bindings = reflection
         .layout
         .groups
@@ -307,10 +362,60 @@ pub(super) fn build_reflected_bind_group(
         return Ok((Vec::new(), push_descriptor_set));
     }
 
-    let bind_group = engine.create_bind_group(BindGroupDesc {
+    let desc = BindGroupDesc {
         layout: layout_handle,
         entries,
-    })?;
+    };
+
+    // Cross-frame bind group cache: compute a hash of (layout + all resource handles).
+    // On hit: reuse the cached Arc<BindGroup> — zero vkAllocateDescriptorSets overhead.
+    // On miss: allocate a new bind group, wrap in Arc, store in cache for future frames.
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    desc.layout.hash(&mut hasher);
+    for e in &desc.entries {
+        e.path.hash(&mut hasher);
+        match e.resource {
+            ResourceBinding::Buffer(h) => h.hash(&mut hasher),
+            ResourceBinding::Image(h) => h.hash(&mut hasher),
+            ResourceBinding::Sampler(h) => h.hash(&mut hasher),
+            ResourceBinding::ImageView { image, .. } => image.hash(&mut hasher),
+            _ => {}
+        }
+    }
+    let key = hasher.finish();
+
+    // Check the intra-frame cache for duplicate detection.
+    if let Some(cache) = intra_frame_cache {
+        cache.insert(key, core::BindGroupHandle::default());
+    }
+
+    // Check the cross-frame cache in the Engine.
+    {
+        let current_frame = engine.bind_group_frame_index();
+        let mut bg_cache = engine
+            .bind_group_cache()
+            .lock();
+        if let Some(entry) = bg_cache.entries.get_mut(&key) {
+            // Cache hit: update last-used frame and reuse the Arc.
+            entry.last_used_frame = current_frame;
+            let arc = std::sync::Arc::clone(&entry.bind_group);
+            return Ok((vec![arc], push_descriptor_set));
+        }
+    }
+
+    // Cache miss: allocate a new bind group, wrap in Arc, add to cross-frame cache.
+    let bind_group = std::sync::Arc::new(engine.create_bind_group(desc)?);
+    {
+        let current_frame = engine.bind_group_frame_index();
+        let mut bg_cache = engine
+            .bind_group_cache()
+            .lock();
+        bg_cache.entries.insert(key, crate::engine::CachedBindGroupEntry {
+            bind_group: std::sync::Arc::clone(&bind_group),
+            last_used_frame: current_frame,
+        });
+    }
     Ok((vec![bind_group], push_descriptor_set))
 }
 
@@ -346,6 +451,8 @@ fn validate_reflected_image_usage(path: &str, kind: BindingKind, desc: ImageDesc
 fn validate_reflected_buffer_usage(path: &str, kind: BindingKind, desc: BufferDesc) -> Result<()> {
     let required = match kind {
         BindingKind::UniformBuffer => BufferUsage::UNIFORM,
+        // Read-only storage buffers (StructuredBuffer<T>) still need STORAGE usage because
+        // they are bound as STORAGE_BUFFER descriptor type even when accessed read-only.
         BindingKind::StorageBuffer => BufferUsage::STORAGE,
         _ => return Ok(()),
     };

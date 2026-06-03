@@ -327,6 +327,19 @@ pub struct CopyImageToBufferDesc {
     pub depth: u32,
 }
 
+/// Buffer-to-buffer copy.  Used to upload data from HOST_VISIBLE staging to
+/// DEVICE_LOCAL (GPU_ONLY) buffers, e.g. for vertex/index data or large GPU
+/// tables that should reside in VRAM on discrete GPUs.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CopyBufferDesc {
+    pub src: BufferHandle,
+    pub src_offset: u64,
+    pub dst: BufferHandle,
+    pub dst_offset: u64,
+    /// Bytes to copy; `u64::MAX` copies the entire source buffer.
+    pub size: u64,
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct CopyBufferToImageDesc {
     pub buffer: BufferHandle,
@@ -564,6 +577,8 @@ pub enum PassWork {
     DrawMeshShaderIndirect(DrawMeshShaderIndirectDesc),
     CopyImageToBuffer(CopyImageToBufferDesc),
     CopyBufferToImage(CopyBufferToImageDesc),
+    /// Buffer-to-buffer copy; typically staging (HOST_VISIBLE) → GPU_ONLY (DEVICE_LOCAL).
+    CopyBuffer(CopyBufferDesc),
     ResolveImage(ResolveImageDesc),
     /// Generate a full mip chain for a single image by blitting each level
     /// from the previous one. The image must have `COPY_SRC | COPY_DST` usage
@@ -1444,8 +1459,8 @@ impl RenderGraph {
 
         for pass_index in order.iter().copied() {
             let pass = &self.passes[pass_index as usize];
-            let mut pass_barriers = Vec::new();
-            let mut pass_buffer_barriers = Vec::new();
+            let mut pass_barriers = Vec::with_capacity(pass.reads.len() + pass.writes.len());
+            let mut pass_buffer_barriers = Vec::with_capacity(pass.buffer_reads.len() + pass.buffer_writes.len());
 
             for usage in pass.reads.iter().chain(pass.writes.iter()) {
                 let key = ImageStateKey {

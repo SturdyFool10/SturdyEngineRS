@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use parking_lot::Mutex;
+use rayon::prelude::*;
 
 use glam::Mat4;
 
@@ -171,32 +172,47 @@ impl RenderWorld {
     /// `RenderMesh`, then all linked entities have their render components
     /// mirrored into queued render-world commands and applied immediately.
     pub fn extract_from_world(&self, world: &mut World) -> RenderExtractionStats {
+        // Phase 1 (sequential): allocate GPU slots for new entities.
         let allocated_objects = self.allocate_missing_objects(world);
+
+        // Phase 2 (parallel): extract components from all linked entities.
+        // World::get<T> is read-only (&self) and World: Sync, so this is safe
+        // to parallelize across rayon threads.  self.commands is thread-safe.
         let linked: Vec<_> = world
             .query::<LocalToWorld>()
             .map(|(entity, link)| (entity, link.object))
             .collect();
 
-        for (entity, object) in &linked {
-            if let Some(transform) = world.get::<Transform>(*entity) {
-                self.set_transform(*object, transform.clone());
-            }
-            if let Some(previous) = world.get::<PreviousTransform>(*entity) {
-                self.set_previous_transform(*object, previous.clone());
-            }
-            if let Some(mesh) = world.get::<RenderMesh>(*entity) {
-                self.set_mesh(*object, *mesh);
-            }
-            if let Some(material) = world.get::<RenderMaterial>(*entity) {
-                self.set_material(*object, *material);
-            }
-            if let Some(bounds) = world.get::<RenderBounds>(*entity) {
-                self.set_bounds(*object, *bounds);
-            }
-            if let Some(visibility) = world.get::<RenderVisibility>(*entity) {
-                self.set_visibility(*object, *visibility);
-            }
-        }
+        // Parallel extraction: compute all commands in parallel, then push in a single
+        // batch (one lock acquisition instead of N×6 per entity).
+        let world_ref: &World = world;
+        let all_commands: Vec<RenderWorldCommand> = linked
+            .par_iter()
+            .flat_map_iter(|(entity, object)| {
+                let mut cmds = Vec::with_capacity(6);
+                if let Some(t) = world_ref.get::<Transform>(*entity) {
+                    cmds.push(RenderWorldCommand::SetTransform(*object, t.clone()));
+                }
+                if let Some(p) = world_ref.get::<PreviousTransform>(*entity) {
+                    cmds.push(RenderWorldCommand::SetPreviousTransform(*object, p.clone()));
+                }
+                if let Some(m) = world_ref.get::<RenderMesh>(*entity) {
+                    cmds.push(RenderWorldCommand::SetMesh(*object, *m));
+                }
+                if let Some(mat) = world_ref.get::<RenderMaterial>(*entity) {
+                    cmds.push(RenderWorldCommand::SetMaterial(*object, *mat));
+                }
+                if let Some(b) = world_ref.get::<RenderBounds>(*entity) {
+                    cmds.push(RenderWorldCommand::SetBounds(*object, *b));
+                }
+                if let Some(v) = world_ref.get::<RenderVisibility>(*entity) {
+                    cmds.push(RenderWorldCommand::SetVisibility(*object, *v));
+                }
+                cmds
+            })
+            .collect();
+        // Single lock acquisition to push all collected commands.
+        self.commands.push_batch(all_commands);
 
         RenderExtractionStats {
             allocated_objects,
@@ -278,11 +294,14 @@ impl RenderWorld {
 
         let ranges_changed = gpu_scene.ranges != ranges;
         let slots_changed = gpu_scene.object_slots != object_slots;
-        let structural_dirty = states.values().any(|state| {
-            state.dirty.contains(RenderDirtyFlags::STRUCTURAL)
-                || state.dirty.contains(RenderDirtyFlags::MESH)
-                || state.dirty.contains(RenderDirtyFlags::VISIBILITY)
-        });
+        let structural_dirty = states.values()
+            .collect::<Vec<_>>()
+            .par_iter()
+            .any(|state| {
+                state.dirty.contains(RenderDirtyFlags::STRUCTURAL)
+                    || state.dirty.contains(RenderDirtyFlags::MESH)
+                    || state.dirty.contains(RenderDirtyFlags::VISIBILITY)
+            });
         let full_rebuild = reallocated || ranges_changed || slots_changed || structural_dirty;
 
         let mut uploaded_instances = 0;
@@ -454,11 +473,14 @@ impl RenderWorld {
         );
         let source_slots: HashMap<_, _> = source_data.object_slots.iter().copied().collect();
 
-        let structural_dirty = states.values().any(|state| {
-            state.dirty.contains(RenderDirtyFlags::STRUCTURAL)
-                || state.dirty.contains(RenderDirtyFlags::MESH)
-                || state.dirty.contains(RenderDirtyFlags::VISIBILITY)
-        });
+        let structural_dirty = states.values()
+            .collect::<Vec<_>>()
+            .par_iter()
+            .any(|state| {
+                state.dirty.contains(RenderDirtyFlags::STRUCTURAL)
+                    || state.dirty.contains(RenderDirtyFlags::MESH)
+                    || state.dirty.contains(RenderDirtyFlags::VISIBILITY)
+            });
         let dirty_source_slots = states.iter().filter_map(|(object, state)| {
             let transform_dirty = state.dirty.contains(RenderDirtyFlags::TRANSFORM)
                 || state.dirty.contains(RenderDirtyFlags::PREVIOUS_TRANSFORM);
@@ -740,10 +762,7 @@ impl RenderWorld {
     }
 
     pub fn object_count(&self) -> usize {
-        self.states
-            .lock()
-            .map(|states| states.len())
-            .unwrap_or_default()
+        self.states.lock().len()
     }
 
     pub fn pending_command_count(&self) -> usize {
@@ -752,16 +771,14 @@ impl RenderWorld {
 
     // ── Private lock helpers ──────────────────────────────────────────────────
 
-    fn lock_states(&self) -> std::sync::MutexGuard<'_, HashMap<GpuObjectId, RenderObjectState>> {
+    fn lock_states(&self) -> parking_lot::MutexGuard<'_, HashMap<GpuObjectId, RenderObjectState>> {
         self.states
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn lock_gpu_scene(&self) -> std::sync::MutexGuard<'_, RenderWorldGpuSceneState> {
+    fn lock_gpu_scene(&self) -> parking_lot::MutexGuard<'_, RenderWorldGpuSceneState> {
         self.gpu_scene
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -810,13 +827,14 @@ fn transform_source_states(
     states: &HashMap<GpuObjectId, RenderObjectState>,
     valid_mesh_count: usize,
 ) -> Vec<RenderObjectState> {
+    // Parallel filter+collect for large scenes.
     states
         .values()
-        .filter(|state| state.visibility.flags.contains(VisibilityFlags::VISIBLE))
+        .collect::<Vec<_>>()
+        .into_par_iter()
         .filter(|state| {
-            state
-                .mesh
-                .is_some_and(|mesh| mesh.mesh.index() < valid_mesh_count)
+            state.visibility.flags.contains(VisibilityFlags::VISIBLE)
+                && state.mesh.is_some_and(|mesh| mesh.mesh.index() < valid_mesh_count)
         })
         .cloned()
         .collect()
@@ -826,54 +844,58 @@ fn gpu_scene_entries_from_states(
     states: &[RenderObjectState],
     valid_mesh_count: usize,
 ) -> Vec<(GpuObjectId, GpuInstanceData)> {
+    // Phase 1 (parallel): compute instance data for each visible state.
+    // All reads are immutable so this is safe across rayon threads.
+    let flat: Vec<(GpuObjectId, GpuInstanceData)> = states
+        .par_iter()
+        .filter_map(|state| {
+            if !state.visibility.flags.contains(VisibilityFlags::VISIBLE) {
+                return None;
+            }
+            let mesh = state.mesh?;
+            if mesh.mesh.index() >= valid_mesh_count {
+                return None;
+            }
+            let model = state
+                .transform
+                .as_ref()
+                .map(|transform| transform.to_mat4())
+                .unwrap_or(Mat4::IDENTITY);
+            let local_sphere = state
+                .bounds
+                .map(|bounds| bounds.local_sphere)
+                .unwrap_or(crate::BoundingSphere::EMPTY);
+            let world_sphere = local_sphere.transform(model);
+            let material_id = state
+                .material
+                .map(|material| material.material.as_u32())
+                .unwrap_or(mesh.mesh.as_u32());
+            let flags = gpu_instance_flags(state.visibility.flags);
+            Some((
+                state.object,
+                GpuInstanceData {
+                    model: model.to_cols_array_2d(),
+                    bounds: [
+                        world_sphere.center.x,
+                        world_sphere.center.y,
+                        world_sphere.center.z,
+                        world_sphere.radius,
+                    ],
+                    mesh_id: mesh.mesh.as_u32(),
+                    material_id,
+                    lod_bias: 0.0,
+                    flags,
+                },
+            ))
+        })
+        .collect();
+
+    // Phase 2 (sequential): sort by mesh then object to produce a stable order.
     let mut by_mesh: BTreeMap<u32, Vec<(GpuObjectId, GpuInstanceData)>> = BTreeMap::new();
-
-    for state in states {
-        if !state.visibility.flags.contains(VisibilityFlags::VISIBLE) {
-            continue;
-        }
-        let Some(mesh) = state.mesh else {
-            continue;
-        };
-        if mesh.mesh.index() >= valid_mesh_count {
-            continue;
-        }
-
-        let model = state
-            .transform
-            .as_ref()
-            .map(|transform| transform.to_mat4())
-            .unwrap_or(Mat4::IDENTITY);
-        let local_sphere = state
-            .bounds
-            .map(|bounds| bounds.local_sphere)
-            .unwrap_or(crate::BoundingSphere::EMPTY);
-        let world_sphere = local_sphere.transform(model);
-        let material_id = state
-            .material
-            .map(|material| material.material.as_u32())
-            .unwrap_or(mesh.mesh.as_u32());
-        let flags = gpu_instance_flags(state.visibility.flags);
-
-        by_mesh.entry(mesh.mesh.as_u32()).or_default().push((
-            state.object,
-            GpuInstanceData {
-                model: model.to_cols_array_2d(),
-                bounds: [
-                    world_sphere.center.x,
-                    world_sphere.center.y,
-                    world_sphere.center.z,
-                    world_sphere.radius,
-                ],
-                mesh_id: mesh.mesh.as_u32(),
-                material_id,
-                lod_bias: 0.0,
-                flags,
-            },
-        ));
+    for (object, instance) in flat {
+        by_mesh.entry(instance.mesh_id).or_default().push((object, instance));
     }
-
-    let mut entries = Vec::new();
+    let mut entries = Vec::with_capacity(by_mesh.values().map(|v| v.len()).sum());
     for (_, mut mesh_entries) in by_mesh {
         mesh_entries.sort_by_key(|(object, _)| *object);
         entries.append(&mut mesh_entries);

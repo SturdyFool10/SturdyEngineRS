@@ -1,14 +1,14 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Mutex,
 };
+use parking_lot::Mutex;
 
 use crate::{
     Buffer, ColorTargetDesc, CullMode, Engine, Error, Format, FrontFace, GraphicsPipelineDesc,
-    Pipeline, PipelineLayout, PrimitiveTopology, RasterState, Result, Shader, ShaderDesc,
-    ShaderObject, ShaderReflection, ShaderSource, ShaderStage, StageMask, VertexAttributeDesc,
-    VertexBufferLayout, VertexFormat, VertexInputRate,
+    Pipeline, PipelineLayout, PrimitiveTopology, RasterState, Result, Shader, ShaderCapabilityProfile,
+    ShaderDesc, ShaderObject, ShaderReflection, ShaderSource, ShaderStage, StageMask,
+    VertexAttributeDesc, VertexBufferLayout, VertexFormat, VertexInputRate,
 };
 
 use super::{FullscreenVertex, ShaderProgramDesc, builtin_shader_path, create_fullscreen_triangle};
@@ -25,6 +25,7 @@ pub struct ShaderProgram {
     pub(crate) fragment: Shader,
     pub(crate) fullscreen_triangle: Buffer,
     pub(crate) reflection: ShaderReflection,
+    pub(crate) capability: ShaderCapabilityProfile,
     pub(crate) stage: ShaderStage,
     source_path: Option<PathBuf>,
     /// VkShaderEXT objects compiled alongside the pipeline when
@@ -169,8 +170,18 @@ impl ShaderProgram {
             source = %source_label,
             "compiling ShaderProgram"
         );
-        let vertex = engine.create_shader(desc.vertex.unwrap_or_else(default_vertex_desc))?;
-        let fragment = engine.create_shader(desc.fragment).map_err(|e| {
+        let vertex_desc = desc.vertex.unwrap_or_else(default_vertex_desc);
+        let fragment_desc = desc.fragment;
+
+        // Compile vertex and fragment/compute shaders in parallel.
+        // Device::create_shader releases the device mutex during the expensive
+        // Slang compilation phase so both can run concurrently on rayon threads.
+        let (vertex_result, fragment_result) = rayon::join(
+            || engine.create_shader(vertex_desc),
+            || engine.create_shader(fragment_desc),
+        );
+        let vertex = vertex_result?;
+        let fragment = fragment_result.map_err(|e| {
             tracing::error!(
                 stage = ?fragment_stage,
                 source = %source_label,
@@ -196,6 +207,7 @@ impl ShaderProgram {
             )
         };
         tracing::debug!(stage = ?fragment_stage, source = %source_label, "ShaderProgram compiled");
+        let capability = ShaderCapabilityProfile::from_reflection(&reflection, fragment_stage);
         let fullscreen_triangle = create_fullscreen_triangle(engine)?;
 
         // Compile VkShaderEXT objects alongside the pipeline when shader objects
@@ -231,6 +243,7 @@ impl ShaderProgram {
             fragment,
             fullscreen_triangle,
             reflection,
+            capability,
             stage: fragment_stage,
             source_path: None,
             vertex_shader_obj,
@@ -240,6 +253,10 @@ impl ShaderProgram {
 
     pub fn reflection(&self) -> &ShaderReflection {
         &self.reflection
+    }
+
+    pub fn capability_profile(&self) -> &ShaderCapabilityProfile {
+        &self.capability
     }
 
     /// Return the source file path if this program was loaded from a file.
@@ -306,13 +323,13 @@ impl ShaderProgram {
         };
         self.fragment = fragment;
         self.reflection = reflection;
+        self.capability = ShaderCapabilityProfile::from_reflection(&self.reflection, self.stage);
         self.pipeline_layout = pipeline_layout;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let cleared = {
             let mut p = self
                 .pipelines
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .lock();
             let n = p.len();
             p.clear();
             n
@@ -352,8 +369,7 @@ impl ShaderProgram {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut pipelines = self
             .pipelines
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let key = (format, samples.max(1));
         if !pipelines.contains_key(&key) {
             tracing::debug!(

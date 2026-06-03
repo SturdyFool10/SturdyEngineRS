@@ -3,6 +3,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use rayon::prelude::*;
 
 use crate::mesh::compute_tangents;
 use crate::mesh_loader::{MeshAlphaMode, MeshMaterialParams, MeshPrimitive, MeshTextures};
@@ -50,25 +51,65 @@ fn upload_images(engine: &Engine, images: &[gltf::image::Data]) -> Result<Vec<Op
         return Ok(Vec::new());
     }
 
-    let mut frame = engine.begin_frame()?;
-    let mut gpu_images: Vec<Option<Arc<Image>>> = Vec::with_capacity(images.len());
-
-    for (i, img) in images.iter().enumerate() {
-        match upload_one_image(&mut frame, img, i) {
-            Ok(image) => gpu_images.push(Some(Arc::new(image))),
-            Err(e) => {
-                tracing::error!("failed to upload image {i}: {e}");
-                gpu_images.push(None);
+    // Phase 1 (parallel): convert all GLTF image formats to RGBA8 on rayon threads.
+    // This is pure CPU work (no GPU API calls) and scales with core count.
+    let decoded: Vec<Option<(u32, u32, Vec<u8>)>> = images
+        .par_iter()
+        .enumerate()
+        .map(|(i, img)| {
+            match decode_to_rgba8(img) {
+                Ok(rgba) => Some((img.width, img.height, rgba)),
+                Err(e) => {
+                    tracing::error!("GLTF: failed to decode image {i}: {e}");
+                    None
+                }
             }
+        })
+        .collect();
+
+    // Phase 2 (sequential): upload decoded RGBA8 data to GPU.
+    let mut frame = engine.begin_frame()?;
+    let mut gpu_images = Vec::with_capacity(images.len());
+    for (i, maybe) in decoded.into_iter().enumerate() {
+        match maybe {
+            Some((w, h, rgba)) => match frame.upload_texture_2d(
+                format!("gltf-image-{i}"),
+                TextureUploadDesc::sampled_rgba8(w, h),
+                &rgba,
+            ) {
+                Ok(img) => gpu_images.push(Some(Arc::new(img))),
+                Err(e) => {
+                    tracing::error!("GLTF: failed to upload image {i}: {e}");
+                    gpu_images.push(None);
+                }
+            },
+            None => gpu_images.push(None),
         }
     }
 
     frame.flush_with_reason(FrameSyncReason::CompatibilityShim)?;
     frame.wait_with_reason(FrameSyncReason::CompatibilityShim)?;
+    frame.recycle_staging_arena();
     Ok(gpu_images)
 }
 
-fn upload_one_image(
+fn decode_to_rgba8(img: &gltf::image::Data) -> Result<Vec<u8>> {
+    use gltf::image::Format as GltfFmt;
+    Ok(match img.format {
+        GltfFmt::R8 => img.pixels.iter().flat_map(|&r| [r, r, r, 255]).collect(),
+        GltfFmt::R8G8 => img.pixels.chunks(2).flat_map(|c| [c[0], c[1], 0, 255]).collect(),
+        GltfFmt::R8G8B8 => img.pixels.chunks(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+        GltfFmt::R8G8B8A8 => img.pixels.clone(),
+        GltfFmt::R16 => img.pixels.chunks(2).flat_map(|c| { let v = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8; [v, v, v, 255] }).collect(),
+        GltfFmt::R16G16 => img.pixels.chunks(4).flat_map(|c| { let r = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8; let g = (u16::from_le_bytes([c[2], c[3]]) >> 8) as u8; [r, g, 0, 255] }).collect(),
+        GltfFmt::R16G16B16 => img.pixels.chunks(6).flat_map(|c| { let r = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8; let g = (u16::from_le_bytes([c[2], c[3]]) >> 8) as u8; let b = (u16::from_le_bytes([c[4], c[5]]) >> 8) as u8; [r, g, b, 255] }).collect(),
+        GltfFmt::R16G16B16A16 => img.pixels.chunks(8).flat_map(|c| { let r = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8; let g = (u16::from_le_bytes([c[2], c[3]]) >> 8) as u8; let b = (u16::from_le_bytes([c[4], c[5]]) >> 8) as u8; let a = (u16::from_le_bytes([c[6], c[7]]) >> 8) as u8; [r, g, b, a] }).collect(),
+        GltfFmt::R32G32B32FLOAT => img.pixels.chunks(12).flat_map(|c| { let r = (f32::from_le_bytes([c[0], c[1], c[2], c[3]]).clamp(0.0, 1.0) * 255.0) as u8; let g = (f32::from_le_bytes([c[4], c[5], c[6], c[7]]).clamp(0.0, 1.0) * 255.0) as u8; let b = (f32::from_le_bytes([c[8], c[9], c[10], c[11]]).clamp(0.0, 1.0) * 255.0) as u8; [r, g, b, 255] }).collect(),
+        _ => return Err(crate::Error::Unknown(format!("unsupported GLTF image format: {:?}", img.format))),
+    })
+}
+
+fn _upload_one_image_legacy(
     frame: &mut crate::Frame,
     img: &gltf::image::Data,
     idx: usize,

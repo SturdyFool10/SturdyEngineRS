@@ -29,8 +29,9 @@ use std::{
     collections::HashMap,
     fmt,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::Arc,
 };
+use parking_lot::{Mutex, MutexGuard};
 
 use crate::texture_compression::compress_texture;
 use crate::{Engine, Format, FrameSyncReason, Image, Result, TextureUploadDesc};
@@ -102,7 +103,7 @@ pub(crate) fn decode_and_compress(path: &Path, name: &str) -> Result<(Vec<u8>, F
 /// engine's `pending_uploads` queue for GPU upload at frame-start drain.
 pub(crate) fn load_texture_2d_async(
     path: impl AsRef<Path>,
-    pending: std::sync::Arc<std::sync::Mutex<Vec<PendingUpload>>>,
+    pending: std::sync::Arc<parking_lot::Mutex<Vec<PendingUpload>>>,
 ) -> AssetHandle<Image> {
     let path = path.as_ref().to_owned();
     let name = path
@@ -135,7 +136,6 @@ pub(crate) fn load_texture_2d_async(
             //panic allowed, reason = "poisoned internal pending upload queue is unrecoverable"
             pending
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(upload);
         }
         Err(e) => {
@@ -321,7 +321,6 @@ impl<T> AssetHandle<T> {
         //panic allowed, reason = "poisoned asset handle mutex is unrecoverable"
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -464,6 +463,7 @@ fn load_and_upload(engine: &Engine, path: &Path, name: &str) -> Result<Image> {
             format: compressed.format,
             usage: crate::ImageUsage::SAMPLED,
             prefer_compressed: true,
+        generate_mips: true,
         };
         let mut frame = engine.begin_frame()?;
         let image = frame.upload_texture_2d(name, desc, &compressed.data)?;
@@ -629,7 +629,7 @@ pub(crate) fn canonical(path: impl AsRef<Path>) -> PathBuf {
 /// file and push it to the pending upload queue.
 pub(crate) fn load_hdr_texture_async(
     path: impl AsRef<Path>,
-    pending: std::sync::Arc<std::sync::Mutex<Vec<PendingUpload>>>,
+    pending: std::sync::Arc<parking_lot::Mutex<Vec<PendingUpload>>>,
     full_32f: bool,
 ) -> AssetHandle<Image> {
     let path = path.as_ref().to_owned();
@@ -655,7 +655,6 @@ pub(crate) fn load_hdr_texture_async(
             //panic allowed, reason = "poisoned internal pending upload queue is unrecoverable"
             pending
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(upload);
         }
         Err(e) => {

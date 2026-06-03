@@ -16,6 +16,9 @@ pub mod spirv_push_constants;
 #[path = "slang/spirv_vertex_inputs.rs"]
 mod spirv_vertex_inputs;
 
+#[path = "slang/spirv_compute_info.rs"]
+mod spirv_compute_info;
+
 #[cfg(not(target_arch = "wasm32"))]
 mod sys {
     use std::ffi::{c_char, c_int, c_uint};
@@ -455,25 +458,39 @@ fn reflect_pipeline_layout_inner(
             }
         }
 
+        // Get the compiled SPIR-V once — used for both vertex inputs and compute info.
+        let spirv_words: Vec<u32> = {
+            let mut code_size: usize = 0;
+            let ptr = sys::spGetEntryPointCode(request, 0, &mut code_size);
+            if ptr.is_null() || code_size < 4 {
+                Vec::new()
+            } else {
+                let bytes = std::slice::from_raw_parts(ptr, code_size);
+                crate::spirv_words_from_bytes(bytes).unwrap_or_default()
+            }
+        };
+
         // Reflect vertex inputs from SPIR-V for vertex shaders.
         let vertex_inputs = if engine_stage == ShaderStage::Vertex {
-            if let Some(code_ptr) = {
-                let mut code_size: usize = 0;
-                let ptr = sys::spGetEntryPointCode(request, 0, &mut code_size);
-                if ptr.is_null() || code_size < 4 {
-                    None
-                } else {
-                    Some((ptr, code_size))
-                }
-            } {
-                let code_bytes = std::slice::from_raw_parts(code_ptr.0, code_ptr.1);
-                let words = crate::spirv_words_from_bytes(code_bytes).unwrap_or_default();
-                spirv_vertex_inputs::reflect_spirv_vertex_inputs(&words)
-            } else {
-                Vec::new()
-            }
+            spirv_vertex_inputs::reflect_spirv_vertex_inputs(&spirv_words)
         } else {
             Vec::new()
+        };
+
+        // Extract compute-specific info (workgroup size, wave ops) from SPIR-V for all stages.
+        // Wave ops are relevant to any stage; workgroup size is only meaningful for compute.
+        let compute_info = spirv_compute_info::reflect_spirv_compute_info(&spirv_words);
+        let workgroup_size = match engine_stage {
+            ShaderStage::Compute | ShaderStage::Mesh | ShaderStage::Task => {
+                // Only set workgroup_size when the SPIR-V declares a non-default LocalSize.
+                let ws = compute_info.workgroup_size;
+                if ws != [1, 1, 1] || !spirv_words.is_empty() {
+                    Some(ws)
+                } else {
+                    None
+                }
+            }
+            _ => None,
         };
 
         Ok(ShaderReflection {
@@ -481,6 +498,8 @@ fn reflect_pipeline_layout_inner(
             entry_points,
             parameters,
             vertex_inputs,
+            workgroup_size,
+            wave_ops_used: compute_info.wave_ops_used,
         })
     })
 }
@@ -601,6 +620,11 @@ unsafe fn extract_reflection(
             if kind == BindingKind::AccelerationStructure && !ray_tracing_enabled {
                 continue;
             }
+            // Determine mutability from the binding type flag.  For storage buffers
+            // and storage images the MUTABLE flag distinguishes RW from readonly access.
+            // Non-mutable storage buffers (StructuredBuffer<T>) are read-only despite
+            // sharing the STORAGE_BUFFER descriptor type with RWStructuredBuffer<T>.
+            let is_mutable = (binding_type & sys::SLANG_BINDING_TYPE_MUTABLE_FLAG) != 0;
 
             let set_index = binding_space + set_offset as u32;
             // For a parameter with one binding range its slot IS base_binding_slot.
@@ -630,11 +654,20 @@ unsafe fn extract_reflection(
                 update_rate,
                 binding: binding_slot,
             });
+            // Override access for non-mutable storage resources: a non-mutable
+            // storage buffer or image is read-only at the shader level even though
+            // it uses the STORAGE_BUFFER / STORAGE_IMAGE descriptor type.
+            let access = match (kind, is_mutable) {
+                (BindingKind::StorageBuffer, false) | (BindingKind::StorageImage, false) => {
+                    ShaderResourceAccess::Read
+                }
+                _ => binding_kind_to_access(kind),
+            };
             parameters.push(ShaderParameterReflection {
                 name: binding_name,
                 kind: ShaderParameterKind::Resource(kind),
                 stage_mask,
-                access: binding_kind_to_access(kind),
+                access,
                 set: Some(set_index),
                 binding: Some(binding_slot),
                 count: resolved_count,
@@ -922,10 +955,10 @@ pub fn compile_and_reflect(
             (layout, eps, parameters)
         };
 
-        // For SPIR-V output, parse the words once for both the compiled source and
-        // vertex input reflection — avoids a second parse after the bytes are moved.
+        // For SPIR-V output, parse the words once for vertex inputs and compute info,
+        // then move into the compiled source — avoids a second parse.
         let mut compiled_entry_point = desc.entry_point.clone();
-        let (compiled_source, vertex_inputs) = match target {
+        let (compiled_source, vertex_inputs, workgroup_size, wave_ops_used) = match target {
             ShaderTarget::Spirv => {
                 let words = spirv_words_from_bytes(&code_bytes)?;
                 if let Some(entry_point) = spirv_entry_point_name(&words, engine_stage) {
@@ -936,10 +969,17 @@ pub fn compile_and_reflect(
                 } else {
                     Vec::new()
                 };
-                (ShaderSource::Spirv(words), inputs)
+                let compute_info = spirv_compute_info::reflect_spirv_compute_info(&words);
+                let ws = match engine_stage {
+                    ShaderStage::Compute | ShaderStage::Mesh | ShaderStage::Task => {
+                        Some(compute_info.workgroup_size)
+                    }
+                    _ => None,
+                };
+                (ShaderSource::Spirv(words), inputs, ws, compute_info.wave_ops_used)
             }
-            ShaderTarget::Dxil => (ShaderSource::Dxil(code_bytes), Vec::new()),
-            ShaderTarget::Msl => (ShaderSource::Msl(code_bytes), Vec::new()),
+            ShaderTarget::Dxil => (ShaderSource::Dxil(code_bytes), Vec::new(), None, false),
+            ShaderTarget::Msl => (ShaderSource::Msl(code_bytes), Vec::new(), None, false),
         };
 
         let compiled_desc = ShaderDesc {
@@ -958,6 +998,8 @@ pub fn compile_and_reflect(
                 entry_points,
                 parameters,
                 vertex_inputs,
+                workgroup_size,
+                wave_ops_used,
             },
         ))
     })

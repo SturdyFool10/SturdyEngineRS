@@ -587,6 +587,18 @@ impl Frame {
         ))
     }
 
+    /// Return the staging arena to the engine pool for reuse next frame.
+    ///
+    /// Must be called AFTER [`wait`] to guarantee the GPU has finished reading
+    /// from all staging buffers.  The arena's HOST_VISIBLE memory is preserved
+    /// and its cursor is reset so it can be reused without a new allocation.
+    pub fn recycle_staging_arena(mut self) {
+        // take() the arena out of self before drop so it isn't freed
+        let arena = std::mem::take(&mut self.upload_arena);
+        self.engine.return_staging_arena(arena);
+        // Frame::drop will run but upload_arena is now default (empty)
+    }
+
     pub(crate) fn last_submission(&self) -> Option<SubmissionHandle> {
         self.inner.last_submission()
     }

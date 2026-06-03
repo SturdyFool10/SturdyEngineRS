@@ -1,8 +1,6 @@
 use std::collections::HashSet;
-use std::sync::{
-    Mutex,
-    atomic::{AtomicU32, Ordering},
-};
+use std::sync::atomic::{AtomicU32, Ordering};
+use parking_lot::Mutex;
 
 use super::GpuObjectId;
 
@@ -29,8 +27,7 @@ impl GpuObjectAllocator {
     pub fn reserve(&self) -> GpuObjectId {
         let mut free = self
             .free
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if let Some(&raw) = free.iter().next() {
             free.remove(&raw);
             return GpuObjectId::from_raw(raw);
@@ -56,8 +53,7 @@ impl GpuObjectAllocator {
         }
         let mut free = self
             .free
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let inserted = free.insert(id.as_u32());
         debug_assert!(
             inserted,
@@ -69,7 +65,7 @@ impl GpuObjectAllocator {
     /// Approximate number of slots currently checked out.
     pub fn allocated_count(&self) -> usize {
         let next = self.next.load(Ordering::Relaxed) as usize;
-        let free = self.free.lock().map(|free| free.len()).unwrap_or(0);
+        let free = self.free.lock().len();
         next.saturating_sub(free)
     }
 }

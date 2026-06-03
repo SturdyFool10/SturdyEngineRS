@@ -1654,4 +1654,45 @@ fn showcase_upload_push_constants_multi_queue_and_aliasing_plan() {
     assert!(compiled.alias_plan.image_savings_bytes > 0);
     assert_eq!(compiled.alias_plan.buffer_savings_bytes, scratch_desc.size);
     assert!(compiled.alias_plan.total_savings_bytes() > scratch_desc.size);
+
+    // Cross-queue release barriers: for every acquire barrier (before_queue != after_queue),
+    // a matching release barrier must exist in the source batch.
+    for (pass_idx, barriers) in compiled.barriers_per_pass.iter().enumerate() {
+        for barrier in barriers {
+            if barrier.before_queue == barrier.after_queue {
+                continue;
+            }
+            // Find the batch that contains this pass (the acquire side).
+            let acquire_batch = compiled.batches.iter().enumerate()
+                .find(|(_, batch)| batch.pass_indices.contains(&(pass_idx as u32)))
+                .map(|(i, _)| i)
+                .expect("every pass belongs to a batch");
+            // Find the source batch (before_queue).
+            let source_batch = compiled.batches.iter().enumerate()
+                .rev()
+                .find(|(_, batch)| {
+                    batch.queue == barrier.before_queue
+                        && batch.pass_indices.iter().any(|&pi| pi < pass_idx as u32)
+                })
+                .map(|(i, _)| i);
+            if let Some(src) = source_batch {
+                // Release barrier must exist in source batch.
+                let release_bufs = &compiled.release_buffer_barriers_per_batch[src];
+                let release_imgs = &compiled.release_image_barriers_per_batch[src];
+                // The acquire barrier is for an image — check image releases.
+                let has_release = release_imgs.iter().any(|r| {
+                    r.image == barrier.image
+                        && r.before_queue == barrier.before_queue
+                        && r.after_queue == barrier.after_queue
+                });
+                assert!(
+                    has_release,
+                    "acquire barrier for image {:?} from {:?} to {:?} at pass {pass_idx} \
+                     must have a matching release barrier in source batch {src}",
+                    barrier.image, barrier.before_queue, barrier.after_queue
+                );
+                let _ = (acquire_batch, release_bufs);
+            }
+        }
+    }
 }

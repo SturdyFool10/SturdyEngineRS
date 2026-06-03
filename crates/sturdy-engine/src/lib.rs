@@ -61,9 +61,11 @@ mod quad_batch;
 mod realtime_gi;
 mod realtime_raytracing;
 pub mod render_world;
+pub mod render_strategy;
 mod renderer_metrics;
 mod resource;
 mod resource_table;
+mod readback;
 mod runtime;
 mod sampler_catalog;
 mod scene;
@@ -76,7 +78,6 @@ mod shadow_pass;
 pub(crate) mod shadow_pipeline;
 mod spot_shadow_pass;
 mod sprite_batch;
-mod srd_denoiser;
 mod stl_loader;
 #[cfg(test)]
 mod tests;
@@ -262,6 +263,7 @@ pub use runtime::{
     RuntimeUserDiagnostic, RuntimeWindowDiagnostics, RuntimeWorkloadDiagnostics, SceneRenderContext,
     ShaderCompileError, UiContext, WindowMode,
 };
+pub use render_strategy::{FrameRenderStrategy, OcclusionMode, RenderStrategySelector, VrsQuality};
 pub use sampler_catalog::SamplerPreset;
 pub use scene::{
     CameraConstants, CameraId, CameraOutput, DirectionalLight, DiskLight, GpuInstanceData,
@@ -279,38 +281,6 @@ pub use shadow_pass::{
 pub use shadow_pipeline::ShadowPipeline;
 pub use spot_shadow_pass::{GpuSpotShadowData, MAX_SPOT_SHADOWS, SpotShadowConfig, SpotShadowPass};
 pub use sprite_batch::{Sprite, SpriteBatch, SpriteRenderer};
-#[allow(deprecated)]
-pub use srd_denoiser::{
-    RealtimeRayTracingDenoiser, SRD_CLEAR_HISTORY_WORKGROUP_SIZE,
-    SRD_RADIANCE_SURFACE_MASK_TILE_SIZE, SRD_TEMPORAL_CONSTANTS_SIZE, SrdAtrousSettings,
-    SrdCapabilities, SrdClearConstants, SrdCommonSettings, SrdConstantArena, SrdConstantRange,
-    SrdDenoiser, SrdDenoiserDesc, SrdDenoiserId, SrdDenoiserMode, SrdDenoiserSettings,
-    SrdDepthConvention, SrdDescriptorType, SrdDispatchDesc, SrdFamilySettings,
-    SrdHistoryClampSettings, SrdHistoryMode, SrdHistoryRejectionSettings, SrdHistoryRing,
-    SrdHitDistanceSettings, SrdInstance, SrdInstanceDesc, SrdMotionVectorConvention,
-    SrdNormalPacking, SrdOcclusionPlan, SrdOcclusionSettings, SrdOcclusionStabilizerExecutor,
-    SrdOcclusionStabilizerInputs, SrdOcclusionStabilizerPrograms, SrdOutlierClampSettings,
-    SrdPassBuilder, SrdPipelineDesc, SrdPoolClass, SrdPostBlurSettings,
-    SrdRadianceAccumulateConstants, SrdRadianceAccumulateResources, SrdRadianceAtrousConstants,
-    SrdRadianceClampConstants, SrdRadianceCombinedPlan, SrdRadianceDiffuseSpecularPlan,
-    SrdRadianceOutlierSuppressConstants, SrdRadianceOutlierSuppressResources,
-    SrdRadianceOutputResource, SrdRadiancePostBlurConstants, SrdRadianceReconstructConstants,
-    SrdRadianceReconstructResources, SrdRadianceReprojectConstants, SrdRadianceReprojectResources,
-    SrdRadianceSettings, SrdRadianceSpatialFilterConstants, SrdRadianceStabilizerExecutor,
-    SrdRadianceStabilizerInputs, SrdRadianceStabilizerPlan, SrdRadianceStabilizerPrograms,
-    SrdRadianceStabilizerResources, SrdRadianceSurfaceMaskConstants, SrdRadianceSurfaceMaskResources,
-    SrdReferenceSettings, SrdReferenceTemporalComputeExecutor, SrdReferenceTemporalComputePrograms,
-    SrdReferenceTemporalExecutor, SrdReferenceTemporalPipelines, SrdReferenceTemporalPrograms,
-    SrdResourceDesc, SrdResourceFormatDesc, SrdResourceSlot, SrdShaderContract,
-    SrdShadowPlan, SrdShadowSettings, SrdShadowStabilizerExecutor, SrdShadowStabilizerInputs,
-    SrdShadowStabilizerPrograms, SrdSignalMomentsConstants, SrdSpatialFilterSettings,
-    SrdSpectralLayout, SrdSpectralRadiancePlan, SrdSpectralRadianceSettings,
-    SrdSpectralRadianceStabilizerExecutor, SrdSpectralRadianceStabilizerInputs,
-    SrdSpectralRadianceStabilizerPrograms, SrdTemporalBindings, SrdTemporalConstants,
-    SrdTextureDesc, SrdTranslucentShadowPlan, SrdTranslucentShadowSettings,
-    SrdTranslucentShadowStabilizerExecutor, SrdTranslucentShadowStabilizerInputs,
-    SrdTranslucentShadowStabilizerPrograms, SrdVarianceSettings,
-};
 pub use sturdy_engine_core::{PcFieldKind, PushConstantField};
 pub use text_draw::{
     TextAtlasContentMode, TextAtlasPage, TextDrawDesc, TextGlyphQuad, TextLayoutOutput,
@@ -326,8 +296,9 @@ pub use bind_group::BindGroupBuilder;
 pub use bindless::BindlessHandle;
 pub use frontend_graph::{
     GraphImage, GraphImageCacheKey, GraphImageHistory, GraphImageHistoryFrame, GraphImageView,
-    MultiMeshDrawBinItem, RenderFrame, ShaderPassIntent, UniformBinding,
+    MultiMeshDrawBinItem, RenderFrame, ShaderPassIntent, UniformBinding, compute_groups,
 };
+pub use readback::ReadbackBuffer;
 pub use glam::{Vec2, Vec3};
 pub use graph_report::{
     DiagnosticLevel, GraphDiagnostic, GraphImageInfo, GraphPassInfo, GraphReport, PassKind,
@@ -348,7 +319,7 @@ pub use sturdy_engine_core::{
     BackendKind, BackendRawCapabilities, BindGroupDesc, BindGroupEntry, BindingKind, BlasBuildDesc,
     BlasGeometryDesc, BlendMode, BorderColor, BufferDesc, BufferUsage, BufferUse, CanonicalBinding,
     CanonicalGroupLayout, CanonicalPipelineLayout, Caps, ColorTargetDesc, CompareOp,
-    CompiledShaderArtifact, ComputePipelineDesc, CopyBufferToImageDesc, CopyImageToBufferDesc,
+    CompiledShaderArtifact, ComputePipelineDesc, CopyBufferDesc, CopyBufferToImageDesc, CopyImageToBufferDesc,
     CullMode, D3d12RawCapabilities, DispatchDesc, DispatchIndirectDesc, DrawDesc,
     DrawIndirectCountDesc, DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, Error,
     MultiMeshIndirectDrawDesc, MultiMeshIndirectDrawItem,
@@ -362,8 +333,9 @@ pub use sturdy_engine_core::{
     PrimitiveTopology, PushConstants, PushDescriptorBinding, PushDescriptorSetDesc,
     QueueType, RasterState, RayTracingPipelineDesc, RayTracingStageDesc, ResolveImageDesc,
     ResourceBinding, Result, RgState, RtShaderGroupDesc, RtShaderGroupKind, SamplerDesc,
-    ShaderBindingTableDesc, ShaderDesc, ShaderParameterKind, ShaderParameterReflection,
-    ShaderResourceAccess, ShaderSource, ShaderStage, ShaderTarget, ShadingRate, SlangCompileDesc,
+    ShaderBindingTableDesc, ShaderCapabilityProfile, ShaderDesc, ShaderParameterKind,
+    ShaderParameterReflection, ShaderResourceAccess, ShaderSource, ShaderStage, ShaderTarget,
+    ShadingRate, SlangCompileDesc,
     StageMask, SubresourceRange, SurfaceCapabilities, SurfaceColorSpace, SurfaceEvent,
     SurfaceFormatInfo, SurfaceHdrCaps, SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode,
     SurfaceRecreateDesc, TlasBuildDesc, TraceRaysDesc, UpdateRate, VertexAttributeDesc,

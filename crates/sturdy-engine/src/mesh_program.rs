@@ -1,8 +1,8 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Mutex,
 };
+use parking_lot::Mutex;
 
 use crate::shader_program::builtin_shader_path;
 use crate::shader_watcher::Reloadable;
@@ -413,8 +413,7 @@ impl MeshProgram {
         let cleared = {
             let mut p = self
                 .pipelines
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .lock();
             let n = p.len();
             p.clear();
             n
@@ -423,8 +422,7 @@ impl MeshProgram {
         let cleared_mrt = {
             let mut p = self
                 .pipelines_mrt
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .lock();
             let n = p.len();
             p.clear();
             n
@@ -471,8 +469,7 @@ impl MeshProgram {
         let cleared = {
             let mut p = self
                 .pipelines
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .lock();
             let n = p.len();
             p.clear();
             n
@@ -481,8 +478,7 @@ impl MeshProgram {
         let cleared_mrt = {
             let mut p = self
                 .pipelines_mrt
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .lock();
             let n = p.len();
             p.clear();
             n
@@ -503,8 +499,7 @@ impl MeshProgram {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut pipelines = self
             .pipelines
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let key = (format, samples.max(1), self.uses_depth);
         if !pipelines.contains_key(&key) {
             tracing::debug!(
@@ -580,8 +575,7 @@ impl MeshProgram {
         //panic allowed, reason = "poisoned mesh program MRT pipeline cache is unrecoverable"
         let mut pipelines = self
             .pipelines_mrt
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         let key = (color_formats.to_vec(), samples.max(1), self.uses_depth);
         if !pipelines.contains_key(&key) {
             tracing::debug!(

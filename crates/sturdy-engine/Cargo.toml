@@ -41,6 +41,7 @@ sturdy-engine-macros = { path = "../sturdy-engine-macros" }
 sturdy-engine-platform = { path = "../sturdy-engine-platform" }
 textui = { path = "../textui" }
 winit = { version = "0.30", optional = true }
+parking_lot.workspace = true
 
 [features]
 default = ["app-shell"]

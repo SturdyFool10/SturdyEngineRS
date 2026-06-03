@@ -3,7 +3,7 @@ use crate::{
     RenderFrame, Result, ShaderProgram, StageMask, shader_program::builtin_shader_path,
 };
 use glam::Mat4;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use sturdy_engine_core::Extent3d;
 
 #[repr(C)]
@@ -191,8 +191,7 @@ impl AntiAliasingPass {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let mut history = self
             .history
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         if history.key != Some(key) {
             history.key = Some(key);
             history.frame_index = 0;

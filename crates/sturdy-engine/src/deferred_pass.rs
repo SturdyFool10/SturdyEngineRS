@@ -59,8 +59,7 @@ pub struct DeferredOutput {
     /// Camera-local motion vectors (`Rgba16Float`, `.xy` = UV-space velocity).
     ///
     /// `None` when no `CameraMotionVectorPass` is attached to the
-    /// `DeferredPass`.  Pass this image to `AntiAliasingPass` or `SrdDenoiser`
-    /// for temporally-stable results.
+    /// `DeferredPass`.  Pass this image to `AntiAliasingPass` for temporally-stable results.
     pub motion_vectors: Option<GraphImage>,
 }
 
@@ -341,7 +340,7 @@ impl DeferredPass {
 
     /// Draw with a [`SceneCamera`] that carries jitter and previous-frame state.
     ///
-    /// This is the preferred entry point when using TAA or the SRD denoiser.
+    /// This is the preferred entry point when using TAA or any temporal effect.
     /// It uses the camera's jittered projection matrix for the G-Buffer fill so
     /// the sub-pixel offsets are correct, and passes the previous view-projection
     /// matrix through for per-vertex motion vector computation.

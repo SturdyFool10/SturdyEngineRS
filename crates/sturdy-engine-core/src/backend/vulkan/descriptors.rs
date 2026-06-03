@@ -1117,9 +1117,10 @@ fn write_descriptor(
                     "image resource can only be bound to image descriptors".into(),
                 ));
             }
+            let fmt = resources.image_desc(image)?.format;
             let info = [vk::DescriptorImageInfo::default()
                 .image_view(resources.image_view(image)?)
-                .image_layout(image_descriptor_layout(binding.descriptor_type))];
+                .image_layout(image_descriptor_layout(binding.descriptor_type, fmt))];
             let write = [vk::WriteDescriptorSet::default()
                 .dst_set(set)
                 .dst_binding(binding.binding_index)
@@ -1138,9 +1139,10 @@ fn write_descriptor(
                     "image resource can only be bound to image descriptors".into(),
                 ));
             }
+            let fmt = resources.image_desc(image)?.format;
             let info = [vk::DescriptorImageInfo::default()
                 .image_view(resources.image_view_for_subresource(device, image, subresource)?)
-                .image_layout(image_descriptor_layout(binding.descriptor_type))];
+                .image_layout(image_descriptor_layout(binding.descriptor_type, fmt))];
             let write = [vk::WriteDescriptorSet::default()
                 .dst_set(set)
                 .dst_binding(binding.binding_index)
@@ -1192,10 +1194,20 @@ fn write_descriptor(
     Ok(())
 }
 
-fn image_descriptor_layout(descriptor_type: vk::DescriptorType) -> vk::ImageLayout {
+fn image_descriptor_layout(descriptor_type: vk::DescriptorType, format: crate::Format) -> vk::ImageLayout {
     match descriptor_type {
         vk::DescriptorType::STORAGE_IMAGE => vk::ImageLayout::GENERAL,
-        _ => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        _ => {
+            // Depth images used as sampled textures require DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            // not SHADER_READ_ONLY_OPTIMAL.  Using the wrong layout triggers Vulkan validation
+            // errors and may produce incorrect results on some hardware.
+            let is_depth = matches!(format, crate::Format::Depth32Float | crate::Format::Depth24Stencil8);
+            if is_depth {
+                vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL
+            } else {
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+            }
+        }
     }
 }
 
@@ -1356,9 +1368,10 @@ fn write_descriptor_to_buffer(
                     return;
                 }
             };
+            let fmt = resources.image_desc(img_handle).map(|d| d.format).unwrap_or(crate::Format::Rgba8Unorm);
             let image_info = vk::DescriptorImageInfo::default()
                 .image_view(view)
-                .image_layout(image_descriptor_layout(binding.descriptor_type));
+                .image_layout(image_descriptor_layout(binding.descriptor_type, fmt));
             let data = if binding.descriptor_type == vk::DescriptorType::STORAGE_IMAGE {
                 vk::DescriptorDataEXT {
                     p_storage_image: &image_info,

@@ -1,7 +1,7 @@
 use crate::{
-    Access, Buffer, CopyBufferToImageDesc, CopyImageToBufferDesc, Error, Extent3d, Format, Frame,
-    Image, ImageDesc, ImageRef, ImageUsage, ImageUse, PassDesc, PassWork, Result, RgState,
-    SubresourceRange,
+    Access, Buffer, CopyBufferDesc, CopyBufferToImageDesc, CopyImageToBufferDesc, Error,
+    Extent3d, Format, Frame, Image, ImageDesc, ImageRef, ImageUsage, ImageUse, PassDesc, PassWork,
+    Result, RgState, SubresourceRange,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -39,6 +39,15 @@ pub struct TextureUploadDesc {
     /// block-compressed format (BC3/BC4/BC5) before GPU upload. Set to `false` for
     /// render targets, UAVs, and any image that must stay uncompressed.
     pub prefer_compressed: bool,
+    /// Generate the full mip chain after upload via `vkCmdBlitImage`.
+    ///
+    /// When `true` (default for sampled textures), the engine computes
+    /// `floor(log2(max(w,h))) + 1` mip levels and automatically records
+    /// a `GenerateMipmaps` pass after the staging copy.  This improves
+    /// rendering quality for distant surfaces and reduces GPU bandwidth.
+    /// Set to `false` for textures that will always be sampled at full
+    /// resolution (e.g. UI images, compute output textures).
+    pub generate_mips: bool,
 }
 
 impl TextureUploadDesc {
@@ -49,6 +58,7 @@ impl TextureUploadDesc {
             format: Format::Rgba8Unorm,
             usage: ImageUsage::SAMPLED,
             prefer_compressed: true,
+            generate_mips: true,
         }
     }
 
@@ -61,6 +71,7 @@ impl TextureUploadDesc {
             format: Format::Rgba16Float,
             usage: ImageUsage::SAMPLED,
             prefer_compressed: true,
+            generate_mips: true,
         }
     }
 
@@ -73,6 +84,7 @@ impl TextureUploadDesc {
             format: Format::Rgba32Float,
             usage: ImageUsage::SAMPLED,
             prefer_compressed: true,
+            generate_mips: true,
         }
     }
 
@@ -86,6 +98,7 @@ impl TextureUploadDesc {
             format: Format::Bc4Unorm,
             usage: ImageUsage::SAMPLED,
             prefer_compressed: true,
+            generate_mips: true,
         }
     }
 
@@ -100,6 +113,7 @@ impl TextureUploadDesc {
             format: Format::Bc5Unorm,
             usage: ImageUsage::SAMPLED,
             prefer_compressed: true,
+            generate_mips: true,
         }
     }
 
@@ -113,6 +127,7 @@ impl TextureUploadDesc {
             format: Format::Bc3Unorm,
             usage: ImageUsage::SAMPLED,
             prefer_compressed: true,
+            generate_mips: true,
         }
     }
 
@@ -126,6 +141,7 @@ impl TextureUploadDesc {
             format: Format::Bc3UnormSrgb,
             usage: ImageUsage::SAMPLED,
             prefer_compressed: true,
+            generate_mips: true,
         }
     }
 
@@ -139,6 +155,7 @@ impl TextureUploadDesc {
             format: Format::Bc7Unorm,
             usage: ImageUsage::SAMPLED,
             prefer_compressed: true,
+            generate_mips: true,
         }
     }
 
@@ -153,6 +170,7 @@ impl TextureUploadDesc {
             format: Format::Bc7UnormSrgb,
             usage: ImageUsage::SAMPLED,
             prefer_compressed: true,
+            generate_mips: true,
         }
     }
 
@@ -166,6 +184,7 @@ impl TextureUploadDesc {
             format: Format::Bc6hUfloat,
             usage: ImageUsage::SAMPLED,
             prefer_compressed: true,
+            generate_mips: true,
         }
     }
 }
@@ -277,6 +296,109 @@ impl Frame {
         })
     }
 
+    /// Record a buffer-to-buffer copy pass.  Typically used to transfer data
+    /// from a HOST_VISIBLE staging buffer to a `GPU_ONLY` / DEVICE_LOCAL buffer.
+    ///
+    /// Both `src` and `dst` must already be registered in the graph (via
+    /// `RenderGraph::import_buffer`); this method handles the import itself.
+    pub fn copy_buffer(
+        &mut self,
+        name: impl Into<String>,
+        src: &Buffer,
+        dst: &Buffer,
+        src_offset: u64,
+        dst_offset: u64,
+        size: u64,
+    ) -> Result<()> {
+        self.inner.graph_mut(|g| g.import_buffer(src.handle(), src.desc()))?;
+        self.inner.graph_mut(|g| g.import_buffer(dst.handle(), dst.desc()))?;
+        self.add_pass(PassDesc {
+            buffer_reads: vec![crate::BufferUse {
+                buffer: src.handle(),
+                access: Access::Read,
+                state: RgState::CopySrc,
+                offset: src_offset,
+                size,
+            }],
+            buffer_writes: vec![crate::BufferUse {
+                buffer: dst.handle(),
+                access: Access::Write,
+                state: RgState::CopyDst,
+                offset: dst_offset,
+                size,
+            }],
+            work: PassWork::CopyBuffer(CopyBufferDesc {
+                src: src.handle(),
+                src_offset,
+                dst: dst.handle(),
+                dst_offset,
+                size,
+            }),
+            ..PassDesc::default_transfer(name)
+        })
+    }
+
+    /// Upload raw bytes to a DEVICE_LOCAL GPU buffer via internal staging.
+    ///
+    /// Allocates a staging region from the frame's upload arena, copies `data`
+    /// into it, and records a `vkCmdCopyBuffer` to transfer the data into `dst`
+    /// (which must have `COPY_DST` and `GPU_ONLY` usage).  The copy completes
+    /// before any subsequent shader access.
+    ///
+    /// # When to use
+    ///
+    /// Call this for one-time uploads of static GPU data (vertex buffers, index
+    /// buffers, large lookup tables) where DEVICE_LOCAL memory gives better
+    /// GPU bandwidth than HOST_VISIBLE.  For per-frame dynamic data use the
+    /// transient buffer pool or `upload_uniform` instead.
+    pub fn upload_buffer_data(
+        &mut self,
+        name: impl Into<String>,
+        dst: &Buffer,
+        data: &[u8],
+    ) -> Result<()> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        if !dst.desc().usage.contains(crate::BufferUsage::COPY_DST) {
+            return Err(Error::InvalidInput(
+                "upload_buffer_data: dst buffer must have COPY_DST usage".into(),
+            ));
+        }
+        let name = name.into();
+        let allocation = self.upload_arena.upload(&self.engine, data)?;
+        let staging = self.upload_arena.buffer(allocation);
+        let staging_handle = staging.handle();
+        let staging_desc = staging.desc();
+        let data_size = data.len() as u64;
+        self.inner.graph_mut(|g| g.import_buffer(staging_handle, staging_desc))?;
+        self.inner.graph_mut(|g| g.import_buffer(dst.handle(), dst.desc()))?;
+        self.add_pass(PassDesc {
+            buffer_reads: vec![crate::BufferUse {
+                buffer: staging_handle,
+                access: Access::Read,
+                state: RgState::CopySrc,
+                offset: allocation.offset(),
+                size: data_size,
+            }],
+            buffer_writes: vec![crate::BufferUse {
+                buffer: dst.handle(),
+                access: Access::Write,
+                state: RgState::CopyDst,
+                offset: 0,
+                size: data_size,
+            }],
+            work: PassWork::CopyBuffer(CopyBufferDesc {
+                src: staging_handle,
+                src_offset: allocation.offset(),
+                dst: dst.handle(),
+                dst_offset: 0,
+                size: data_size,
+            }),
+            ..PassDesc::default_transfer(name)
+        })
+    }
+
     pub fn upload_texture_2d(
         &mut self,
         name: impl Into<String>,
@@ -296,6 +418,26 @@ impl Frame {
             )));
         }
 
+        // Compute mip count: full chain when mips are requested and format supports blitting.
+        let can_blit = !matches!(
+            desc.format,
+            Format::Bc3Unorm | Format::Bc3UnormSrgb | Format::Bc4Unorm
+                | Format::Bc5Unorm | Format::Bc6hUfloat | Format::Bc7Unorm | Format::Bc7UnormSrgb
+        );
+        let mip_levels: u32 = if desc.generate_mips && can_blit {
+            let max_dim = desc.width.max(desc.height);
+            (u32::BITS - max_dim.leading_zeros()).max(1)  // floor(log2(max_dim)) + 1
+        } else {
+            1
+        };
+        let generate_mips = mip_levels > 1;
+        let extra_usage = if generate_mips {
+            // GenerateMipmaps requires COPY_SRC (src of each blit) + COPY_DST (dst of each blit).
+            ImageUsage::COPY_DST | ImageUsage::COPY_SRC
+        } else {
+            ImageUsage::COPY_DST
+        };
+
         let image = self.engine.create_image(ImageDesc {
             dimension: crate::ImageDimension::D2,
             extent: Extent3d {
@@ -303,11 +445,11 @@ impl Frame {
                 height: desc.height,
                 depth: 1,
             },
-            mip_levels: 1,
+            mip_levels: mip_levels as u16,
             layers: 1,
             samples: 1,
             format: desc.format,
-            usage: desc.usage | ImageUsage::COPY_DST,
+            usage: desc.usage | extra_usage,
             transient: false,
             clear_value: None,
             debug_name: Some("uploaded texture"),
@@ -359,20 +501,46 @@ impl Frame {
             }],
             ..PassDesc::default_transfer(format!("{name}-copy"))
         })?;
-        self.add_pass(PassDesc {
-            reads: vec![ImageUse {
-                image: image.handle(),
-                access: Access::Read,
-                state: RgState::ShaderRead,
-                subresource: SubresourceRange {
-                    base_mip: 0,
-                    mip_count: 1,
-                    base_layer: 0,
-                    layer_count: 1,
+
+        // Optional: generate the full mip chain from mip 0 via blit.
+        // The GenerateMipmaps pass transitions each mip to SHADER_READ_ONLY at the end.
+        if generate_mips {
+            self.inner.graph_mut(|g| g.import_image(image.handle(), image.desc()))?;
+            self.add_pass(PassDesc {
+                work: PassWork::GenerateMipmaps {
+                    image: image.handle(),
+                    mip_count: mip_levels,
                 },
-            }],
-            ..PassDesc::default_graphics(format!("{name}-shader-read"))
-        })?;
+                reads: vec![ImageUse {
+                    image: image.handle(),
+                    access: Access::Read,
+                    state: RgState::CopySrc,
+                    subresource: SubresourceRange { base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+                }],
+                writes: vec![ImageUse {
+                    image: image.handle(),
+                    access: Access::Write,
+                    state: RgState::CopyDst,
+                    subresource: SubresourceRange { base_mip: 0, mip_count: u16::MAX, base_layer: 0, layer_count: 1 },
+                }],
+                ..PassDesc::default_transfer(format!("{name}-gen-mips"))
+            })?;
+        } else {
+            self.add_pass(PassDesc {
+                reads: vec![ImageUse {
+                    image: image.handle(),
+                    access: Access::Read,
+                    state: RgState::ShaderRead,
+                    subresource: SubresourceRange {
+                        base_mip: 0,
+                        mip_count: 1,
+                        base_layer: 0,
+                        layer_count: 1,
+                    },
+                }],
+                ..PassDesc::default_graphics(format!("{name}-shader-read"))
+            })?;
+        }
         Ok(image)
     }
 
@@ -389,6 +557,7 @@ impl Frame {
             format: desc.format,
             usage: desc.usage,
             prefer_compressed: false,
+            generate_mips: false,
         })?;
         if data.len() as u64 != expected_len {
             return Err(Error::InvalidInput(format!(

@@ -482,12 +482,24 @@ impl Mesh {
 }
 
 fn upload_slice<T>(engine: &Engine, data: &[T], usage: BufferUsage) -> Result<Buffer> {
-    let buffer = engine.create_buffer(BufferDesc {
-        size: std::mem::size_of_val(data) as u64,
-        usage,
-    })?;
-    buffer.write(0, bytes_of_slice(data))?;
-    Ok(buffer)
+    let bytes = bytes_of_slice(data);
+    // Vertex and index buffers are written once at load time and read many
+    // times by the GPU.  Upload via GPU_ONLY (DEVICE_LOCAL) for best GPU
+    // read bandwidth on discrete hardware; host-visible paths pay extra PCI-e
+    // bandwidth on every GPU draw.
+    let is_geometry = usage.contains(BufferUsage::VERTEX) || usage.contains(BufferUsage::INDEX);
+    if is_geometry && engine.parallel_secondary_recording_supported() {
+        // parallel_secondary_recording_supported() is true on Vulkan; use it
+        // as a proxy for "capable discrete-GPU backend that benefits from DEVICE_LOCAL."
+        engine.create_gpu_buffer(bytes, usage)
+    } else {
+        let buffer = engine.create_buffer(BufferDesc {
+            size: bytes.len() as u64,
+            usage,
+        })?;
+        buffer.write(0, bytes)?;
+        Ok(buffer)
+    }
 }
 
 fn bytes_of_slice<T>(data: &[T]) -> &[u8] {

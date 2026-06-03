@@ -1,4 +1,5 @@
 use glam::{Mat4, Vec3, Vec4};
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -559,38 +560,61 @@ impl Scene {
         }
 
         // Fill instance lists and per-instance render metadata.
-        // Use atomic Acquire loads for transforms — visible to any Release store
-        // performed by worker threads via set_transform().
-        for obj in &self.objects {
-            if obj.mesh_id.index() >= self.meshes.len()
-                || !obj.visibility_flags.contains(VisibilityFlags::VISIBLE)
-            {
-                continue;
-            }
+        // Phase 1 (parallel): compute instance data for all visible objects using rayon.
+        //   Each object's transform load is atomic (Acquire) so this is safe across threads.
+        // Phase 2 (sequential): aggregate into batches (HashMap mutation requires single-writer).
+        let mesh_count = self.meshes.len();
+        struct ObjectData {
+            mesh_id: u32,
+            instance: InstanceData,
+            metadata: super::instance_metadata::SceneInstanceMetadata,
+            kind: ObjectKind,
+            static_dirty_flag: *const std::sync::atomic::AtomicBool,
+        }
+        // SAFETY: AtomicBool pointers are valid for the duration of this function
+        // and the store in Phase 2 is sequential (no data race).
+        unsafe impl Send for ObjectData {}
 
-            let transform = obj.transform.load();
-            let fallback_sphere = mesh_spheres
-                .get(obj.mesh_id.index())
-                .copied()
-                .unwrap_or(crate::BoundingSphere::EMPTY);
-            let metadata = obj.instance_metadata(fallback_sphere);
+        let object_data: Vec<ObjectData> = self
+            .objects
+            .par_iter()
+            .filter(|obj| {
+                obj.mesh_id.index() < mesh_count
+                    && obj.visibility_flags.contains(VisibilityFlags::VISIBLE)
+            })
+            .map(|obj| {
+                let transform = obj.transform.load();
+                let fallback_sphere = mesh_spheres
+                    .get(obj.mesh_id.index())
+                    .copied()
+                    .unwrap_or(crate::BoundingSphere::EMPTY);
+                let metadata = obj.instance_metadata(fallback_sphere);
+                ObjectData {
+                    mesh_id: obj.mesh_id.0,
+                    instance: InstanceData::from_transform(transform),
+                    metadata,
+                    kind: obj.kind,
+                    static_dirty_flag: &obj.static_dirty as *const _,
+                }
+            })
+            .collect();
+
+        // Phase 2: aggregate into batches (sequential, no contention).
+        for od in object_data {
             let batch = self
                 .batches
-                .entry(obj.mesh_id.0)
-                .or_insert_with(|| InstanceBatch::new(obj.mesh_id.0));
-            match obj.kind {
+                .entry(od.mesh_id)
+                .or_insert_with(|| InstanceBatch::new(od.mesh_id));
+            match od.kind {
                 ObjectKind::Static => {
-                    batch
-                        .static_instances
-                        .push(InstanceData::from_transform(transform));
-                    batch.static_metadata.push(metadata);
-                    obj.static_dirty.store(false, Ordering::Release);
+                    batch.static_instances.push(od.instance);
+                    batch.static_metadata.push(od.metadata);
+                    // SAFETY: pointer is valid and no concurrent access in Phase 2.
+                    unsafe { (*od.static_dirty_flag).store(false, Ordering::Release) };
                 }
                 ObjectKind::Dynamic => {
-                    batch
-                        .dynamic_instances
-                        .push(InstanceData::from_transform(transform));
-                    batch.dynamic_metadata.push(metadata);
+                    batch.dynamic_instances.push(od.instance);
+                    batch.dynamic_metadata.push(od.metadata);
                 }
             }
         }

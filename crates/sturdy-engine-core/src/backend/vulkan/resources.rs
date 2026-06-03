@@ -728,7 +728,11 @@ impl ResourceRegistry {
             .ok_or(Error::Unsupported("cannot CPU-write an imported buffer"))?;
         let base = allocation
             .mapped_ptr
-            .ok_or_else(|| Error::Backend("buffer allocation is not host-visible".into()))?;
+            .ok_or_else(|| Error::Backend(
+                "write_buffer: buffer is in DEVICE_LOCAL (GPU-only) memory and is not CPU-writable. \
+                 Remove BufferUsage::GPU_ONLY to use HOST_VISIBLE memory, or use a staging buffer \
+                 and vkCmdCopyBuffer for GPU-side uploads.".into()
+            ))?;
         let start = offset as usize;
         let end = start + data.len();
         if end > allocation.size as usize {

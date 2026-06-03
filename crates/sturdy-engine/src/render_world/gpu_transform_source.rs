@@ -93,30 +93,37 @@ pub struct RenderWorldGpuTransformSourceData {
 
 impl RenderWorldGpuTransformSourceData {
     pub fn from_states(states: &[RenderObjectState]) -> Self {
-        let mut states: Vec<_> = states
+        use rayon::prelude::*;
+
+        // Filter and sort sequentially (small work, deterministic ordering needed).
+        let mut filtered: Vec<_> = states
             .iter()
             .filter(|state| state.mesh.is_some())
             .cloned()
             .collect();
-        states.sort_by_key(|state| state.object);
+        filtered.sort_by_key(|state| state.object);
 
-        let mut transforms = Vec::with_capacity(states.len());
-        let mut object_slots = Vec::with_capacity(states.len());
-        for (slot, state) in states.iter().enumerate() {
-            let transform = state.transform.as_ref().unwrap_or(&Transform::IDENTITY);
-            transforms.push(GpuTransformSourceData::from_transforms(
-                transform,
-                state.previous_transform.as_ref(),
-                None,
-                state.bounds.as_ref(),
-            ));
-            object_slots.push((state.object, slot as u32));
-        }
+        // Compute transform source data in parallel — pure reads, no sharing.
+        let transforms: Vec<GpuTransformSourceData> = filtered
+            .par_iter()
+            .map(|state| {
+                let transform = state.transform.as_ref().unwrap_or(&Transform::IDENTITY);
+                GpuTransformSourceData::from_transforms(
+                    transform,
+                    state.previous_transform.as_ref(),
+                    None,
+                    state.bounds.as_ref(),
+                )
+            })
+            .collect();
 
-        Self {
-            transforms,
-            object_slots,
-        }
+        let object_slots: Vec<(GpuObjectId, u32)> = filtered
+            .iter()
+            .enumerate()
+            .map(|(slot, state)| (state.object, slot as u32))
+            .collect();
+
+        Self { transforms, object_slots }
     }
 
     pub fn len(&self) -> usize {

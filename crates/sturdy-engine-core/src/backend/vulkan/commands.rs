@@ -67,13 +67,13 @@ pub struct CommandContext {
     /// Nanoseconds per GPU timestamp tick (from physical device limits).
     timestamp_period_ns: f32,
     /// Pass names and queue types recorded during the most-recently-submitted frame.
-    /// Populated during recording; used to label the readback results.
-    pending_pass_names: Vec<(String, crate::QueueType)>,
+    /// Uses `Arc<str>` to share the string with `pass_timings` without re-allocating.
+    pending_pass_names: Vec<(std::sync::Arc<str>, crate::QueueType)>,
     /// How many passes were submitted in the last frame.
     pending_pass_count: u32,
     /// Per-pass GPU timings from the previous frame (name, queue_type, milliseconds).
     /// Empty until the second `submit_graph` call (first readback).
-    pub pass_timings: Vec<(String, crate::QueueType, f32)>,
+    pub pass_timings: Vec<(std::sync::Arc<str>, crate::QueueType, f32)>,
     /// CPU wall time spent waiting on the reused frame slot during the most recent submit.
     last_submit_gpu_wait_ms: f32,
     acceleration_structure_scratch: Vec<VulkanScratchBuffer>,
@@ -682,7 +682,7 @@ impl CommandContext {
                                     );
                                 }
                             }
-                            self.pending_pass_names.push((pass.name.clone(), pass.queue));
+                            self.pending_pass_names.push((std::sync::Arc::from(pass.name.as_str()), pass.queue));
                             ts_query_idx += 1;
                         }
                         // GFX-1g breadcrumbs at pass end: NV checkpoint + AMD buffer marker.
@@ -767,13 +767,13 @@ impl CommandContext {
                 .get(batch_index)
                 .map(|batch| batch.queue)
                 .unwrap_or(crate::QueueType::Graphics);
-            let mut wait_sems = Vec::new();
+            let mut wait_sems = Vec::with_capacity(2);
             if batch_index == 0 {
                 wait_sems.extend(wait_semaphore);
             } else if !use_timeline {
                 wait_sems.push(chain_semaphores[batch_index - 1]);
             }
-            let mut signal_sems = Vec::new();
+            let mut signal_sems = Vec::with_capacity(2);
             if batch_index + 1 < batch_count && !use_timeline {
                 signal_sems.push(chain_semaphores[batch_index]);
             } else if batch_index + 1 == batch_count {
@@ -810,7 +810,9 @@ impl CommandContext {
                             vk::SemaphoreSubmitInfo::default()
                                 .semaphore(tl)
                                 .value(self.chain_value + batch_index as u64)
-                                .stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE),
+                                // NONE in sync2 = "all pipeline stages wait".
+                                // TOP_OF_PIPE is deprecated in sync2; NONE is the correct replacement.
+                                .stage_mask(vk::PipelineStageFlags2::NONE),
                         );
                     }
                 }
@@ -819,7 +821,9 @@ impl CommandContext {
                     .map(|&sem| {
                         vk::SemaphoreSubmitInfo::default()
                             .semaphore(sem)
-                            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                            // BOTTOM_OF_PIPE: signal after all commands in this batch complete.
+                            // More precise than ALL_COMMANDS (same semantics, better driver hint).
+                            .stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
                     })
                     .collect();
                 // GFX-1c: add timeline chain signal for non-last batches.
@@ -829,7 +833,7 @@ impl CommandContext {
                             vk::SemaphoreSubmitInfo::default()
                                 .semaphore(tl)
                                 .value(self.chain_value + batch_index as u64 + 1)
-                                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+                                .stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE),
                         );
                     }
                 }
@@ -1252,6 +1256,22 @@ impl CommandContext {
                         })],
                 );
             },
+            PassWork::CopyBuffer(copy) => unsafe {
+                let src = resources.buffer(copy.src)?;
+                let dst = resources.buffer(copy.dst)?;
+                // size == u64::MAX means "copy entire source from src_offset".
+                // vk::WHOLE_SIZE is also u64::MAX so the mapping is direct.
+                device.cmd_copy_buffer(
+                    command_buffer,
+                    src,
+                    dst,
+                    &[vk::BufferCopy {
+                        src_offset: copy.src_offset,
+                        dst_offset: copy.dst_offset,
+                        size: copy.size,
+                    }],
+                );
+            }
             PassWork::DispatchIndirect(desc) => {
                 let binding = bound_binding.as_ref().ok_or_else(|| {
                     Error::InvalidInput(
@@ -2780,13 +2800,14 @@ impl CommandContext {
                         barrier.after_queue,
                         barrier.queue,
                     );
+                    let img_format = resources.image_desc(barrier.image)?.format;
                     Ok(vk::ImageMemoryBarrier2::default()
                         .src_stage_mask(stage_mask2(barrier.before))
                         .src_access_mask(access_mask2(barrier.before))
                         .dst_stage_mask(stage_mask2(barrier.after))
                         .dst_access_mask(access_mask2(barrier.after))
-                        .old_layout(image_layout(barrier.before))
-                        .new_layout(image_layout(barrier.after))
+                        .old_layout(image_layout_for_format(barrier.before, img_format))
+                        .new_layout(image_layout_for_format(barrier.after, img_format))
                         .src_queue_family_index(src_queue_family)
                         .dst_queue_family_index(dst_queue_family)
                         .image(resources.image(barrier.image)?)
@@ -2835,11 +2856,12 @@ impl CommandContext {
                         barrier.after_queue,
                         barrier.queue,
                     );
+                    let img_format = resources.image_desc(barrier.image)?.format;
                     Ok(vk::ImageMemoryBarrier::default()
                         .src_access_mask(access_mask(barrier.before))
                         .dst_access_mask(access_mask(barrier.after))
-                        .old_layout(image_layout(barrier.before))
-                        .new_layout(image_layout(barrier.after))
+                        .old_layout(image_layout_for_format(barrier.before, img_format))
+                        .new_layout(image_layout_for_format(barrier.after, img_format))
                         .src_queue_family_index(src_queue_family)
                         .dst_queue_family_index(dst_queue_family)
                         .image(resources.image(barrier.image)?)
@@ -2913,14 +2935,21 @@ impl CommandContext {
     }
 }
 
+#[inline]
 fn access_mask(state: RgState) -> vk::AccessFlags {
     match state {
         RgState::Undefined => vk::AccessFlags::empty(),
         RgState::ShaderRead => vk::AccessFlags::SHADER_READ,
         RgState::ShaderWrite => vk::AccessFlags::SHADER_WRITE,
-        RgState::RenderTarget => vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+        // RenderTarget: include READ for blending (read-modify-write of the attachment).
+        RgState::RenderTarget => {
+            vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::COLOR_ATTACHMENT_READ
+        }
         RgState::DepthRead => vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ,
-        RgState::DepthWrite => vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        RgState::DepthWrite => {
+            vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+        }
         RgState::CopySrc => vk::AccessFlags::TRANSFER_READ,
         RgState::CopyDst => vk::AccessFlags::TRANSFER_WRITE,
         // Present uses semaphore-based GPU sync; the access mask is empty because
@@ -2942,6 +2971,7 @@ fn access_mask(state: RgState) -> vk::AccessFlags {
 ///
 /// Used to build precise `srcStageMask` / `dstStageMask` for pipeline barriers
 /// instead of blanket `ALL_COMMANDS`, which unnecessarily serialises the whole GPU.
+#[inline]
 fn stage_mask(state: RgState) -> vk::PipelineStageFlags {
     match state {
         // No real predecessor — barrier is just an initialisation transition.
@@ -2999,6 +3029,7 @@ fn stage_mask(state: RgState) -> vk::PipelineStageFlags {
 }
 
 /// Map a resource state to `vk::PipelineStageFlags2` for VK_KHR_synchronization2 barriers.
+#[inline]
 fn stage_mask2(state: RgState) -> vk::PipelineStageFlags2 {
     match state {
         RgState::Undefined => vk::PipelineStageFlags2::TOP_OF_PIPE,
@@ -3041,14 +3072,22 @@ fn stage_mask2(state: RgState) -> vk::PipelineStageFlags2 {
 }
 
 /// Map a resource state to `vk::AccessFlags2` for VK_KHR_synchronization2 barriers.
+#[inline]
 fn access_mask2(state: RgState) -> vk::AccessFlags2 {
     match state {
         RgState::Undefined => vk::AccessFlags2::empty(),
         RgState::ShaderRead => vk::AccessFlags2::SHADER_READ,
         RgState::ShaderWrite => vk::AccessFlags2::SHADER_WRITE,
-        RgState::RenderTarget => vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+        RgState::RenderTarget => {
+            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE | vk::AccessFlags2::COLOR_ATTACHMENT_READ
+        }
         RgState::DepthRead => vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
-        RgState::DepthWrite => vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        // DepthWrite: depth testing reads happen alongside depth writes in the same pass.
+        // Specifying both flags ensures proper srcAccessMask when releasing the depth buffer.
+        RgState::DepthWrite => {
+            vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
+                | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+        }
         RgState::CopySrc => vk::AccessFlags2::TRANSFER_READ,
         RgState::CopyDst => vk::AccessFlags2::TRANSFER_WRITE,
         RgState::Present => vk::AccessFlags2::empty(),
@@ -3698,9 +3737,10 @@ fn record_push_descriptor_binding(
             image_view,
             layout,
         } => {
+            let img_fmt = resources.image_desc(*image_view).map(|d| d.format).unwrap_or(Format::Rgba8Unorm);
             let info = [vk::DescriptorImageInfo::default()
                 .image_view(resources.image_view(*image_view)?)
-                .image_layout(image_layout(*layout))];
+                .image_layout(image_layout_for_format(*layout, img_fmt))];
             let write = [vk::WriteDescriptorSet::default()
                 .dst_binding(*binding)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
@@ -3796,6 +3836,21 @@ fn vk_fragment_shading_rate(rate: ShadingRate) -> vk::Extent2D {
     vk::Extent2D { width, height }
 }
 
+/// Format-aware image layout: depth images in `ShaderRead` state need
+/// `DEPTH_STENCIL_READ_ONLY_OPTIMAL`, not `SHADER_READ_ONLY_OPTIMAL`.
+/// Use this in barriers where the image format is known.
+#[inline]
+fn image_layout_for_format(state: RgState, format: Format) -> vk::ImageLayout {
+    if state == RgState::ShaderRead {
+        let is_depth = image_aspect_mask(format).contains(vk::ImageAspectFlags::DEPTH);
+        if is_depth {
+            return vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        }
+    }
+    image_layout(state)
+}
+
+#[inline]
 fn image_layout(state: RgState) -> vk::ImageLayout {
     match state {
         RgState::Undefined => vk::ImageLayout::UNDEFINED,
@@ -4174,7 +4229,7 @@ impl FramedCommands {
     /// Per-pass GPU timings from the most recently completed frame.
     ///
     /// Each entry is `(pass_name, queue_type, gpu_ms)`. Empty until the second frame.
-    pub fn pass_timings(&self) -> &[(String, crate::QueueType, f32)] {
+    pub fn pass_timings(&self) -> &[(std::sync::Arc<str>, crate::QueueType, f32)] {
         // Return timings from the context that last completed (previous slot).
         let n = self.contexts.len();
         let prev_slot = self.next_slot.wrapping_sub(1).min(n - 1);

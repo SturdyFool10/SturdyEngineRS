@@ -26,7 +26,7 @@
 
 use std::marker::PhantomData;
 use std::ptr::NonNull;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use glam::Mat4;
 
@@ -70,7 +70,6 @@ impl SceneCommands {
         //panic allowed, reason = "poisoned internal scene command queue is unrecoverable"
         self.queue
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(Box::new(cmd));
     }
 
@@ -103,14 +102,13 @@ impl SceneCommands {
         //panic allowed, reason = "poisoned internal scene command queue is unrecoverable"
         let mut lock = self
             .queue
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .lock();
         std::mem::take(&mut *lock)
     }
 
     /// Number of pending commands. Useful for diagnostics.
     pub fn pending_count(&self) -> usize {
-        self.queue.lock().map(|q| q.len()).unwrap_or(0)
+        self.queue.lock().len()
     }
 }
 

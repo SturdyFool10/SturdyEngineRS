@@ -103,7 +103,7 @@ pub use ray_tracing_pipeline::{
 pub use render_graph::{
     AccelerationStructureBuildMode, Access, AliasPlan, Barrier, BlasBuildDesc, BlasGeometryDesc,
     BufferBarrier, BufferStateKey, BufferUse, ClusterAccelerationStructureBuildDesc, CompiledGraph,
-    CopyBufferToImageDesc, CopyImageToBufferDesc, DispatchDesc, DispatchIndirectDesc, DrawDesc,
+    CopyBufferDesc, CopyBufferToImageDesc, CopyImageToBufferDesc, DispatchDesc, DispatchIndirectDesc, DrawDesc,
     DrawIndirectCountDesc, DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc,
     ImageBarrier, ImageStateKey, ImageUse, IndexBufferBinding, IndexFormat,
     MultiMeshIndirectDrawDesc, MultiMeshIndirectDrawItem, PassDesc, PassWork,
@@ -116,7 +116,7 @@ pub use sampler::{
     AddressMode, BorderColor, CompareOp, FilterMode, MipmapMode, SamplerDesc, SamplerReductionMode,
 };
 pub use shader::{
-    CompiledShaderArtifact, ShaderDesc, ShaderModule, ShaderParameterKind,
+    CompiledShaderArtifact, ShaderCapabilityProfile, ShaderDesc, ShaderModule, ShaderParameterKind,
     ShaderParameterReflection, ShaderReflection, ShaderResourceAccess, ShaderSource, ShaderStage,
     ShaderTarget, VertexInputReflection,
 };

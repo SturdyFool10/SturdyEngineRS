@@ -4,10 +4,10 @@ use sturdy_engine_core as core;
 
 use crate::{
     Access, BindGroup, BindGroupDesc, BindGroupEntry, BindingKind, BlasBuildDesc, Buffer,
-    BufferDesc, BufferUsage, BufferUse, CopyImageToBufferDesc, DispatchDesc, DrawDesc,
-    DrawIndirectCountDesc, DrawIndirectDesc, Engine, Error, Format, ImageDesc, ImageHandle,
-    ImageRef, ImageUse, IndexBufferBinding, MultiMeshIndirectDrawDesc, MultiMeshIndirectDrawItem,
-    PassDesc, PassWork, Pipeline, PushConstants, QueueType,
+    BufferDesc, BufferUsage, BufferUse, CopyBufferDesc, CopyImageToBufferDesc, DispatchDesc,
+    DrawDesc, DrawIndirectCountDesc, DrawIndirectDesc, Engine, Error, Format, ImageDesc,
+    ImageHandle, ImageRef, ImageUse, IndexBufferBinding, MultiMeshIndirectDrawDesc,
+    MultiMeshIndirectDrawItem, PassDesc, PassWork, Pipeline, PushConstants, QueueType,
     RayTracingShaderBindingTable, ResolveImageDesc, ResourceBinding, Result, RgState,
     ShaderReflection, StageMask, SubresourceRange, SurfaceImage, TlasBuildDesc, TraceRaysDesc,
     VertexBufferBinding, compute_program::ComputeProgram, mesh::Mesh, mesh_program::MeshProgram,
@@ -25,10 +25,38 @@ mod scheduler;
 use self::reflection::{
     append_unique_buffer_uses, build_reflected_bind_group, reflected_buffer_read_names,
     reflected_buffer_uses, reflected_buffer_write_names, reflected_image_reads,
-    reflected_push_constant_stages, reflected_storage_image_reads,
+    reflected_push_constant_stages, reflected_read_state_for, reflected_storage_image_reads,
     validate_deferred_reflected_resources, validate_pass_target_usage,
     validate_typed_push_constants_size,
 };
+
+/// Compute the 3D dispatch group count needed to cover `(width × height × depth)` pixels
+/// using a workgroup of size `(tile[0], tile[1], tile[2])`.
+///
+/// Each dimension is rounded up so every pixel is covered even when the image size
+/// is not a multiple of the tile size.
+///
+/// # Example
+/// ```
+/// let groups = compute_groups([1920, 1080, 1], [8, 8, 1]);
+/// // groups = [240, 135, 1]  (covers 1920×1080 with 8×8 tiles)
+/// ```
+pub fn compute_groups(extent: [u32; 3], tile: [u32; 3]) -> [u32; 3] {
+    [
+        extent[0].div_ceil(tile[0].max(1)),
+        extent[1].div_ceil(tile[1].max(1)),
+        extent[2].div_ceil(tile[2].max(1)),
+    ]
+}
+
+/// 2D specialization of [`compute_groups`] for image-space compute passes.
+fn compute_groups_2d(width: u32, height: u32, tile: [u32; 2]) -> [u32; 3] {
+    [
+        width.div_ceil(tile[0].max(1)),
+        height.div_ceil(tile[1].max(1)),
+        1,
+    ]
+}
 
 fn shader_program_label(shader: &ShaderProgram) -> String {
     shader
@@ -242,7 +270,11 @@ struct RenderFrameInner {
     images_by_name: HashMap<String, GraphImageRecord>,
     samplers_by_name: HashMap<String, core::SamplerHandle>,
     buffers_by_name: HashMap<String, (core::BufferHandle, crate::BufferDesc)>,
-    held_bind_groups: Vec<BindGroup>,
+    held_bind_groups: Vec<std::sync::Arc<BindGroup>>,
+    /// Intra-frame bind group cache.  Maps a hash of `BindGroupDesc` to its Arc.
+    /// Prevents duplicate `vkAllocateDescriptorSets` calls within a single frame AND
+    /// allows reuse across frames when the same resources are bound.
+    bind_group_cache: HashMap<u64, core::BindGroupHandle>,
     pass_records: Vec<PassRecord>,
     /// Passes queued for submission. Flushed through the scheduler on `flush()`.
     pending_passes: Vec<PendingPass>,
@@ -300,6 +332,7 @@ impl RenderFrame {
                 samplers_by_name: HashMap::new(),
                 buffers_by_name: HashMap::new(),
                 held_bind_groups: Vec::new(),
+                bind_group_cache: HashMap::new(),
                 pass_records: Vec::new(),
                 pending_passes: Vec::new(),
                 ordering_constraints: Vec::new(),
@@ -588,6 +621,18 @@ impl RenderFrame {
     /// frame.dispatch_async_compute_auto("draw_gen", &prog, &constants, [groups, 1, 1])?;
     /// ```
     pub fn fill_buffer(&self, buffer: &crate::Buffer, value: u32) -> Result<()> {
+        // vkCmdFillBuffer requires COPY_DST usage and 4-byte aligned size.
+        if !buffer.desc().usage.contains(crate::BufferUsage::COPY_DST) {
+            return Err(Error::InvalidInput(
+                "fill_buffer: buffer must have COPY_DST usage".into(),
+            ));
+        }
+        if buffer.desc().size % 4 != 0 {
+            return Err(Error::InvalidInput(format!(
+                "fill_buffer: buffer size {} must be a multiple of 4",
+                buffer.desc().size
+            )));
+        }
         let mut inner = self.inner.borrow_mut();
         let declaration_index = inner.declaration_index;
         inner.declaration_index = inner.declaration_index.saturating_add(1);
@@ -628,6 +673,94 @@ impl RenderFrame {
             deferred: None,
         });
         Ok(())
+    }
+
+    /// Copy a range of `src` into `dst` via `vkCmdCopyBuffer`.
+    ///
+    /// Both buffers must include `COPY_SRC` and `COPY_DST` respectively.
+    /// Pass `size = u64::MAX` to copy the entire source buffer.
+    pub fn copy_buffer(
+        &self,
+        name: impl Into<String>,
+        src: &crate::Buffer,
+        dst: &crate::Buffer,
+        src_offset: u64,
+        dst_offset: u64,
+        size: u64,
+    ) -> Result<()> {
+        let copy_size = if size == u64::MAX { src.desc().size } else { size };
+        let src_handle = src.handle();
+        let dst_handle = dst.handle();
+        let src_desc = src.desc();
+        let dst_desc = dst.desc();
+        let mut inner = self.inner.borrow_mut();
+        let declaration_index = inner.declaration_index;
+        inner.declaration_index = inner.declaration_index.saturating_add(1);
+        inner.frame.inner.graph_mut(|g| {
+            g.import_buffer(src_handle, src_desc)?;
+            g.import_buffer(dst_handle, dst_desc)
+        })?;
+        let pass_name = format!("{declaration_index:04}-copy-buffer-{}", name.into());
+        inner.pass_records.push(PassRecord {
+            name: pass_name.clone(),
+            kind: PassKind::Compute,
+            queue: core::QueueType::Transfer,
+            reads: Vec::new(),
+            writes: Vec::new(),
+            buffer_read_names: Vec::new(),
+            buffer_write_names: Vec::new(),
+            deferred_read_names: Vec::new(),
+            skip_read_name: String::new(),
+        });
+        inner.pending_passes.push(PendingPass {
+            desc: PassDesc {
+                name: pass_name,
+                queue: QueueType::Transfer,
+                work: PassWork::CopyBuffer(CopyBufferDesc {
+                    src: src_handle,
+                    src_offset,
+                    dst: dst_handle,
+                    dst_offset,
+                    size,
+                }),
+                buffer_reads: vec![crate::BufferUse {
+                    buffer: src_handle,
+                    access: Access::Read,
+                    state: RgState::CopySrc,
+                    offset: src_offset,
+                    size: copy_size,
+                }],
+                buffer_writes: vec![crate::BufferUse {
+                    buffer: dst_handle,
+                    access: Access::Write,
+                    state: RgState::CopyDst,
+                    offset: dst_offset,
+                    size: copy_size,
+                }],
+                ..PassDesc::new(String::new(), QueueType::Transfer)
+            },
+            deferred: None,
+        });
+        Ok(())
+    }
+
+    /// Copy a range of a GPU buffer into a [`ReadbackBuffer`](crate::ReadbackBuffer)
+    /// for CPU readback after the frame completes.
+    ///
+    /// After calling `frame.flush()` and `frame.wait()` (or waiting for the next
+    /// frame start), use [`ReadbackBuffer::read_as`] or [`ReadbackBuffer::read_bytes`]
+    /// to access the data without any additional CPU-GPU synchronization.
+    ///
+    /// Pass `size = u64::MAX` to copy the entire source buffer.
+    pub fn copy_to_readback(
+        &self,
+        name: impl Into<String>,
+        src: &crate::Buffer,
+        readback: &crate::ReadbackBuffer,
+        src_offset: u64,
+        size: u64,
+    ) -> Result<()> {
+        self.copy_buffer(name, src, readback.buffer(), src_offset, 0, size)
     }
 
     pub fn bind_buffer(&self, name: impl Into<String>, buffer: &crate::Buffer) -> &Self {
@@ -880,7 +1013,76 @@ impl RenderFrame {
         constants: &T,
         groups: [u32; 3],
     ) -> Result<()> {
-        self.dispatch_on_queue(QueueType::Compute, name, program, constants, groups)
+        // Reflection-driven async compute auto-routing:
+        // If the shader only accesses storage buffers and storage images (no sampled
+        // render-target images registered in this frame), it is safe to run on the
+        // dedicated async compute queue for GPU overlap with shadow/rasterization.
+        // Shaders that read frame-transient sampled images (like HDR scene color) stay
+        // on Compute so they wait for the graphics fence before executing.
+        let queue = if self.is_pure_async_compute_eligible(program) {
+            QueueType::AsyncCompute
+        } else {
+            QueueType::Compute
+        };
+        self.dispatch_on_queue(queue, name, program, constants, groups)
+    }
+
+    /// Returns true when the shader can safely overlap with graphics on the async compute queue.
+    ///
+    /// Uses the precomputed `ShaderCapabilityProfile` for the fast path (no sampled images at
+    /// all — never needs to wait for graphics). Falls through to a per-frame frame-image scan
+    /// only for shaders that do have sampled image bindings.
+    fn is_pure_async_compute_eligible(&self, program: &ComputeProgram) -> bool {
+        // On hardware without a dedicated async compute queue, AsyncCompute falls back to
+        // the graphics queue anyway. Skip auto-routing only on the Null backend.
+        if !self.inner.borrow().engine.parallel_secondary_recording_supported() {
+            return false;
+        }
+        // Fast path: profile is precomputed — no lock, no HashMap lookup.
+        let profile = program.capability_profile();
+        if profile.async_compute_eligible {
+            // No sampled image bindings at all: always safe for async compute.
+            return true;
+        }
+        // Slow path: the shader has sampled image bindings at sets > 0 (per-frame/per-pass
+        // named bindings). Check whether any of those names are registered as frame images
+        // (written by a graphics pass this frame). Uses the cached list from the profile
+        // — no reflection scan required.
+        //
+        // Bindless heap images (set 0, e.g. `g_bindless_textures`) are already excluded
+        // from `sampled_image_names` — they are never frame-registered.
+        let inner = self.inner.borrow();
+        for name in profile.sampled_image_names.iter() {
+            if inner.images_by_name.contains_key(name.as_ref()) {
+                // A frame-registered render-target image is sampled — must wait for graphics.
+                return false;
+            }
+        }
+        // No frame-registered images found among the sampled bindings.
+        true
+    }
+
+    /// Dispatch a compute or async-compute shader with group counts derived from
+    /// pixel dimensions and workgroup tile size.
+    ///
+    /// Equivalent to `dispatch_compute_auto` with `groups = compute_groups(width, height, tile)`.
+    /// Auto-routes to async compute using the same eligibility check as `dispatch_compute_auto`.
+    pub fn dispatch_compute_sized<T: bytemuck::Pod>(
+        &self,
+        name: impl Into<String>,
+        program: &ComputeProgram,
+        constants: &T,
+        width: u32,
+        height: u32,
+        tile: [u32; 2],
+    ) -> Result<()> {
+        let groups = compute_groups_2d(width, height, tile);
+        let queue = if self.is_pure_async_compute_eligible(program) {
+            QueueType::AsyncCompute
+        } else {
+            QueueType::Compute
+        };
+        self.dispatch_on_queue(queue, name, program, constants, groups)
     }
 
     fn dispatch_on_queue<T: bytemuck::Pod>(
@@ -964,15 +1166,21 @@ impl RenderFrame {
                 buffer_reads: buf_read_names
                     .iter()
                     .filter_map(|n| {
-                        eager_buffers
-                            .get(n)
-                            .map(|&(handle, desc)| crate::BufferUse {
+                        eager_buffers.get(n).map(|&(handle, desc)| {
+                            // Uniform buffers use UniformRead; read-only storage use ShaderRead.
+                            let state = reflected_read_state_for(
+                                program.reflection(),
+                                n,
+                                RgState::ShaderRead,
+                            );
+                            crate::BufferUse {
                                 buffer: handle,
                                 access: Access::Read,
-                                state: RgState::ShaderRead,
+                                state,
                                 offset: 0,
                                 size: desc.size,
-                            })
+                            }
+                        })
                     })
                     .collect(),
                 buffer_writes: buf_write_names
@@ -1447,6 +1655,8 @@ impl RenderFrame {
         let mut inner = self.inner.borrow_mut();
         inner.flushed = true;
         submit_pending_passes(&mut inner)?;
+        // Advance the cross-frame bind group cache counter and evict stale entries.
+        inner.engine.advance_bind_group_frame();
         let submission = inner.frame.flush()?;
         auto_present_if_configured(&mut inner)?;
         Ok(submission)
@@ -4570,6 +4780,7 @@ fn submit_pending_passes(inner: &mut RenderFrameInner) -> Result<()> {
                     .storage_output
                     .as_ref()
                     .map(|(s, h)| (s.as_str(), *h)),
+                Some(&mut inner.bind_group_cache),
             )
             .map_err(|error| match error {
                 Error::InvalidInput(message) => Error::InvalidInput(format!(
