@@ -123,7 +123,10 @@ impl RenderWorldGpuTransformSourceData {
             .map(|(slot, state)| (state.object, slot as u32))
             .collect();
 
-        Self { transforms, object_slots }
+        Self {
+            transforms,
+            object_slots,
+        }
     }
 
     pub fn len(&self) -> usize {

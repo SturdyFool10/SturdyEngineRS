@@ -123,8 +123,14 @@ fn benchmark_report_per_pass_stats_aggregated() {
             gpu_ms: None,
             gpu_wait_ms: None,
             pass_timings: vec![
-                BenchmarkPassSample { name: "GBuffer".into(), gpu_ms: (i + 1) as f32 },
-                BenchmarkPassSample { name: "Shadow".into(), gpu_ms: 0.5 },
+                BenchmarkPassSample {
+                    name: "GBuffer".into(),
+                    gpu_ms: (i + 1) as f32,
+                },
+                BenchmarkPassSample {
+                    name: "Shadow".into(),
+                    gpu_ms: 0.5,
+                },
             ],
         });
     }

@@ -1,7 +1,7 @@
 use crate::{
-    Access, Buffer, CopyBufferDesc, CopyBufferToImageDesc, CopyImageToBufferDesc, Error,
-    Extent3d, Format, Frame, Image, ImageDesc, ImageRef, ImageUsage, ImageUse, PassDesc, PassWork,
-    Result, RgState, SubresourceRange,
+    Access, Buffer, CopyBufferDesc, CopyBufferToImageDesc, CopyImageToBufferDesc, Error, Extent3d,
+    Format, Frame, Image, ImageDesc, ImageRef, ImageUsage, ImageUse, PassDesc, PassWork, Result,
+    RgState, SubresourceRange,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -310,8 +310,10 @@ impl Frame {
         dst_offset: u64,
         size: u64,
     ) -> Result<()> {
-        self.inner.graph_mut(|g| g.import_buffer(src.handle(), src.desc()))?;
-        self.inner.graph_mut(|g| g.import_buffer(dst.handle(), dst.desc()))?;
+        self.inner
+            .graph_mut(|g| g.import_buffer(src.handle(), src.desc()))?;
+        self.inner
+            .graph_mut(|g| g.import_buffer(dst.handle(), dst.desc()))?;
         self.add_pass(PassDesc {
             buffer_reads: vec![crate::BufferUse {
                 buffer: src.handle(),
@@ -371,8 +373,10 @@ impl Frame {
         let staging_handle = staging.handle();
         let staging_desc = staging.desc();
         let data_size = data.len() as u64;
-        self.inner.graph_mut(|g| g.import_buffer(staging_handle, staging_desc))?;
-        self.inner.graph_mut(|g| g.import_buffer(dst.handle(), dst.desc()))?;
+        self.inner
+            .graph_mut(|g| g.import_buffer(staging_handle, staging_desc))?;
+        self.inner
+            .graph_mut(|g| g.import_buffer(dst.handle(), dst.desc()))?;
         self.add_pass(PassDesc {
             buffer_reads: vec![crate::BufferUse {
                 buffer: staging_handle,
@@ -421,12 +425,17 @@ impl Frame {
         // Compute mip count: full chain when mips are requested and format supports blitting.
         let can_blit = !matches!(
             desc.format,
-            Format::Bc3Unorm | Format::Bc3UnormSrgb | Format::Bc4Unorm
-                | Format::Bc5Unorm | Format::Bc6hUfloat | Format::Bc7Unorm | Format::Bc7UnormSrgb
+            Format::Bc3Unorm
+                | Format::Bc3UnormSrgb
+                | Format::Bc4Unorm
+                | Format::Bc5Unorm
+                | Format::Bc6hUfloat
+                | Format::Bc7Unorm
+                | Format::Bc7UnormSrgb
         );
         let mip_levels: u32 = if desc.generate_mips && can_blit {
             let max_dim = desc.width.max(desc.height);
-            (u32::BITS - max_dim.leading_zeros()).max(1)  // floor(log2(max_dim)) + 1
+            (u32::BITS - max_dim.leading_zeros()).max(1) // floor(log2(max_dim)) + 1
         } else {
             1
         };
@@ -505,7 +514,8 @@ impl Frame {
         // Optional: generate the full mip chain from mip 0 via blit.
         // The GenerateMipmaps pass transitions each mip to SHADER_READ_ONLY at the end.
         if generate_mips {
-            self.inner.graph_mut(|g| g.import_image(image.handle(), image.desc()))?;
+            self.inner
+                .graph_mut(|g| g.import_image(image.handle(), image.desc()))?;
             self.add_pass(PassDesc {
                 work: PassWork::GenerateMipmaps {
                     image: image.handle(),
@@ -515,13 +525,23 @@ impl Frame {
                     image: image.handle(),
                     access: Access::Read,
                     state: RgState::CopySrc,
-                    subresource: SubresourceRange { base_mip: 0, mip_count: 1, base_layer: 0, layer_count: 1 },
+                    subresource: SubresourceRange {
+                        base_mip: 0,
+                        mip_count: 1,
+                        base_layer: 0,
+                        layer_count: 1,
+                    },
                 }],
                 writes: vec![ImageUse {
                     image: image.handle(),
                     access: Access::Write,
                     state: RgState::CopyDst,
-                    subresource: SubresourceRange { base_mip: 0, mip_count: u16::MAX, base_layer: 0, layer_count: 1 },
+                    subresource: SubresourceRange {
+                        base_mip: 0,
+                        mip_count: u16::MAX,
+                        base_layer: 0,
+                        layer_count: 1,
+                    },
                 }],
                 ..PassDesc::default_transfer(format!("{name}-gen-mips"))
             })?;

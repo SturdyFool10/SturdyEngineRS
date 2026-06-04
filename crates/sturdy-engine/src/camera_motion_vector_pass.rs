@@ -11,7 +11,8 @@
 
 use crate::{
     Engine, Format, GraphImage, ImageDesc, ImageDimension, ImageUsage, RenderFrame, Result,
-    SamplerPreset, ShaderProgram, StageMask, shader_program::builtin_shader_path, scene::SceneCamera,
+    SamplerPreset, ShaderProgram, StageMask, scene::SceneCamera,
+    shader_program::builtin_shader_path,
 };
 use sturdy_engine_core::Extent3d;
 

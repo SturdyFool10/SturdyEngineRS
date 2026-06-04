@@ -8,7 +8,6 @@
 pub mod animation;
 mod anti_aliasing_pass;
 mod antialiasing;
-mod camera_motion_vector_pass;
 mod ao_pass;
 mod application;
 mod asset_loader;
@@ -17,6 +16,7 @@ mod auto_exposure;
 mod bind_group;
 mod bindless;
 mod bloom_pass;
+mod camera_motion_vector_pass;
 mod compute_program;
 mod debug_draw_2d;
 mod debug_overlay;
@@ -43,9 +43,9 @@ mod headless;
 mod hiz_pass;
 mod input;
 mod light_bvh;
+mod material_registry;
 mod material_table;
 mod mesh;
-mod material_registry;
 mod mesh_loader;
 mod mesh_program;
 mod mip_pyramid;
@@ -58,14 +58,14 @@ mod point_shadow_pass;
 mod post_process;
 mod procedural_texture;
 mod quad_batch;
+mod readback;
 mod realtime_gi;
 mod realtime_raytracing;
-pub mod render_world;
 pub mod render_strategy;
+pub mod render_world;
 mod renderer_metrics;
 mod resource;
 mod resource_table;
-mod readback;
 mod runtime;
 mod sampler_catalog;
 mod scene;
@@ -114,6 +114,7 @@ pub use bloom_pass::{
     BloomCompositeConstants, BloomConfig, BloomPass, BrightPassConstants, DownsampleConstants,
     UpsampleConstants,
 };
+pub use camera_motion_vector_pass::CameraMotionVectorPass;
 pub use clay_ui::{
     ClipSpace, Ndc, RenderTargetPx, SurfacePx, TexelPx, UiPx, Uv01, WindowLogicalPx,
     WindowPhysicalPx, WorldSpace, logical_to_physical, physical_to_logical, render_target_to_uv,
@@ -126,7 +127,6 @@ pub use debug_overlay::{
     DebugOverlayRenderer, DebugOverlayTransform,
 };
 pub use debug_view_picker::DebugViewPicker;
-pub use camera_motion_vector_pass::CameraMotionVectorPass;
 pub use deferred_pass::{DeferredOutput, DeferredPass, RenderPath, SkyConfig};
 pub use device_manager::{AdapterEntry, DeviceManager};
 pub use ecs::{
@@ -221,6 +221,7 @@ pub use realtime_raytracing::{
     RealtimeBlas, RealtimeRayTracingPipeline, RealtimeRayTracingShaderDesc,
     RealtimeRayTracingSupport, RealtimeTlas, RealtimeTlasInstance,
 };
+pub use render_strategy::{FrameRenderStrategy, OcclusionMode, RenderStrategySelector, VrsQuality};
 pub use render_world::{
     Aabb, GpuObjectAllocator, GpuObjectId, GpuTransformDirtyRange, GpuTransformSourceData,
     LayerMask, LocalToWorld, LodGroupId, MaterialId, MaterialShaderClass, PipelineClass,
@@ -254,16 +255,15 @@ pub use runtime::{
     AppLayer, AppRuntime, AppRuntimeFrame, AssetDiagnostic, AssetState, AutoExposureDiagnostics,
     BackendFeatureChange, BackendRestartOutcome, BenchmarkFrameSample, BenchmarkPassSample,
     BenchmarkReport, DebugImageRegistry, DefaultSceneTargetConfig, FrameStats, FrameTimingReport,
-    RuntimeApp, RuntimeApplyNotification,
-    RuntimeApplyPath, RuntimeApplyReport, RuntimeChangeResult, RuntimeController,
-    RuntimeDiagnostics, RuntimeFixedUpdateContext, RuntimeGraphDiagnostics, RuntimePassTiming,
-    RuntimeSettingChange, RuntimeSettingDescriptor, RuntimeSettingEntry, RuntimeSettingId,
-    RuntimeSettingKey, RuntimeSettingOption, RuntimeSettingSource, RuntimeSettingSupport,
-    RuntimeSettingValue, RuntimeSettingsSnapshot, RuntimeSettingsTransaction, RuntimeTimingSummary,
-    RuntimeUserDiagnostic, RuntimeWindowDiagnostics, RuntimeWorkloadDiagnostics, SceneRenderContext,
-    ShaderCompileError, UiContext, WindowMode,
+    RuntimeApp, RuntimeApplyNotification, RuntimeApplyPath, RuntimeApplyReport,
+    RuntimeChangeResult, RuntimeController, RuntimeDiagnostics, RuntimeFixedUpdateContext,
+    RuntimeGraphDiagnostics, RuntimePassTiming, RuntimeSettingChange, RuntimeSettingDescriptor,
+    RuntimeSettingEntry, RuntimeSettingId, RuntimeSettingKey, RuntimeSettingOption,
+    RuntimeSettingSource, RuntimeSettingSupport, RuntimeSettingValue, RuntimeSettingsSnapshot,
+    RuntimeSettingsTransaction, RuntimeTimingSummary, RuntimeUserDiagnostic,
+    RuntimeWindowDiagnostics, RuntimeWorkloadDiagnostics, SceneRenderContext, ShaderCompileError,
+    UiContext, WindowMode,
 };
-pub use render_strategy::{FrameRenderStrategy, OcclusionMode, RenderStrategySelector, VrsQuality};
 pub use sampler_catalog::SamplerPreset;
 pub use scene::{
     CameraConstants, CameraId, CameraOutput, DirectionalLight, DiskLight, GpuInstanceData,
@@ -298,7 +298,6 @@ pub use frontend_graph::{
     GraphImage, GraphImageCacheKey, GraphImageHistory, GraphImageHistoryFrame, GraphImageView,
     MultiMeshDrawBinItem, RenderFrame, ShaderPassIntent, UniformBinding, compute_groups,
 };
-pub use readback::ReadbackBuffer;
 pub use glam::{Vec2, Vec3};
 pub use graph_report::{
     DiagnosticLevel, GraphDiagnostic, GraphImageInfo, GraphPassInfo, GraphReport, PassKind,
@@ -308,6 +307,7 @@ pub use post_process::{
     AutoExposureConfig, CaConfig, CaPass, GrainConfig, GrainPass, LensConfig, LensPass,
     PostProcessConfig, PostProcessPasses, VignetteConfig, VignettePass,
 };
+pub use readback::ReadbackBuffer;
 pub use shader_data::ShaderData;
 pub use shader_program::{ShaderName, ShaderProgram, ShaderProgramDesc, SlangEntryPoints};
 #[cfg(not(target_arch = "wasm32"))]
@@ -319,23 +319,22 @@ pub use sturdy_engine_core::{
     BackendKind, BackendRawCapabilities, BindGroupDesc, BindGroupEntry, BindingKind, BlasBuildDesc,
     BlasGeometryDesc, BlendMode, BorderColor, BufferDesc, BufferUsage, BufferUse, CanonicalBinding,
     CanonicalGroupLayout, CanonicalPipelineLayout, Caps, ColorTargetDesc, CompareOp,
-    CompiledShaderArtifact, ComputePipelineDesc, CopyBufferDesc, CopyBufferToImageDesc, CopyImageToBufferDesc,
-    CullMode, D3d12RawCapabilities, DispatchDesc, DispatchIndirectDesc, DrawDesc,
-    DrawIndirectCountDesc, DrawIndirectDesc, DrawMeshShaderDesc, DrawMeshShaderIndirectDesc, Error,
-    MultiMeshIndirectDrawDesc, MultiMeshIndirectDrawItem,
-    ErrorCategory, Extent3d, ExternalBufferDesc, ExternalBufferHandle, ExternalImageDesc,
-    ExternalImageHandle, FilterMode, Format, FormatCapabilities, FrontFace, GpuCaptureDesc,
-    GpuCaptureTool, GpuMemoryBudget, GpuTimeline, GraphicsPipelineDesc, HdrMetadata, ImageBuilder,
-    ImageCompression, ImageDesc, ImageDimension, ImageRole, ImageUsage, ImageUse,
-    IndexBufferBinding, IndexFormat, MemoryBudgetReport, MemoryHeapBudget, MetalRawCapabilities,
-    MipmapMode, NativeHandleCapabilities, NativeHandleCapability, NativeHandleKind,
+    CompiledShaderArtifact, ComputePipelineDesc, CopyBufferDesc, CopyBufferToImageDesc,
+    CopyImageToBufferDesc, CullMode, D3d12RawCapabilities, DispatchDesc, DispatchIndirectDesc,
+    DrawDesc, DrawIndirectCountDesc, DrawIndirectDesc, DrawMeshShaderDesc,
+    DrawMeshShaderIndirectDesc, Error, ErrorCategory, Extent3d, ExternalBufferDesc,
+    ExternalBufferHandle, ExternalImageDesc, ExternalImageHandle, FilterMode, Format,
+    FormatCapabilities, FrontFace, GpuCaptureDesc, GpuCaptureTool, GpuMemoryBudget, GpuTimeline,
+    GraphicsPipelineDesc, HdrMetadata, ImageBuilder, ImageCompression, ImageDesc, ImageDimension,
+    ImageRole, ImageUsage, ImageUse, IndexBufferBinding, IndexFormat, MemoryBudgetReport,
+    MemoryHeapBudget, MetalRawCapabilities, MipmapMode, MultiMeshIndirectDrawDesc,
+    MultiMeshIndirectDrawItem, NativeHandleCapabilities, NativeHandleCapability, NativeHandleKind,
     NativeHandleOwnership, PassDesc, PassTimingReport, PassWork, PerfCounterHandle, PolygonMode,
-    PrimitiveTopology, PushConstants, PushDescriptorBinding, PushDescriptorSetDesc,
-    QueueType, RasterState, RayTracingPipelineDesc, RayTracingStageDesc, ResolveImageDesc,
-    ResourceBinding, Result, RgState, RtShaderGroupDesc, RtShaderGroupKind, SamplerDesc,
-    ShaderBindingTableDesc, ShaderCapabilityProfile, ShaderDesc, ShaderParameterKind,
-    ShaderParameterReflection, ShaderResourceAccess, ShaderSource, ShaderStage, ShaderTarget,
-    ShadingRate, SlangCompileDesc,
+    PrimitiveTopology, PushConstants, PushDescriptorBinding, PushDescriptorSetDesc, QueueType,
+    RasterState, RayTracingPipelineDesc, RayTracingStageDesc, ResolveImageDesc, ResourceBinding,
+    Result, RgState, RtShaderGroupDesc, RtShaderGroupKind, SamplerDesc, ShaderBindingTableDesc,
+    ShaderCapabilityProfile, ShaderDesc, ShaderParameterKind, ShaderParameterReflection,
+    ShaderResourceAccess, ShaderSource, ShaderStage, ShaderTarget, ShadingRate, SlangCompileDesc,
     StageMask, SubresourceRange, SurfaceCapabilities, SurfaceColorSpace, SurfaceEvent,
     SurfaceFormatInfo, SurfaceHdrCaps, SurfaceHdrPreference, SurfaceInfo, SurfacePresentMode,
     SurfaceRecreateDesc, TlasBuildDesc, TraceRaysDesc, UpdateRate, VertexAttributeDesc,

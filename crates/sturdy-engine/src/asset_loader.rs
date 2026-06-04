@@ -25,13 +25,13 @@
 //! [`AssetCache`] prevents double-loading. Paths are normalised to absolute
 //! form before lookup so relative-path variants of the same file share a handle.
 
+use parking_lot::{Mutex, MutexGuard};
 use std::{
     collections::HashMap,
     fmt,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use parking_lot::{Mutex, MutexGuard};
 
 use crate::texture_compression::compress_texture;
 use crate::{Engine, Format, FrameSyncReason, Image, Result, TextureUploadDesc};
@@ -134,9 +134,7 @@ pub(crate) fn load_texture_2d_async(
                 height,
             };
             //panic allowed, reason = "poisoned internal pending upload queue is unrecoverable"
-            pending
-                .lock()
-                .push(upload);
+            pending.lock().push(upload);
         }
         Err(e) => {
             tracing::error!(path = %path.display(), "async texture load failed: {e}");
@@ -319,8 +317,7 @@ impl<T> AssetHandle<T> {
 
     fn lock(&self) -> MutexGuard<'_, LoadState<T>> {
         //panic allowed, reason = "poisoned asset handle mutex is unrecoverable"
-        self.inner
-            .lock()
+        self.inner.lock()
     }
 }
 
@@ -463,7 +460,7 @@ fn load_and_upload(engine: &Engine, path: &Path, name: &str) -> Result<Image> {
             format: compressed.format,
             usage: crate::ImageUsage::SAMPLED,
             prefer_compressed: true,
-        generate_mips: true,
+            generate_mips: true,
         };
         let mut frame = engine.begin_frame()?;
         let image = frame.upload_texture_2d(name, desc, &compressed.data)?;
@@ -653,9 +650,7 @@ pub(crate) fn load_hdr_texture_async(
                 height,
             };
             //panic allowed, reason = "poisoned internal pending upload queue is unrecoverable"
-            pending
-                .lock()
-                .push(upload);
+            pending.lock().push(upload);
         }
         Err(e) => {
             handle_bg.set_failed(format!("load_hdr_texture '{}': {e}", path.display()));

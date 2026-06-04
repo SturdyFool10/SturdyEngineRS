@@ -24,9 +24,9 @@
 // `prepare()` calls. All accessed data is either immutable or accessed via
 // atomic operations.
 
+use parking_lot::Mutex;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
-use parking_lot::Mutex;
 
 use glam::Mat4;
 
@@ -68,9 +68,7 @@ impl SceneCommands {
 
     fn push(&self, cmd: impl FnOnce(&mut Scene) + Send + 'static) {
         //panic allowed, reason = "poisoned internal scene command queue is unrecoverable"
-        self.queue
-            .lock()
-            .push(Box::new(cmd));
+        self.queue.lock().push(Box::new(cmd));
     }
 
     // ── Structural mutations — safe to call from any thread ───────────────────
@@ -100,9 +98,7 @@ impl SceneCommands {
     /// the `SceneCommands`.
     pub(super) fn take_all(&self) -> Vec<CommandFn> {
         //panic allowed, reason = "poisoned internal scene command queue is unrecoverable"
-        let mut lock = self
-            .queue
-            .lock();
+        let mut lock = self.queue.lock();
         std::mem::take(&mut *lock)
     }
 

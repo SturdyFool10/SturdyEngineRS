@@ -16,9 +16,13 @@ pub(super) fn reflected_buffer_read_names(reflection: &ShaderReflection) -> Vec<
             .parameters
             .iter()
             .filter(|p| {
-                matches!(p.kind, crate::ShaderParameterKind::Resource(core::BindingKind::UniformBuffer))
-                    || (matches!(p.kind, crate::ShaderParameterKind::Resource(core::BindingKind::StorageBuffer))
-                        && p.access == crate::ShaderResourceAccess::Read)
+                matches!(
+                    p.kind,
+                    crate::ShaderParameterKind::Resource(core::BindingKind::UniformBuffer)
+                ) || (matches!(
+                    p.kind,
+                    crate::ShaderParameterKind::Resource(core::BindingKind::StorageBuffer)
+                ) && p.access == crate::ShaderResourceAccess::Read)
             })
             .map(|p| p.name.clone())
             .collect();
@@ -36,8 +40,10 @@ pub(super) fn reflected_buffer_write_names(reflection: &ShaderReflection) -> Vec
             .parameters
             .iter()
             .filter(|p| {
-                matches!(p.kind, crate::ShaderParameterKind::Resource(core::BindingKind::StorageBuffer))
-                    && p.access != crate::ShaderResourceAccess::Read
+                matches!(
+                    p.kind,
+                    crate::ShaderParameterKind::Resource(core::BindingKind::StorageBuffer)
+                ) && p.access != crate::ShaderResourceAccess::Read
             })
             .map(|p| p.name.clone())
             .collect();
@@ -136,7 +142,10 @@ pub(super) fn build_reflected_bind_group(
     eager_buffers: &HashMap<String, (core::BufferHandle, crate::BufferDesc)>,
     output_image: Option<(&str, ImageHandle)>,
     intra_frame_cache: Option<&mut HashMap<u64, core::BindGroupHandle>>,
-) -> Result<(Vec<std::sync::Arc<BindGroup>>, Option<core::PushDescriptorSetDesc>)> {
+) -> Result<(
+    Vec<std::sync::Arc<BindGroup>>,
+    Option<core::PushDescriptorSetDesc>,
+)> {
     let has_bindings = reflection
         .layout
         .groups
@@ -257,10 +266,12 @@ pub(super) fn build_reflected_bind_group(
             match binding.kind {
                 BindingKind::SampledImage => {
                     let image = resolve_image(&binding.path).or_else(|| {
-                        engine.global_image(&binding.path).map(|(handle, _desc)| ImageBinding {
-                            handle,
-                            subresource: single_subresource(),
-                        })
+                        engine
+                            .global_image(&binding.path)
+                            .map(|(handle, _desc)| ImageBinding {
+                                handle,
+                                subresource: single_subresource(),
+                            })
                     });
                     if let Some(image) = image {
                         if let Some(desc) = image_desc(image.handle) {
@@ -393,9 +404,7 @@ pub(super) fn build_reflected_bind_group(
     // Check the cross-frame cache in the Engine.
     {
         let current_frame = engine.bind_group_frame_index();
-        let mut bg_cache = engine
-            .bind_group_cache()
-            .lock();
+        let mut bg_cache = engine.bind_group_cache().lock();
         if let Some(entry) = bg_cache.entries.get_mut(&key) {
             // Cache hit: update last-used frame and reuse the Arc.
             entry.last_used_frame = current_frame;
@@ -408,13 +417,14 @@ pub(super) fn build_reflected_bind_group(
     let bind_group = std::sync::Arc::new(engine.create_bind_group(desc)?);
     {
         let current_frame = engine.bind_group_frame_index();
-        let mut bg_cache = engine
-            .bind_group_cache()
-            .lock();
-        bg_cache.entries.insert(key, crate::engine::CachedBindGroupEntry {
-            bind_group: std::sync::Arc::clone(&bind_group),
-            last_used_frame: current_frame,
-        });
+        let mut bg_cache = engine.bind_group_cache().lock();
+        bg_cache.entries.insert(
+            key,
+            crate::engine::CachedBindGroupEntry {
+                bind_group: std::sync::Arc::clone(&bind_group),
+                last_used_frame: current_frame,
+            },
+        );
     }
     Ok((vec![bind_group], push_descriptor_set))
 }

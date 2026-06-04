@@ -176,7 +176,10 @@ fn window_reconfigure_report_surfaces_native_appearance_degradation() {
 }
 
 fn pt(name: &str, ms: f32) -> RuntimePassTiming {
-    RuntimePassTiming { name: name.to_string(), gpu_time_ms: Some(ms) }
+    RuntimePassTiming {
+        name: name.to_string(),
+        gpu_time_ms: Some(ms),
+    }
 }
 
 #[test]
@@ -201,7 +204,10 @@ fn pass_timing_overlay_groups_bloom_passes() {
     assert!(lines[0].starts_with("passes: total="));
     // Bloom is grouped into one line
     let bloom_line = lines.iter().find(|l| l.contains("Bloom:")).unwrap();
-    assert!(bloom_line.contains("6 ops"), "expected 6 ops, got: {bloom_line}");
+    assert!(
+        bloom_line.contains("6 ops"),
+        "expected 6 ops, got: {bloom_line}"
+    );
     // Deferred is individual
     assert!(lines.iter().any(|l| l.contains("Deferred:")));
     // No individual Bloom down/up lines
@@ -223,10 +229,7 @@ fn pass_timing_overlay_singles_listed_individually() {
 
 #[test]
 fn pass_timing_overlay_skips_zero_ms_passes() {
-    let timings = vec![
-        pt("Bloom: bright", 0.0),
-        pt("Deferred", 1.80),
-    ];
+    let timings = vec![pt("Bloom: bright", 0.0), pt("Deferred", 1.80)];
     let lines = pass_timing_overlay_lines(&timings);
     assert!(!lines.iter().any(|l| l.contains("Bloom")));
     assert!(lines.iter().any(|l| l.contains("Deferred:")));

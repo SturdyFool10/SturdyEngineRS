@@ -40,7 +40,8 @@ impl ComputeProgram {
             uses_ser: false,
         })?;
         let reflection = engine.shader_reflection(&shader)?;
-        let capability = ShaderCapabilityProfile::from_reflection(&reflection, ShaderStage::Compute);
+        let capability =
+            ShaderCapabilityProfile::from_reflection(&reflection, ShaderStage::Compute);
         let pipeline_layout = engine.create_reflected_compute_pipeline_layout(&shader)?;
         let pipeline = engine.create_compute_pipeline(ComputePipelineDesc {
             shader: shader.handle(),
@@ -90,7 +91,8 @@ impl ComputeProgram {
             uses_ser: false,
         })?;
         let reflection = self.engine.shader_reflection(&shader)?;
-        let capability = ShaderCapabilityProfile::from_reflection(&reflection, ShaderStage::Compute);
+        let capability =
+            ShaderCapabilityProfile::from_reflection(&reflection, ShaderStage::Compute);
         let pipeline_layout = self
             .engine
             .create_reflected_compute_pipeline_layout(&shader)?;

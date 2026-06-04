@@ -1,14 +1,14 @@
+use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
-use parking_lot::Mutex;
 
 use crate::{
     Buffer, ColorTargetDesc, CullMode, Engine, Error, Format, FrontFace, GraphicsPipelineDesc,
-    Pipeline, PipelineLayout, PrimitiveTopology, RasterState, Result, Shader, ShaderCapabilityProfile,
-    ShaderDesc, ShaderObject, ShaderReflection, ShaderSource, ShaderStage, StageMask,
-    VertexAttributeDesc, VertexBufferLayout, VertexFormat, VertexInputRate,
+    Pipeline, PipelineLayout, PrimitiveTopology, RasterState, Result, Shader,
+    ShaderCapabilityProfile, ShaderDesc, ShaderObject, ShaderReflection, ShaderSource, ShaderStage,
+    StageMask, VertexAttributeDesc, VertexBufferLayout, VertexFormat, VertexInputRate,
 };
 
 use super::{FullscreenVertex, ShaderProgramDesc, builtin_shader_path, create_fullscreen_triangle};
@@ -327,9 +327,7 @@ impl ShaderProgram {
         self.pipeline_layout = pipeline_layout;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let cleared = {
-            let mut p = self
-                .pipelines
-                .lock();
+            let mut p = self.pipelines.lock();
             let n = p.len();
             p.clear();
             n
@@ -367,9 +365,7 @@ impl ShaderProgram {
         samples: u8,
     ) -> Result<sturdy_engine_core::PipelineHandle> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut pipelines = self
-            .pipelines
-            .lock();
+        let mut pipelines = self.pipelines.lock();
         let key = (format, samples.max(1));
         if !pipelines.contains_key(&key) {
             tracing::debug!(

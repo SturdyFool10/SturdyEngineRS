@@ -284,18 +284,18 @@ pub fn query_caps(instance: &Instance, physical_device: vk::PhysicalDevice) -> C
     let external_memory_fd_export = has(b"VK_KHR_external_memory_fd\0");
 
     // Modern Vulkan maintenance and robustness features.
-    let maintenance5 = has(b"VK_KHR_maintenance5\0")
-        && feature_chain.maintenance5.maintenance5 == vk::TRUE;
-    let maintenance6 = has(b"VK_KHR_maintenance6\0")
-        && feature_chain.maintenance6.maintenance6 == vk::TRUE;
+    let maintenance5 =
+        has(b"VK_KHR_maintenance5\0") && feature_chain.maintenance5.maintenance5 == vk::TRUE;
+    let maintenance6 =
+        has(b"VK_KHR_maintenance6\0") && feature_chain.maintenance6.maintenance6 == vk::TRUE;
     let dynamic_rendering_local_read = has(b"VK_KHR_dynamic_rendering_local_read\0")
         && feature_chain
             .dynamic_rendering_local_read
             .dynamic_rendering_local_read
             == vk::TRUE;
     // VK_EXT_robustness2 null_descriptor: safe sentinel values in unbound slots.
-    let null_descriptor = has(b"VK_EXT_robustness2\0")
-        && feature_chain.robustness2.null_descriptor == vk::TRUE;
+    let null_descriptor =
+        has(b"VK_EXT_robustness2\0") && feature_chain.robustness2.null_descriptor == vk::TRUE;
     let depth_clip_enable = has(b"VK_EXT_depth_clip_enable\0")
         && feature_chain.depth_clip_enable.depth_clip_enable == vk::TRUE;
     // VK_KHR_calibrated_timestamps is core in Vulkan 1.4; fall back to EXT variant.

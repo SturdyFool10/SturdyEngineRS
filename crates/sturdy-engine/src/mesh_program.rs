@@ -1,8 +1,8 @@
+use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
 };
-use parking_lot::Mutex;
 
 use crate::shader_program::builtin_shader_path;
 use crate::shader_watcher::Reloadable;
@@ -411,18 +411,14 @@ impl MeshProgram {
         self.pipeline_layout = pipeline_layout;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let cleared = {
-            let mut p = self
-                .pipelines
-                .lock();
+            let mut p = self.pipelines.lock();
             let n = p.len();
             p.clear();
             n
         };
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let cleared_mrt = {
-            let mut p = self
-                .pipelines_mrt
-                .lock();
+            let mut p = self.pipelines_mrt.lock();
             let n = p.len();
             p.clear();
             n
@@ -467,18 +463,14 @@ impl MeshProgram {
         self.pipeline_layout = pipeline_layout;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let cleared = {
-            let mut p = self
-                .pipelines
-                .lock();
+            let mut p = self.pipelines.lock();
             let n = p.len();
             p.clear();
             n
         };
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         let cleared_mrt = {
-            let mut p = self
-                .pipelines_mrt
-                .lock();
+            let mut p = self.pipelines_mrt.lock();
             let n = p.len();
             p.clear();
             n
@@ -497,9 +489,7 @@ impl MeshProgram {
         samples: u8,
     ) -> Result<core::PipelineHandle> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut pipelines = self
-            .pipelines
-            .lock();
+        let mut pipelines = self.pipelines.lock();
         let key = (format, samples.max(1), self.uses_depth);
         if !pipelines.contains_key(&key) {
             tracing::debug!(
@@ -573,9 +563,7 @@ impl MeshProgram {
         samples: u8,
     ) -> Result<core::PipelineHandle> {
         //panic allowed, reason = "poisoned mesh program MRT pipeline cache is unrecoverable"
-        let mut pipelines = self
-            .pipelines_mrt
-            .lock();
+        let mut pipelines = self.pipelines_mrt.lock();
         let key = (color_formats.to_vec(), samples.max(1), self.uses_depth);
         if !pipelines.contains_key(&key) {
             tracing::debug!(

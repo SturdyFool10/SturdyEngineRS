@@ -220,10 +220,7 @@ impl DebugUtils {
         device: &ash::Device,
         enabled_extensions: &[String],
     ) -> Self {
-        if !enabled_extensions
-            .iter()
-            .any(|n| n == "VK_EXT_debug_utils")
-        {
+        if !enabled_extensions.iter().any(|n| n == "VK_EXT_debug_utils") {
             return Self { loader: None };
         }
         let loader = ext::debug_utils::Device::load(instance, device);

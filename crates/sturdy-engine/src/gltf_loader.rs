@@ -1,9 +1,9 @@
 // GLTF 2.0 mesh and material loading.
 // Called by mesh_loader::load_mesh_from_path for .gltf / .glb files.
 
+use rayon::prelude::*;
 use std::path::Path;
 use std::sync::Arc;
-use rayon::prelude::*;
 
 use crate::mesh::compute_tangents;
 use crate::mesh_loader::{MeshAlphaMode, MeshMaterialParams, MeshPrimitive, MeshTextures};
@@ -56,13 +56,11 @@ fn upload_images(engine: &Engine, images: &[gltf::image::Data]) -> Result<Vec<Op
     let decoded: Vec<Option<(u32, u32, Vec<u8>)>> = images
         .par_iter()
         .enumerate()
-        .map(|(i, img)| {
-            match decode_to_rgba8(img) {
-                Ok(rgba) => Some((img.width, img.height, rgba)),
-                Err(e) => {
-                    tracing::error!("GLTF: failed to decode image {i}: {e}");
-                    None
-                }
+        .map(|(i, img)| match decode_to_rgba8(img) {
+            Ok(rgba) => Some((img.width, img.height, rgba)),
+            Err(e) => {
+                tracing::error!("GLTF: failed to decode image {i}: {e}");
+                None
             }
         })
         .collect();
@@ -97,15 +95,74 @@ fn decode_to_rgba8(img: &gltf::image::Data) -> Result<Vec<u8>> {
     use gltf::image::Format as GltfFmt;
     Ok(match img.format {
         GltfFmt::R8 => img.pixels.iter().flat_map(|&r| [r, r, r, 255]).collect(),
-        GltfFmt::R8G8 => img.pixels.chunks(2).flat_map(|c| [c[0], c[1], 0, 255]).collect(),
-        GltfFmt::R8G8B8 => img.pixels.chunks(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+        GltfFmt::R8G8 => img
+            .pixels
+            .chunks(2)
+            .flat_map(|c| [c[0], c[1], 0, 255])
+            .collect(),
+        GltfFmt::R8G8B8 => img
+            .pixels
+            .chunks(3)
+            .flat_map(|c| [c[0], c[1], c[2], 255])
+            .collect(),
         GltfFmt::R8G8B8A8 => img.pixels.clone(),
-        GltfFmt::R16 => img.pixels.chunks(2).flat_map(|c| { let v = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8; [v, v, v, 255] }).collect(),
-        GltfFmt::R16G16 => img.pixels.chunks(4).flat_map(|c| { let r = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8; let g = (u16::from_le_bytes([c[2], c[3]]) >> 8) as u8; [r, g, 0, 255] }).collect(),
-        GltfFmt::R16G16B16 => img.pixels.chunks(6).flat_map(|c| { let r = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8; let g = (u16::from_le_bytes([c[2], c[3]]) >> 8) as u8; let b = (u16::from_le_bytes([c[4], c[5]]) >> 8) as u8; [r, g, b, 255] }).collect(),
-        GltfFmt::R16G16B16A16 => img.pixels.chunks(8).flat_map(|c| { let r = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8; let g = (u16::from_le_bytes([c[2], c[3]]) >> 8) as u8; let b = (u16::from_le_bytes([c[4], c[5]]) >> 8) as u8; let a = (u16::from_le_bytes([c[6], c[7]]) >> 8) as u8; [r, g, b, a] }).collect(),
-        GltfFmt::R32G32B32FLOAT => img.pixels.chunks(12).flat_map(|c| { let r = (f32::from_le_bytes([c[0], c[1], c[2], c[3]]).clamp(0.0, 1.0) * 255.0) as u8; let g = (f32::from_le_bytes([c[4], c[5], c[6], c[7]]).clamp(0.0, 1.0) * 255.0) as u8; let b = (f32::from_le_bytes([c[8], c[9], c[10], c[11]]).clamp(0.0, 1.0) * 255.0) as u8; [r, g, b, 255] }).collect(),
-        _ => return Err(crate::Error::Unknown(format!("unsupported GLTF image format: {:?}", img.format))),
+        GltfFmt::R16 => img
+            .pixels
+            .chunks(2)
+            .flat_map(|c| {
+                let v = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8;
+                [v, v, v, 255]
+            })
+            .collect(),
+        GltfFmt::R16G16 => img
+            .pixels
+            .chunks(4)
+            .flat_map(|c| {
+                let r = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8;
+                let g = (u16::from_le_bytes([c[2], c[3]]) >> 8) as u8;
+                [r, g, 0, 255]
+            })
+            .collect(),
+        GltfFmt::R16G16B16 => img
+            .pixels
+            .chunks(6)
+            .flat_map(|c| {
+                let r = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8;
+                let g = (u16::from_le_bytes([c[2], c[3]]) >> 8) as u8;
+                let b = (u16::from_le_bytes([c[4], c[5]]) >> 8) as u8;
+                [r, g, b, 255]
+            })
+            .collect(),
+        GltfFmt::R16G16B16A16 => img
+            .pixels
+            .chunks(8)
+            .flat_map(|c| {
+                let r = (u16::from_le_bytes([c[0], c[1]]) >> 8) as u8;
+                let g = (u16::from_le_bytes([c[2], c[3]]) >> 8) as u8;
+                let b = (u16::from_le_bytes([c[4], c[5]]) >> 8) as u8;
+                let a = (u16::from_le_bytes([c[6], c[7]]) >> 8) as u8;
+                [r, g, b, a]
+            })
+            .collect(),
+        GltfFmt::R32G32B32FLOAT => img
+            .pixels
+            .chunks(12)
+            .flat_map(|c| {
+                let r =
+                    (f32::from_le_bytes([c[0], c[1], c[2], c[3]]).clamp(0.0, 1.0) * 255.0) as u8;
+                let g =
+                    (f32::from_le_bytes([c[4], c[5], c[6], c[7]]).clamp(0.0, 1.0) * 255.0) as u8;
+                let b =
+                    (f32::from_le_bytes([c[8], c[9], c[10], c[11]]).clamp(0.0, 1.0) * 255.0) as u8;
+                [r, g, b, 255]
+            })
+            .collect(),
+        _ => {
+            return Err(crate::Error::Unknown(format!(
+                "unsupported GLTF image format: {:?}",
+                img.format
+            )));
+        }
     })
 }
 

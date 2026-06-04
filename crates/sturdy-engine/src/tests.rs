@@ -1762,6 +1762,10 @@ fn runtime_setting_keys_report_expected_apply_paths() {
         RuntimeApplyPath::Immediate
     );
     assert_eq!(
+        RuntimeSettingKey::TargetFrameMs.apply_path(),
+        RuntimeApplyPath::Immediate
+    );
+    assert_eq!(
         RuntimeSettingKey::ShaderHotReloadPolicy.apply_path(),
         RuntimeApplyPath::Immediate
     );
@@ -1905,6 +1909,43 @@ fn runtime_controller_clamps_max_frames_in_flight() {
         controller.diagnostics().user_diagnostics[0].message,
         "max frames in flight was clamped to 1."
     );
+}
+
+#[test]
+fn runtime_controller_applies_target_frame_ms_setting() {
+    let mut controller = RuntimeController::default();
+
+    let report = controller
+        .transact()
+        .set_engine_value(RuntimeSettingKey::TargetFrameMs, 16.6_f64)
+        .apply()
+        .unwrap();
+
+    assert_eq!(
+        report.changes,
+        vec![RuntimeChangeResult::Exact {
+            setting: RuntimeSettingId::from(RuntimeSettingKey::TargetFrameMs),
+            path: RuntimeApplyPath::Immediate,
+        }]
+    );
+    assert_eq!(
+        controller.setting_value(RuntimeSettingKey::TargetFrameMs),
+        Some(RuntimeSettingValue::Float(16.6))
+    );
+    assert_eq!(controller.settings().target_frame_ms, Some(16.6));
+
+    let report = controller
+        .transact()
+        .set_engine_value(RuntimeSettingKey::TargetFrameMs, -4.0_f64)
+        .apply()
+        .unwrap();
+
+    assert!(matches!(
+        &report.changes[0],
+        RuntimeChangeResult::Clamped { setting, value, .. }
+            if setting == &RuntimeSettingId::from(RuntimeSettingKey::TargetFrameMs) && value == "0"
+    ));
+    assert_eq!(controller.settings().target_frame_ms, None);
 }
 
 #[test]

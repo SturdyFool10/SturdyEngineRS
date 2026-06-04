@@ -51,9 +51,7 @@ pub fn reflect_spirv_compute_info(words: &[u32]) -> SpirvComputeInfo {
                     wave_ops_used = true;
                 }
             }
-            OP_EXECUTION_MODE
-                if word_count >= 6 && instr[2] == EXECUTION_MODE_LOCAL_SIZE =>
-            {
+            OP_EXECUTION_MODE if word_count >= 6 && instr[2] == EXECUTION_MODE_LOCAL_SIZE => {
                 workgroup_size = [instr[3], instr[4], instr[5]];
             }
             _ => {}

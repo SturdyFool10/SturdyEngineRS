@@ -1,6 +1,6 @@
-use std::collections::{BTreeMap, HashMap};
 use parking_lot::Mutex;
 use rayon::prelude::*;
+use std::collections::{BTreeMap, HashMap};
 
 use glam::Mat4;
 
@@ -294,14 +294,11 @@ impl RenderWorld {
 
         let ranges_changed = gpu_scene.ranges != ranges;
         let slots_changed = gpu_scene.object_slots != object_slots;
-        let structural_dirty = states.values()
-            .collect::<Vec<_>>()
-            .par_iter()
-            .any(|state| {
-                state.dirty.contains(RenderDirtyFlags::STRUCTURAL)
-                    || state.dirty.contains(RenderDirtyFlags::MESH)
-                    || state.dirty.contains(RenderDirtyFlags::VISIBILITY)
-            });
+        let structural_dirty = states.values().collect::<Vec<_>>().par_iter().any(|state| {
+            state.dirty.contains(RenderDirtyFlags::STRUCTURAL)
+                || state.dirty.contains(RenderDirtyFlags::MESH)
+                || state.dirty.contains(RenderDirtyFlags::VISIBILITY)
+        });
         let full_rebuild = reallocated || ranges_changed || slots_changed || structural_dirty;
 
         let mut uploaded_instances = 0;
@@ -473,14 +470,11 @@ impl RenderWorld {
         );
         let source_slots: HashMap<_, _> = source_data.object_slots.iter().copied().collect();
 
-        let structural_dirty = states.values()
-            .collect::<Vec<_>>()
-            .par_iter()
-            .any(|state| {
-                state.dirty.contains(RenderDirtyFlags::STRUCTURAL)
-                    || state.dirty.contains(RenderDirtyFlags::MESH)
-                    || state.dirty.contains(RenderDirtyFlags::VISIBILITY)
-            });
+        let structural_dirty = states.values().collect::<Vec<_>>().par_iter().any(|state| {
+            state.dirty.contains(RenderDirtyFlags::STRUCTURAL)
+                || state.dirty.contains(RenderDirtyFlags::MESH)
+                || state.dirty.contains(RenderDirtyFlags::VISIBILITY)
+        });
         let dirty_source_slots = states.iter().filter_map(|(object, state)| {
             let transform_dirty = state.dirty.contains(RenderDirtyFlags::TRANSFORM)
                 || state.dirty.contains(RenderDirtyFlags::PREVIOUS_TRANSFORM);
@@ -699,7 +693,10 @@ impl RenderWorld {
             gpu_scene.draw_indirect_buffer = Some(engine.create_buffer(BufferDesc {
                 size: (new_capacity * indirect_stride) as u64,
                 // GPU_ONLY: written exclusively by render_world_draw_generate.slang compute.
-                usage: BufferUsage::INDIRECT | BufferUsage::STORAGE | BufferUsage::COPY_DST | BufferUsage::GPU_ONLY,
+                usage: BufferUsage::INDIRECT
+                    | BufferUsage::STORAGE
+                    | BufferUsage::COPY_DST
+                    | BufferUsage::GPU_ONLY,
             })?);
             gpu_scene.draw_indirect_capacity = new_capacity;
             indirect_buffer_reallocated = true;
@@ -710,7 +707,10 @@ impl RenderWorld {
             gpu_scene.draw_count_buffer = Some(engine.create_buffer(BufferDesc {
                 size: std::mem::size_of::<u32>() as u64,
                 // GPU_ONLY: written by GPU atomic in draw generation, zeroed by vkCmdFillBuffer.
-                usage: BufferUsage::INDIRECT | BufferUsage::STORAGE | BufferUsage::COPY_DST | BufferUsage::GPU_ONLY,
+                usage: BufferUsage::INDIRECT
+                    | BufferUsage::STORAGE
+                    | BufferUsage::COPY_DST
+                    | BufferUsage::GPU_ONLY,
             })?);
             count_buffer_reallocated = true;
         }
@@ -772,13 +772,11 @@ impl RenderWorld {
     // ── Private lock helpers ──────────────────────────────────────────────────
 
     fn lock_states(&self) -> parking_lot::MutexGuard<'_, HashMap<GpuObjectId, RenderObjectState>> {
-        self.states
-            .lock()
+        self.states.lock()
     }
 
     fn lock_gpu_scene(&self) -> parking_lot::MutexGuard<'_, RenderWorldGpuSceneState> {
-        self.gpu_scene
-            .lock()
+        self.gpu_scene.lock()
     }
 }
 
@@ -834,7 +832,9 @@ fn transform_source_states(
         .into_par_iter()
         .filter(|state| {
             state.visibility.flags.contains(VisibilityFlags::VISIBLE)
-                && state.mesh.is_some_and(|mesh| mesh.mesh.index() < valid_mesh_count)
+                && state
+                    .mesh
+                    .is_some_and(|mesh| mesh.mesh.index() < valid_mesh_count)
         })
         .cloned()
         .collect()
@@ -893,7 +893,10 @@ fn gpu_scene_entries_from_states(
     // Phase 2 (sequential): sort by mesh then object to produce a stable order.
     let mut by_mesh: BTreeMap<u32, Vec<(GpuObjectId, GpuInstanceData)>> = BTreeMap::new();
     for (object, instance) in flat {
-        by_mesh.entry(instance.mesh_id).or_default().push((object, instance));
+        by_mesh
+            .entry(instance.mesh_id)
+            .or_default()
+            .push((object, instance));
     }
     let mut entries = Vec::with_capacity(by_mesh.values().map(|v| v.len()).sum());
     for (_, mut mesh_entries) in by_mesh {

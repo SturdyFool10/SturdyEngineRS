@@ -559,7 +559,12 @@ impl ResourceRegistry {
         // unavailable (integrated GPU, memory pressure, etc.).
         let allocation = if desc.usage.contains(BufferUsage::GPU_ONLY) {
             self.allocator
-                .alloc_with_flags(device, requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL, allocate_flags)
+                .alloc_with_flags(
+                    device,
+                    requirements,
+                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                    allocate_flags,
+                )
                 .or_else(|_| {
                     tracing::debug!(
                         size = desc.size,
@@ -568,7 +573,8 @@ impl ResourceRegistry {
                     self.allocator.alloc_with_flags(
                         device,
                         requirements,
-                        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                        vk::MemoryPropertyFlags::HOST_VISIBLE
+                            | vk::MemoryPropertyFlags::HOST_COHERENT,
                         allocate_flags,
                     )
                 })
@@ -957,11 +963,14 @@ impl ResourceRegistry {
     /// lifetime must exceed the handle's use; destroy is NOT called on this entry
     /// because `imported = true` skips cleanup in `destroy_buffer`.
     pub fn register_raw_buffer(&mut self, handle: BufferHandle, buffer: vk::Buffer) {
-        self.buffers.insert(handle, VulkanBuffer {
-            buffer,
-            allocation: None,
-            imported: true,
-        });
+        self.buffers.insert(
+            handle,
+            VulkanBuffer {
+                buffer,
+                allocation: None,
+                imported: true,
+            },
+        );
     }
 
     pub fn sampler(&self, handle: SamplerHandle) -> Result<vk::Sampler> {

@@ -385,8 +385,18 @@ mod tests {
     fn profile_pure_storage_is_async_eligible() {
         let reflection = ShaderReflection {
             parameters: vec![
-                make_param("input_buf", BindingKind::StorageBuffer, ShaderResourceAccess::Read, 1),
-                make_param("output_buf", BindingKind::StorageBuffer, ShaderResourceAccess::ReadWrite, 1),
+                make_param(
+                    "input_buf",
+                    BindingKind::StorageBuffer,
+                    ShaderResourceAccess::Read,
+                    1,
+                ),
+                make_param(
+                    "output_buf",
+                    BindingKind::StorageBuffer,
+                    ShaderResourceAccess::ReadWrite,
+                    1,
+                ),
             ],
             ..ShaderReflection::default()
         };
@@ -401,9 +411,12 @@ mod tests {
     #[test]
     fn profile_sampled_image_at_set1_not_async_eligible() {
         let reflection = ShaderReflection {
-            parameters: vec![
-                make_param("scene_color", BindingKind::SampledImage, ShaderResourceAccess::Read, 1),
-            ],
+            parameters: vec![make_param(
+                "scene_color",
+                BindingKind::SampledImage,
+                ShaderResourceAccess::Read,
+                1,
+            )],
             ..ShaderReflection::default()
         };
         let profile = ShaderCapabilityProfile::from_reflection(&reflection, ShaderStage::Compute);
@@ -418,23 +431,32 @@ mod tests {
     fn profile_bindless_sampled_image_is_async_eligible() {
         // Bindless heap images (set 0) are NOT blocking for async compute.
         let reflection = ShaderReflection {
-            parameters: vec![
-                make_param("g_bindless_textures", BindingKind::SampledImage, ShaderResourceAccess::Read, 0),
-            ],
+            parameters: vec![make_param(
+                "g_bindless_textures",
+                BindingKind::SampledImage,
+                ShaderResourceAccess::Read,
+                0,
+            )],
             ..ShaderReflection::default()
         };
         let profile = ShaderCapabilityProfile::from_reflection(&reflection, ShaderStage::Compute);
         assert!(profile.async_compute_eligible);
         assert!(profile.has_sampled_images);
-        assert!(profile.sampled_image_names.is_empty(), "bindless textures must not block async compute");
+        assert!(
+            profile.sampled_image_names.is_empty(),
+            "bindless textures must not block async compute"
+        );
     }
 
     #[test]
     fn profile_storage_image_write_detected() {
         let reflection = ShaderReflection {
-            parameters: vec![
-                make_param("output_img", BindingKind::StorageImage, ShaderResourceAccess::ReadWrite, 1),
-            ],
+            parameters: vec![make_param(
+                "output_img",
+                BindingKind::StorageImage,
+                ShaderResourceAccess::ReadWrite,
+                1,
+            )],
             ..ShaderReflection::default()
         };
         let profile = ShaderCapabilityProfile::from_reflection(&reflection, ShaderStage::Compute);
@@ -446,9 +468,12 @@ mod tests {
     #[test]
     fn profile_read_only_storage_image_not_flagged_as_write() {
         let reflection = ShaderReflection {
-            parameters: vec![
-                make_param("src_img", BindingKind::StorageImage, ShaderResourceAccess::Read, 1),
-            ],
+            parameters: vec![make_param(
+                "src_img",
+                BindingKind::StorageImage,
+                ShaderResourceAccess::Read,
+                1,
+            )],
             ..ShaderReflection::default()
         };
         let profile = ShaderCapabilityProfile::from_reflection(&reflection, ShaderStage::Compute);
@@ -461,8 +486,18 @@ mod tests {
     fn profile_bindless_only_when_no_set_gt_0() {
         let reflection = ShaderReflection {
             parameters: vec![
-                make_param("g_bindless_textures", BindingKind::SampledImage, ShaderResourceAccess::Read, 0),
-                make_param("g_bindless_samplers", BindingKind::Sampler, ShaderResourceAccess::Read, 0),
+                make_param(
+                    "g_bindless_textures",
+                    BindingKind::SampledImage,
+                    ShaderResourceAccess::Read,
+                    0,
+                ),
+                make_param(
+                    "g_bindless_samplers",
+                    BindingKind::Sampler,
+                    ShaderResourceAccess::Read,
+                    0,
+                ),
             ],
             ..ShaderReflection::default()
         };
@@ -474,8 +509,18 @@ mod tests {
     fn profile_not_bindless_only_when_has_set1_binding() {
         let reflection = ShaderReflection {
             parameters: vec![
-                make_param("g_bindless_textures", BindingKind::SampledImage, ShaderResourceAccess::Read, 0),
-                make_param("scene_data", BindingKind::UniformBuffer, ShaderResourceAccess::Read, 1),
+                make_param(
+                    "g_bindless_textures",
+                    BindingKind::SampledImage,
+                    ShaderResourceAccess::Read,
+                    0,
+                ),
+                make_param(
+                    "scene_data",
+                    BindingKind::UniformBuffer,
+                    ShaderResourceAccess::Read,
+                    1,
+                ),
             ],
             ..ShaderReflection::default()
         };
@@ -486,7 +531,8 @@ mod tests {
     #[test]
     fn profile_ray_tracing_stage_detected() {
         let reflection = ShaderReflection::default();
-        let profile = ShaderCapabilityProfile::from_reflection(&reflection, ShaderStage::RayGeneration);
+        let profile =
+            ShaderCapabilityProfile::from_reflection(&reflection, ShaderStage::RayGeneration);
         assert!(profile.requires_ray_tracing);
         assert!(!profile.requires_mesh_shading);
     }

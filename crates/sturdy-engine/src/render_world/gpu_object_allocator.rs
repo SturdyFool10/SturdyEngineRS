@@ -1,6 +1,6 @@
+use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
-use parking_lot::Mutex;
 
 use super::GpuObjectId;
 
@@ -25,9 +25,7 @@ impl GpuObjectAllocator {
 
     /// Reserve one object slot from any thread.
     pub fn reserve(&self) -> GpuObjectId {
-        let mut free = self
-            .free
-            .lock();
+        let mut free = self.free.lock();
         if let Some(&raw) = free.iter().next() {
             free.remove(&raw);
             return GpuObjectId::from_raw(raw);
@@ -51,9 +49,7 @@ impl GpuObjectAllocator {
         if !id.is_valid() {
             return;
         }
-        let mut free = self
-            .free
-            .lock();
+        let mut free = self.free.lock();
         let inserted = free.insert(id.as_u32());
         debug_assert!(
             inserted,

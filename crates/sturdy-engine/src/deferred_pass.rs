@@ -387,7 +387,9 @@ impl DeferredPass {
             engine,
             time,
         )?;
-        Ok(DeferredOutput { motion_vectors: gbuffer_motion })
+        Ok(DeferredOutput {
+            motion_vectors: gbuffer_motion,
+        })
     }
 
     /// GPU-driven variant of [`draw_with_camera`](Self::draw_with_camera).
@@ -416,7 +418,9 @@ impl DeferredPass {
             engine,
             time,
         )?;
-        Ok(DeferredOutput { motion_vectors: gbuffer_motion })
+        Ok(DeferredOutput {
+            motion_vectors: gbuffer_motion,
+        })
     }
 
     /// Run the camera motion vector pass if attached, using the G-Buffer depth
@@ -593,7 +597,17 @@ impl DeferredPass {
         engine: &Engine,
         time: f32,
     ) -> Result<()> {
-        self.draw_gpu_driven_inner(scene, render_world, view, proj, previous_view_proj, output, frame, engine, time)?;
+        self.draw_gpu_driven_inner(
+            scene,
+            render_world,
+            view,
+            proj,
+            previous_view_proj,
+            output,
+            frame,
+            engine,
+            time,
+        )?;
         Ok(())
     }
 
@@ -724,7 +738,17 @@ impl DeferredPass {
         engine: &Engine,
         time: f32,
     ) -> Result<()> {
-        self.draw_impl(scene, None, view, proj, previous_view_proj, output, frame, engine, time)?;
+        self.draw_impl(
+            scene,
+            None,
+            view,
+            proj,
+            previous_view_proj,
+            output,
+            frame,
+            engine,
+            time,
+        )?;
         Ok(())
     }
 

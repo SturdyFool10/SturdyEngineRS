@@ -1460,7 +1460,8 @@ impl RenderGraph {
         for pass_index in order.iter().copied() {
             let pass = &self.passes[pass_index as usize];
             let mut pass_barriers = Vec::with_capacity(pass.reads.len() + pass.writes.len());
-            let mut pass_buffer_barriers = Vec::with_capacity(pass.buffer_reads.len() + pass.buffer_writes.len());
+            let mut pass_buffer_barriers =
+                Vec::with_capacity(pass.buffer_reads.len() + pass.buffer_writes.len());
 
             for usage in pass.reads.iter().chain(pass.writes.iter()) {
                 let key = ImageStateKey {

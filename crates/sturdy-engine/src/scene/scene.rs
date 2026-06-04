@@ -1001,9 +1001,8 @@ impl Scene {
             // on the frame before calling so the bind-group builder picks them up.
             // Note: with the material table (bindless path), per-bin bindings go
             // away and this becomes a pure single-descriptor-set pass.
-            let mut bin_items: Vec<MultiMeshDrawBinItem<'_>> = Vec::with_capacity(
-                self.gpu_draw_bins.bins.len()
-            );
+            let mut bin_items: Vec<MultiMeshDrawBinItem<'_>> =
+                Vec::with_capacity(self.gpu_draw_bins.bins.len());
             for (bin_index, bin) in self.gpu_draw_bins.bins.iter().enumerate() {
                 let mesh_idx = bin.key.mesh.index();
                 let Some((mesh, _)) = self.meshes.get(mesh_idx) else {

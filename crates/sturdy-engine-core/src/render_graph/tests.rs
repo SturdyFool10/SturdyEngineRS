@@ -1663,12 +1663,18 @@ fn showcase_upload_push_constants_multi_queue_and_aliasing_plan() {
                 continue;
             }
             // Find the batch that contains this pass (the acquire side).
-            let acquire_batch = compiled.batches.iter().enumerate()
+            let acquire_batch = compiled
+                .batches
+                .iter()
+                .enumerate()
                 .find(|(_, batch)| batch.pass_indices.contains(&(pass_idx as u32)))
                 .map(|(i, _)| i)
                 .expect("every pass belongs to a batch");
             // Find the source batch (before_queue).
-            let source_batch = compiled.batches.iter().enumerate()
+            let source_batch = compiled
+                .batches
+                .iter()
+                .enumerate()
                 .rev()
                 .find(|(_, batch)| {
                     batch.queue == barrier.before_queue

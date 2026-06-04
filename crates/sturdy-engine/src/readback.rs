@@ -62,7 +62,12 @@ impl ReadbackBuffer {
     /// Read a slice of `T` values starting at byte `offset`.
     ///
     /// Panics if the requested range exceeds the buffer size.
-    pub fn read_slice<T: bytemuck::Pod>(&self, engine: &Engine, offset: u64, count: usize) -> Result<Vec<T>> {
+    pub fn read_slice<T: bytemuck::Pod>(
+        &self,
+        engine: &Engine,
+        offset: u64,
+        count: usize,
+    ) -> Result<Vec<T>> {
         let elem_size = std::mem::size_of::<T>() as u64;
         let total = elem_size * count as u64;
         assert!(
@@ -98,7 +103,10 @@ impl Engine {
     }
 
     /// Create a `ReadbackBuffer` large enough to hold `count` elements of type `T`.
-    pub fn create_readback_buffer_for<T: bytemuck::Pod>(&self, count: usize) -> Result<ReadbackBuffer> {
+    pub fn create_readback_buffer_for<T: bytemuck::Pod>(
+        &self,
+        count: usize,
+    ) -> Result<ReadbackBuffer> {
         self.create_readback_buffer((std::mem::size_of::<T>() * count) as u64)
     }
 }

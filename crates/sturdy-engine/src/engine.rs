@@ -1,8 +1,5 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-};
 use parking_lot::Mutex;
+use std::{collections::HashMap, sync::Arc};
 
 use sturdy_engine_core as core;
 
@@ -16,9 +13,9 @@ use crate::{
     GraphicsPipelineDesc, Image, ImageDesc, ImageUsage, MeshPrimitive, NativeHandleCapabilities,
     Pipeline, PipelineLayout, RayTracingPipelineDesc, RayTracingShaderBindingTable, RenderFrame,
     Result, Sampler, SamplerDesc, SamplerPreset, Shader, ShaderBindingTableDesc, ShaderDesc,
-    ShaderName, ShaderObject, ShaderProgram, ShaderProgramDesc, ShaderReflection, ShaderSource, ShaderStage,
-    SlangEntryPoints, Surface, SurfaceHdrPreference, SurfaceImage, SurfaceSize, TextureUploadDesc,
-    TlasBuildDesc, asset_loader, engine_global, mesh_loader, sampler_catalog,
+    ShaderName, ShaderObject, ShaderProgram, ShaderProgramDesc, ShaderReflection, ShaderSource,
+    ShaderStage, SlangEntryPoints, Surface, SurfaceHdrPreference, SurfaceImage, SurfaceSize,
+    TextureUploadDesc, TlasBuildDesc, asset_loader, engine_global, mesh_loader, sampler_catalog,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -222,25 +219,12 @@ impl Engine {
     /// Graph image cache, texture cache, pending uploads, and global resource
     /// registries all hold GPU handles that are invalid after the backend is rebuilt.
     pub(crate) fn clear_caches_after_backend_restart(&self) {
-        *self
-            .graph_image_cache
-            .lock() = HashMap::new();
-        *self
-            .texture_cache
-            .lock() = HashMap::new();
-        *self
-            .pending_uploads
-            .lock() = Vec::new();
-        self.global_buffers
-            .lock()
-            .clear();
-        self.global_images
-            .lock()
-            .clear();
-        self.bind_group_cache
-            .lock()
-            .entries
-            .clear();
+        *self.graph_image_cache.lock() = HashMap::new();
+        *self.texture_cache.lock() = HashMap::new();
+        *self.pending_uploads.lock() = Vec::new();
+        self.global_buffers.lock().clear();
+        self.global_images.lock().clear();
+        self.bind_group_cache.lock().entries.clear();
     }
 
     /// Rebuild the sampler catalog against the current (new) backend.
@@ -277,9 +261,7 @@ impl Engine {
     pub(crate) fn advance_bind_group_frame(&self) {
         use std::sync::atomic::Ordering;
         let frame = self.frame_index.fetch_add(1, Ordering::Relaxed) + 1;
-        self.bind_group_cache
-            .lock()
-            .evict_stale(frame);
+        self.bind_group_cache.lock().evict_stale(frame);
     }
 
     /// Current frame index used for bind group cache TTL tracking.
@@ -302,7 +284,12 @@ impl Engine {
     ///
     /// Re-registering an existing name replaces the old entry (useful after a
     /// buffer resize).  Cleared automatically on backend restart.
-    pub fn register_global_buffer(&self, name: impl Into<String>, handle: core::BufferHandle, desc: BufferDesc) {
+    pub fn register_global_buffer(
+        &self,
+        name: impl Into<String>,
+        handle: core::BufferHandle,
+        desc: BufferDesc,
+    ) {
         self.global_buffers
             .lock()
             .insert(name.into(), (handle, desc));
@@ -311,7 +298,12 @@ impl Engine {
     /// Register a named image for automatic reflection-driven binding.
     ///
     /// Works like [`register_global_buffer`] but for images.
-    pub fn register_global_image(&self, name: impl Into<String>, handle: core::ImageHandle, desc: ImageDesc) {
+    pub fn register_global_image(
+        &self,
+        name: impl Into<String>,
+        handle: core::ImageHandle,
+        desc: ImageDesc,
+    ) {
         self.global_images
             .lock()
             .insert(name.into(), (handle, desc));
@@ -319,32 +311,22 @@ impl Engine {
 
     /// Un-register a previously registered named buffer.
     pub fn unregister_global_buffer(&self, name: &str) {
-        self.global_buffers
-            .lock()
-            .remove(name);
+        self.global_buffers.lock().remove(name);
     }
 
     /// Un-register a previously registered named image.
     pub fn unregister_global_image(&self, name: &str) {
-        self.global_images
-            .lock()
-            .remove(name);
+        self.global_images.lock().remove(name);
     }
 
     /// Look up a globally registered buffer by name.
     pub fn global_buffer(&self, name: &str) -> Option<(core::BufferHandle, BufferDesc)> {
-        self.global_buffers
-            .lock()
-            .get(name)
-            .copied()
+        self.global_buffers.lock().get(name).copied()
     }
 
     /// Look up a globally registered image by name.
     pub fn global_image(&self, name: &str) -> Option<(core::ImageHandle, ImageDesc)> {
-        self.global_images
-            .lock()
-            .get(name)
-            .copied()
+        self.global_images.lock().get(name).copied()
     }
 
     // ── Global accessor ───────────────────────────────────────────────────────
@@ -428,7 +410,11 @@ impl Engine {
     /// requirements documented by `Device::import_external_image`.
     pub unsafe fn import_external_image(&self, desc: ExternalImageDesc) -> Result<Image> {
         let handle = unsafe { self.device.import_external_image(desc)? };
-        Ok(Image::without_bindless(self.device.clone(), handle, desc.desc))
+        Ok(Image::without_bindless(
+            self.device.clone(),
+            handle,
+            desc.desc,
+        ))
     }
 
     pub fn create_buffer(&self, desc: BufferDesc) -> Result<Buffer> {
@@ -458,7 +444,9 @@ impl Engine {
     /// etc.); `COPY_DST` is added automatically for the staging transfer.
     pub fn create_gpu_buffer(&self, data: &[u8], usage: BufferUsage) -> Result<Buffer> {
         if data.is_empty() {
-            return Err(Error::InvalidInput("create_gpu_buffer: data must not be empty".into()));
+            return Err(Error::InvalidInput(
+                "create_gpu_buffer: data must not be empty".into(),
+            ));
         }
         let dst = self.create_buffer(BufferDesc {
             size: data.len() as u64,
@@ -673,9 +661,7 @@ impl Engine {
     }
 
     pub fn evict_cached_graph_images_with_prefix(&self, name_prefix: &str) {
-        let mut cache = self
-            .graph_image_cache
-            .lock();
+        let mut cache = self.graph_image_cache.lock();
         cache.retain(|key, _| !key.name().starts_with(name_prefix));
     }
 
@@ -685,9 +671,7 @@ impl Engine {
         desc: ImageDesc,
     ) -> Result<(core::ImageHandle, ImageDesc)> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut cache = self
-            .graph_image_cache
-            .lock();
+        let mut cache = self.graph_image_cache.lock();
         if let Some(image) = cache.get(&key) {
             return Ok((image.handle(), image.desc()));
         }
@@ -802,11 +786,7 @@ impl Engine {
     pub fn begin_frame(&self) -> Result<Frame> {
         // Try to reuse a reset staging arena from the pool to avoid per-frame
         // HOST_VISIBLE vkAllocateMemory calls.
-        let upload_arena = self
-            .staging_pool
-            .lock()
-            .pop()
-            .unwrap_or_default();
+        let upload_arena = self.staging_pool.lock().pop().unwrap_or_default();
         Ok(Frame {
             engine: self.clone(),
             inner: self.device.begin_frame()?,
@@ -893,18 +873,14 @@ impl Engine {
         // the caller waits via `with()` or polls `is_ready()` each frame.
         {
             //panic allowed, reason = "poisoned internal texture cache is unrecoverable"
-            let cache = self
-                .texture_cache
-                .lock();
+            let cache = self.texture_cache.lock();
             if let Some(handle) = cache.get(&key) {
                 return handle.clone();
             }
         }
         let handle = asset_loader::load_texture_2d_async(&path, self.pending_uploads.clone());
         //panic allowed, reason = "poisoned internal texture cache is unrecoverable"
-        self.texture_cache
-            .lock()
-            .insert(key, handle.clone());
+        self.texture_cache.lock().insert(key, handle.clone());
         handle
     }
 
@@ -959,9 +935,7 @@ impl Engine {
 
         let uploads: Vec<asset_loader::PendingUpload> = {
             //panic allowed, reason = "poisoned internal pending upload queue is unrecoverable"
-            let mut lock = self
-                .pending_uploads
-                .lock();
+            let mut lock = self.pending_uploads.lock();
             std::mem::take(&mut *lock)
         };
         if uploads.is_empty() {
@@ -977,7 +951,7 @@ impl Engine {
                 format: u.format,
                 usage: ImageUsage::SAMPLED,
                 prefer_compressed: true,
-            generate_mips: true,
+                generate_mips: true,
             };
             results.push(frame.upload_texture_2d(&u.name, desc, &u.data));
         }
@@ -1104,10 +1078,13 @@ impl Engine {
         if !self.caps().features.shader_object {
             return None;
         }
-        self.device.create_shader_object(desc).ok().map(|handle| ShaderObject {
-            device: self.device.clone(),
-            handle,
-        })
+        self.device
+            .create_shader_object(desc)
+            .ok()
+            .map(|handle| ShaderObject {
+                device: self.device.clone(),
+                handle,
+            })
     }
 
     /// Register a 2-D texture (sampled image) in the global bindless heap.

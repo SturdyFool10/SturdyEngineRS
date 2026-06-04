@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
 
 use crate::ecs::Transform;
 
@@ -72,9 +72,7 @@ impl RenderWorldCommands {
     }
 
     pub(super) fn take_all(&self) -> Vec<RenderWorldCommand> {
-        let mut queue = self
-            .queue
-            .lock();
+        let mut queue = self.queue.lock();
         std::mem::take(&mut *queue)
     }
 }

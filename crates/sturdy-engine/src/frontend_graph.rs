@@ -638,7 +638,10 @@ impl RenderFrame {
         inner.declaration_index = inner.declaration_index.saturating_add(1);
         let handle = buffer.handle();
         let desc = buffer.desc();
-        inner.frame.inner.graph_mut(|g| g.import_buffer(handle, desc))?;
+        inner
+            .frame
+            .inner
+            .graph_mut(|g| g.import_buffer(handle, desc))?;
         let pass_name = format!("{declaration_index:04}-fill-buffer");
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
@@ -688,7 +691,11 @@ impl RenderFrame {
         dst_offset: u64,
         size: u64,
     ) -> Result<()> {
-        let copy_size = if size == u64::MAX { src.desc().size } else { size };
+        let copy_size = if size == u64::MAX {
+            src.desc().size
+        } else {
+            size
+        };
         let src_handle = src.handle();
         let dst_handle = dst.handle();
         let src_desc = src.desc();
@@ -794,10 +801,7 @@ impl RenderFrame {
     /// // any subsequent pass whose shader declares `material_table` is wired up
     /// deferred.draw(&mut scene, view, proj, &hdr, &frame, &engine, time)?;
     /// ```
-    pub fn bind_material_table(
-        &self,
-        registry: &crate::MaterialRegistry,
-    ) -> &Self {
+    pub fn bind_material_table(&self, registry: &crate::MaterialRegistry) -> &Self {
         self.bind_buffer("material_table", registry.gpu_buffer())
     }
 
@@ -1035,7 +1039,12 @@ impl RenderFrame {
     fn is_pure_async_compute_eligible(&self, program: &ComputeProgram) -> bool {
         // On hardware without a dedicated async compute queue, AsyncCompute falls back to
         // the graphics queue anyway. Skip auto-routing only on the Null backend.
-        if !self.inner.borrow().engine.parallel_secondary_recording_supported() {
+        if !self
+            .inner
+            .borrow()
+            .engine
+            .parallel_secondary_recording_supported()
+        {
             return false;
         }
         // Fast path: profile is precomputed — no lock, no HashMap lookup.
@@ -2110,7 +2119,12 @@ impl<'a> ShaderPassIntent<'a> {
         self.compute_on_queue(program, groups, QueueType::AsyncCompute)
     }
 
-    fn compute_on_queue(self, program: &ComputeProgram, groups: [u32; 3], queue: QueueType) -> Result<()> {
+    fn compute_on_queue(
+        self,
+        program: &ComputeProgram,
+        groups: [u32; 3],
+        queue: QueueType,
+    ) -> Result<()> {
         let target = self.target.ok_or_else(|| {
             Error::InvalidInput(format!(
                 "shader pass '{}' needs a target image before compute()",
@@ -3234,12 +3248,21 @@ impl GraphImage {
         inner.declaration_index = inner.declaration_index.saturating_add(1);
 
         // Import the primary and additional render targets.
-        inner.frame.inner.graph_mut(|g| g.import_image(self.handle, self.desc))?;
+        inner
+            .frame
+            .inner
+            .graph_mut(|g| g.import_image(self.handle, self.desc))?;
         for t in additional_targets {
-            inner.frame.inner.graph_mut(|g| g.import_image(t.handle, t.desc))?;
+            inner
+                .frame
+                .inner
+                .graph_mut(|g| g.import_image(t.handle, t.desc))?;
         }
         if let Some(d) = depth {
-            inner.frame.inner.graph_mut(|g| g.import_image(d.handle, d.desc))?;
+            inner
+                .frame
+                .inner
+                .graph_mut(|g| g.import_image(d.handle, d.desc))?;
         }
 
         // Import all mesh geometry + indirect buffers across all items.
@@ -3247,10 +3270,16 @@ impl GraphImage {
         let mut work_items: Vec<MultiMeshIndirectDrawItem> = Vec::with_capacity(items.len());
         for item in items {
             inner.frame.inner.graph_mut(|g| {
-                g.import_buffer(item.mesh.vertex_buffer.handle(), item.mesh.vertex_buffer.desc())
+                g.import_buffer(
+                    item.mesh.vertex_buffer.handle(),
+                    item.mesh.vertex_buffer.desc(),
+                )
             })?;
             if let Some(ib) = &item.mesh.index_buffer {
-                inner.frame.inner.graph_mut(|g| g.import_buffer(ib.handle(), ib.desc()))?;
+                inner
+                    .frame
+                    .inner
+                    .graph_mut(|g| g.import_buffer(ib.handle(), ib.desc()))?;
             }
             inner.frame.inner.graph_mut(|g| {
                 g.import_buffer(item.indirect_buffer.handle(), item.indirect_buffer.desc())
@@ -3278,18 +3307,23 @@ impl GraphImage {
                 offset: 0,
                 size: item.indirect_buffer.desc().size,
             });
-            const INDIRECT_STRIDE: u32 = std::mem::size_of::<crate::DrawIndexedIndirectCommand>() as u32;
+            const INDIRECT_STRIDE: u32 =
+                std::mem::size_of::<crate::DrawIndexedIndirectCommand>() as u32;
             work_items.push(MultiMeshIndirectDrawItem {
                 vertex_buffer: VertexBufferBinding {
                     buffer: item.mesh.vertex_buffer.handle(),
                     binding: 0,
                     offset: 0,
                 },
-                index_buffer: item.mesh.index_buffer.as_ref().map(|ib| IndexBufferBinding {
-                    buffer: ib.handle(),
-                    offset: 0,
-                    format: item.mesh.index_format,
-                }),
+                index_buffer: item
+                    .mesh
+                    .index_buffer
+                    .as_ref()
+                    .map(|ib| IndexBufferBinding {
+                        buffer: ib.handle(),
+                        offset: 0,
+                        format: item.mesh.index_format,
+                    }),
                 indirect_buffer: item.indirect_buffer.handle(),
                 indirect_offset: item.indirect_offset,
                 max_draw_count: item.draw_count,
@@ -3331,20 +3365,34 @@ impl GraphImage {
         for name in &mesh_read_names {
             if name != &self.name {
                 if let Some(record) = inner.images_by_name.get(name.as_str()).copied() {
-                    inner.frame.inner.graph_mut(|g| g.import_image(record.handle, record.desc))?;
+                    inner
+                        .frame
+                        .inner
+                        .graph_mut(|g| g.import_image(record.handle, record.desc))?;
                 }
             }
         }
         let (eager_bindings, unresolved_read_names, eager_uses) =
             split_read_names(&mesh_read_names, &self.name, &inner.images_by_name);
 
-        let pass_name = format!("{declaration_index:04}-multi-mesh-indirect-mrt-{}", self.name);
+        let pass_name = format!(
+            "{declaration_index:04}-multi-mesh-indirect-mrt-{}",
+            self.name
+        );
         inner.pass_records.push(PassRecord {
             name: pass_name.clone(),
             kind: PassKind::Mesh,
             queue: core::QueueType::Graphics,
             reads: eager_uses.clone(),
-            writes: writes.iter().map(|w| crate::ImageUse { image: w.image, access: w.access, state: w.state, subresource: w.subresource }).collect(),
+            writes: writes
+                .iter()
+                .map(|w| crate::ImageUse {
+                    image: w.image,
+                    access: w.access,
+                    state: w.state,
+                    subresource: w.subresource,
+                })
+                .collect(),
             buffer_read_names: reflected_buffer_read_names(program.reflection()),
             buffer_write_names: reflected_buffer_write_names(program.reflection()),
             deferred_read_names: unresolved_read_names.clone(),
@@ -3354,11 +3402,15 @@ impl GraphImage {
         // Snapshot eager buffer bindings for the deferred resolve.
         let buf_read_names = reflected_buffer_read_names(program.reflection());
         let buf_write_names = reflected_buffer_write_names(program.reflection());
-        let mut eager_buffers: HashMap<String, (core::BufferHandle, crate::BufferDesc)> = HashMap::new();
+        let mut eager_buffers: HashMap<String, (core::BufferHandle, crate::BufferDesc)> =
+            HashMap::new();
         for n in buf_read_names.iter().chain(buf_write_names.iter()) {
             if let Some(&(handle, desc)) = inner.buffers_by_name.get(n.as_str()) {
                 eager_buffers.insert(n.clone(), (handle, desc));
-                inner.frame.inner.graph_mut(|g| g.import_buffer(handle, desc))?;
+                inner
+                    .frame
+                    .inner
+                    .graph_mut(|g| g.import_buffer(handle, desc))?;
             }
         }
 
@@ -3371,7 +3423,9 @@ impl GraphImage {
                 bind_groups: Vec::new(),
                 push_constants,
                 pipeline_shading_rate: None,
-                work: PassWork::MultiMeshIndirectDraw(MultiMeshIndirectDrawDesc { items: work_items }),
+                work: PassWork::MultiMeshIndirectDraw(MultiMeshIndirectDrawDesc {
+                    items: work_items,
+                }),
                 reads: eager_uses,
                 writes,
                 buffer_reads,
@@ -4313,8 +4367,15 @@ fn record_compute_shader_pass(
     explicit: ExplicitPassResources,
 ) -> Result<()> {
     record_compute_shader_pass_on_queue(
-        frame, pass_name_override, target, program, push_constants,
-        groups, target_binding_name, explicit, QueueType::Compute,
+        frame,
+        pass_name_override,
+        target,
+        program,
+        push_constants,
+        groups,
+        target_binding_name,
+        explicit,
+        QueueType::Compute,
     )
 }
 
@@ -4329,8 +4390,15 @@ fn record_compute_shader_pass_async(
     explicit: ExplicitPassResources,
 ) -> Result<()> {
     record_compute_shader_pass_on_queue(
-        frame, pass_name_override, target, program, push_constants,
-        groups, target_binding_name, explicit, QueueType::AsyncCompute,
+        frame,
+        pass_name_override,
+        target,
+        program,
+        push_constants,
+        groups,
+        target_binding_name,
+        explicit,
+        QueueType::AsyncCompute,
     )
 }
 

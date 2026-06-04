@@ -5,14 +5,8 @@
 //! it establishes the engine-owned types and access patterns without changing
 //! the existing application shell behavior yet.
 
-use std::{
-    collections::HashMap,
-    fmt,
-    path::PathBuf,
-    sync::Arc,
-    time::Instant,
-};
 use parking_lot::Mutex;
+use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc, time::Instant};
 
 use crate::{
     BackendFeature, BackendKind, Engine, Error, Format, FrameClock, FrameTime, GraphImage,
@@ -158,6 +152,17 @@ impl AppRuntime {
         &mut self.strategy_selector
     }
 
+    pub(crate) fn apply_render_strategy_runtime_settings(
+        &mut self,
+        controller: &RuntimeController,
+    ) {
+        let target_frame_ms = controller
+            .float_setting(RuntimeSettingKey::TargetFrameMs)
+            .and_then(|ms| (ms > 0.0).then_some(ms as f32));
+        self.strategy_selector.set_target_frame_ms(target_frame_ms);
+    }
+
+    /// Current adaptive render strategy for this frame.
     /// Return the current frame render strategy.
     ///
     /// Updated automatically each frame when a target frame time is set.
@@ -1151,10 +1156,7 @@ impl RuntimeController {
     /// Return the current runtime settings snapshot.
     pub fn settings(&self) -> RuntimeSettingsSnapshot {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.shared
-            .lock()
-            .settings
-            .clone()
+        self.shared.lock().settings.clone()
     }
 
     /// Begin a transaction that can update runtime settings coherently.
@@ -1178,9 +1180,7 @@ impl RuntimeController {
         }
 
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut shared = self
-            .shared
-            .lock();
+        let mut shared = self.shared.lock();
         if shared.setting_entries.contains_key(&id) {
             return Err(Error::InvalidInput(format!(
                 "runtime setting `{}` is already registered",
@@ -1228,11 +1228,7 @@ impl RuntimeController {
     /// Return one registered runtime setting, including menu metadata.
     pub fn setting_entry(&self, id: impl Into<RuntimeSettingId>) -> Option<RuntimeSettingEntry> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.shared
-            .lock()
-            .setting_entries
-            .get(&id.into())
-            .cloned()
+        self.shared.lock().setting_entries.get(&id.into()).cloned()
     }
 
     /// Return every registered runtime setting.
@@ -1279,9 +1275,7 @@ impl RuntimeController {
     /// Return the current settings change serial.
     pub fn settings_revision(&self) -> u64 {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.shared
-            .lock()
-            .settings_revision
+        self.shared.lock().settings_revision
     }
 
     /// Return every settings change recorded after `revision`.
@@ -1299,9 +1293,7 @@ impl RuntimeController {
     /// Return the current apply-notification revision.
     pub fn apply_notifications_revision(&self) -> u64 {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.shared
-            .lock()
-            .apply_notifications_revision
+        self.shared.lock().apply_notifications_revision
     }
 
     /// Return apply notifications recorded after `revision`.
@@ -1322,10 +1314,7 @@ impl RuntimeController {
     /// Return the most recent runtime apply report, if any transaction has run.
     pub fn last_apply_report(&self) -> Option<RuntimeApplyReport> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.shared
-            .lock()
-            .last_apply_report
-            .clone()
+        self.shared.lock().last_apply_report.clone()
     }
 
     /// Return the current runtime diagnostics snapshot.
@@ -1334,9 +1323,7 @@ impl RuntimeController {
     /// diagnostics reported via `report_shader_compile_error` / `report_asset_state`.
     pub fn diagnostics(&self) -> RuntimeDiagnostics {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let shared = self
-            .shared
-            .lock();
+        let shared = self.shared.lock();
         let mut diag = shared.diagnostics.clone();
         diag.shader_compile_errors = shared
             .shader_compile_errors
@@ -1397,10 +1384,7 @@ impl RuntimeController {
     /// Clear all shader compile errors.
     pub fn clear_all_shader_compile_errors(&self) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.shared
-            .lock()
-            .shader_compile_errors
-            .clear();
+        self.shared.lock().shader_compile_errors.clear();
     }
 
     /// Report or update the health state for a monitored asset path.
@@ -1409,11 +1393,7 @@ impl RuntimeController {
     /// `diagnostics().asset_diagnostics` so only problems are surfaced.
     pub fn report_asset_state(&self, path: impl Into<PathBuf>, state: AssetState) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let _ = self
-            .shared
-            .lock()
-            .asset_states
-            .insert(path.into(), state);
+        let _ = self.shared.lock().asset_states.insert(path.into(), state);
     }
 
     /// Check whether a file path exists and report `Missing` or `Ok` accordingly.
@@ -1440,11 +1420,7 @@ impl RuntimeController {
     /// Remove the tracked state for an asset path (stops monitoring it).
     pub fn unregister_asset_path(&self, path: impl Into<PathBuf>) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let _ = self
-            .shared
-            .lock()
-            .asset_states
-            .remove(&path.into());
+        let _ = self.shared.lock().asset_states.remove(&path.into());
     }
 
     /// Format a `GraphReport` as a multi-line human-readable string for debugging.
@@ -1551,17 +1527,12 @@ impl RuntimeController {
     /// Return the current overlay text lines.
     pub fn overlay_lines(&self) -> Vec<String> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.shared
-            .lock()
-            .overlay_lines
-            .clone()
+        self.shared.lock().overlay_lines.clone()
     }
 
     pub(crate) fn set_settings(&self, settings: RuntimeSettingsSnapshot) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut shared = self
-            .shared
-            .lock();
+        let mut shared = self.shared.lock();
         shared.sync_engine_snapshot(&settings);
         shared.settings = settings;
     }
@@ -1579,25 +1550,18 @@ impl RuntimeController {
 
     pub(crate) fn update_diagnostics(&self, f: impl FnOnce(&mut RuntimeDiagnostics)) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut shared = self
-            .shared
-            .lock();
+        let mut shared = self.shared.lock();
         f(&mut shared.diagnostics);
     }
 
     pub(crate) fn set_overlay_lines(&self, lines: Vec<String>) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.shared
-            .lock()
-            .overlay_lines = lines;
+        self.shared.lock().overlay_lines = lines;
     }
 
     pub(crate) fn clear_overlay_lines(&self) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.shared
-            .lock()
-            .overlay_lines
-            .clear();
+        self.shared.lock().overlay_lines.clear();
     }
 
     pub(crate) fn record_runtime_apply_report(&self, report: RuntimeApplyReport) {
@@ -1605,14 +1569,12 @@ impl RuntimeController {
             return;
         }
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.shared
-            .lock()
-            .record_apply_report(report);
+        self.shared.lock().record_apply_report(report);
     }
 }
 
 /// Snapshot of the current runtime settings.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeSettingsSnapshot {
     pub backend: BackendKind,
     pub browser_backend: String,
@@ -1625,6 +1587,9 @@ pub struct RuntimeSettingsSnapshot {
     pub max_frames_in_flight: u32,
     pub threaded_input_mode: String,
     pub render_threading_mode: String,
+    /// Target GPU frame time for adaptive render strategy, in milliseconds.
+    /// `None` disables timing-driven quality adaptation.
+    pub target_frame_ms: Option<f32>,
     pub surface_size: SurfaceSize,
     pub window_title: String,
     pub window_size: SurfaceSize,
@@ -1653,6 +1618,7 @@ impl Default for RuntimeSettingsSnapshot {
             max_frames_in_flight: 2,
             threaded_input_mode: "Auto".to_string(),
             render_threading_mode: "Auto".to_string(),
+            target_frame_ms: None,
             surface_size: SurfaceSize {
                 width: 1,
                 height: 1,
@@ -2006,6 +1972,10 @@ impl RuntimeShared {
             RuntimeSettingValue::Text(settings.render_threading_mode.clone()),
         );
         self.sync_engine_value(
+            RuntimeSettingKey::TargetFrameMs,
+            RuntimeSettingValue::Float(settings.target_frame_ms.unwrap_or(0.0) as f64),
+        );
+        self.sync_engine_value(
             RuntimeSettingKey::WindowTitle,
             RuntimeSettingValue::Text(settings.window_title.clone()),
         );
@@ -2335,6 +2305,24 @@ fn clamp_runtime_setting_value(
                 )
             }
         }
+        (
+            RuntimeSettingId::Engine(RuntimeSettingKey::TargetFrameMs),
+            RuntimeSettingValue::Float(requested),
+        ) => {
+            const MIN_TARGET_FRAME_MS: f64 = 0.0;
+            const MAX_TARGET_FRAME_MS: f64 = 1000.0;
+            let clamped = requested.clamp(MIN_TARGET_FRAME_MS, MAX_TARGET_FRAME_MS);
+            if clamped == requested {
+                (RuntimeSettingValue::Float(requested), None)
+            } else {
+                (
+                    RuntimeSettingValue::Float(clamped),
+                    Some(format!(
+                        "requested {requested}, allowed range is {MIN_TARGET_FRAME_MS}..={MAX_TARGET_FRAME_MS}; 0 disables adaptive strategy"
+                    )),
+                )
+            }
+        }
         (_, value) => (value, None),
     }
 }
@@ -2354,6 +2342,10 @@ fn sync_runtime_settings_snapshot_value(
             RuntimeSettingValue::Text(policy),
         ) => settings.asset_hot_reload_policy = policy.clone(),
         (
+            RuntimeSettingId::Engine(RuntimeSettingKey::TargetFrameMs),
+            RuntimeSettingValue::Float(ms),
+        ) => settings.target_frame_ms = (*ms > 0.0).then_some(*ms as f32),
+        (
             RuntimeSettingId::Engine(RuntimeSettingKey::LogLevel),
             RuntimeSettingValue::Text(level),
         ) => {
@@ -2372,18 +2364,14 @@ pub struct DebugImageRegistry {
 impl DebugImageRegistry {
     pub fn clear(&self) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.names
-            .lock()
-            .clear();
+        self.names.lock().clear();
     }
 
     pub fn register(&self, image: &GraphImage, name: impl Into<String>) {
         let name = name.into();
         image.register_as(name.clone());
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut names = self
-            .names
-            .lock();
+        let mut names = self.names.lock();
         if !names.iter().any(|existing| existing == &name) {
             names.push(name);
         }
@@ -2391,9 +2379,7 @@ impl DebugImageRegistry {
 
     pub fn names(&self) -> Vec<String> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.names
-            .lock()
-            .clone()
+        self.names.lock().clone()
     }
 }
 
@@ -2646,6 +2632,7 @@ pub enum RuntimeSettingKey {
     MaxFramesInFlight,
     ThreadedInputMode,
     RenderThreadingMode,
+    TargetFrameMs,
     WindowTitle,
     WindowWidth,
     WindowHeight,
@@ -2688,6 +2675,7 @@ impl RuntimeSettingKey {
             Self::MaxFramesInFlight,
             Self::ThreadedInputMode,
             Self::RenderThreadingMode,
+            Self::TargetFrameMs,
             Self::WindowTitle,
             Self::WindowWidth,
             Self::WindowHeight,
@@ -2751,6 +2739,7 @@ impl RuntimeSettingKey {
             | Self::MaxFramesInFlight
             | Self::ThreadedInputMode
             | Self::RenderThreadingMode
+            | Self::TargetFrameMs
             | Self::LogLevel => RuntimeApplyPath::Immediate,
         }
     }
@@ -2768,6 +2757,7 @@ impl RuntimeSettingKey {
             Self::MaxFramesInFlight => "max_frames_in_flight",
             Self::ThreadedInputMode => "threaded_input_mode",
             Self::RenderThreadingMode => "render_threading_mode",
+            Self::TargetFrameMs => "target_frame_ms",
             Self::WindowTitle => "window_title",
             Self::WindowWidth => "window_width",
             Self::WindowHeight => "window_height",
@@ -2808,6 +2798,7 @@ impl RuntimeSettingKey {
             Self::MaxFramesInFlight => "max frames in flight",
             Self::ThreadedInputMode => "threaded input mode",
             Self::RenderThreadingMode => "render threading mode",
+            Self::TargetFrameMs => "target frame time",
             Self::WindowTitle => "window title",
             Self::WindowWidth => "window width",
             Self::WindowHeight => "window height",
@@ -2987,10 +2978,7 @@ impl<'a> RuntimeSettingsTransaction<'a> {
     /// Apply the pending transaction.
     pub fn apply(self) -> Result<RuntimeApplyReport> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut shared = self
-            .controller
-            .shared
-            .lock();
+        let mut shared = self.controller.shared.lock();
         let mut report = RuntimeApplyReport::default();
         for pending in self.pending {
             let result = match pending {
@@ -3137,6 +3125,13 @@ fn default_setting_entries(
             "ParallelCommandRecording",
             "MultiQueueExperimental",
         ])),
+        RuntimeSettingDescriptor::new(
+            RuntimeSettingKey::TargetFrameMs,
+            "Target Frame Time (ms)",
+            RuntimeSettingKey::TargetFrameMs.apply_path(),
+            settings.target_frame_ms.unwrap_or(0.0) as f64,
+        )
+        .with_description("GPU frame-time budget for adaptive render strategy. Set to 0 to disable automatic quality scaling."),
         RuntimeSettingDescriptor::new(
             RuntimeSettingKey::WindowTitle,
             "Window Title",
@@ -3588,7 +3583,14 @@ pub struct FrameStats {
 
 impl FrameStats {
     fn zero() -> Self {
-        Self { min: 0.0, max: 0.0, mean: 0.0, p50: 0.0, p95: 0.0, p99: 0.0 }
+        Self {
+            min: 0.0,
+            max: 0.0,
+            mean: 0.0,
+            p50: 0.0,
+            p95: 0.0,
+            p99: 0.0,
+        }
     }
 
     fn from_samples(samples: &[f32]) -> Self {
@@ -3604,7 +3606,14 @@ impl FrameStats {
         let p50 = sorted[(n as f32 * 0.5) as usize];
         let p95 = sorted[((n - 1) as f32 * 0.95) as usize];
         let p99 = sorted[((n - 1) as f32 * 0.99) as usize];
-        Self { min, max, mean, p50, p95, p99 }
+        Self {
+            min,
+            max,
+            mean,
+            p50,
+            p95,
+            p99,
+        }
     }
 }
 
@@ -3631,7 +3640,10 @@ struct BenchmarkSession {
 
 impl BenchmarkSession {
     fn new() -> Self {
-        Self { frames: Vec::new(), next_frame_index: 0 }
+        Self {
+            frames: Vec::new(),
+            next_frame_index: 0,
+        }
     }
 
     fn record(&mut self, sample: BenchmarkFrameSample) {
@@ -3654,7 +3666,10 @@ impl BenchmarkSession {
         let mut pass_map: std::collections::HashMap<String, Vec<f32>> = Default::default();
         for frame in &self.frames {
             for pass in &frame.pass_timings {
-                pass_map.entry(pass.name.clone()).or_default().push(pass.gpu_ms);
+                pass_map
+                    .entry(pass.name.clone())
+                    .or_default()
+                    .push(pass.gpu_ms);
             }
         }
         BenchmarkReport {

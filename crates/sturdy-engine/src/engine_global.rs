@@ -1,5 +1,5 @@
-use std::sync::OnceLock;
 use parking_lot::Mutex;
+use std::sync::OnceLock;
 
 use crate::{Engine, FrameTimingReport};
 
@@ -28,12 +28,9 @@ pub(crate) fn is_engine_set() -> bool {
 }
 
 pub(crate) fn set_frame_timing(report: FrameTimingReport) {
-    *frame_timing_cell()
-        .lock() = Some(report);
+    *frame_timing_cell().lock() = Some(report);
 }
 
 pub(crate) fn frame_timing() -> Option<FrameTimingReport> {
-    frame_timing_cell()
-        .lock()
-        .clone()
+    frame_timing_cell().lock().clone()
 }

@@ -976,7 +976,12 @@ pub fn compile_and_reflect(
                     }
                     _ => None,
                 };
-                (ShaderSource::Spirv(words), inputs, ws, compute_info.wave_ops_used)
+                (
+                    ShaderSource::Spirv(words),
+                    inputs,
+                    ws,
+                    compute_info.wave_ops_used,
+                )
             }
             ShaderTarget::Dxil => (ShaderSource::Dxil(code_bytes), Vec::new(), None, false),
             ShaderTarget::Msl => (ShaderSource::Msl(code_bytes), Vec::new(), None, false),

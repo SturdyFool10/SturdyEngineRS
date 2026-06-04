@@ -15,7 +15,7 @@ use sturdy_engine::{
     AntiAliasingConfig, AntiAliasingDial, AntiAliasingPass, AppRuntime, AppRuntimeFrame,
     AutoExposureConfig, AutoExposurePass, BloomConfig, BloomPass, CpuProceduralTexture2d,
     DebugOverlay, DebugOverlayRenderer, DebugViewPicker, Engine, Error, Extent3d, Format,
-    GraphImageHistory, GpuProceduralTexture, HdrPipelineDesc, HdrPreference, ImageDesc,
+    GpuProceduralTexture, GraphImageHistory, HdrPipelineDesc, HdrPreference, ImageDesc,
     ImageDimension, ImageUsage, KeyInput, KeyInputState, KeyModifier, KeyToken, MotionVectorLayer,
     MotionVectorSpace, ProceduralTextureRecipe, ProceduralTextureUpdatePolicy,
     Result as EngineResult, RuntimeApp, RuntimeController, RuntimeMotionVectorDesc,
@@ -699,10 +699,8 @@ impl RuntimeApp for Testbed {
         let scene_program = engine.load_shader(shader_path("shader_graph_fragment.slang"))?;
         let motion_program = engine.load_shader(shader_path("motion_vectors.slang"))?;
         let tonemap_program = engine.load_shader(shader_path("tonemap.slang"))?;
-        let pt_temporal_program =
-            engine.load_shader(shader_path("temporal_accumulate.slang"))?;
-        let pt_clear_program =
-            engine.load_shader(shader_path("temporal_clear_history.slang"))?;
+        let pt_temporal_program = engine.load_shader(shader_path("temporal_accumulate.slang"))?;
+        let pt_clear_program = engine.load_shader(shader_path("temporal_clear_history.slang"))?;
         let cornell_denoise_program = engine.load_shader(shader_path("cornell_denoise.slang"))?;
 
         let mut shader_watcher = ShaderWatcher::new();
@@ -919,8 +917,7 @@ impl RuntimeApp for Testbed {
                         "cornell_accumulation",
                         pt_history_desc,
                     )?;
-                    let cornell_sample_frame =
-                        pt_history.frame_index.min(u32::MAX as u64) as u32;
+                    let cornell_sample_frame = pt_history.frame_index.min(u32::MAX as u64) as u32;
                     let current_camera = self.path_tracer_camera.gpu_data();
                     let cornell_frame = cornell_rt_scene.draw(
                         frame,
@@ -952,7 +949,9 @@ impl RuntimeApp for Testbed {
 
                     // Temporal accumulation using the same pt_history acquired above.
                     if !pt_history.has_history {
-                        pt_history.write.execute_shader_auto(&self.pt_clear_program)?;
+                        pt_history
+                            .write
+                            .execute_shader_auto(&self.pt_clear_program)?;
                     }
                     cornell_frame.color.register_as("current_signal");
                     pt_history.read.register_as("history_signal");

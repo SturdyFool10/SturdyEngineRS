@@ -771,10 +771,7 @@ impl DescriptorRegistry {
 
     /// Return the Vulkan set index of the push-descriptor set for this layout,
     /// or `None` when the layout has no push-descriptor set.
-    pub fn pipeline_push_descriptor_set_index(
-        &self,
-        handle: PipelineLayoutHandle,
-    ) -> Option<u32> {
+    pub fn pipeline_push_descriptor_set_index(&self, handle: PipelineLayoutHandle) -> Option<u32> {
         self.layouts.get(&handle)?.push_descriptor_set_index
     }
 }
@@ -1194,14 +1191,20 @@ fn write_descriptor(
     Ok(())
 }
 
-fn image_descriptor_layout(descriptor_type: vk::DescriptorType, format: crate::Format) -> vk::ImageLayout {
+fn image_descriptor_layout(
+    descriptor_type: vk::DescriptorType,
+    format: crate::Format,
+) -> vk::ImageLayout {
     match descriptor_type {
         vk::DescriptorType::STORAGE_IMAGE => vk::ImageLayout::GENERAL,
         _ => {
             // Depth images used as sampled textures require DEPTH_STENCIL_READ_ONLY_OPTIMAL,
             // not SHADER_READ_ONLY_OPTIMAL.  Using the wrong layout triggers Vulkan validation
             // errors and may produce incorrect results on some hardware.
-            let is_depth = matches!(format, crate::Format::Depth32Float | crate::Format::Depth24Stencil8);
+            let is_depth = matches!(
+                format,
+                crate::Format::Depth32Float | crate::Format::Depth24Stencil8
+            );
             if is_depth {
                 vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL
             } else {
@@ -1368,7 +1371,10 @@ fn write_descriptor_to_buffer(
                     return;
                 }
             };
-            let fmt = resources.image_desc(img_handle).map(|d| d.format).unwrap_or(crate::Format::Rgba8Unorm);
+            let fmt = resources
+                .image_desc(img_handle)
+                .map(|d| d.format)
+                .unwrap_or(crate::Format::Rgba8Unorm);
             let image_info = vk::DescriptorImageInfo::default()
                 .image_view(view)
                 .image_layout(image_descriptor_layout(binding.descriptor_type, fmt));

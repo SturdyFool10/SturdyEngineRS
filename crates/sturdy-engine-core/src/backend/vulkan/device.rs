@@ -210,10 +210,11 @@ pub fn create_logical_device(
         .dynamic_rendering_local_read
         == vk::TRUE;
     let null_descriptor_enabled = feature_request.robustness2.null_descriptor == vk::TRUE;
-    let depth_clip_enable_enabled =
-        feature_request.depth_clip_enable.depth_clip_enable == vk::TRUE;
-    let shader_module_identifier_enabled =
-        feature_request.shader_module_identifier.shader_module_identifier == vk::TRUE;
+    let depth_clip_enable_enabled = feature_request.depth_clip_enable.depth_clip_enable == vk::TRUE;
+    let shader_module_identifier_enabled = feature_request
+        .shader_module_identifier
+        .shader_module_identifier
+        == vk::TRUE;
     // push_descriptors, conservative_rasterization, and global_queue_priority are extension-only
     // (no feature struct).
     // They are enabled if the extension was added to required_extensions by resolve().
@@ -545,7 +546,8 @@ impl FeatureRequest<'static> {
                 vk::PhysicalDeviceDynamicRenderingLocalReadFeaturesKHR::default(),
             robustness2: vk::PhysicalDeviceRobustness2FeaturesEXT::default(),
             depth_clip_enable: vk::PhysicalDeviceDepthClipEnableFeaturesEXT::default(),
-            shader_module_identifier: vk::PhysicalDeviceShaderModuleIdentifierFeaturesEXT::default(),
+            shader_module_identifier: vk::PhysicalDeviceShaderModuleIdentifierFeaturesEXT::default(
+            ),
             use_feature_chain: false,
             required_extensions: Vec::new(),
         };
@@ -956,7 +958,8 @@ impl FeatureRequest<'static> {
                 {
                     return false;
                 }
-                self.dynamic_rendering_local_read.dynamic_rendering_local_read = vk::TRUE;
+                self.dynamic_rendering_local_read
+                    .dynamic_rendering_local_read = vk::TRUE;
                 true
             }
             "null_descriptor" => {
@@ -1148,12 +1151,11 @@ impl FeatureRequest<'static> {
             "maintenance6" if api_version < vk::API_VERSION_1_4 => {
                 self.require_extension(ash::khr::maintenance6::NAME, available_extensions)?
             }
-            "dynamic_rendering_local_read" if api_version < vk::API_VERSION_1_4 => {
-                self.require_extension(
+            "dynamic_rendering_local_read" if api_version < vk::API_VERSION_1_4 => self
+                .require_extension(
                     ash::khr::dynamic_rendering_local_read::NAME,
                     available_extensions,
-                )?
-            }
+                )?,
             "null_descriptor" => {
                 self.require_extension(ash::ext::robustness2::NAME, available_extensions)?
             }
@@ -1320,7 +1322,11 @@ impl FeatureRequest<'static> {
             push_feature_chain(&mut self.features2, &mut self.maintenance6);
             self.use_feature_chain = true;
         }
-        if self.dynamic_rendering_local_read.dynamic_rendering_local_read == vk::TRUE {
+        if self
+            .dynamic_rendering_local_read
+            .dynamic_rendering_local_read
+            == vk::TRUE
+        {
             push_feature_chain(&mut self.features2, &mut self.dynamic_rendering_local_read);
             self.use_feature_chain = true;
         }

@@ -26,10 +26,10 @@
 // }
 // ```
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 use clay_ui::{GpuWorkQueue, RenderCommandKind, RenderData};
 
@@ -116,16 +116,12 @@ impl UiRenderer {
 
     /// Register an image for Clay `Image` commands with the matching `image_key`.
     pub fn set_image(&self, image_key: impl Into<String>, image: Arc<Image>) {
-        self.images
-            .write()
-            .insert(image_key.into(), image);
+        self.images.write().insert(image_key.into(), image);
     }
 
     /// Remove a registered Clay image by key.
     pub fn remove_image(&self, image_key: &str) -> Option<Arc<Image>> {
-        self.images
-            .write()
-            .remove(image_key)
+        self.images.write().remove(image_key)
     }
 
     /// Draw all supported commands from `queue` into `target`.
@@ -206,9 +202,7 @@ impl UiRenderer {
                 RenderCommandKind::Image => {
                     if let RenderData::Image(data) = &command.data {
                         let image = {
-                            let images = self
-                                .images
-                                .read();
+                            let images = self.images.read();
                             images.get(&data.image_key).cloned()
                         };
                         let Some(image) = image else {
@@ -392,8 +386,7 @@ pub fn draw_ui_text(
     use parking_lot::Mutex;
     static TEXT_PROGRAM: Mutex<Option<MeshProgram>> = Mutex::new(None);
 
-    let program_guard = TEXT_PROGRAM
-        .lock();
+    let program_guard = TEXT_PROGRAM.lock();
     if program_guard.is_none() {
         drop(program_guard);
         let prog = MeshProgram::new(
@@ -413,11 +406,9 @@ pub fn draw_ui_text(
                 uses_depth: false,
             },
         )?;
-        *TEXT_PROGRAM
-            .lock() = Some(prog);
+        *TEXT_PROGRAM.lock() = Some(prog);
     }
-    let program_guard = TEXT_PROGRAM
-        .lock();
+    let program_guard = TEXT_PROGRAM.lock();
     let program = match program_guard.as_ref() {
         Some(p) => p,
         None => return Ok(()),

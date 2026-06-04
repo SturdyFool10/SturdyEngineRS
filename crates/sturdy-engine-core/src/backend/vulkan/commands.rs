@@ -319,7 +319,8 @@ impl CommandContext {
         let count = items.len();
         assert!(
             count <= self.secondary_slots.len(),
-            "record_parallel_compute: count={count} exceeds slot count={}", self.secondary_slots.len()
+            "record_parallel_compute: count={count} exceeds slot count={}",
+            self.secondary_slots.len()
         );
 
         // Begin all secondaries before spawning rayon tasks.
@@ -339,8 +340,11 @@ impl CommandContext {
 
         // Build tokens — one per slot.  Each is Send because SecondaryRecordToken
         // is marked Send (see secondary_pool.rs safety comment).
-        let tokens: Vec<secondary_pool::SecondaryRecordToken> =
-            cmds.iter().copied().map(secondary_pool::SecondaryRecordToken).collect();
+        let tokens: Vec<secondary_pool::SecondaryRecordToken> = cmds
+            .iter()
+            .copied()
+            .map(secondary_pool::SecondaryRecordToken)
+            .collect();
 
         // Record in parallel using scoped threads — each gets exclusive access to
         // its own token.  std::thread::scope ensures all threads join before we
@@ -354,7 +358,11 @@ impl CommandContext {
             }
             handles
                 .into_iter()
-                .map(|h| h.join().unwrap_or_else(|_| Err(Error::Backend("secondary recording thread panicked".into()))))
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| {
+                        Err(Error::Backend("secondary recording thread panicked".into()))
+                    })
+                })
                 .collect()
         });
 
@@ -682,7 +690,8 @@ impl CommandContext {
                                     );
                                 }
                             }
-                            self.pending_pass_names.push((std::sync::Arc::from(pass.name.as_str()), pass.queue));
+                            self.pending_pass_names
+                                .push((std::sync::Arc::from(pass.name.as_str()), pass.queue));
                             ts_query_idx += 1;
                         }
                         // GFX-1g breadcrumbs at pass end: NV checkpoint + AMD buffer marker.
@@ -1226,11 +1235,20 @@ impl CommandContext {
                         })],
                 );
             },
-            PassWork::FillBuffer { buffer, offset, size, value } => unsafe {
+            PassWork::FillBuffer {
+                buffer,
+                offset,
+                size,
+                value,
+            } => unsafe {
                 let buf = resources.buffer(buffer)?;
-                let fill_size = if size == u64::MAX { vk::WHOLE_SIZE } else { size };
+                let fill_size = if size == u64::MAX {
+                    vk::WHOLE_SIZE
+                } else {
+                    size
+                };
                 device.cmd_fill_buffer(command_buffer, buf, offset, fill_size, value);
-            }
+            },
             PassWork::CopyBufferToImage(copy) => unsafe {
                 let image_desc = resources.image_desc(copy.image)?;
                 device.cmd_copy_buffer_to_image(
@@ -1271,7 +1289,7 @@ impl CommandContext {
                         size: copy.size,
                     }],
                 );
-            }
+            },
             PassWork::DispatchIndirect(desc) => {
                 let binding = bound_binding.as_ref().ok_or_else(|| {
                     Error::InvalidInput(
@@ -3520,10 +3538,10 @@ fn record_bound_resources(
     if let Some(push_descriptor_set) = &pass.push_descriptor_set {
         let push_descriptor = push_descriptor.ok_or_else(|| {
             Error::Unsupported(
-            "push descriptor set requires VK_KHR_push_descriptor — \
+                "push descriptor set requires VK_KHR_push_descriptor — \
              add \"push_descriptor\" to VulkanBackendConfig::optional_features"
-                .into(),
-        )
+                    .into(),
+            )
         })?;
         for push_binding in &push_descriptor_set.bindings {
             record_push_descriptor_binding(
@@ -3737,7 +3755,10 @@ fn record_push_descriptor_binding(
             image_view,
             layout,
         } => {
-            let img_fmt = resources.image_desc(*image_view).map(|d| d.format).unwrap_or(Format::Rgba8Unorm);
+            let img_fmt = resources
+                .image_desc(*image_view)
+                .map(|d| d.format)
+                .unwrap_or(Format::Rgba8Unorm);
             let info = [vk::DescriptorImageInfo::default()
                 .image_view(resources.image_view(*image_view)?)
                 .image_layout(image_layout_for_format(*layout, img_fmt))];

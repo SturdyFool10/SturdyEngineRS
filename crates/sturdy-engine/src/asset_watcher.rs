@@ -155,7 +155,8 @@ impl AssetWatcher {
         let slot_is_empty = slot.lock().is_none();
         if slot_is_empty {
             if let Ok(img) = engine.load_texture_2d_blocking(&path) {
-                let mut slot = slot.lock(); if true {
+                let mut slot = slot.lock();
+                if true {
                     *slot = Some(Arc::new(img));
                 }
             }

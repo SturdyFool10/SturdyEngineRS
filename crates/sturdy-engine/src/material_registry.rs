@@ -44,8 +44,8 @@
 // `update`, and `flush` are called from a single thread (the main render
 // thread).  The GPU buffer is read-only from the GPU side.
 
-use crate::{Buffer, BufferDesc, BufferUsage, Engine, Image, Result};
 use crate::render_world::MaterialId;
+use crate::{Buffer, BufferDesc, BufferUsage, Engine, Image, Result};
 
 /// Sentinel index: no texture bound.  Shaders should substitute a 1×1 white
 /// texture at this index via the engine's built-in fallback slot, or branch on
@@ -276,10 +276,18 @@ impl MaterialRegistry {
         let idx = id.as_u32() as usize;
         assert!(idx < self.cpu_entries.len(), "MaterialId out of range");
         let e = &mut self.cpu_entries[idx];
-        if let Some(v) = albedo { e.albedo_idx = v; }
-        if let Some(v) = normal { e.normal_idx = v; }
-        if let Some(v) = roughness_metallic { e.roughness_metallic_idx = v; }
-        if let Some(v) = emissive { e.emissive_idx = v; }
+        if let Some(v) = albedo {
+            e.albedo_idx = v;
+        }
+        if let Some(v) = normal {
+            e.normal_idx = v;
+        }
+        if let Some(v) = roughness_metallic {
+            e.roughness_metallic_idx = v;
+        }
+        if let Some(v) = emissive {
+            e.emissive_idx = v;
+        }
         self.mark_dirty(id.as_u32());
     }
 
@@ -307,7 +315,8 @@ impl MaterialRegistry {
         let end = self.dirty_end as usize;
         let byte_offset = start as u64 * GPU_ENTRY_SIZE;
         let dirty_slice = &self.cpu_entries[start..end];
-        self.gpu_buffer.write(byte_offset, bytemuck::cast_slice(dirty_slice))?;
+        self.gpu_buffer
+            .write(byte_offset, bytemuck::cast_slice(dirty_slice))?;
         // Mark clean.
         self.dirty_start = CLEAN_START;
         self.dirty_end = 0;

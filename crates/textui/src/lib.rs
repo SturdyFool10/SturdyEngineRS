@@ -392,17 +392,12 @@ impl TextUi {
             (options.line_height * scale).max(1.0),
         );
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        buffer.set_size(
-            width_points_opt.map(|w| (w * scale).max(1.0)),
-            None,
-        );
-        buffer.set_wrap(
-            if options.wrap {
-                Wrap::WordOrGlyph
-            } else {
-                Wrap::None
-            },
-        );
+        buffer.set_size(width_points_opt.map(|w| (w * scale).max(1.0)), None);
+        buffer.set_wrap(if options.wrap {
+            Wrap::WordOrGlyph
+        } else {
+            Wrap::None
+        });
         let attrs = attrs_for_options(options);
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, true);
@@ -491,17 +486,12 @@ impl TextUi {
             (options.line_height * scale).max(1.0),
         );
         let mut buffer = Buffer::new(&mut self.font_system, metrics);
-        buffer.set_size(
-            width_points_opt.map(|w| (w * scale).max(1.0)),
-            None,
-        );
-        buffer.set_wrap(
-            if options.wrap {
-                Wrap::WordOrGlyph
-            } else {
-                Wrap::None
-            },
-        );
+        buffer.set_size(width_points_opt.map(|w| (w * scale).max(1.0)), None);
+        buffer.set_wrap(if options.wrap {
+            Wrap::WordOrGlyph
+        } else {
+            Wrap::None
+        });
         let attrs = attrs_for_options(options);
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, true);

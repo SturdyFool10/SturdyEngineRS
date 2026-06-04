@@ -576,7 +576,7 @@ The engine reflects every shader at compile time and uses that information to au
 - [x] **Timing-driven quality adaptation**: 5% over-budget → reduce quality (resolution → LOD → shadow cascades). Under-budget 3 consecutive frames → restore one step. Imperceptible step sizes.
 - [x] **Scene-state-driven choices**: `occlusion_mode` auto-selects `TwoPass` when draw_count ≥ 5000, `SinglePass` below that threshold.
 - [x] **Target frame time**: Set via `runtime.strategy_selector_mut().set_target_frame_ms(Some(16.6))`. `None` = strategy fixed at maximum quality.
-- [ ] **Target frame time via `RuntimeSettings`**: Expose `target_frame_ms: Option<f32>` in `RuntimeSettings` so it can be changed through the standard settings UI.
+- [x] **Target frame time via `RuntimeSettings`**: Expose `target_frame_ms: Option<f32>` in `RuntimeSettingsSnapshot` and `RuntimeSettingKey::TargetFrameMs`; standard settings transactions now update `RenderStrategySelector` immediately.
 - [ ] **Strategy observable in debug overlay**: All `FrameRenderStrategy` fields shown in debug overlay with per-field change reason.
 
 Acceptance: on hardware with all features, the engine selects the optimal shader variant, routes all eligible compute to async compute, injects bindless set 0 without manual descriptor code, and adapts quality automatically to meet a configured frame-time target — with no per-frame user code.

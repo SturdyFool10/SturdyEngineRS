@@ -2069,6 +2069,15 @@ where
         }
 
         self.apply_engine_runtime_settings(&controller, &changes);
+        if changes.iter().any(|change| {
+            matches!(
+                change.setting,
+                RuntimeSettingId::Engine(RuntimeSettingKey::TargetFrameMs)
+            )
+        }) {
+            self.runtime
+                .apply_render_strategy_runtime_settings(&controller);
+        }
         self.app_state.runtime_settings_changed(
             &controller,
             &changes,
@@ -3009,6 +3018,15 @@ where
                 window.state_mut().waiting_for_surface_recreation = false;
             }
         }
+        if changes.iter().any(|change| {
+            matches!(
+                change.setting,
+                RuntimeSettingId::Engine(RuntimeSettingKey::TargetFrameMs)
+            )
+        }) {
+            self.runtime
+                .apply_render_strategy_runtime_settings(&controller);
+        }
         // Apply Immediate-path latency/pacing settings.
         for change in &changes {
             if let crate::RuntimeSettingId::Engine(crate::RuntimeSettingKey::LatencyMode) =
@@ -3025,7 +3043,11 @@ where
                         "LowLatency" | "UltraLowLatency" => sturdy_engine_core::AntiLagMode::On,
                         _ => sturdy_engine_core::AntiLagMode::Off,
                     };
-                    let _ = self.runtime.engine().device.set_anti_lag_mode(anti_lag_mode);
+                    let _ = self
+                        .runtime
+                        .engine()
+                        .device
+                        .set_anti_lag_mode(anti_lag_mode);
                 }
             }
         }
@@ -3293,10 +3315,10 @@ where
                         if self.runtime.backend_restart_pending() {
                             match self.runtime.apply_pending_backend_restart() {
                                 Ok(restart_outcome) => {
-                                    if let Err(e) = self.app_state.on_backend_restarted(
-                                        &mut self.runtime,
-                                        &restart_outcome,
-                                    ) {
+                                    if let Err(e) = self
+                                        .app_state
+                                        .on_backend_restarted(&mut self.runtime, &restart_outcome)
+                                    {
                                         tracing::error!("on_backend_restarted failed: {e:?}");
                                         std::process::exit(1);
                                     }

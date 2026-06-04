@@ -266,25 +266,25 @@ impl VulkanBackend {
         caps.features.vertex_input_dynamic_state = logical.vertex_input_dynamic_state_enabled;
         caps.features.shader_object = logical.shader_object_enabled && caps.features.shader_object;
         caps.features.graphics_pipeline_library = logical.graphics_pipeline_library_enabled;
-        caps.features.maintenance5 =
-            logical.maintenance5_enabled && caps.features.maintenance5;
-        caps.features.maintenance6 =
-            logical.maintenance6_enabled && caps.features.maintenance6;
+        caps.features.maintenance5 = logical.maintenance5_enabled && caps.features.maintenance5;
+        caps.features.maintenance6 = logical.maintenance6_enabled && caps.features.maintenance6;
         caps.features.dynamic_rendering_local_read = logical.dynamic_rendering_local_read_enabled
             && caps.features.dynamic_rendering_local_read;
         caps.features.null_descriptor =
             logical.null_descriptor_enabled && caps.features.null_descriptor;
         caps.features.depth_clip_enable =
             logical.depth_clip_enable_enabled && caps.features.depth_clip_enable;
-        caps.features.shader_module_identifier = logical.shader_module_identifier_enabled
-            && caps.features.shader_module_identifier;
+        caps.features.shader_module_identifier =
+            logical.shader_module_identifier_enabled && caps.features.shader_module_identifier;
         // calibrated_timestamps: extension-only, reflected from enabled extension list.
         caps.features.calibrated_timestamps = caps.features.calibrated_timestamps
-            && (enabled_extension(&logical.enabled_extension_names, "VK_KHR_calibrated_timestamps")
-                || enabled_extension(
-                    &logical.enabled_extension_names,
-                    "VK_EXT_calibrated_timestamps",
-                ));
+            && (enabled_extension(
+                &logical.enabled_extension_names,
+                "VK_KHR_calibrated_timestamps",
+            ) || enabled_extension(
+                &logical.enabled_extension_names,
+                "VK_EXT_calibrated_timestamps",
+            ));
         caps.features.device_fault =
             enabled_extension(&logical.enabled_extension_names, "VK_EXT_device_fault");
         caps.features.device_diagnostic_checkpoints_nv = enabled_extension(
@@ -823,12 +823,18 @@ impl VulkanBackend {
         // Name queues for GPU debuggers (RenderDoc, NVIDIA Nsight, etc.).
         // Safe: DebugUtils::new only activates the loader when VK_EXT_debug_utils is
         // in the enabled extension list, so these are no-ops when the extension is absent.
-        backend.debug.set_name(&backend.device, backend.queues.graphics, "queue:graphics");
+        backend
+            .debug
+            .set_name(&backend.device, backend.queues.graphics, "queue:graphics");
         if backend.queues.compute != backend.queues.graphics {
-            backend.debug.set_name(&backend.device, backend.queues.compute, "queue:compute");
+            backend
+                .debug
+                .set_name(&backend.device, backend.queues.compute, "queue:compute");
         }
         if backend.queues.transfer != backend.queues.graphics {
-            backend.debug.set_name(&backend.device, backend.queues.transfer, "queue:transfer");
+            backend
+                .debug
+                .set_name(&backend.device, backend.queues.transfer, "queue:transfer");
         }
         if backend.queues.async_compute != backend.queues.compute {
             backend.debug.set_name(
@@ -838,7 +844,9 @@ impl VulkanBackend {
             );
         }
         if backend.queues.dma != backend.queues.transfer {
-            backend.debug.set_name(&backend.device, backend.queues.dma, "queue:dma");
+            backend
+                .debug
+                .set_name(&backend.device, backend.queues.dma, "queue:dma");
         }
         Ok(backend)
     }
@@ -968,12 +976,8 @@ impl VulkanBackend {
     /// Register each frame slot's transient pool buffer as a `BufferHandle` in the resource
     /// registry. Called once after device creation when handle IDs are available.
     pub fn register_transient_buffer_handles(&self, handles: &[crate::BufferHandle]) {
-        let mut commands = self
-            .commands
-            .lock();
-        let mut resources = self
-            .resources
-            .write();
+        let mut commands = self.commands.lock();
+        let mut resources = self.resources.write();
         for (ctx, &handle) in commands.contexts_mut().iter_mut().zip(handles.iter()) {
             if let Some(pool) = &ctx.transient_buffer_pool {
                 resources.register_raw_buffer(handle, pool.raw_buffer());
@@ -984,10 +988,7 @@ impl VulkanBackend {
 
     /// Returns the number of frame-in-flight context slots.
     pub fn transient_pool_slot_count(&self) -> usize {
-        self.commands
-            .lock()
-            .contexts_mut()
-            .len()
+        self.commands.lock().contexts_mut().len()
     }
 
     /// Pre-allocate secondary command buffer slots for parallel recording.
@@ -995,10 +996,7 @@ impl VulkanBackend {
     /// Call once at init time (or when the expected parallel count increases) so
     /// that per-frame parallel recording does not allocate on the hot path.
     /// Slots are created on the graphics queue family.
-    pub fn prepare_parallel_secondary_capacity(
-        &self,
-        count: usize,
-    ) -> crate::Result<()> {
+    pub fn prepare_parallel_secondary_capacity(&self, count: usize) -> crate::Result<()> {
         let queue_family = self.queue_families.graphics;
         self.commands
             .lock()
@@ -1025,10 +1023,7 @@ impl Backend for VulkanBackend {
 
     fn memory_budget(&self) -> Option<crate::GpuMemoryBudget> {
         //panic allowed, reason = "poisoned vulkan resource registry is unrecoverable"
-        let stats = self
-            .resources
-            .read()
-            .allocator_stats();
+        let stats = self.resources.read().allocator_stats();
         Some(crate::GpuMemoryBudget {
             device_local_used_bytes: stats.device_local_used_bytes,
             device_local_capacity_bytes: stats.device_local_capacity_bytes,
@@ -1211,9 +1206,7 @@ impl Backend for VulkanBackend {
             return Vec::new();
         }
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let pipelines = self
-            .pipelines
-            .lock();
+        let pipelines = self.pipelines.lock();
         let vk_pipeline = match pipelines.vk_pipeline(pipeline) {
             Ok(p) => p,
             Err(_) => return Vec::new(),
@@ -1298,9 +1291,7 @@ impl Backend for VulkanBackend {
             return Vec::new();
         }
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let pipelines = self
-            .pipelines
-            .lock();
+        let pipelines = self.pipelines.lock();
         let vk_pipeline = match pipelines.vk_pipeline(pipeline) {
             Ok(p) => p,
             Err(_) => return Vec::new(),
@@ -1381,9 +1372,7 @@ impl Backend for VulkanBackend {
         }
 
         let t0 = std::time::Instant::now();
-        let pipelines = self
-            .pipelines
-            .lock();
+        let pipelines = self.pipelines.lock();
 
         // Pre-warm VertexInput libraries for the most common vertex formats.
         // These are the engine's standard vertex layouts — new layouts are cached lazily.
@@ -1495,9 +1484,7 @@ impl Backend for VulkanBackend {
     fn alloc_transient(&self, size: u64, alignment: u64) -> Option<crate::TransientAllocation> {
         // Track 11a: bump-allocate from the current frame context's pool.
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut commands = self
-            .commands
-            .lock();
+        let mut commands = self.commands.lock();
         let ctx = commands.current_context_mut();
         let pool = ctx.transient_buffer_pool.as_mut()?;
         let handle = ctx.transient_buffer_handle;
@@ -1587,9 +1574,7 @@ impl Backend for VulkanBackend {
 
     fn destroy_image(&self, handle: ImageHandle) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut resources = self
-            .resources
-            .write();
+        let mut resources = self.resources.write();
         // GFX-1b: no framebuffer cache invalidation needed — framebuffers are now transient.
         resources.destroy_image(&self.device, handle)
     }
@@ -1602,9 +1587,7 @@ impl Backend for VulkanBackend {
     }
 
     fn buffer_device_address(&self, handle: BufferHandle) -> Result<Option<u64>> {
-        let resources = self
-            .resources
-            .read();
+        let resources = self.resources.read();
         Ok(Some(
             resources.buffer_device_address_raw(&self.device, handle)?,
         ))
@@ -1626,9 +1609,7 @@ impl Backend for VulkanBackend {
 
     fn destroy_buffer(&self, handle: BufferHandle) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.resources
-            .write()
-            .destroy_buffer(&self.device, handle)
+        self.resources.write().destroy_buffer(&self.device, handle)
     }
 
     fn create_acceleration_structure(
@@ -1649,9 +1630,13 @@ impl Backend for VulkanBackend {
             }
             AccelerationStructureKind::TopLevel => vk::AccelerationStructureTypeKHR::TOP_LEVEL,
         };
-        self.resources
-            .write()
-            .create_acceleration_structure(&self.device, handle, desc.size, as_ext, ty)
+        self.resources.write().create_acceleration_structure(
+            &self.device,
+            handle,
+            desc.size,
+            as_ext,
+            ty,
+        )
     }
 
     fn destroy_acceleration_structure(&self, handle: AccelerationStructureHandle) -> Result<()> {
@@ -1695,9 +1680,7 @@ impl Backend for VulkanBackend {
             let src = desc.src.ok_or_else(|| {
                 Error::InvalidInput("BLAS compaction size query requires a source".into())
             })?;
-            let resources = self
-                .resources
-                .read();
+            let resources = self.resources.read();
             let (kind, size) = resources.acceleration_structure_metadata(src)?;
             return compact_acceleration_structure_build_sizes(
                 kind,
@@ -1720,9 +1703,7 @@ impl Backend for VulkanBackend {
             let src = desc.src.ok_or_else(|| {
                 Error::InvalidInput("TLAS compaction size query requires a source".into())
             })?;
-            let resources = self
-                .resources
-                .read();
+            let resources = self.resources.read();
             let (kind, size) = resources.acceleration_structure_metadata(src)?;
             return compact_acceleration_structure_build_sizes(
                 kind,
@@ -1763,23 +1744,17 @@ impl Backend for VulkanBackend {
 
     fn destroy_sampler(&self, handle: SamplerHandle) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.resources
-            .write()
-            .destroy_sampler(&self.device, handle)
+        self.resources.write().destroy_sampler(&self.device, handle)
     }
 
     fn write_buffer(&self, handle: BufferHandle, offset: u64, data: &[u8]) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.resources
-            .write()
-            .write_buffer(handle, offset, data)
+        self.resources.write().write_buffer(handle, offset, data)
     }
 
     fn read_buffer(&self, handle: BufferHandle, offset: u64, out: &mut [u8]) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.resources
-            .read()
-            .read_buffer(handle, offset, out)
+        self.resources.read().read_buffer(handle, offset, out)
     }
 
     fn create_shader(&self, handle: ShaderHandle, desc: &ShaderDesc) -> Result<()> {
@@ -1791,9 +1766,7 @@ impl Backend for VulkanBackend {
 
     fn destroy_shader(&self, handle: ShaderHandle) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.shaders
-            .lock()
-            .destroy_shader(&self.device, handle)
+        self.shaders.lock().destroy_shader(&self.device, handle)
     }
 
     fn create_pipeline_layout(
@@ -1802,15 +1775,13 @@ impl Backend for VulkanBackend {
         layout: &CanonicalPipelineLayout,
     ) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.descriptors
-            .write()
-            .create_pipeline_layout(
-                &self.device,
-                handle,
-                layout,
-                self.bindless_vk_info().map(|info| info.set_layout),
-                &self.caps.limits,
-            )
+        self.descriptors.write().create_pipeline_layout(
+            &self.device,
+            handle,
+            layout,
+            self.bindless_vk_info().map(|info| info.set_layout),
+            &self.caps.limits,
+        )
     }
 
     fn destroy_pipeline_layout(&self, handle: PipelineLayoutHandle) -> Result<()> {
@@ -1822,9 +1793,7 @@ impl Backend for VulkanBackend {
 
     fn create_bind_group(&self, handle: BindGroupHandle, desc: &BindGroupDesc) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let resources = self
-            .resources
-            .read();
+        let resources = self.resources.read();
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.descriptors
             .write()
@@ -1844,17 +1813,17 @@ impl Backend for VulkanBackend {
         desc: ComputePipelineDesc,
     ) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let shaders = self
-            .shaders
-            .lock();
+        let shaders = self.shaders.lock();
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let descriptors = self
-            .descriptors
-            .read();
+        let descriptors = self.descriptors.read();
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.pipelines
-            .lock()
-            .create_compute_pipeline(&self.device, handle, desc, &shaders, &descriptors)
+        self.pipelines.lock().create_compute_pipeline(
+            &self.device,
+            handle,
+            desc,
+            &shaders,
+            &descriptors,
+        )
     }
 
     fn create_graphics_pipeline(
@@ -1863,24 +1832,22 @@ impl Backend for VulkanBackend {
         desc: &GraphicsPipelineDesc,
     ) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let shaders = self
-            .shaders
-            .lock();
+        let shaders = self.shaders.lock();
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let descriptors = self
-            .descriptors
-            .read();
+        let descriptors = self.descriptors.read();
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.pipelines
-            .lock()
-            .create_graphics_pipeline(&self.device, handle, desc, &shaders, &descriptors)
+        self.pipelines.lock().create_graphics_pipeline(
+            &self.device,
+            handle,
+            desc,
+            &shaders,
+            &descriptors,
+        )
     }
 
     fn destroy_pipeline(&self, handle: PipelineHandle) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.pipelines
-            .lock()
-            .destroy_pipeline(&self.device, handle)
+        self.pipelines.lock().destroy_pipeline(&self.device, handle)
     }
 
     fn create_ray_tracing_pipeline(
@@ -1896,17 +1863,11 @@ impl Backend for VulkanBackend {
             )
         })?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut pipelines = self
-            .pipelines
-            .lock();
+        let mut pipelines = self.pipelines.lock();
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let shaders = self
-            .shaders
-            .lock();
+        let shaders = self.shaders.lock();
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let descriptors = self
-            .descriptors
-            .read();
+        let descriptors = self.descriptors.read();
         pipelines.create_ray_tracing_pipeline(
             &self.device,
             handle,
@@ -1918,12 +1879,13 @@ impl Backend for VulkanBackend {
     }
 
     fn shader_binding_table_properties(&self) -> Result<ShaderBindingTableProperties> {
-        self.ray_tracing_sbt_properties
-            .ok_or_else(|| Error::Unsupported(
+        self.ray_tracing_sbt_properties.ok_or_else(|| {
+            Error::Unsupported(
                 "VK_KHR_ray_tracing_pipeline is not enabled — \
                  add \"ray_tracing_pipeline\" to VulkanBackendConfig::optional_features"
                     .into(),
-            ))
+            )
+        })
     }
 
     fn ray_tracing_shader_group_handles(
@@ -1940,10 +1902,7 @@ impl Backend for VulkanBackend {
             )
         })?;
         let props = self.shader_binding_table_properties()?;
-        let pipeline = self
-            .pipelines
-            .lock()
-            .pipeline(pipeline)?;
+        let pipeline = self.pipelines.lock().pipeline(pipeline)?;
         if pipeline.bind_point != vk::PipelineBindPoint::RAY_TRACING_KHR {
             return Err(Error::InvalidInput(
                 "shader group handles require a ray-tracing pipeline".into(),
@@ -1977,29 +1936,25 @@ impl Backend for VulkanBackend {
         desc: NativeSurfaceDesc,
     ) -> Result<SurfaceInfo> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.surfaces
-            .lock()
-            .create_surface(
-                &self._entry,
-                &self.instance,
-                &self.device,
-                self.physical_device,
-                self.queue_families.graphics,
-                handle,
-                desc,
-                // vkQueuePresentKHR waits on binary semaphores; keep swapchain
-                // render-finished signaling binary even when timeline semaphores
-                // are enabled for internal submission chains.
-                false,
-            )
+        self.surfaces.lock().create_surface(
+            &self._entry,
+            &self.instance,
+            &self.device,
+            self.physical_device,
+            self.queue_families.graphics,
+            handle,
+            desc,
+            // vkQueuePresentKHR waits on binary semaphores; keep swapchain
+            // render-finished signaling binary even when timeline semaphores
+            // are enabled for internal submission chains.
+            false,
+        )
     }
 
     fn resize_surface(&self, handle: SurfaceHandle, size: SurfaceSize) -> Result<SurfaceInfo> {
         // Wait only on submitted frames, not all GPU work — avoids vkDeviceWaitIdle stall.
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.commands
-            .lock()
-            .wait_all(&self.device)?;
+        self.commands.lock().wait_all(&self.device)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.surfaces
             .lock()
@@ -2013,9 +1968,7 @@ impl Backend for VulkanBackend {
         _current: SurfaceInfo,
     ) -> Result<SurfaceInfo> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.commands
-            .lock()
-            .wait_all(&self.device)?;
+        self.commands.lock().wait_all(&self.device)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
         self.surfaces
             .lock()
@@ -2024,60 +1977,40 @@ impl Backend for VulkanBackend {
 
     fn destroy_surface(&self, handle: SurfaceHandle) -> Result<()> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.commands
-            .lock()
-            .wait_all(&self.device)?;
+        self.commands.lock().wait_all(&self.device)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        *self
-            .active_surface
-            .lock() = None;
+        *self.active_surface.lock() = None;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.surfaces
-            .lock()
-            .destroy_surface(&self.device, handle)?;
+        self.surfaces.lock().destroy_surface(&self.device, handle)?;
         Ok(())
     }
 
     fn query_surface_capabilities(&self, handle: SurfaceHandle) -> Result<SurfaceCapabilities> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.surfaces
-            .lock()
-            .query_surface_capabilities(
-                self.physical_device,
-                handle,
-                self.hdr_metadata_ext.is_some(),
-            )
+        self.surfaces.lock().query_surface_capabilities(
+            self.physical_device,
+            handle,
+            self.hdr_metadata_ext.is_some(),
+        )
     }
 
     fn set_image_debug_name(&self, handle: ImageHandle, name: &str) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        if let Ok(image) = self
-            .resources
-            .read()
-            .image(handle)
-        {
+        if let Ok(image) = self.resources.read().image(handle) {
             self.debug.set_name(&self.device, image, name);
         }
     }
 
     fn set_buffer_debug_name(&self, handle: BufferHandle, name: &str) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        if let Ok(buffer) = self
-            .resources
-            .read()
-            .buffer(handle)
-        {
+        if let Ok(buffer) = self.resources.read().buffer(handle) {
             self.debug.set_name(&self.device, buffer, name);
         }
     }
 
     fn set_pipeline_debug_name(&self, handle: PipelineHandle, name: &str) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        if let Ok(pipeline) = self
-            .pipelines
-            .lock()
-            .pipeline(handle)
-        {
+        if let Ok(pipeline) = self.pipelines.lock().pipeline(handle) {
             self.debug.set_name(&self.device, pipeline.pipeline, name);
         }
     }
@@ -2088,35 +2021,28 @@ impl Backend for VulkanBackend {
         image: ImageHandle,
     ) -> Result<(ImageDesc, u64)> {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let acquired = self
-            .surfaces
-            .lock()
-            .acquire_image(surface)?;
+        let acquired = self.surfaces.lock().acquire_image(surface)?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.resources
-            .write()
-            .import_image(image, acquired.image, acquired.image_view, acquired.desc)?;
+        self.resources.write().import_image(
+            image,
+            acquired.image,
+            acquired.image_view,
+            acquired.desc,
+        )?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        *self
-            .active_surface
-            .lock() = Some(surface);
+        *self.active_surface.lock() = Some(surface);
         Ok((acquired.desc, acquired.image_index as u64))
     }
 
     fn present_surface(&self, surface: SurfaceHandle) -> Result<()> {
         tracing::trace!(?surface, "presenting swapchain image");
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let result = self
-            .surfaces
-            .lock()
-            .present(self.queues.graphics, surface);
+        let result = self.surfaces.lock().present(self.queues.graphics, surface);
         if let Err(ref e) = result {
             tracing::warn!("swapchain present failed — surface may need recreation: {e:?}");
         }
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        *self
-            .active_surface
-            .lock() = None;
+        *self.active_surface.lock() = None;
         result
     }
 
@@ -2129,9 +2055,7 @@ impl Backend for VulkanBackend {
         // Resolve per-surface semaphores if a swapchain image was acquired.
         let (wait_sem, signal_sem) = {
             //panic allowed, reason = "poisoned mutex is unrecoverable"
-            let active = *self
-                .active_surface
-                .lock();
+            let active = *self.active_surface.lock();
             if let Some(sh) = active {
                 //panic allowed, reason = "poisoned mutex is unrecoverable"
                 let sems = self
@@ -2156,12 +2080,8 @@ impl Backend for VulkanBackend {
             &self.device,
             &self.instance,
             self.physical_device,
-            &mut self
-                .resources
-                .write(),
-            &mut self
-                .alias_heaps
-                .lock(),
+            &mut self.resources.write(),
+            &mut self.alias_heaps.lock(),
             graph,
         )
         .map_err(|error| {
@@ -2171,31 +2091,19 @@ impl Backend for VulkanBackend {
         })?;
 
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut resources = self
-            .resources
-            .write();
+        let mut resources = self.resources.write();
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let descriptors = self
-            .descriptors
-            .read();
+        let descriptors = self.descriptors.read();
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut pipelines = self
-            .pipelines
-            .lock();
+        let mut pipelines = self.pipelines.lock();
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut commands = self
-            .commands
-            .lock();
-        let optical_flow_sessions = self
-            .optical_flow_sessions
-            .lock();
+        let mut commands = self.commands.lock();
+        let optical_flow_sessions = self.optical_flow_sessions.lock();
         let optical_flow_sessions_arg = self
             .optical_flow_nv_ext
             .as_ref()
             .map(|_| &*optical_flow_sessions);
-        let indirect_command_layouts = self
-            .indirect_command_layouts
-            .lock();
+        let indirect_command_layouts = self.indirect_command_layouts.lock();
         let indirect_command_layouts_arg = self
             .device_generated_commands_nv
             .as_ref()
@@ -2288,23 +2196,20 @@ impl Backend for VulkanBackend {
 
     fn last_submit_gpu_wait_ms(&self) -> f32 {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.commands
-            .lock()
-            .last_submit_gpu_wait_ms()
+        self.commands.lock().last_submit_gpu_wait_ms()
     }
 
     fn frame_draw_dispatch_counts(&self) -> (u32, u32) {
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let cmds = self
-            .commands
-            .lock();
-        (cmds.last_frame_draw_calls(), cmds.last_frame_dispatch_calls())
+        let cmds = self.commands.lock();
+        (
+            cmds.last_frame_draw_calls(),
+            cmds.last_frame_dispatch_calls(),
+        )
     }
 
     fn transient_aliased_bytes(&self) -> u64 {
-        self.alias_heaps
-            .lock()
-            .total_bytes()
+        self.alias_heaps.lock().total_bytes()
     }
 
     fn wait_submission(&self, token: SubmissionHandle) -> Result<()> {
@@ -2445,9 +2350,7 @@ impl Backend for VulkanBackend {
         };
 
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let mut sessions = self
-            .video_sessions
-            .lock();
+        let mut sessions = self.video_sessions.lock();
         if let Some(previous) = sessions.insert(handle, VulkanVideoSession { session, memories }) {
             destroy_video_session_entry(&self.device, video, previous);
         }
@@ -2463,11 +2366,7 @@ impl Backend for VulkanBackend {
             )
         })?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        if let Some(session) = self
-            .video_sessions
-            .lock()
-            .remove(&handle)
-        {
+        if let Some(session) = self.video_sessions.lock().remove(&handle) {
             destroy_video_session_entry(&self.device, video, session);
         }
         Ok(())
@@ -2543,10 +2442,7 @@ impl Backend for VulkanBackend {
                 Error::Backend(format!("vkCreateIndirectCommandsLayoutNV failed: {e:?}"))
             })?;
         }
-        let previous = self
-            .indirect_command_layouts
-            .lock()
-            .insert(handle, layout);
+        let previous = self.indirect_command_layouts.lock().insert(handle, layout);
         if let Some(previous) = previous {
             unsafe {
                 (dgc.fp().destroy_indirect_commands_layout_nv)(
@@ -2568,11 +2464,7 @@ impl Backend for VulkanBackend {
                 "device-generated commands require VK_NV_device_generated_commands".into(),
             )
         })?;
-        if let Some(layout) = self
-            .indirect_command_layouts
-            .lock()
-            .remove(&handle)
-        {
+        if let Some(layout) = self.indirect_command_layouts.lock().remove(&handle) {
             unsafe {
                 (dgc.fp().destroy_indirect_commands_layout_nv)(
                     self.device.handle(),
@@ -2591,14 +2483,13 @@ impl Backend for VulkanBackend {
         handle: crate::OpticalFlowSessionHandle,
         desc: &crate::OpticalFlowSessionDesc,
     ) -> Result<()> {
-        let ext = self
-            .optical_flow_nv_ext
-            .as_ref()
-            .ok_or_else(|| Error::Unsupported(
+        let ext = self.optical_flow_nv_ext.as_ref().ok_or_else(|| {
+            Error::Unsupported(
                 "VK_NV_optical_flow is not available — \
                  add \"optical_flow_nv\" to VulkanBackendConfig::optional_features"
                     .into(),
-            ))?;
+            )
+        })?;
         if desc.width == 0 || desc.height == 0 {
             return Err(Error::InvalidInput(
                 "optical flow session dimensions must be non-zero".into(),
@@ -2624,10 +2515,7 @@ impl Backend for VulkanBackend {
             .result()
             .map_err(|e| Error::Backend(format!("vkCreateOpticalFlowSessionNV failed: {e:?}")))?;
         }
-        let previous = self
-            .optical_flow_sessions
-            .lock()
-            .insert(handle, session);
+        let previous = self.optical_flow_sessions.lock().insert(handle, session);
         if let Some(previous) = previous {
             unsafe {
                 (ext.fp().destroy_optical_flow_session_nv)(
@@ -2641,19 +2529,14 @@ impl Backend for VulkanBackend {
     }
 
     fn destroy_optical_flow_session(&self, handle: crate::OpticalFlowSessionHandle) -> Result<()> {
-        let ext = self
-            .optical_flow_nv_ext
-            .as_ref()
-            .ok_or_else(|| Error::Unsupported(
+        let ext = self.optical_flow_nv_ext.as_ref().ok_or_else(|| {
+            Error::Unsupported(
                 "VK_NV_optical_flow is not available — \
                  add \"optical_flow_nv\" to VulkanBackendConfig::optional_features"
                     .into(),
-            ))?;
-        if let Some(session) = self
-            .optical_flow_sessions
-            .lock()
-            .remove(&handle)
-        {
+            )
+        })?;
+        if let Some(session) = self.optical_flow_sessions.lock().remove(&handle) {
             unsafe {
                 (ext.fp().destroy_optical_flow_session_nv)(
                     self.device.handle(),
@@ -2674,18 +2557,15 @@ impl Backend for VulkanBackend {
         layer: u32,
         data: &[u8],
     ) -> Result<()> {
-        let ext = self
-            .host_image_copy_ext
-            .as_ref()
-            .ok_or_else(|| Error::Unsupported(
+        let ext = self.host_image_copy_ext.as_ref().ok_or_else(|| {
+            Error::Unsupported(
                 "VK_EXT_host_image_copy is not available — \
                  add \"host_image_copy\" to VulkanBackendConfig::optional_features"
                     .into(),
-            ))?;
+            )
+        })?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let resources = self
-            .resources
-            .read();
+        let resources = self.resources.read();
         let vk_image = resources.image(handle)?;
         let desc = resources.image_desc(handle)?;
         let region = ash::vk::MemoryToImageCopyEXT::default()
@@ -2720,18 +2600,15 @@ impl Backend for VulkanBackend {
         handle: ImageHandle,
         new_layout: crate::RgState,
     ) -> Result<()> {
-        let ext = self
-            .host_image_copy_ext
-            .as_ref()
-            .ok_or_else(|| Error::Unsupported(
+        let ext = self.host_image_copy_ext.as_ref().ok_or_else(|| {
+            Error::Unsupported(
                 "VK_EXT_host_image_copy is not available — \
                  add \"host_image_copy\" to VulkanBackendConfig::optional_features"
                     .into(),
-            ))?;
+            )
+        })?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let resources = self
-            .resources
-            .read();
+        let resources = self.resources.read();
         let vk_image = resources.image(handle)?;
         let desc = resources.image_desc(handle)?;
         let vk_new_layout = match new_layout {
@@ -2792,9 +2669,7 @@ impl Backend for VulkanBackend {
             .low_latency_boost(low_latency_boost)
             .minimum_interval_us(0);
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let surfaces = self
-            .surfaces
-            .lock();
+        let surfaces = self.surfaces.lock();
         for swapchain in surfaces.all_swapchain_handles() {
             unsafe {
                 let _ = reflex.set_latency_sleep_mode(swapchain, Some(&sleep_mode_info));
@@ -2841,14 +2716,9 @@ impl Backend for VulkanBackend {
                 Error::Backend(format!("vkCreateSemaphore (timeline) failed: {e:?}"))
             })?
         };
-        let handle_val = self
-            .timeline_semaphore_handles
-            .lock()
-            .alloc();
+        let handle_val = self.timeline_semaphore_handles.lock().alloc();
         let handle = crate::SemaphoreHandle(handle_val);
-        self.timeline_semaphores
-            .lock()
-            .insert(handle, semaphore);
+        self.timeline_semaphores.lock().insert(handle, semaphore);
         Ok(handle)
     }
 
@@ -2892,11 +2762,7 @@ impl Backend for VulkanBackend {
     }
 
     fn destroy_timeline_semaphore(&self, semaphore: crate::SemaphoreHandle) -> Result<()> {
-        if let Some(sem) = self
-            .timeline_semaphores
-            .lock()
-            .remove(&semaphore)
-        {
+        if let Some(sem) = self.timeline_semaphores.lock().remove(&semaphore) {
             unsafe { self.device.destroy_semaphore(sem, None) };
         }
         Ok(())
@@ -3047,9 +2913,7 @@ impl Backend for VulkanBackend {
                     Error::Backend(format!("vkBindImageMemory (exportable) failed: {e:?}"))
                 })?;
         }
-        self.exportable_image_memories
-            .lock()
-            .insert(handle, memory);
+        self.exportable_image_memories.lock().insert(handle, memory);
         let _ = handle;
         Ok(())
     }
@@ -3114,9 +2978,7 @@ impl Backend for VulkanBackend {
                 Error::Backend(format!("vkCreateSemaphore (exportable) failed: {e:?}"))
             })?
         };
-        self.exportable_semaphores
-            .lock()
-            .insert(handle, semaphore);
+        self.exportable_semaphores.lock().insert(handle, semaphore);
         Ok(())
     }
 
@@ -3173,9 +3035,7 @@ impl Backend for VulkanBackend {
                 .create_fence(&fence_info, None)
                 .map_err(|e| Error::Backend(format!("vkCreateFence (exportable) failed: {e:?}")))?
         };
-        self.exportable_fences
-            .lock()
-            .insert(handle, fence);
+        self.exportable_fences.lock().insert(handle, fence);
         Ok(())
     }
 
@@ -3362,18 +3222,12 @@ impl Backend for VulkanBackend {
     fn read_encode_bitstream(&self, handle: BufferHandle, max_bytes: u64) -> Result<Vec<u8>> {
         // GFX-4b: copy the encoded bitstream from the output buffer to a Vec<u8>.
         // The buffer must have been created with HOST_VISIBLE memory so we can map it.
-        let resources = self
-            .resources
-            .read();
+        let resources = self.resources.read();
         let buf = resources.buffer(handle)?;
         let requirements = unsafe { self.device.get_buffer_memory_requirements(buf) };
         let _ = requirements; // size info used for validation
         // Find the buffer's memory — for encode buffers we track them in exportable_buffer_memories.
-        let memory = self
-            .exportable_buffer_memories
-            .lock()
-            .get(&handle)
-            .copied();
+        let memory = self.exportable_buffer_memories.lock().get(&handle).copied();
         if let Some(mem) = memory {
             let byte_count = max_bytes.min(max_bytes) as usize;
             let ptr = unsafe {
@@ -3403,9 +3257,7 @@ impl Backend for VulkanBackend {
             + 1;
         let swapchain = {
             //panic allowed, reason = "poisoned mutex is unrecoverable"
-            self.surfaces
-                .lock()
-                .swapchain_handle(surface)?
+            self.surfaces.lock().swapchain_handle(surface)?
         };
         let sleep_info = ash::vk::LatencySleepInfoNV::default()
             .signal_semaphore(semaphore)
@@ -3467,9 +3319,7 @@ impl Backend for VulkanBackend {
             .as_ref()
             .ok_or_else(|| Error::Unsupported("VK_EXT_shader_object is not enabled".into()))?;
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        let shaders = self
-            .shaders
-            .lock();
+        let shaders = self.shaders.lock();
         let stage = shaders.stage(desc.shader)?;
         let spirv_words = shaders.spirv_words(desc.shader)?;
         let spirv_bytes = unsafe {
@@ -3483,9 +3333,7 @@ impl Backend for VulkanBackend {
         let stage_flags = shaders::shader_stage_flags(stage);
         let (set_layouts, push_constant_ranges) = if let Some(layout) = desc.layout {
             //panic allowed, reason = "poisoned mutex is unrecoverable"
-            self.descriptors
-                .read()
-                .shader_object_layout_info(layout)?
+            self.descriptors.read().shader_object_layout_info(layout)?
         } else {
             (Vec::new(), Vec::new())
         };
@@ -3503,16 +3351,14 @@ impl Backend for VulkanBackend {
         // Release the shaders lock before acquiring resources write lock.
         drop(shaders);
         //panic allowed, reason = "poisoned mutex is unrecoverable"
-        self.resources
-            .write()
-            .register_shader_object(
-                handle,
-                resources::VulkanShaderObject {
-                    shader: shader_objs[0],
-                    stage: stage_flags,
-                    layout: desc.layout,
-                },
-            );
+        self.resources.write().register_shader_object(
+            handle,
+            resources::VulkanShaderObject {
+                shader: shader_objs[0],
+                stage: stage_flags,
+                layout: desc.layout,
+            },
+        );
         Ok(())
     }
 
@@ -3522,7 +3368,8 @@ impl Backend for VulkanBackend {
     ) -> Result<()> {
         if let Some(ref ext) = self.shader_object_ext {
             //panic allowed, reason = "poisoned mutex is unrecoverable"
-            let mut resources = self.resources.write(); if true {
+            let mut resources = self.resources.write();
+            if true {
                 resources.destroy_shader_object(ext, handle)?;
             }
         }
@@ -3538,9 +3385,7 @@ impl Backend for VulkanBackend {
             Some(ext) => ext,
             None => return Ok(()), // HDR not available; silently ignore
         };
-        let surfaces = self
-            .surfaces
-            .lock();
+        let surfaces = self.surfaces.lock();
         let swapchain = surfaces.swapchain_handle(surface)?;
         let primaries = metadata.display_primaries;
         let vk_meta = ash::vk::HdrMetadataEXT::default()
@@ -3726,13 +3571,10 @@ fn allocate_and_bind_video_session_memory(
     let mut memories = Vec::with_capacity(requirements.len());
     let mut bindings = Vec::with_capacity(requirements.len());
     for requirement in &requirements {
-        let memory_type_index = resources
-            .read()
-            .allocator()
-            .find_memory_type(
-                requirement.memory_requirements.memory_type_bits,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            )?;
+        let memory_type_index = resources.read().allocator().find_memory_type(
+            requirement.memory_requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        )?;
         let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(requirement.memory_requirements.size)
             .memory_type_index(memory_type_index);
@@ -4141,26 +3983,30 @@ impl Drop for VulkanBackend {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.device_wait_idle();
-            let commands = self.commands.lock(); if true {
+            let commands = self.commands.lock();
+            if true {
                 commands.destroy(&self.device);
             }
-            let pipelines = self.pipelines.lock(); if true {
+            let pipelines = self.pipelines.lock();
+            if true {
                 if let Ok(data) = pipelines.serialize_cache(&self.device) {
                     save_pipeline_cache_file(&data);
                 }
             }
-            let mut pipelines = self.pipelines.lock(); if true {
+            let mut pipelines = self.pipelines.lock();
+            if true {
                 pipelines.destroy_all(&self.device);
             }
-            let mut descriptors = self.descriptors.write(); if true {
+            let mut descriptors = self.descriptors.write();
+            if true {
                 descriptors.destroy_all(&self.device);
             }
-            let mut shaders = self.shaders.lock(); if true {
+            let mut shaders = self.shaders.lock();
+            if true {
                 shaders.destroy_all(&self.device);
             }
             let mut sessions = self.video_sessions.lock();
-            if let Some(video) = self.video_queue_khr.as_ref()
-            {
+            if let Some(video) = self.video_queue_khr.as_ref() {
                 for (_, session) in sessions.drain() {
                     destroy_video_session_entry(&self.device, video, session);
                 }
@@ -4185,24 +4031,28 @@ impl Drop for VulkanBackend {
                     );
                 }
             }
-            let mut resources = self.resources.write(); if true {
+            let mut resources = self.resources.write();
+            if true {
                 resources.destroy_all(
                     &self.device,
                     self.acceleration_structure_khr.as_ref(),
                     self.shader_object_ext.as_ref(),
                 );
             }
-            let mut surfaces = self.surfaces.lock(); if true {
+            let mut surfaces = self.surfaces.lock();
+            if true {
                 surfaces.destroy_all(&self.device);
             }
-            let mut heaps = self.alias_heaps.lock(); if true {
+            let mut heaps = self.alias_heaps.lock();
+            if true {
                 heaps.destroy_all(&self.device);
             }
             if let Some(sem) = self.reflex_sleep_semaphore.take() {
                 self.device.destroy_semaphore(sem, None);
             }
             // GFX-5b: destroy exportable fences before device.
-            let mut fences = self.exportable_fences.lock(); if true {
+            let mut fences = self.exportable_fences.lock();
+            if true {
                 for (_, fence) in fences.drain() {
                     self.device.destroy_fence(fence, None);
                 }

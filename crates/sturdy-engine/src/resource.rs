@@ -51,15 +51,28 @@ impl Image {
     ///
     /// Used internally for render targets, depth buffers, and images whose
     /// heap slot would never be reclaimed (e.g. transient frame resources).
-    pub(crate) fn without_bindless(device: core::Device, handle: core::ImageHandle, desc: ImageDesc) -> Self {
-        Self { device, handle, desc, bindless_handle: None }
+    pub(crate) fn without_bindless(
+        device: core::Device,
+        handle: core::ImageHandle,
+        desc: ImageDesc,
+    ) -> Self {
+        Self {
+            device,
+            handle,
+            desc,
+            bindless_handle: None,
+        }
     }
 
     /// Build an Image and attempt bindless registration.
     ///
     /// Auto-registers if `desc.usage` contains `SAMPLED` and does NOT contain
     /// `DEPTH_STENCIL`, and `desc.transient` is false.
-    pub(crate) fn with_auto_bindless(device: core::Device, handle: core::ImageHandle, desc: ImageDesc) -> Self {
+    pub(crate) fn with_auto_bindless(
+        device: core::Device,
+        handle: core::ImageHandle,
+        desc: ImageDesc,
+    ) -> Self {
         use crate::ImageUsage;
         let should_register = desc.usage.contains(ImageUsage::SAMPLED)
             && !desc.usage.contains(ImageUsage::DEPTH_STENCIL)
@@ -69,7 +82,12 @@ impl Image {
         } else {
             None
         };
-        Self { device, handle, desc, bindless_handle }
+        Self {
+            device,
+            handle,
+            desc,
+            bindless_handle,
+        }
     }
 }
 
